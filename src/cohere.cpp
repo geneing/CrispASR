@@ -26,6 +26,8 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <fftw3.h>
+#include <cblas.h>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,6 +101,13 @@ struct cohere_enc_layer {
     ggml_tensor * ff2_dn_w, * ff2_dn_b;
     // Output norm
     ggml_tensor * out_norm_w, * out_norm_b;
+
+    // BatchNorm-folded depthwise conv weights (precomputed at model load time).
+    // w_fused[d] = dw_w[d] * bn_gamma[d] / sqrt(bn_var[d] + 1e-5)
+    // b_fused[d] = (dw_b[d] - bn_mean[d]) * bn_gamma[d] / sqrt(bn_var[d] + 1e-5) + bn_beta[d]
+    // These are F32 host vectors used by both the legacy and ggml-graph paths.
+    std::vector<float> conv_dw_w_fused; // [d * conv_k]
+    std::vector<float> conv_dw_b_fused; // [d]
 };
 
 // ---------------------------------------------------------------------------
@@ -185,10 +194,26 @@ struct cohere_context {
     cohere_vocab  vocab;
     cohere_context_params params;
 
-    // KV cache for decoder (pre-allocated)
+    // KV cache for decoder self-attention (pre-allocated)
     // Shape per layer: (n_heads, max_ctx, head_dim) × 2 (K and V)
     std::vector<std::vector<float>> kv_cache_k; // [n_dec_layers][n_heads * max_ctx * head_dim]
     std::vector<std::vector<float>> kv_cache_v;
+
+    // Cross-attention KV cache: computed once per utterance from encoder output.
+    // Shape per layer: (T_enc, dec_d_model), row-major.
+    std::vector<std::vector<float>> cross_kv_k; // [n_dec_layers][T_enc * dec_d_model]
+    std::vector<std::vector<float>> cross_kv_v;
+
+    // ggml backend for compute graph execution (CPU; GPU backends slot in here later)
+    ggml_backend_t      ggml_backend = nullptr;
+    ggml_gallocr_t      ggml_alloc   = nullptr;
+
+    // Metadata context for graph node descriptors (no_alloc=true; actual buffers via gallocr)
+    // Sized generously; only holds ggml_tensor_overhead() * N_NODES bytes.
+    std::vector<uint8_t> compute_meta;
+
+    // Cached T_enc from last encode call, needed by decode graph builder.
+    int cached_T_enc = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -394,21 +419,21 @@ static void ct_swish_inplace(float * x, int n) {
 // Returns newly allocated buffer (caller frees).
 // ---------------------------------------------------------------------------
 
+// ct_linear: out (T × n_out) = in (T × n_in) @ w^T (n_in × n_out) + b
+// Uses OpenBLAS SGEMM for ~10-30× speedup over scalar loops.
 static std::vector<float> ct_linear(const float * in, int n_in, int T,
                                     const float * w, int n_out,
                                     const float * b = nullptr) {
     std::vector<float> out(n_out * T, 0.0f);
-    // Parallelize over output neurons — n_out is large (up to 5120), T may be small.
-    #pragma omp parallel for schedule(static)
-    for (int o = 0; o < n_out; o++) {
-        const float * row = w + o * n_in;
-        float bv = b ? b[o] : 0.0f;
-        for (int t = 0; t < T; t++) {
-            const float * xi = in + t * n_in;
-            float v = bv;
-            for (int k = 0; k < n_in; k++) v += row[k] * xi[k];
-            out[t * n_out + o] = v;
-        }
+    // out (T, n_out) = in (T, n_in) * w^T (n_in, n_out)
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                T, n_out, n_in,
+                1.0f, in, n_in, w, n_in,
+                0.0f, out.data(), n_out);
+    if (b) {
+        for (int t = 0; t < T; t++)
+            for (int o = 0; o < n_out; o++)
+                out[t * n_out + o] += b[o];
     }
     return out;
 }
@@ -485,21 +510,22 @@ static std::vector<float> cohere_compute_features(const cohere_hparams & hp,
     for (int i = 0; i < win; i++) window[lpad + i] = fe_window_data[i];
 
     // STFT → power spectrum → mel → log → normalize
+    // Use FFTW3f real-to-complex FFT: O(n_fft·log n_fft) vs O(n_fft²) for direct DFT.
     std::vector<float> power(n_freqs * T, 0.0f);
-
-    for (int t = 0; t < T; t++) {
-        const float * frame = padded.data() + t * hop;
-        // DFT via direct computation (slow but correct; can optimize with FFT later)
-        for (int k = 0; k < n_freqs; k++) {
-            double re = 0.0, im = 0.0;
-            for (int n = 0; n < n_fft; n++) {
-                float w   = window[n];
-                double ang = 2.0 * M_PI * k * n / n_fft;
-                re += frame[n] * w * cos(ang);
-                im -= frame[n] * w * sin(ang);
+    {
+        std::vector<float>           fft_in(n_fft);
+        std::vector<fftwf_complex>   fft_out(n_freqs);
+        fftwf_plan plan = fftwf_plan_dft_r2c_1d(n_fft, fft_in.data(), fft_out.data(), FFTW_ESTIMATE);
+        for (int t = 0; t < T; t++) {
+            const float * frame = padded.data() + t * hop;
+            for (int n = 0; n < n_fft; n++) fft_in[n] = frame[n] * window[n];
+            fftwf_execute(plan);
+            for (int k = 0; k < n_freqs; k++) {
+                float re = fft_out[k][0], im = fft_out[k][1];
+                power[t * n_freqs + k] = re*re + im*im;
             }
-            power[t * n_freqs + k] = (float)(re*re + im*im);
         }
+        fftwf_destroy_plan(plan);
     }
 
     // mel filterbank: fe_mel_fb shape [1, n_mels, n_freqs]
@@ -984,6 +1010,33 @@ static std::vector<float> cohere_encode(const cohere_model & m, const float * me
 }
 
 // ---------------------------------------------------------------------------
+// Pre-compute cross-attention K and V for all decoder layers.
+// Call once per utterance after encoding; results stored in cross_kv_k/v.
+// Layout: cross_kv_k[li] has shape (T_enc, dec_d_model), row-major.
+// ---------------------------------------------------------------------------
+
+static void cohere_precompute_cross_kv(
+    const cohere_model & m,
+    const float * enc_out, int T_enc,
+    std::vector<std::vector<float>> & cross_kv_k,
+    std::vector<std::vector<float>> & cross_kv_v
+) {
+    const auto & hp = m.hparams;
+    const int d = hp.dec_d_model;
+    cross_kv_k.resize(hp.dec_n_layers);
+    cross_kv_v.resize(hp.dec_n_layers);
+    for (int li = 0; li < hp.dec_n_layers; li++) {
+        const auto & l = m.dec_layers[li];
+        auto cross_k_w = ct_to_f32(l.cross_k_w);  auto cross_k_b = ct_to_f32(l.cross_k_b);
+        auto cross_v_w = ct_to_f32(l.cross_v_w);  auto cross_v_b = ct_to_f32(l.cross_v_b);
+        cross_kv_k[li] = ct_linear(enc_out, d, T_enc, cross_k_w.data(), d, cross_k_b.data());
+        cross_kv_v[li] = ct_linear(enc_out, d, T_enc, cross_v_w.data(), d, cross_v_b.data());
+    }
+    fprintf(stderr, "cohere: cross KV pre-computed for %d layers, T_enc=%d\n",
+            hp.dec_n_layers, T_enc);
+}
+
+// ---------------------------------------------------------------------------
 // Decoder: one step (auto-regressive)
 // enc_out:  (T_enc, dec_d)
 // tokens:   [offset .. offset+n_tok-1]
@@ -992,10 +1045,12 @@ static std::vector<float> cohere_encode(const cohere_model & m, const float * me
 
 static std::vector<float> cohere_decode_step(
     const cohere_model & m,
-    const float * enc_out, int T_enc,
+    int T_enc,
     const int * tokens, int n_tok, int offset,
     std::vector<std::vector<float>> & kv_k,
-    std::vector<std::vector<float>> & kv_v
+    std::vector<std::vector<float>> & kv_v,
+    const std::vector<std::vector<float>> & cross_kv_k,
+    const std::vector<std::vector<float>> & cross_kv_v
 ) {
     const auto & hp = m.hparams;
     const int d  = hp.dec_d_model;
@@ -1087,10 +1142,9 @@ static std::vector<float> cohere_decode_step(
         for (int i = 0; i < n_tok * d; i++) h[i] += sa_proj[i];
 
         // --- Cross-attention ---
+        // CK and CV are pre-computed once per utterance in cross_kv_k/v.
         auto cross_ln_w = ct_to_f32(l.cross_ln_w);  auto cross_ln_b = ct_to_f32(l.cross_ln_b);
         auto cross_q_w  = ct_to_f32(l.cross_q_w);   auto cross_q_b  = ct_to_f32(l.cross_q_b);
-        auto cross_k_w  = ct_to_f32(l.cross_k_w);   auto cross_k_b  = ct_to_f32(l.cross_k_b);
-        auto cross_v_w  = ct_to_f32(l.cross_v_w);   auto cross_v_b  = ct_to_f32(l.cross_v_b);
         auto cross_o_w  = ct_to_f32(l.cross_o_w);   auto cross_o_b  = ct_to_f32(l.cross_o_b);
 
         std::vector<float> h_cross_norm(n_tok * d);
@@ -1098,8 +1152,8 @@ static std::vector<float> cohere_decode_step(
             ct_layer_norm(h_cross_norm.data() + i*d, h.data() + i*d, d, cross_ln_w.data(), cross_ln_b.data());
 
         auto CQ = ct_linear(h_cross_norm.data(), d, n_tok, cross_q_w.data(), d, cross_q_b.data());
-        auto CK = ct_linear(enc_out, d, T_enc, cross_k_w.data(), d, cross_k_b.data());
-        auto CV = ct_linear(enc_out, d, T_enc, cross_v_w.data(), d, cross_v_b.data());
+        const float * CK = cross_kv_k[li].data();
+        const float * CV = cross_kv_v[li].data();
 
         std::vector<float> ca_out(n_tok * d, 0.0f);
         for (int h_idx = 0; h_idx < H; h_idx++) {
@@ -1248,7 +1302,11 @@ char * cohere_transcribe(struct cohere_context * ctx,
     // Filter out any missing tokens
     prompt.erase(std::remove_if(prompt.begin(), prompt.end(), [](int t){ return t == -1; }), prompt.end());
 
-    // Reset KV cache
+    // Pre-compute cross KV cache once for this utterance
+    cohere_precompute_cross_kv(ctx->model, enc_out.data(), T_enc,
+                               ctx->cross_kv_k, ctx->cross_kv_v);
+
+    // Reset self-attention KV cache
     for (auto & kv : ctx->kv_cache_k) std::fill(kv.begin(), kv.end(), 0.0f);
     for (auto & kv : ctx->kv_cache_v) std::fill(kv.begin(), kv.end(), 0.0f);
 
@@ -1256,9 +1314,10 @@ char * cohere_transcribe(struct cohere_context * ctx,
     const int max_gen = 100; // debug cap; was: hp.dec_max_ctx - (int)prompt.size() - 4
 
     // --- Run prompt through decoder ---
-    auto logits = cohere_decode_step(ctx->model, enc_out.data(), T_enc,
+    auto logits = cohere_decode_step(ctx->model, T_enc,
                                       prompt.data(), (int)prompt.size(), 0,
-                                      ctx->kv_cache_k, ctx->kv_cache_v);
+                                      ctx->kv_cache_k, ctx->kv_cache_v,
+                                      ctx->cross_kv_k, ctx->cross_kv_v);
     int offset = (int)prompt.size();
 
     // Greedy decode
@@ -1281,9 +1340,10 @@ char * cohere_transcribe(struct cohere_context * ctx,
         offset++;
 
         // Next step: decode single token
-        logits = cohere_decode_step(ctx->model, enc_out.data(), T_enc,
+        logits = cohere_decode_step(ctx->model, T_enc,
                                     &next_tok, 1, offset - 1,
-                                    ctx->kv_cache_k, ctx->kv_cache_v);
+                                    ctx->kv_cache_k, ctx->kv_cache_v,
+                                    ctx->cross_kv_k, ctx->cross_kv_v);
     }
 
     // --- Decode tokens to text ---

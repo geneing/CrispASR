@@ -118,6 +118,22 @@ add_library(cohere
 target_include_directories(cohere PUBLIC . ../include)
 target_compile_features   (cohere PUBLIC cxx_std_17)
 find_package(OpenMP)
+# OpenBLAS for SGEMM acceleration
+find_package(BLAS)
+if(BLAS_FOUND)
+    target_link_libraries(cohere PUBLIC ${BLAS_LIBRARIES})
+    target_compile_definitions(cohere PRIVATE HAVE_BLAS)
+else()
+    # Fallback: try linking openblas directly
+    target_link_libraries(cohere PUBLIC openblas)
+endif()
+# FFTW3f (single-precision) for STFT
+find_library(FFTW3F_LIB fftw3f)
+if(FFTW3F_LIB)
+    target_link_libraries(cohere PUBLIC ${FFTW3F_LIB})
+else()
+    target_link_libraries(cohere PUBLIC fftw3f)
+endif()
 if(OpenMP_CXX_FOUND)
     target_link_libraries(cohere PUBLIC ggml Threads::Threads OpenMP::OpenMP_CXX)
     target_compile_options(cohere PRIVATE -O3 -march=native)
