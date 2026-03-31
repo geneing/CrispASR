@@ -160,18 +160,34 @@ This is what the ONNX model does. Integrates naturally into the ggml graph.
 
 ---
 
-## Bottleneck Analysis (updated after P1+P2A+P3)
+## Bottleneck Analysis (measured, 11s JFK audio, 4 threads)
 
-| Component | Before | After P1+P2A+P3 | Notes |
-|-----------|--------|-----------------|-------|
-| STFT (DFT loop) | ~1–2 min | ~2–3 s | FFTW3f, ~57× |
-| Encoder GEMM (48 layers) | ~3 min | ~10–20 s | OpenBLAS, ~10–20× |
-| Decoder cross-KV recompute | ~30 s | ~0 s | Pre-cached |
-| Decoder self-attn | ~10 s | ~2–5 s | OpenBLAS |
-| **Total estimate** | **~300 s** | **~15–25 s** | **needs benchmark** |
+**Baseline estimate** (original scalar code): ~825s for 11s audio (scaled from 5min/4s).
+
+| Component | Before | After P1+P2A+P3 (measured) | Next target |
+|-----------|--------|---------------------------|-------------|
+| STFT | ~4 min | ~3–5 s (FFTW3f) | keep |
+| ct_to_f32 per-inference | 0 | ~30–40 s (new bottleneck, 3.8 GB scalar F16→F32) | P2A-cache fix |
+| Encoder GEMM (48 layers) | ~8 min | ~30–40 s (OpenBLAS) | ggml F16 |
+| Encoder attn scalar loops | ~3 min | ~15–20 s (not yet BLAS-ized) | ggml |
+| Decoder cross-KV | ~45 s | ~0 s (pre-cached) | done |
+| Decoder self-attn | ~30 s | ~5–10 s (OpenBLAS) | ggml |
+| Memory alloc/sys overhead | ~0 | ~20–30 s (high sys time) | pre-alloc buffers |
+| **Total (measured)** | **~825 s** | **104 s** | **→ ~20 s target** |
+
+**Measured speedup**: 825s → 104s = **~8× total**
+- FFTW3f alone: expected ~57× for STFT component
+- OpenBLAS: working, but partly masked by ct_to_f32 overhead and scalar attn loops
+- Wall 1m44s, sys 1m47s: abnormally high sys time = massive malloc churn (~5 GB vector allocs/frees)
+
+**Remaining bottlenecks in priority order:**
+1. `ct_to_f32` per inference: ~30–40s — fix: F32 weight cache (P2A-cache, in progress)
+2. Memory allocation churn: ~20–30s sys time — fix: pre-allocate buffers in ct_linear
+3. Scalar attention loops in `ct_rel_pos_mha`: ~15–20s — fix: BLAS-ize or ggml port
+4. F16 matmul via ggml: ~2× over current F32 OpenBLAS — fix: ggml graph port (P2B)
 
 After P2B (ggml graph + F16):
-- F16 matmul: ~2× over F32 OpenBLAS → ~8–12 s
+- F16 matmul: ~2× over F32 OpenBLAS → ~15–20 s total
 - GPU (CUDA/Metal): ~20–100× over CPU → **real-time or better**
 
 ---
@@ -181,27 +197,34 @@ After P2B (ggml graph + F16):
 | Optimization | Component | Speedup | Status |
 |-------------|-----------|---------|--------|
 | FFTW3f for STFT | Feature extraction | 50–60× | DONE |
-| OpenBLAS GEMM | All matmuls | 10–20× | DONE (intermediate) |
+| OpenBLAS GEMM | All ct_linear calls | 10–20× | DONE (intermediate) |
 | Cross KV caching | Decoder | 2–10× | DONE |
-| ggml compute graph | All | enables further | TODO |
+| F32 weight cache | Weight loading | ~3× (eliminates 30–40s overhead) | IN PROGRESS |
+| Pre-alloc ct_linear buffers | Memory churn | ~1.5–2× | TODO |
+| BLAS-ize attn score loops | Encoder attn | ~3–5× | TODO |
+| ggml compute graph | All | enables F16/GPU/quant | TODO (P2B) |
 | F16 matmul | Encoder/decoder | 2× | blocked on ggml |
 | Q8_0 quant | Encoder/decoder | 1.5–2× | blocked on ggml |
 | GPU (CUDA/Metal) | All | 20–100× | blocked on ggml |
 
-**Current combined (P1+P2A+P3)**: estimated ~15–30× over baseline → ~10–20 s for 4s audio.
-**With ggml + F16**: ~50–80× → ~4–6 s → approaching real-time on CPU.
-**With GPU**: real-time easily achievable.
+**Measured (P1+P2A+P3, 11s audio)**: 825s → 104s = **~8×**
+**After F32 cache + buffer pre-alloc**: est. 104s → ~35–50s
+**After BLAS attn**: est. ~20–30s
+**With ggml + F16**: est. ~15–20s → approaching real-time on CPU
+**With GPU**: real-time easily achievable
 
 ---
 
 ## Comparison with Reference Implementations
 
-| Implementation | Speed (4s audio) | Notes |
-|----------------|-----------------|-------|
-| ONNX int8 CPU | ~0.5–1s | int8 encoder + F32 decoder |
-| PyTorch F16 GPU | ~0.1s | A100 / RTX 3090 |
-| Rust (cpu, no simd) | ~30–60s | pure Rust, no BLAS |
-| **Ours (baseline)** | **~300s** | naive DFT + scalar GEMM |
-| **Ours (P1+P2A+P3)** | **~10–20s (est.)** | FFTW3f + OpenBLAS + cross KV |
-| **Ours (ggml + F16)** | **~4–6s (est.)** | target for CPU |
-| **Ours (ggml + GPU)** | **~0.1–0.5s** | stretch goal |
+| Implementation | Speed (11s audio) | Notes |
+|----------------|------------------|-------|
+| ONNX int8 CPU | ~1–2s | int8 encoder + F32 decoder |
+| PyTorch F16 GPU | ~0.3s | A100 / RTX 3090 |
+| Rust (cpu, no simd) | ~90–180s | pure Rust, no BLAS |
+| **Ours (baseline)** | **~825s** | naive DFT + scalar GEMM |
+| **Ours (P1+P2A+P3, measured)** | **104s** | FFTW3f + OpenBLAS + cross KV |
+| **Ours (+ F32 cache, est.)** | **~35–50s** | eliminates weight conversion overhead |
+| **Ours (+ BLAS attn, est.)** | **~20–30s** | |
+| **Ours (ggml + F16, est.)** | **~10–15s** | CPU target |
+| **Ours (ggml + GPU, est.)** | **~0.3–1s** | stretch goal |

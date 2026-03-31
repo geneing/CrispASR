@@ -519,3 +519,94 @@ Decoder tensors use these names:
 - `dec.blk.{i}.cross_ln.*`, `cross_q/k/v/o.*`
 - `dec.blk.{i}.ffn_ln.*`, `ffn_up.*`, `ffn_down.*`
 - ALL decoder biases/norms = F32; weight matrices = F16
+
+---
+
+## Session 2026-03-31: Performance Optimizations
+
+### Baseline
+~5 min for 4s audio = ~75× slower than real-time. Profiling breakdown:
+- STFT: O(n_fft²) direct DFT = ~1–2 min for 4s, ~4 min for 11s
+- Encoder GEMM: scalar triple-nested loops = ~3 min for 4s, ~8 min for 11s
+- Decoder cross-KV: recomputed from enc_out on every autoregressive step
+
+### What was implemented and measured (11s JFK audio, 4 threads)
+
+**1. FFTW3f for STFT** (O(n_fft log n_fft) vs O(n_fft²))
+- Used `fftwf_plan_dft_r2c_1d` in `cohere_compute_features`
+- Decision: chose FFTW3f over whisper.cpp's own `fft()` — whisper's is scalar Cooley-Tukey,
+  FFTW3f auto-uses AVX/AVX2/SSE2. It's an external dep (libfftw3f-dev) but already installed.
+- Speedup for STFT: ~57×
+
+**2. OpenBLAS GEMM** (intermediate, via cblas_sgemm in ct_linear)
+- `out = in @ w^T + bias` via `cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, T, n_out, n_in, ...)`
+- Layout: in (T×n_in), w (n_out×n_in) → out (T×n_out)
+- This is an intermediate step — long-term plan is ggml compute graph for F16/GPU/quantization
+- CMake: `find_package(BLAS)` + `find_library(FFTW3F_LIB fftw3f)` in src/CMakeLists.txt
+
+**3. Cross-KV pre-computation** (decoder cross-attention)
+- `cohere_precompute_cross_kv()` computes all 8 layers' CK/CV once after encoding
+- Stored in `cohere_context::cross_kv_k/v`; `cohere_decode_step` no longer takes `enc_out` pointer
+- Mirrors `kv_cross` in upstream whisper.cpp
+
+**4. BLAS-ized attention score/context loops** in ct_rel_pos_mha
+- Replaced O(H×T×T×hd) scalar triple loops for AC, BD_raw, ctx_v with cblas_sgemm calls
+- Key trick: non-contiguous BLAS with `lda=d` (stride = full model dim d) to slice per-head
+  without copying: `cblas_sgemm(..., Q_u + h*head_dim, d, K + h*head_dim, d, ...)`
+- AC = Q_u @ K^T: sgemm(T, T, hd), per head
+- BD_raw = Q_v @ R^T: sgemm(T, 2T-1, hd), per head
+- ctx = scores @ V: sgemm(T, hd, T), per head, output with ldc=d (non-contiguous)
+
+### Measured benchmark results
+
+| Version | Time (11s audio) | Wall speedup |
+|---------|-----------------|--------------|
+| Baseline (scalar) | ~825s (est.) | 1× |
+| FFTW3f + OpenBLAS + cross-KV (binary NOT linked) | 264s | 3.1× |
+| FFTW3f + OpenBLAS + cross-KV (properly linked) | 104s | **~8×** |
+
+### Critical debugging lesson: verify the binary actually links the libraries
+
+The first benchmark showed only 3× speedup instead of 10–20×. Root cause: cmake configured
+correctly (`find_package(BLAS)` found libopenblas) but `make cohere` only rebuilt libcohere.a.
+The existing `cohere-main` binary was linked against an older libcohere.a that DID NOT include
+openblas/fftw3f in its NEEDED list. Verified with:
+```
+readelf -d build/bin/cohere-main | grep NEEDED
+nm build/src/libcohere.a | grep cblas_sgemm   # "U" = undefined = referenced but not resolved
+```
+After `make cohere-main` (full binary rebuild): libopenblas.so.0 and libfftw3f.so.3 appeared in NEEDED.
+
+Additional issue: stale cmake cache had `/usr/lib/x86_64-linux-gnu/libpthread.so` which doesn't
+exist separately on Ubuntu 22.04+ (pthreads merged into glibc). Fix: `cmake_thread_libs_init` →
+`Threads::Threads` in examples/cohere-main/CMakeLists.txt, plus `rm CMakeCache.txt` + reconfigure
+with `-DBUILD_SHARED_LIBS=OFF` to avoid symlink I/O errors.
+
+### Remaining bottlenecks (after current optimizations)
+
+1. **ct_to_f32 per-inference**: ~3.8 GB of scalar F16→F32 conversions each call (67 calls × avg 56MB).
+   The sys time of 1m47s for a 1m44s wall time confirms massive malloc churn.
+   Fix in progress: `ct_to_f32_ref()` with static cache + `cohere_model_warm_cache()` at init time.
+
+2. **Memory allocation churn**: each `ct_linear` allocates a new `std::vector<float>` for output.
+   For 480 encoder GEMM calls × 2.8MB avg = 1.36 GB of alloc/free per encoder run.
+   Fix: pass pre-allocated output buffers instead of returning vectors.
+
+3. **F16 weights via ggml**: current F16→F32 conversion throws away memory bandwidth advantage.
+   Fix: port to ggml compute graph (`ggml_mul_mat` handles F16 natively, enables GPU/quant).
+
+### Architecture decisions
+
+**FFTW3f vs whisper.cpp's fft()**:
+whisper.cpp has a scalar Cooley-Tukey at whisper.cpp:3060 with precomputed sin/cos table.
+It's O(N log N) but not SIMD. FFTW3f uses AVX2/SSE2 automatically. Better wheel.
+Downside: external dep, won't upstream to mainline whisper.cpp without making it optional.
+
+**cblas_sgemm vs ggml_mul_mat**:
+ggml already has this in `ggml/src/ggml-blas/ggml-blas.cpp` (line 141, 206) and also has
+AVX2 kernels, CUDA, Metal, quantized GEMM. The cblas_sgemm in ct_linear is temporary.
+Long-term: port entire encoder/decoder to ggml compute graph (Priority 2B in optimize.md).
+
+**Cross-KV cache pattern**:
+Exactly mirrors upstream whisper.cpp's `whisper_kv_cache kv_cross` (whisper.cpp:858, 2303–2338).
+Confirmed correct design by reading the upstream implementation.

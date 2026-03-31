@@ -697,53 +697,40 @@ static std::vector<float> ct_rel_pos_mha(
     auto pos_enc = ct_rel_pos_enc(T, d);          // (2T-1, d)
     auto R = ct_linear(pos_enc.data(), d, 2*T-1, pos_w, d); // (2T-1, d)
 
-    // Reshape Q, K, V to (H, T, head_dim) — re-index
-    // Q[h, t, i] = Q[t * d + h * head_dim + i]
-    // Content-content: AC[h, t_q, t_k] = (q_u[h,t_q] · k[h,t_k])
-    //   where q_u = Q + pos_bias_u (broadcast over T)
-    // Content-position: BD[h, t_q, rel] = (q_v[h,t_q] · R[rel,h,:])
-    //   then relative-shift to get BD[h, t_q, t_k]
+    // Build Q_u = Q + pos_bias_u and Q_v = Q + pos_bias_v (broadcast bias over T).
+    // pos_bias_u/v are (H, head_dim) = (d,), one bias per head dimension.
+    std::vector<float> Q_u(T * d), Q_v(T * d);
+    for (int t = 0; t < T; t++)
+        for (int j = 0; j < d; j++) {
+            Q_u[t*d + j] = Q[t*d + j] + pos_bias_u[j];
+            Q_v[t*d + j] = Q[t*d + j] + pos_bias_v[j];
+        }
 
-    // Allocate AC and BD_raw
-    std::vector<float> AC(H * T * T, 0.0f);
-    std::vector<float> BD_raw(H * T * (2*T-1), 0.0f);
-
-    #pragma omp parallel for schedule(static)
+    // AC[h, T, T] = Q_u[:, h*hd:(h+1)*hd] @ K[:, h*hd:(h+1)*hd]^T
+    // BD_raw[h, T, 2T-1] = Q_v[:, h*hd:] @ R[:, h*hd:]^T
+    // Use non-contiguous BLAS: slice start = ptr + h*head_dim, leading dim = d.
+    const int n2 = 2*T - 1;
+    std::vector<float> AC(H * T * T);
+    std::vector<float> BD_raw(H * T * n2);
     for (int h = 0; h < H; h++) {
-        // Compute AC
-        for (int tq = 0; tq < T; tq++) {
-            for (int tk = 0; tk < T; tk++) {
-                float v = 0.0f;
-                for (int i = 0; i < head_dim; i++) {
-                    float qi = Q[tq * d + h * head_dim + i] + pos_bias_u[h * head_dim + i];
-                    float ki = K[tk * d + h * head_dim + i];
-                    v += qi * ki;
-                }
-                AC[(h * T + tq) * T + tk] = v;
-            }
-        }
-        // Compute BD_raw
-        for (int tq = 0; tq < T; tq++) {
-            for (int r = 0; r < 2*T-1; r++) {
-                float v = 0.0f;
-                for (int i = 0; i < head_dim; i++) {
-                    float qi = Q[tq * d + h * head_dim + i] + pos_bias_v[h * head_dim + i];
-                    float ri = R[r * d + h * head_dim + i];
-                    v += qi * ri;
-                }
-                BD_raw[(h * T + tq) * (2*T-1) + r] = v;
-            }
-        }
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    T, T, head_dim, 1.0f,
+                    Q_u.data() + h*head_dim, d,
+                    K.data()   + h*head_dim, d,
+                    0.0f, AC.data() + h*T*T, T);
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    T, n2, head_dim, 1.0f,
+                    Q_v.data() + h*head_dim, d,
+                    R.data()   + h*head_dim, d,
+                    0.0f, BD_raw.data() + h*T*n2, n2);
     }
 
-    // Relative shift
+    // Relative shift BD_raw → BD
     auto BD = ct_rel_shift(BD_raw.data(), H, T);
 
-    // scores = (AC + BD) * scale, then softmax — scale applied after, matching Python
+    // scores = (AC + BD) * scale, softmax per (head, query)
     std::vector<float> scores(H * T * T);
     for (int i = 0; i < H * T * T; i++) scores[i] = (AC[i] + BD[i]) * scale;
-
-    // Softmax per (head, query)
     for (int h = 0; h < H; h++) {
         for (int tq = 0; tq < T; tq++) {
             float * row = scores.data() + (h * T + tq) * T;
@@ -754,25 +741,16 @@ static std::vector<float> ct_rel_pos_mha(
         }
     }
 
-    // Context = scores @ V
-    std::vector<float> ctx_v(H * T * head_dim, 0.0f);
-    for (int h = 0; h < H; h++) {
-        for (int tq = 0; tq < T; tq++) {
-            for (int i = 0; i < head_dim; i++) {
-                float v = 0.0f;
-                for (int tk = 0; tk < T; tk++)
-                    v += scores[(h * T + tq) * T + tk] * V[tk * d + h * head_dim + i];
-                ctx_v[(h * T + tq) * head_dim + i] = v;
-            }
-        }
-    }
-
-    // Reshape ctx to (T, d): ctx[t, h*head_dim..] = ctx_v[h, t, :]
+    // ctx_merged[T, d] = scores[H,T,T] @ V[T,d], written per-head with stride d.
     std::vector<float> ctx_merged(T * d, 0.0f);
-    for (int h = 0; h < H; h++)
-        for (int t = 0; t < T; t++)
-            for (int i = 0; i < head_dim; i++)
-                ctx_merged[t * d + h * head_dim + i] = ctx_v[(h * T + t) * head_dim + i];
+    for (int h = 0; h < H; h++) {
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    T, head_dim, T, 1.0f,
+                    scores.data() + h*T*T, T,
+                    V.data()      + h*head_dim, d,
+                    0.0f,
+                    ctx_merged.data() + h*head_dim, d);
+    }
 
     // Output projection
     return ct_linear(ctx_merged.data(), d, T, out_w, d, out_b);
