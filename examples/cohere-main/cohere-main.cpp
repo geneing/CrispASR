@@ -5,6 +5,7 @@
 
 #include "cohere.h"
 #include "common.h"
+#include "ggml.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -114,13 +115,21 @@ int main(int argc, char ** argv) {
             (int)samples.size(), samples.size() / 16000.0f);
 
     // Transcribe
+    const int64_t t_start_ms = ggml_time_ms();
     char * text = cohere_transcribe(ctx, samples.data(), (int)samples.size(), lang);
+    const int64_t t_end_ms = ggml_time_ms();
+
     if (text) {
         printf("%s\n", text);
         free(text);
     } else {
         fprintf(stderr, "cohere-main: transcription failed\n");
     }
+
+    const double t_inference_s = (t_end_ms - t_start_ms) / 1000.0;
+    const double audio_duration_s = samples.size() / 16000.0f;
+    fprintf(stderr, "cohere-main: inference took %.2fs (%.2fx realtime)\n",
+            t_inference_s, audio_duration_s / t_inference_s);
 
     cohere_free(ctx);
     return 0;
