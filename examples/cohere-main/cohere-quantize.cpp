@@ -1,0 +1,185 @@
+#include "ggml.h"
+#include "ggml-backend.h"
+#include "gguf.h"
+#include "common.h"
+#include "common-ggml.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <thread>
+#include <cmath>
+
+static bool cohere_model_quantize(const std::string & fname_inp, const std::string & fname_out, ggml_ftype ftype) {
+    ggml_type qtype = GGML_TYPE_F32;
+
+    switch (ftype) {
+        case GGML_FTYPE_MOSTLY_Q4_0: qtype = GGML_TYPE_Q4_0; break;
+        case GGML_FTYPE_MOSTLY_Q4_1: qtype = GGML_TYPE_Q4_1; break;
+        case GGML_FTYPE_MOSTLY_Q5_0: qtype = GGML_TYPE_Q5_0; break;
+        case GGML_FTYPE_MOSTLY_Q5_1: qtype = GGML_TYPE_Q5_1; break;
+        case GGML_FTYPE_MOSTLY_Q8_0: qtype = GGML_TYPE_Q8_0; break;
+        case GGML_FTYPE_MOSTLY_Q2_K: qtype = GGML_TYPE_Q2_K; break;
+        case GGML_FTYPE_MOSTLY_Q3_K: qtype = GGML_TYPE_Q3_K; break;
+        case GGML_FTYPE_MOSTLY_Q4_K: qtype = GGML_TYPE_Q4_K; break;
+        case GGML_FTYPE_MOSTLY_Q5_K: qtype = GGML_TYPE_Q5_K; break;
+        case GGML_FTYPE_MOSTLY_Q6_K: qtype = GGML_TYPE_Q6_K; break;
+        default:
+            fprintf(stderr, "%s: unsupported quantization type %d\n", __func__, ftype);
+            return false;
+    }
+
+    printf("%s: loading model from '%s'\n", __func__, fname_inp.c_str());
+
+    struct ggml_context * ctx_in_ggml = nullptr;
+    struct gguf_init_params params = { .no_alloc = true, .ctx = &ctx_in_ggml };
+    struct gguf_context * ctx_in = gguf_init_from_file(fname_inp.c_str(), params);
+    if (!ctx_in || !ctx_in_ggml) {
+        fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, fname_inp.c_str());
+        return false;
+    }
+
+    struct gguf_context * ctx_out = gguf_init_empty();
+    gguf_set_kv(ctx_out, ctx_in);
+    gguf_set_val_u32(ctx_out, "general.quantization_version", GGML_QNT_VERSION);
+    gguf_set_val_u32(ctx_out, "general.file_type", ftype);
+
+    const int n_tensors = gguf_get_n_tensors(ctx_in);
+    for (int i = 0; i < n_tensors; i++) {
+        const char * name = gguf_get_tensor_name(ctx_in, i);
+        struct ggml_tensor * t = ggml_get_tensor(ctx_in_ggml, name);
+        gguf_add_tensor(ctx_out, t);
+    }
+
+    // Allocate output file
+    printf("%s: writing quantized model to '%s'\n", __func__, fname_out.c_str());
+    FILE * fout = fopen(fname_out.c_str(), "wb");
+    if (!fout) {
+        fprintf(stderr, "%s: failed to open '%s' for writing\n", __func__, fname_out.c_str());
+        gguf_free(ctx_in);
+        gguf_free(ctx_out);
+        if (ctx_in_ggml) ggml_free(ctx_in_ggml);
+        return false;
+    }
+
+    // Write metadata placeholder
+    const size_t meta_size = gguf_get_meta_size(ctx_out);
+    std::vector<uint8_t> meta_data(meta_size, 0);
+    fwrite(meta_data.data(), 1, meta_size, fout);
+
+    // Open input file for data reading
+    FILE * fin = fopen(fname_inp.c_str(), "rb");
+    const size_t data_offset_in = gguf_get_data_offset(ctx_in);
+
+    std::vector<float> f32_data;
+    std::vector<uint8_t> q_data;
+
+    for (int i = 0; i < n_tensors; i++) {
+        const char * name = gguf_get_tensor_name(ctx_in, i);
+        struct ggml_tensor * t = ggml_get_tensor(ctx_in_ggml, name);
+        
+        enum ggml_type type = t->type;
+        size_t size = ggml_nbytes(t);
+        size_t offset = data_offset_in + gguf_get_tensor_offset(ctx_in, i);
+
+        printf("[%3d/%3d] %-40s - %10s, ", i + 1, n_tensors, name, ggml_type_name(type));
+
+        bool quantize = ggml_is_quantized(qtype) && 
+                        (type == GGML_TYPE_F32 || type == GGML_TYPE_F16) &&
+                        (ggml_n_dims(t) == 2) && // Quantize only 2D matrices
+                        (std::string(name).find("weight") != std::string::npos) &&
+                        (std::string(name).find("norm") == std::string::npos);
+
+        const int64_t ncols = t->ne[0];
+        const int64_t qk_k = ggml_blck_size(qtype);
+
+        if (quantize && ncols % qk_k != 0) {
+            printf("warning: ncols %ld not divisible by %ld, skipping quantization for this tensor\n", ncols, qk_k);
+            quantize = false;
+        }
+
+        fseek(fin, offset, SEEK_SET);
+
+        if (quantize) {
+            printf("quantizing to %s... ", ggml_type_name(qtype));
+            
+            const int64_t nelements = ggml_nelements(t);
+            f32_data.resize(nelements);
+
+            if (type == GGML_TYPE_F32) {
+                if (fread(f32_data.data(), sizeof(float), nelements, fin) != (size_t)nelements) {
+                    fprintf(stderr, "failed to read f32 data\n");
+                    return false;
+                }
+            } else {
+                std::vector<ggml_fp16_t> f16_data(nelements);
+                if (fread(f16_data.data(), sizeof(ggml_fp16_t), nelements, fin) != (size_t)nelements) {
+                    fprintf(stderr, "failed to read f16 data\n");
+                    return false;
+                }
+                for (int j = 0; j < nelements; j++) f32_data[j] = ggml_fp16_to_fp32(f16_data[j]);
+            }
+
+            const size_t max_q_size = ggml_row_size(qtype, t->ne[0]) * (nelements / t->ne[0]);
+            q_data.resize(max_q_size);
+
+            size_t q_size = ggml_quantize_chunk(qtype, f32_data.data(), q_data.data(), 0, nelements / t->ne[0], t->ne[0], nullptr);
+            
+            fwrite(q_data.data(), 1, q_size, fout);
+            gguf_set_tensor_type(ctx_out, name, qtype);
+            
+            // Padding
+            size_t pad = GGML_PAD(q_size, GGUF_DEFAULT_ALIGNMENT) - q_size;
+            for (size_t j = 0; j < pad; j++) fputc(0, fout);
+
+            printf("done\n");
+        } else {
+            printf("copying... ");
+            std::vector<uint8_t> raw_data(size);
+            if (fread(raw_data.data(), 1, size, fin) != size) {
+                fprintf(stderr, "failed to read raw data\n");
+                return false;
+            }
+            fwrite(raw_data.data(), 1, size, fout);
+
+            // Padding
+            size_t pad = GGML_PAD(size, GGUF_DEFAULT_ALIGNMENT) - size;
+            for (size_t j = 0; j < pad; j++) fputc(0, fout);
+            printf("done\n");
+        }
+    }
+
+    // Write real metadata
+    rewind(fout);
+    gguf_get_meta_data(ctx_out, meta_data.data());
+    fwrite(meta_data.data(), 1, meta_size, fout);
+
+    fclose(fin);
+    fclose(fout);
+    gguf_free(ctx_in);
+    gguf_free(ctx_out);
+    ggml_free(ctx_in_ggml);
+
+    return true;
+}
+
+int main(int argc, char ** argv) {
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s model-f16.gguf model-quant.gguf type\n", argv[0]);
+        ggml_print_ftypes(stderr);
+        return 1;
+    }
+
+    const std::string fname_inp = argv[1];
+    const std::string fname_out = argv[2];
+    const ggml_ftype ftype = ggml_parse_ftype(argv[3]);
+
+    if (!cohere_model_quantize(fname_inp, fname_out, ftype)) {
+        fprintf(stderr, "failed to quantize model\n");
+        return 1;
+    }
+
+    return 0;
+}
