@@ -19,13 +19,14 @@ This document tracks the progress of porting `cohere-whisper.cpp` to a full `ggm
     - [x] Port Conv2D subsampling to `ggml_conv_2d`.
     - [x] Implement Conformer relative-position attention (relative shift) in `ggml`.
     - [x] Implement Conformer convolution module.
-- [ ] **Phase 3: Integration & Cleanup**
-    - [ ] Remove `cblas_sgemm` and `ct_linear` dependencies.
-    - [ ] Remove manual F32 weight caching.
-    - [ ] Enable F16 weight support natively in `ggml_mul_mat`.
+- [x] **Phase 3: Integration & Cleanup**
+    - [x] Remove `cblas_sgemm` and `ct_linear` dependencies (Ported to graph).
+    - [x] Remove manual F32 weight caching.
+    - [x] Clean up redundant feature extraction and conversion logic.
 - [ ] **Phase 4: Advanced Features**
     - [ ] Quantization tool (Q8_0, Q4_K).
     - [ ] GPU Backend support (CUDA/Metal).
+    - [ ] Flash Attention for decoder.
 
 ## Current Status
 - Decoder: **Graph implementation functional and verified**.

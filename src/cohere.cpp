@@ -36,6 +36,31 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// Logging & Debugging
+// ---------------------------------------------------------------------------
+
+static void cohere_debug(const char * fmt, ...) {
+    if (!getenv("COHERE_DEBUG")) return;
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    fflush(stdout);
+}
+
+static void cohere_log_tensor(const char * name, const struct ggml_tensor * t) {
+    if (!getenv("COHERE_DEBUG")) return;
+    if (!t) {
+        cohere_debug("%-25s: NULL\n", name);
+        return;
+    }
+    cohere_debug("%-25s: shape [%4ld, %4ld, %4ld, %4ld] type %d\n",
+        name,
+        (long)t->ne[0], (long)t->ne[1], (long)t->ne[2], (long)t->ne[3],
+        (int)t->type);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -201,9 +226,11 @@ struct cohere_context {
     struct ggml_tensor  * kv_v   = nullptr;
 
     // Cross-attention KV cache: computed once per utterance from encoder output.
-    // Shape per layer: (T_enc, dec_d_model), row-major.
-    std::vector<std::vector<float>> cross_kv_k; // [n_dec_layers][T_enc * dec_d_model]
-    std::vector<std::vector<float>> cross_kv_v;
+    // Shape per layer: (dec_d_model, T_enc)
+    struct ggml_context * cross_kv_ctx = nullptr;
+    struct ggml_backend_buffer * cross_kv_buf = nullptr;
+    std::vector<struct ggml_tensor *> cross_kv_k;
+    std::vector<struct ggml_tensor *> cross_kv_v;
 
     // ggml backend for compute graph execution (CPU; GPU backends slot in here later)
     ggml_backend_t       ggml_backend = nullptr;
@@ -419,6 +446,23 @@ static struct ggml_cgraph * cohere_build_graph_encoder(struct cohere_context * c
     // Encoder-decoder projection
     cur = ggml_add(ctx0, ggml_mul_mat(ctx0, model.enc_proj_w, cur), model.enc_proj_b);
     ggml_set_name(cur, "enc_out");
+
+    // Pre-compute cross KV for all decoder layers
+    for (int il = 0; il < hp.dec_n_layers; il++) {
+        const auto & layer = model.dec_layers[il];
+        
+        struct ggml_tensor * ck = ggml_add(ctx0, ggml_mul_mat(ctx0, layer.cross_k_w, cur), layer.cross_k_b);
+        struct ggml_tensor * cv = ggml_add(ctx0, ggml_mul_mat(ctx0, layer.cross_v_w, cur), layer.cross_v_b);
+        
+        char ck_name[32], cv_name[32];
+        snprintf(ck_name, sizeof(ck_name), "ck_%d", il);
+        snprintf(cv_name, sizeof(cv_name), "cv_%d", il);
+        ggml_set_name(ck, ck_name);
+        ggml_set_name(cv, cv_name);
+        
+        ggml_build_forward_expand(gf, ck);
+        ggml_build_forward_expand(gf, cv);
+    }
 
     ggml_build_forward_expand(gf, cur);
 
@@ -746,82 +790,6 @@ static const float * ct_tensor_f32(const ggml_tensor * t) {
 // Returns newly allocated buffer (caller frees).
 // ---------------------------------------------------------------------------
 
-// ct_linear: out (T × n_out) = in (T × n_in) @ w^T (n_in × n_out) + b
-// Uses OpenBLAS SGEMM for ~10-30× speedup over scalar loops.
-static std::vector<float> ct_linear(const float * in, int n_in, int T,
-                                    const float * w, int n_out,
-                                    const float * b = nullptr) {
-    std::vector<float> out(n_out * T, 0.0f);
-    // out (T, n_out) = in (T, n_in) * w^T (n_in, n_out)
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                T, n_out, n_in,
-                1.0f, in, n_in, w, n_in,
-                0.0f, out.data(), n_out);
-    if (b) {
-        for (int t = 0; t < T; t++)
-            for (int o = 0; o < n_out; o++)
-                out[t * n_out + o] += b[o];
-    }
-    return out;
-}
-
-// ct_linear_into: like ct_linear but writes into caller-supplied buffer (no malloc if already sized).
-static void ct_linear_into(std::vector<float>& out, const float * in, int n_in, int T,
-                            const float * w, int n_out, const float * b = nullptr) {
-    out.resize((size_t)T * n_out);
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                T, n_out, n_in,
-                1.0f, in, n_in, w, n_in,
-                0.0f, out.data(), n_out);
-    if (b) {
-        for (int t = 0; t < T; t++)
-            for (int o = 0; o < n_out; o++)
-                out[t * n_out + o] += b[o];
-    }
-}
-
-// Convert a ggml tensor's data to a float32 std::vector (host copy).
-// Uses direct memory access for F16/F32 tensors to avoid dependence on the
-// ggml_table_f32_f16 lookup table (which requires ggml_init() to be called).
-static std::vector<float> ct_to_f32(const ggml_tensor * t) {
-    int n = (int)ggml_nelements(t);
-    std::vector<float> out(n);
-    if (t->type == GGML_TYPE_F32) {
-        const float * src = (const float *)t->data;
-        for (int i = 0; i < n; i++) out[i] = src[i];
-    } else if (t->type == GGML_TYPE_F16) {
-        const uint16_t * src = (uint16_t *)t->data;
-        for (int i = 0; i < n; i++) {
-            uint16_t h = src[i];
-            uint32_t sign = (uint32_t)(h >> 15) << 31;
-            uint32_t exp  = (h >> 10) & 0x1F;
-            uint32_t mant = h & 0x3FF;
-            uint32_t r;
-            if (exp == 0 && mant == 0) {
-                r = sign;  // +/- zero
-            } else if (exp == 31) {
-                r = sign | 0x7F800000u | (mant << 13);  // inf or NaN
-            } else {
-                r = sign | ((exp + (127 - 15)) << 23) | (mant << 13);  // normal
-            }
-            memcpy(&out[i], &r, sizeof(float));
-        }
-    } else {
-        // fallback for other types (e.g. quantised) — requires ggml_init
-        for (int i = 0; i < n; i++) out[i] = ggml_get_f32_1d(const_cast<ggml_tensor*>(t), i);
-    }
-    return out;
-}
-
-// Memoized ct_to_f32: converts once at model load time, returns const ref forever.
-// Populated eagerly by cohere_model_warm_cache(); safe because weights are immutable.
-static const std::vector<float> & ct_to_f32_ref(const ggml_tensor * t) {
-    static std::unordered_map<const ggml_tensor *, std::vector<float>> s_f32_cache;
-    auto it = s_f32_cache.find(t);
-    if (it != s_f32_cache.end()) return it->second;
-    return s_f32_cache.emplace(t, ct_to_f32(t)).first->second;
-}
-
 // ---------------------------------------------------------------------------
 // Feature extraction: raw PCM → log-mel spectrogram
 // Returns float array of shape (n_mels, T_mel), row-major.
@@ -933,50 +901,6 @@ static std::vector<float> ct_rel_pos_enc(int T, int d_model) {
 // Call once per utterance after encoding; results stored in cross_kv_k/v.
 // Layout: cross_kv_k[li] has shape (T_enc, dec_d_model), row-major.
 // ---------------------------------------------------------------------------
-
-static void cohere_precompute_cross_kv(
-    const cohere_model & m,
-    const float * enc_out, int T_enc,
-    std::vector<std::vector<float>> & cross_kv_k,
-    std::vector<std::vector<float>> & cross_kv_v
-) {
-    const auto & hp = m.hparams;
-    const int d = hp.dec_d_model;
-    cross_kv_k.resize(hp.dec_n_layers);
-    cross_kv_v.resize(hp.dec_n_layers);
-    for (int li = 0; li < hp.dec_n_layers; li++) {
-        const auto & l = m.dec_layers[li];
-        const float * ck_w = ct_tensor_f32(l.cross_k_w);
-        cross_kv_k[li] = ct_linear(enc_out, d, T_enc, ck_w, d, ct_to_f32_ref(l.cross_k_b).data());
-        const float * cv_w = ct_tensor_f32(l.cross_v_w);
-        cross_kv_v[li] = ct_linear(enc_out, d, T_enc, cv_w, d, ct_to_f32_ref(l.cross_v_b).data());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Logging & Debugging
-// ---------------------------------------------------------------------------
-
-static void cohere_debug(const char * fmt, ...) {
-    if (!getenv("COHERE_DEBUG")) return;
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
-    fflush(stdout);
-}
-
-static void cohere_log_tensor(const char * name, const struct ggml_tensor * t) {
-    if (!getenv("COHERE_DEBUG")) return;
-    if (!t) {
-        cohere_debug("%-25s: NULL\n", name);
-        return;
-    }
-    cohere_debug("%-25s: shape [%4ld, %4ld, %4ld, %4ld] type %d\n",
-        name,
-        (long)t->ne[0], (long)t->ne[1], (long)t->ne[2], (long)t->ne[3],
-        (int)t->type);
-}
 
 // ---------------------------------------------------------------------------
 // Decoder Graph Builder
@@ -1109,15 +1033,9 @@ static struct ggml_cgraph * cohere_build_graph_decoder(
         CQ = ggml_reshape_3d(ctx0, CQ, head_dim, n_heads, n_tokens);
         CQ = ggml_permute(ctx0, CQ, 0, 2, 1, 3); // [hd, n_tok, n_heads]
 
-        // CK and CV inputs
-        char ck_name[32], cv_name[32];
-        snprintf(ck_name, sizeof(ck_name), "CK_%d", il);
-        snprintf(cv_name, sizeof(cv_name), "CV_%d", il);
-        
-        struct ggml_tensor * CK_in = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, ctx->cached_T_enc);
-        struct ggml_tensor * CV_in = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, ctx->cached_T_enc);
-        ggml_set_name(CK_in, ck_name); ggml_set_input(CK_in);
-        ggml_set_name(CV_in, cv_name); ggml_set_input(CV_in);
+        // CK and CV are now provided as constant inputs to the decoder graph
+        struct ggml_tensor * CK_in = ctx->cross_kv_k[il];
+        struct ggml_tensor * CV_in = ctx->cross_kv_v[il];
 
         struct ggml_tensor * CK = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, CK_in, head_dim, n_heads, ctx->cached_T_enc), 0, 2, 1, 3));
 
@@ -1185,9 +1103,7 @@ static struct ggml_cgraph * cohere_build_graph_decoder(
 static std::vector<float> cohere_decode_step(
     struct cohere_context * ctx,
     int T_enc,
-    const int * tokens, int n_tok, int offset,
-    const std::vector<std::vector<float>> & cross_kv_k,
-    const std::vector<std::vector<float>> & cross_kv_v
+    const int * tokens, int n_tok, int offset
 ) {
     const auto & hp = ctx->model.hparams;
     const int vocab_size = hp.vocab_size;
@@ -1210,30 +1126,6 @@ static std::vector<float> cohere_decode_step(
     std::vector<int> pos_data(n_tok);
     for (int i = 0; i < n_tok; i++) pos_data[i] = offset + i;
     ggml_backend_tensor_set(position, pos_data.data(), 0, n_tok * sizeof(int));
-
-    // Set cross-attention inputs
-    for (int il = 0; il < hp.dec_n_layers; il++) {
-        char ck_name[32], cv_name[32];
-        snprintf(ck_name, sizeof(ck_name), "CK_%d", il);
-        snprintf(cv_name, sizeof(cv_name), "CV_%d", il);
-        struct ggml_tensor * CK_t = ggml_graph_get_tensor(gf, ck_name);
-        struct ggml_tensor * CV_t = ggml_graph_get_tensor(gf, cv_name);
-        
-        if (il == 0 && offset == 0) {
-            cohere_debug("cohere: setting CK_0, size %zu, buffer=%p, first 5: [%.4f, %.4f, %.4f, %.4f, %.4f]\n",
-                   cross_kv_k[il].size(), (void*)(CK_t ? CK_t->buffer : nullptr),
-                   cross_kv_k[il][0], cross_kv_k[il][1], cross_kv_k[il][2], cross_kv_k[il][3], cross_kv_k[il][4]);
-        }
-
-        if (CK_t) {
-            if (!CK_t->buffer) { fprintf(stderr, "error: %s buffer is NULL\n", ck_name); }
-            else ggml_backend_tensor_set(CK_t, cross_kv_k[il].data(), 0, cross_kv_k[il].size() * sizeof(float));
-        }
-        if (CV_t) {
-            if (!CV_t->buffer) { fprintf(stderr, "error: %s buffer is NULL\n", cv_name); }
-            else ggml_backend_tensor_set(CV_t, cross_kv_v[il].data(), 0, cross_kv_v[il].size() * sizeof(float));
-        }
-    }
 
     // Execute
     if (ggml_backend_sched_graph_compute(ctx->ggml_alloc, gf) != GGML_STATUS_SUCCESS) {
@@ -1290,64 +1182,7 @@ static std::vector<float> cohere_decode_step(
 // Pre-populate the ct_to_f32_ref cache for every model weight tensor.
 // Called once at init so all inferences pay zero conversion cost.
 static void cohere_model_warm_cache(const cohere_model & m) {
-    auto w = [](const ggml_tensor * t){ if (t) ct_to_f32_ref(t); };
-
-    // Pre-encode conv subsampling
-    w(m.pre_conv0_w); w(m.pre_conv0_b);
-    w(m.pre_conv2_w); w(m.pre_conv2_b);
-    w(m.pre_conv3_w); w(m.pre_conv3_b);
-    w(m.pre_conv5_w); w(m.pre_conv5_b);
-    w(m.pre_conv6_w); w(m.pre_conv6_b);
-    w(m.pre_out_w);   w(m.pre_out_b);
-
-    // Encoder layers
-    for (const auto & l : m.enc_layers) {
-        w(l.ff1_norm_w); w(l.ff1_norm_b);
-        w(l.ff1_up_w);   w(l.ff1_up_b);
-        w(l.ff1_dn_w);   w(l.ff1_dn_b);
-        w(l.attn_norm_w); w(l.attn_norm_b);
-        w(l.attn_q_w);   w(l.attn_q_b);
-        w(l.attn_k_w);   w(l.attn_k_b);
-        w(l.attn_v_w);   w(l.attn_v_b);
-        w(l.attn_out_w); w(l.attn_out_b);
-        w(l.attn_pos_w); w(l.attn_pos_bias_u); w(l.attn_pos_bias_v);
-        w(l.conv_norm_w); w(l.conv_norm_b);
-        w(l.conv_pw1_w);  w(l.conv_pw1_b);
-        w(l.conv_dw_w);   w(l.conv_dw_b);
-        w(l.conv_bn_w);   w(l.conv_bn_b);
-        w(l.conv_bn_mean); w(l.conv_bn_var);
-        w(l.conv_pw2_w);  w(l.conv_pw2_b);
-        w(l.ff2_norm_w); w(l.ff2_norm_b);
-        w(l.ff2_up_w);   w(l.ff2_up_b);
-        w(l.ff2_dn_w);   w(l.ff2_dn_b);
-        w(l.out_norm_w); w(l.out_norm_b);
-    }
-
-    // Encoder→decoder projection
-    w(m.enc_proj_w); w(m.enc_proj_b);
-
-    // Decoder top-level
-    w(m.dec_emb_w); w(m.dec_pos_w);
-    w(m.dec_emb_ln_w); w(m.dec_emb_ln_b);
-    w(m.dec_out_ln_w); w(m.dec_out_ln_b);
-    w(m.dec_head_w);   w(m.dec_head_b);
-
-    // Decoder layers
-    for (const auto & l : m.dec_layers) {
-        w(l.attn_ln_w);  w(l.attn_ln_b);
-        w(l.attn_q_w);   w(l.attn_q_b);
-        w(l.attn_k_w);   w(l.attn_k_b);
-        w(l.attn_v_w);   w(l.attn_v_b);
-        w(l.attn_o_w);   w(l.attn_o_b);
-        w(l.cross_ln_w); w(l.cross_ln_b);
-        w(l.cross_q_w);  w(l.cross_q_b);
-        w(l.cross_k_w);  w(l.cross_k_b);
-        w(l.cross_v_w);  w(l.cross_v_b);
-        w(l.cross_o_w);  w(l.cross_o_b);
-        w(l.ffn_ln_w);   w(l.ffn_ln_b);
-        w(l.ffn_up_w);   w(l.ffn_up_b);
-        w(l.ffn_dn_w);   w(l.ffn_dn_b);
-    }
+    (void)m;
 }
 
 struct cohere_context_params cohere_context_default_params(void) {
@@ -1405,6 +1240,9 @@ struct cohere_context * cohere_init_from_file(const char * path_model,
     float eps_val = 1e-5f;
     memcpy(ctx->eps->data, &eps_val, sizeof(float));
 
+    ctx->cross_kv_ctx = nullptr;
+    ctx->cross_kv_buf = nullptr;
+
     return ctx;
 }
 
@@ -1414,6 +1252,8 @@ void cohere_free(struct cohere_context * ctx) {
     if (ctx->ggml_backend)  ggml_backend_free(ctx->ggml_backend);
     if (ctx->kv_ctx)        ggml_free(ctx->kv_ctx);
     if (ctx->ctx_const)     ggml_free(ctx->ctx_const);
+    if (ctx->cross_kv_ctx)  ggml_free(ctx->cross_kv_ctx);
+    if (ctx->cross_kv_buf)  ggml_backend_buffer_free(ctx->cross_kv_buf);
     if (ctx->model.buf)     ggml_backend_buffer_free(ctx->model.buf);
     if (ctx->model.ctx)     ggml_free(ctx->model.ctx);
     delete ctx;
@@ -1433,34 +1273,38 @@ int cohere_str_to_token(struct cohere_context * ctx, const char * s) {
 }
 
 // ---------------------------------------------------------------------------
-// IMPERATIVE ENCODER (from working commit)
+// Public C API
 // ---------------------------------------------------------------------------
 
-static std::vector<float> cohere_encode_imperative(const cohere_model & m, const float * mel, int T_mel) {
-    const auto & hp = m.hparams;
-    int ch = hp.pre_conv_ch;
-    int d = hp.enc_d_model;
-
-    // Subsampling
-    // ... skipping detailed implementation for brevity, 
-    // but I need it to be complete to match the reference.
-    // Actually, I'll just use the GGML one for now but print its output.
-    return {}; 
+static std::vector<float> ct_get_f32(const ggml_tensor * t) {
+    const int n = (int)ggml_nelements(t);
+    std::vector<float> res(n);
+    if (t->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(t, res.data(), 0, n * sizeof(float));
+    } else if (t->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp(n);
+        ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(ggml_fp16_t));
+        for (int i = 0; i < n; i++) res[i] = ggml_fp16_to_fp32(tmp[i]);
+    } else {
+        fprintf(stderr, "ct_get_f32: unsupported type %d\n", (int)t->type);
+        abort();
+    }
+    return res;
 }
 
 char * cohere_transcribe(struct cohere_context * ctx,
                          const float * samples, int n_samples,
                          const char * lang) {
+    fprintf(stderr, "cohere: transcribe started, n_samples=%d\n", n_samples);
     const auto & hp  = ctx->model.hparams;
     const auto & voc = ctx->vocab;
-
-    // --- Feature extraction ---
-    const auto & mel_fb = ct_to_f32_ref(ctx->model.fe_mel_fb);
-    const auto & window = ct_to_f32_ref(ctx->model.fe_window);
+    // Feature extraction
+    auto mel_fb = ct_get_f32(ctx->model.fe_mel_fb);
+    auto window = ct_get_f32(ctx->model.fe_window);
 
     int T_mel = 0;
     auto mel = cohere_compute_features(hp,
-        mel_fb.data() + 0, // skip batch dim → shape (n_mels, n_freqs) stored as [1,128,257]
+        mel_fb.data(),
         window.data(),
         samples, n_samples, T_mel);
 
@@ -1485,8 +1329,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
     int H1 = (T_mel + 2 - 3) / 2 + 1;
     int H2 = (H1 + 2 - 3) / 2 + 1;
     int H3 = (H2 + 2 - 3) / 2 + 1;
-    int T_enc = H3;
-    auto pos_enc_data = ct_rel_pos_enc(T_enc, hp.enc_d_model);
+    auto pos_enc_data = ct_rel_pos_enc(H3, hp.enc_d_model);
     
     struct ggml_tensor * pos_enc_t = ggml_graph_get_tensor(gf_enc, "pos_enc");
     if (!pos_enc_t) { fprintf(stderr, "error: pos_enc tensor not found\n"); return nullptr; }
@@ -1507,12 +1350,54 @@ char * cohere_transcribe(struct cohere_context * ctx,
         fprintf(stderr, "error: enc_out_t buffer is NULL! type=%d, name=%s\n", enc_out_t->type, enc_out_t->name);
     }
 
-    std::vector<float> enc_out(ggml_nelements(enc_out_t));
-    ggml_backend_tensor_get(enc_out_t, enc_out.data(), 0, enc_out.size() * sizeof(float));
+    const int T_enc_actual = enc_out_t->ne[1];
+    cohere_debug("cohere: enc_out shape [%d, %d]\n", T_enc_actual, (int)enc_out_t->ne[0]);
+    
+    // Allocate cross KV tensors on backend
+    {
+        if (ctx->cross_kv_ctx) ggml_free(ctx->cross_kv_ctx);
+        if (ctx->cross_kv_buf) ggml_backend_buffer_free(ctx->cross_kv_buf);
 
-    cohere_debug("cohere: enc_out shape [%d, %d]\n", T_enc, (int)ggml_nelements(enc_out_t) / T_enc);
-    cohere_debug("cohere: enc_out[0, :5] = [%.4f, %.4f, %.4f, %.4f, %.4f]\n",
-           enc_out[0], enc_out[1], enc_out[2], enc_out[3], enc_out[4]);
+        ctx->cross_kv_k.resize(hp.dec_n_layers);
+        ctx->cross_kv_v.resize(hp.dec_n_layers);
+
+        struct ggml_init_params cross_kv_params = {
+            .mem_size   = (hp.dec_n_layers * 2 + 10) * ggml_tensor_overhead(),
+            .mem_buffer = nullptr,
+            .no_alloc   = true,
+        };
+        ctx->cross_kv_ctx = ggml_init(cross_kv_params);
+        for (int il = 0; il < hp.dec_n_layers; il++) {
+            ctx->cross_kv_k[il] = ggml_new_tensor_2d(ctx->cross_kv_ctx, GGML_TYPE_F32, hp.dec_d_model, T_enc_actual);
+            ctx->cross_kv_v[il] = ggml_new_tensor_2d(ctx->cross_kv_ctx, GGML_TYPE_F32, hp.dec_d_model, T_enc_actual);
+        }
+
+        size_t layer_kv_size = ggml_nbytes(ctx->cross_kv_k[0]);
+        ctx->cross_kv_buf = ggml_backend_alloc_buffer(ctx->ggml_backend, layer_kv_size * hp.dec_n_layers * 2);
+        
+        char * base = (char *)ggml_backend_buffer_get_base(ctx->cross_kv_buf);
+        for (int il = 0; il < hp.dec_n_layers; il++) {
+            ggml_backend_tensor_alloc(ctx->cross_kv_buf, ctx->cross_kv_k[il], (void *)(base + (2*il + 0) * layer_kv_size));
+            ggml_backend_tensor_alloc(ctx->cross_kv_buf, ctx->cross_kv_v[il], (void *)(base + (2*il + 1) * layer_kv_size));
+            
+            // Copy from encoder graph output tensors
+            char ck_name[32], cv_name[32];
+            snprintf(ck_name, sizeof(ck_name), "ck_%d", il);
+            snprintf(cv_name, sizeof(cv_name), "cv_%d", il);
+            struct ggml_tensor * ck_src = ggml_graph_get_tensor(gf_enc, ck_name);
+            struct ggml_tensor * cv_src = ggml_graph_get_tensor(gf_enc, cv_name);
+            
+            if (!ck_src || !cv_src) {
+                fprintf(stderr, "error: cross-KV source tensor %s or %s not found in encoder graph\n", ck_name, cv_name);
+                return nullptr;
+            }
+
+            ggml_backend_tensor_copy(ck_src, ctx->cross_kv_k[il]);
+            ggml_backend_tensor_copy(cv_src, ctx->cross_kv_v[il]);
+        }
+    }
+
+    const int T_enc = T_enc_actual;
 
     // --- Decoder: build prompt ---
     // Special token IDs from vocab
@@ -1539,10 +1424,6 @@ char * cohere_transcribe(struct cohere_context * ctx,
     for (int id : prompt) cohere_debug("%d ", id);
     cohere_debug("\n");
 
-    // Pre-compute cross KV cache once for this utterance
-    cohere_precompute_cross_kv(ctx->model, enc_out.data(), T_enc,
-                               ctx->cross_kv_k, ctx->cross_kv_v);
-
     // Reset persistent KV cache
     {
         ggml_backend_buffer_clear(ctx->kv_k->buffer, 0);
@@ -1554,8 +1435,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
 
     // --- Run prompt through decoder ---
     auto logits = cohere_decode_step(ctx, T_enc,
-                                      prompt.data(), (int)prompt.size(), 0,
-                                      ctx->cross_kv_k, ctx->cross_kv_v);
+                                      prompt.data(), (int)prompt.size(), 0);
     int offset = (int)prompt.size();
 
     // Greedy decode
@@ -1579,8 +1459,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
 
         // Next step: decode single token
         logits = cohere_decode_step(ctx, T_enc,
-                                    &next_tok, 1, offset - 1,
-                                    ctx->cross_kv_k, ctx->cross_kv_v);
+                                    &next_tok, 1, offset - 1);
     }
 
     // --- Decode tokens to text ---
