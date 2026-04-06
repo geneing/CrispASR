@@ -416,7 +416,6 @@ struct cohere_context {
     struct ggml_context * kv_ctx  = nullptr;
     struct ggml_tensor  * kv_k    = nullptr;
     struct ggml_tensor  * kv_v    = nullptr;
-    struct ggml_tensor  * kq_mask = nullptr; // [max_ctx] F32, additive mask for fixed-shape attention
 
     // Cross-attention KV cache: computed once per utterance from encoder output.
     // Shape per layer: (dec_d_model, T_enc)
@@ -1153,14 +1152,8 @@ static struct ggml_cgraph * cohere_build_graph_decoder(
     const int d        = hp.dec_d_model;
     const int n_heads  = hp.dec_n_heads;
     const int head_dim = hp.dec_head_dim;
-    const int max_ctx  = hp.dec_max_ctx;
 
-    // For single-token autoregressive steps, use fixed-size KV views (max_ctx) so that
-    // the ggml_gallocr can reuse its allocation plan across steps instead of re-reserving
-    // each time the shape changes. An additive mask zeros out unwritten cache slots.
-    const int kv_len = (n_tokens == 1) ? max_ctx : (offset + n_tokens);
-
-    cohere_debug("\n--- cohere_build_graph_decoder: n_tokens=%d, offset=%d kv_len=%d ---\n", n_tokens, offset, kv_len);
+    cohere_debug("\n--- cohere_build_graph_decoder: n_tokens=%d, offset=%d ---\n", n_tokens, offset);
 
     struct ggml_init_params params = {
         .mem_size   = ctx->compute_meta.size(),
@@ -1234,24 +1227,21 @@ static struct ggml_cgraph * cohere_build_graph_decoder(
         struct ggml_tensor * Q = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Qcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3); // [hd, n_tok, n_heads]
         
         struct ggml_tensor * K = ggml_view_3d(ctx0, ctx->kv_k,
-            head_dim, kv_len, n_heads,
+            head_dim, offset + n_tokens, n_heads,
             ctx->kv_k->nb[1], ctx->kv_k->nb[2],
-            il * ctx->kv_k->nb[3]); // [hd, kv_len, n_heads]
+            il * ctx->kv_k->nb[3]); // [hd, offset+n_tok, n_heads]
         K = ggml_cont(ctx0, K);
-        struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q); // [kv_len, n_tok, n_heads]
-        KQ = ggml_scale_inplace(ctx0, KQ, 1.0f / sqrtf((float)head_dim));
-        if (n_tokens == 1) {
-            // Additive mask: 0.0 for valid positions, -inf for unwritten slots
-            KQ = ggml_add_inplace(ctx0, KQ, ctx->kq_mask);
-        } else {
-            KQ = ggml_diag_mask_inf_inplace(ctx0, KQ, offset);
-        }
-        KQ = ggml_soft_max_inplace(ctx0, KQ);
+struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q); // [n_tok, L, H]
+KQ = ggml_scale_inplace(ctx0, KQ, 1.0f / sqrtf((float)head_dim));
+if (n_tokens > 1) {
+    KQ = ggml_diag_mask_inf_inplace(ctx0, KQ, offset);
+}
+KQ = ggml_soft_max_inplace(ctx0, KQ);
 
         struct ggml_tensor * V = ggml_view_3d(ctx0, ctx->kv_v,
-            head_dim, kv_len, n_heads,
+            head_dim, offset + n_tokens, n_heads,
             ctx->kv_v->nb[1], ctx->kv_v->nb[2],
-            il * ctx->kv_v->nb[3]); // [hd, kv_len, n_heads]
+            il * ctx->kv_v->nb[3]); // [hd, offset+n_tok, n_heads]
 
         struct ggml_tensor * V_trans = ggml_cont(ctx0, ggml_permute(ctx0, V, 1, 0, 2, 3)); // [offset+n_tok, hd, n_heads]
         struct ggml_tensor * sa_out = ggml_mul_mat(ctx0, V_trans, KQ); // [hd, n_tok, n_heads]
@@ -1369,15 +1359,6 @@ static std::vector<float> cohere_decode_step(
     for (int i = 0; i < n_tok; i++) pos_data[i] = offset + i;
     ggml_backend_tensor_set(position, pos_data.data(), 0, n_tok * sizeof(int));
 
-    // For single-token steps, update the KQ mask: 0.0 for valid positions, -inf for the rest.
-    // This enables fixed-size KV views (kv_len=max_ctx) so the gallocr plan can be reused.
-    if (n_tok == 1) {
-        const int max_ctx = ctx->model.hparams.dec_max_ctx;
-        const int valid_len = offset + n_tok;
-        std::vector<float> mask_data(max_ctx, -INFINITY);
-        for (int i = 0; i < valid_len && i < max_ctx; i++) mask_data[i] = 0.0f;
-        ggml_backend_tensor_set(ctx->kq_mask, mask_data.data(), 0, max_ctx * sizeof(float));
-    }
 
     t0 = ggml_time_us();
     if (!cohere_sched_graph_compute(ctx->ggml_alloc, gf, ctx->params.n_threads)) {
@@ -1526,21 +1507,18 @@ struct cohere_context * cohere_init_from_file(const char * path_model,
     // Allocate persistent KV cache
     {
         struct ggml_init_params kv_params = {
-            .mem_size   = ggml_tensor_overhead() * 3 + 1024,
+            .mem_size   = ggml_tensor_overhead() * 2 + 1024,
             .mem_buffer = nullptr,
             .no_alloc   = true,
         };
-        ctx->kv_ctx  = ggml_init(kv_params);
-        ctx->kv_k    = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hp.dec_head_dim, hp.dec_max_ctx, hp.dec_n_heads, hp.dec_n_layers);
-        ctx->kv_v    = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hp.dec_head_dim, hp.dec_max_ctx, hp.dec_n_heads, hp.dec_n_layers);
-        ctx->kq_mask = ggml_new_tensor_1d(ctx->kv_ctx, GGML_TYPE_F32, hp.dec_max_ctx);
-        ggml_set_name(ctx->kq_mask, "kq_mask");
+        ctx->kv_ctx = ggml_init(kv_params);
+        ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hp.dec_head_dim, hp.dec_max_ctx, hp.dec_n_heads, hp.dec_n_layers);
+        ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hp.dec_head_dim, hp.dec_max_ctx, hp.dec_n_heads, hp.dec_n_layers);
         ggml_backend_buffer_t kv_buf = ggml_backend_alloc_buffer(ctx->ggml_backend,
-            ggml_nbytes(ctx->kv_k) + ggml_nbytes(ctx->kv_v) + ggml_nbytes(ctx->kq_mask));
+                                           ggml_nbytes(ctx->kv_k) + ggml_nbytes(ctx->kv_v));
         char * base = (char *)ggml_backend_buffer_get_base(kv_buf);
-        ggml_backend_tensor_alloc(kv_buf, ctx->kv_k,    (void *)(base));
-        ggml_backend_tensor_alloc(kv_buf, ctx->kv_v,    (void *)(base + ggml_nbytes(ctx->kv_k)));
-        ggml_backend_tensor_alloc(kv_buf, ctx->kq_mask, (void *)(base + ggml_nbytes(ctx->kv_k) + ggml_nbytes(ctx->kv_v)));
+        ggml_backend_tensor_alloc(kv_buf, ctx->kv_k, (void *)(base));
+        ggml_backend_tensor_alloc(kv_buf, ctx->kv_v, (void *)(base + ggml_nbytes(ctx->kv_k)));
 
         fprintf(stderr, "cohere: kv cache     = %.1f MiB  (dec_head_dim=%d max_ctx=%d n_heads=%d n_layers=%d)\n",
                 ggml_backend_buffer_get_size(kv_buf) / 1048576.0,
@@ -1978,6 +1956,17 @@ char * cohere_transcribe(struct cohere_context * ctx,
             perf.t_dec_build_us / 1e3,
             perf.t_dec_alloc_us / 1e3,
             perf.t_dec_compute_us / 1e3);
+
+    // Pre-reserve the scheduler with the maximum-size single-step decoder graph.
+    // The prompt pass leaves the gallocr sized for the prompt graph (different structure).
+    // By reserving with n_tokens=1, offset=max_ctx-1 (largest possible K/V views),
+    // the gallocr's size_max covers all future autoregressive steps, so
+    // ggml_gallocr_needs_realloc returns false for every step and the plan is reused.
+    {
+        const int dummy_tok = 0;
+        struct ggml_cgraph * gf_max = cohere_build_graph_decoder(ctx, &dummy_tok, 1, hp.dec_max_ctx - 1);
+        ggml_backend_sched_reserve(ctx->ggml_alloc, gf_max);
+    }
 
     // Greedy decode
     std::vector<int> generated;
