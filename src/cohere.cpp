@@ -687,6 +687,7 @@ static struct ggml_cgraph * cohere_build_graph_encoder(struct cohere_context * c
     return gf;
 }
 
+
 static struct ggml_cgraph * cohere_build_graph_decoder(struct cohere_context * ctx, const int * tokens, int n_tokens, int offset);
 
 #define CT_CHECK(x) do { if (!(x)) { fprintf(stderr, "CT_CHECK failed: %s (%s:%d)\n", #x, __FILE__, __LINE__); abort(); } } while(0)
@@ -1683,99 +1684,179 @@ char * cohere_transcribe(struct cohere_context * ctx,
     auto mel_fb = ct_get_f32(ctx->model.fe_mel_fb);
     auto window = ct_get_f32(ctx->model.fe_window);
 
-    int T_mel = 0;
-    t0 = ggml_time_us();
-    auto mel = cohere_compute_features(hp, mel_fb.data(), window.data(),
-                                       samples, n_samples, T_mel);
-    t1 = ggml_time_us();
-    perf.t_features_us = t1 - t0;
-    fprintf(stderr, "cohere: features done         T_mel=%d  %.1f ms\n",
-            T_mel, perf.t_features_us / 1e3);
+    // --- Feature extraction + Encoder ---
+    // For audio > 30s: process in 30s chunks to cap O(T²) attention cost.
+    // Cross-KV (K/V projections of encoder output) is extracted from each chunk's
+    // encoder graph and scatter-copied into the final K[head_dim,T_total,n_heads] /
+    // V[T_total,head_dim,n_heads] layout on the CPU, then uploaded to the backend.
+    const int CHUNK_SAMPLES = 30 * hp.sample_rate;
+    const bool do_chunked = (n_samples > CHUNK_SAMPLES);
 
-    // --- Encoder Graph ---
-    t0 = ggml_time_us();
-    struct ggml_cgraph * gf_enc = cohere_build_graph_encoder(ctx, T_mel);
-    t1 = ggml_time_us();
-    perf.t_enc_build_us = t1 - t0;
-    perf.enc_n_nodes = ggml_graph_n_nodes(gf_enc);
-    fprintf(stderr, "cohere: enc graph built       nodes=%d  %.1f ms\n",
-            perf.enc_n_nodes, perf.t_enc_build_us / 1e3);
+    int T_enc_total = 0;
 
-    t0 = ggml_time_us();
-    ggml_backend_sched_reset(ctx->ggml_alloc);
-    if (!ggml_backend_sched_alloc_graph(ctx->ggml_alloc, gf_enc)) {
-        fprintf(stderr, "cohere: failed to allocate encoder graph\n");
-        return nullptr;
+    // Per-chunk K/V CPU storage: partial_k[il][chunk] and partial_v[il][chunk]
+    // K chunk: [head_dim, T_c, n_heads] layout (raw F32 bytes from encoder graph)
+    // V chunk: [T_c, head_dim, n_heads] layout (raw F32 bytes from encoder graph)
+    std::vector<std::vector<std::vector<float>>> partial_k(hp.dec_n_layers);
+    std::vector<std::vector<std::vector<float>>> partial_v(hp.dec_n_layers);
+    std::vector<int> T_enc_chunks;
+    for (int il = 0; il < hp.dec_n_layers; il++) {
+        partial_k[il].reserve(4);
+        partial_v[il].reserve(4);
     }
-    t1 = ggml_time_us();
-    perf.t_enc_alloc_us = t1 - t0;
-    perf.mem_sched_buf = ggml_backend_sched_get_buffer_size(ctx->ggml_alloc, ctx->ggml_backend);
-    fprintf(stderr, "cohere: enc sched alloc       %.1f ms   sched_buf=%.1f MiB\n",
-            perf.t_enc_alloc_us / 1e3, perf.mem_sched_buf / 1048576.0);
 
-    struct ggml_tensor * mel_t = ggml_graph_get_tensor(gf_enc, "mel");
-    if (!mel_t) { fprintf(stderr, "error: mel tensor not found\n"); return nullptr; }
-    ggml_backend_tensor_set(mel_t, mel.data(), 0, mel.size() * sizeof(float));
-
-    int H1 = (T_mel + 2 - 3) / 2 + 1;
-    int H2 = (H1   + 2 - 3) / 2 + 1;
-    int H3 = (H2   + 2 - 3) / 2 + 1;
-    auto pos_enc_data = ct_rel_pos_enc(H3, hp.enc_d_model);
-    struct ggml_tensor * pos_enc_t = ggml_graph_get_tensor(gf_enc, "pos_enc");
-    if (!pos_enc_t) { fprintf(stderr, "error: pos_enc tensor not found\n"); return nullptr; }
-    ggml_backend_tensor_set(pos_enc_t, pos_enc_data.data(), 0, pos_enc_data.size() * sizeof(float));
-
-    // Optional per-op profiling (COHERE_PROF=1)
+    // Optional per-op profiling (COHERE_PROF=1, single-chunk only)
     cohere_prof_state prof_state;
-    bool do_prof = getenv("COHERE_PROF") != nullptr;
-    if (do_prof) {
-        ggml_backend_sched_set_eval_callback(ctx->ggml_alloc, cohere_prof_eval_cb, &prof_state);
-    }
+    bool do_prof = !do_chunked && (getenv("COHERE_PROF") != nullptr);
 
-    t0 = ggml_time_us();
-    if (!cohere_sched_graph_compute(ctx->ggml_alloc, gf_enc, ctx->params.n_threads)) {
-        fprintf(stderr, "cohere: failed to compute encoder graph\n");
-        return nullptr;
-    }
-    t1 = ggml_time_us();
-    perf.t_enc_compute_us = t1 - t0;
-    fprintf(stderr, "cohere: enc compute done      %.1f ms\n", perf.t_enc_compute_us / 1e3);
-
-    if (do_prof) {
-        ggml_backend_sched_set_eval_callback(ctx->ggml_alloc, nullptr, nullptr);
-        cohere_prof_print(prof_state);
-    }
-
-    struct ggml_tensor * enc_out_t = ggml_graph_get_tensor(gf_enc, "enc_out");
-    if (!enc_out_t) { fprintf(stderr, "error: enc_out tensor not found\n"); return nullptr; }
-    const int T_enc_actual = enc_out_t->ne[1];
-    cohere_debug("cohere: enc_out shape [%d, %d]\n", T_enc_actual, (int)enc_out_t->ne[0]);
-
-    // --- Cross-KV extraction ---
-    t0 = ggml_time_us();
     {
+        int n_chunks = 0;
+        for (int sample_offset = 0; sample_offset < n_samples; sample_offset += CHUNK_SAMPLES) {
+            int chunk_n = std::min(CHUNK_SAMPLES, n_samples - sample_offset);
+            n_chunks++;
+
+            // Feature extraction for this chunk
+            int T_mel_c = 0;
+            t0 = ggml_time_us();
+            auto mel_c = cohere_compute_features(hp, mel_fb.data(), window.data(),
+                                                  samples + sample_offset, chunk_n, T_mel_c);
+            t1 = ggml_time_us();
+            perf.t_features_us += (t1 - t0);
+
+            if (do_chunked) {
+                fprintf(stderr, "cohere: chunk %d/%d  n=%d  T_mel=%d\n",
+                        n_chunks, (n_samples + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES, chunk_n, T_mel_c);
+            } else {
+                fprintf(stderr, "cohere: features done         T_mel=%d  %.1f ms\n",
+                        T_mel_c, perf.t_features_us / 1e3);
+            }
+
+            // Build encoder graph for this chunk
+            t0 = ggml_time_us();
+            struct ggml_cgraph * gf_enc = cohere_build_graph_encoder(ctx, T_mel_c);
+            t1 = ggml_time_us();
+            perf.t_enc_build_us += (t1 - t0);
+            perf.enc_n_nodes = ggml_graph_n_nodes(gf_enc);
+
+            if (!do_chunked) {
+                fprintf(stderr, "cohere: enc graph built       nodes=%d  %.1f ms\n",
+                        perf.enc_n_nodes, perf.t_enc_build_us / 1e3);
+            }
+
+            // Allocate
+            t0 = ggml_time_us();
+            ggml_backend_sched_reset(ctx->ggml_alloc);
+            if (!ggml_backend_sched_alloc_graph(ctx->ggml_alloc, gf_enc)) {
+                fprintf(stderr, "cohere: failed to allocate encoder graph (chunk %d)\n", n_chunks);
+                return nullptr;
+            }
+            t1 = ggml_time_us();
+            perf.t_enc_alloc_us += (t1 - t0);
+            perf.mem_sched_buf = ggml_backend_sched_get_buffer_size(ctx->ggml_alloc, ctx->ggml_backend);
+            if (!do_chunked) {
+                fprintf(stderr, "cohere: enc sched alloc       %.1f ms   sched_buf=%.1f MiB\n",
+                        perf.t_enc_alloc_us / 1e3, perf.mem_sched_buf / 1048576.0);
+            }
+
+            // Set inputs
+            struct ggml_tensor * mel_t = ggml_graph_get_tensor(gf_enc, "mel");
+            if (!mel_t) { fprintf(stderr, "error: mel tensor not found\n"); return nullptr; }
+            ggml_backend_tensor_set(mel_t, mel_c.data(), 0, mel_c.size() * sizeof(float));
+
+            int H1c = (T_mel_c + 2 - 3) / 2 + 1;
+            int H2c = (H1c + 2 - 3) / 2 + 1;
+            int H3c = (H2c + 2 - 3) / 2 + 1;
+            auto pos_enc_c = ct_rel_pos_enc(H3c, hp.enc_d_model);
+            struct ggml_tensor * pos_enc_t = ggml_graph_get_tensor(gf_enc, "pos_enc");
+            if (!pos_enc_t) { fprintf(stderr, "error: pos_enc tensor not found\n"); return nullptr; }
+            ggml_backend_tensor_set(pos_enc_t, pos_enc_c.data(), 0, pos_enc_c.size() * sizeof(float));
+
+            if (do_prof) {
+                ggml_backend_sched_set_eval_callback(ctx->ggml_alloc, cohere_prof_eval_cb, &prof_state);
+            }
+
+            // Compute
+            t0 = ggml_time_us();
+            if (!cohere_sched_graph_compute(ctx->ggml_alloc, gf_enc, ctx->params.n_threads)) {
+                fprintf(stderr, "cohere: failed to compute encoder graph (chunk %d)\n", n_chunks);
+                return nullptr;
+            }
+            t1 = ggml_time_us();
+            perf.t_enc_compute_us += (t1 - t0);
+
+            if (do_chunked) {
+                fprintf(stderr, "cohere: chunk %d enc done     %.1f ms\n", n_chunks, (t1-t0)/1e3);
+            } else {
+                fprintf(stderr, "cohere: enc compute done      %.1f ms\n", perf.t_enc_compute_us / 1e3);
+            }
+
+            if (do_prof) {
+                ggml_backend_sched_set_eval_callback(ctx->ggml_alloc, nullptr, nullptr);
+            }
+
+            // Extract T_enc for this chunk
+            struct ggml_tensor * enc_out_t = ggml_graph_get_tensor(gf_enc, "enc_out");
+            if (!enc_out_t) { fprintf(stderr, "error: enc_out tensor not found\n"); return nullptr; }
+            int T_enc_c = enc_out_t->ne[1];
+            T_enc_total += T_enc_c;
+            T_enc_chunks.push_back(T_enc_c);
+
+            // Extract cross-KV from this chunk's encoder graph into CPU vectors.
+            // K shape: [head_dim, T_enc_c, n_heads] (raw F32 from encoder graph)
+            // V shape: [T_enc_c, head_dim, n_heads] (raw F32 from encoder graph)
+            for (int il = 0; il < hp.dec_n_layers; il++) {
+                char ck_name[32], cv_name[32];
+                snprintf(ck_name, sizeof(ck_name), "ck_%d", il);
+                snprintf(cv_name, sizeof(cv_name), "cv_%d", il);
+                struct ggml_tensor * ck_src = ggml_graph_get_tensor(gf_enc, ck_name);
+                struct ggml_tensor * cv_src = ggml_graph_get_tensor(gf_enc, cv_name);
+                if (!ck_src || !cv_src) {
+                    fprintf(stderr, "error: cross-KV tensor %s or %s not found\n", ck_name, cv_name);
+                    return nullptr;
+                }
+                partial_k[il].emplace_back(ggml_nelements(ck_src));
+                partial_v[il].emplace_back(ggml_nelements(cv_src));
+                ggml_backend_tensor_get(ck_src, partial_k[il].back().data(), 0, ggml_nbytes(ck_src));
+                ggml_backend_tensor_get(cv_src, partial_v[il].back().data(), 0, ggml_nbytes(cv_src));
+            }
+        } // end chunk loop
+
+        if (do_chunked) {
+            fprintf(stderr, "cohere: enc compute done      %.1f ms  (chunked %d×30s)\n",
+                    perf.t_enc_compute_us / 1e3, n_chunks);
+        }
+
+        if (do_prof) {
+            cohere_prof_print(prof_state);
+        }
+    }
+
+    // Assemble cross-KV from per-chunk CPU data and upload to backend buffer.
+    {
+        t0 = ggml_time_us();
+
         if (ctx->cross_kv_ctx) ggml_free(ctx->cross_kv_ctx);
         if (ctx->cross_kv_buf) ggml_backend_buffer_free(ctx->cross_kv_buf);
 
         ctx->cross_kv_k.resize(hp.dec_n_layers);
         ctx->cross_kv_v.resize(hp.dec_n_layers);
 
-        struct ggml_init_params cross_kv_params = {
+        struct ggml_init_params ckv_params = {
             .mem_size   = (hp.dec_n_layers * 2 + 10) * ggml_tensor_overhead(),
             .mem_buffer = nullptr,
             .no_alloc   = true,
         };
-        ctx->cross_kv_ctx = ggml_init(cross_kv_params);
+        ctx->cross_kv_ctx = ggml_init(ckv_params);
 
         for (int il = 0; il < hp.dec_n_layers; il++) {
             ctx->cross_kv_k[il] = ggml_new_tensor_3d(ctx->cross_kv_ctx, GGML_TYPE_F32,
-                                                       head_dim, T_enc_actual, n_heads);
+                                                       head_dim, T_enc_total, n_heads);
             ctx->cross_kv_v[il] = ggml_new_tensor_3d(ctx->cross_kv_ctx, GGML_TYPE_F32,
-                                                       T_enc_actual, head_dim, n_heads);
+                                                       T_enc_total, head_dim, n_heads);
         }
 
-        size_t k_size = ggml_nbytes(ctx->cross_kv_k[0]);
-        size_t v_size = ggml_nbytes(ctx->cross_kv_v[0]);
+        const size_t k_size = ggml_nbytes(ctx->cross_kv_k[0]); // head_dim × T_enc_total × n_heads × 4
+        const size_t v_size = ggml_nbytes(ctx->cross_kv_v[0]); // T_enc_total × head_dim × n_heads × 4
         ctx->cross_kv_buf = ggml_backend_alloc_buffer(ctx->ggml_backend,
                                 (k_size + v_size) * hp.dec_n_layers);
         char * base = (char *)ggml_backend_buffer_get_base(ctx->cross_kv_buf);
@@ -1785,26 +1866,61 @@ char * cohere_transcribe(struct cohere_context * ctx,
                                       (void *)(base + il * (k_size + v_size)));
             ggml_backend_tensor_alloc(ctx->cross_kv_buf, ctx->cross_kv_v[il],
                                       (void *)(base + il * (k_size + v_size) + k_size));
-            char ck_name[32], cv_name[32];
-            snprintf(ck_name, sizeof(ck_name), "ck_%d", il);
-            snprintf(cv_name, sizeof(cv_name), "cv_%d", il);
-            struct ggml_tensor * ck_src = ggml_graph_get_tensor(gf_enc, ck_name);
-            struct ggml_tensor * cv_src = ggml_graph_get_tensor(gf_enc, cv_name);
-            if (!ck_src || !cv_src) {
-                fprintf(stderr, "error: cross-KV tensor %s or %s not found\n", ck_name, cv_name);
-                return nullptr;
-            }
-            ggml_backend_tensor_copy(ck_src, ctx->cross_kv_k[il]);
-            ggml_backend_tensor_copy(cv_src, ctx->cross_kv_v[il]);
         }
-    }
-    t1 = ggml_time_us();
-    perf.t_cross_kv_us    = t1 - t0;
-    perf.mem_cross_kv_buf = ggml_backend_buffer_get_size(ctx->cross_kv_buf);
-    fprintf(stderr, "cohere: cross-kv done         %.1f ms   buf=%.1f MiB\n",
-            perf.t_cross_kv_us / 1e3, perf.mem_cross_kv_buf / 1048576.0);
 
-    const int T_enc = T_enc_actual;
+        const int n_chunks = (int)T_enc_chunks.size();
+        if (n_chunks == 1) {
+            // Fast path: single chunk — direct upload from CPU vectors
+            for (int il = 0; il < hp.dec_n_layers; il++) {
+                ggml_backend_tensor_set(ctx->cross_kv_k[il], partial_k[il][0].data(),
+                                        0, partial_k[il][0].size() * sizeof(float));
+                ggml_backend_tensor_set(ctx->cross_kv_v[il], partial_v[il][0].data(),
+                                        0, partial_v[il][0].size() * sizeof(float));
+            }
+        } else {
+            // Multi-chunk: scatter-copy each chunk's K/V into the final layout.
+            //
+            // K layout [head_dim, T_enc_total, n_heads]: for head h, all T frames are at
+            //   offset h × T_enc_total × head_dim (a contiguous block of T×head_dim floats).
+            //   Each chunk's head-h block: chunk_k[h × T_c × head_dim .. (h+1) × T_c × head_dim)
+            //
+            // V layout [T_enc_total, head_dim, n_heads]: for head h and dim d, the T frames are at
+            //   h × head_dim × T_enc_total + d × T_enc_total + T_so_far (stride 1).
+            //   Each chunk's (h,d) slice: chunk_v[h × head_dim × T_c + d × T_c .. + T_c)
+            std::vector<float> k_full(head_dim * T_enc_total * n_heads);
+            std::vector<float> v_full(T_enc_total * head_dim * n_heads);
+
+            for (int il = 0; il < hp.dec_n_layers; il++) {
+                int T_so_far = 0;
+                for (int c = 0; c < n_chunks; c++) {
+                    int T_c = T_enc_chunks[c];
+                    const float * ck = partial_k[il][c].data();
+                    const float * cv = partial_v[il][c].data();
+                    for (int h = 0; h < n_heads; h++) {
+                        // K: head h block in chunk = ck[h × T_c × head_dim .. ]
+                        const float * ks = ck + h * T_c * head_dim;
+                        float * kd = k_full.data() + h * T_enc_total * head_dim + T_so_far * head_dim;
+                        memcpy(kd, ks, T_c * head_dim * sizeof(float));
+                        // V: for each dim d, copy T_c consecutive frames
+                        for (int d = 0; d < head_dim; d++) {
+                            const float * vs = cv + h * head_dim * T_c + d * T_c;
+                            float * vd = v_full.data() + h * head_dim * T_enc_total + d * T_enc_total + T_so_far;
+                            memcpy(vd, vs, T_c * sizeof(float));
+                        }
+                    }
+                    T_so_far += T_c;
+                }
+                ggml_backend_tensor_set(ctx->cross_kv_k[il], k_full.data(), 0, k_full.size() * sizeof(float));
+                ggml_backend_tensor_set(ctx->cross_kv_v[il], v_full.data(), 0, v_full.size() * sizeof(float));
+            }
+        }
+
+        t1 = ggml_time_us();
+        perf.t_cross_kv_us    = t1 - t0;
+        perf.mem_cross_kv_buf = ggml_backend_buffer_get_size(ctx->cross_kv_buf);
+    }
+
+    const int T_enc = T_enc_total;
 
     // --- Decoder prompt ---
     auto tid = [&](const std::string & s) { return voc.token_id(s); };

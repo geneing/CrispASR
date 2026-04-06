@@ -32,13 +32,14 @@ This document tracks the progress of porting `cohere-whisper.cpp` to a full `ggm
     - [x] mmap weight loading: replace fread+vector into mmap to eliminate heap churn (done; load time = disk I/O, not software overhead).
     - [x] Per-op profiler: `COHERE_PROF=1` — eval_callback shows mul_mat=87.6%, im2col=7.0% for 44s audio.
     - [x] Metal/GPU backend: `ggml_backend_load_all()` + `ggml_backend_init_best()` + CPU fallback in sched; `COHERE_DEVICE=metal|cuda|cpu`; CMake: `GGML_METAL=ON` / `GGML_CUDA=ON`.
-    - [ ] Chunked encoder: process long audio in overlapping 30s windows to cap O(T²) attention cost.
+    - [x] Chunked encoder: process long audio in 30s windows to cap O(T²) attention cost.
 
 ## Current Status
 - Decoder: **Graph implementation functional and verified**.
 - Encoder: **Graph implementation functional and verified**. 
 - Full Pipeline: **Verified correct output on sample audio.**
 - BatchNorm folding: **Done and verified** — 4940→4460 nodes, F16 RTF 0.96×, Q4_K RTF 1.15× (real-time).
+- Chunked encoder (30s windows): **Done and verified** — 89s audio Q4_K 4-thread: RTF 1.07× vs 1.26× full-audio (16% speedup). Threads=1: 0.35×, threads=2: 0.66×, threads=4: 1.07×.
 
 ## Phase 5: Technical Learnings & Pitfalls (CRITICAL)
 
@@ -50,6 +51,12 @@ This document tracks the progress of porting `cohere-whisper.cpp` to a full `ggm
 ### 2. Audio Preprocessing Consistency
 - **Mel Layout:** The subsampling Conv2D layers expect mel features in **time-major** layout `[T, n_mels]` (stored as `[1, n_mels, T]` for 2D conv). Storing them in mel-major layout `[n_mels, T]` will result in garbage encoder output.
 - **Normalization:** Ensure per-feature normalization matches the reference (PyTorch/ONNX) exactly, including the biased/unbiased variance calculation.
+
+### 4. Chunked Encoder Cross-KV Assembly
+- **Per-chunk extraction, not standalone graph:** A standalone GGML cross-KV graph (taking concatenated enc_out as input) CANNOT be run through the same `ggml_backend_sched` that was used for the encoder graph. The `gallocr` buffer reset reuses the same virtual buffer; its allocated addresses overlap with input tensors, causing enc_in to be overwritten during computation.
+- **Fix:** Extract ck/cv directly from each chunk's encoder graph (same proven path as single-chunk), copy to CPU vectors, then scatter-copy into the final `[head_dim, T_total, n_heads]` (K) and `[T_total, head_dim, n_heads]` (V) layouts before uploading to the backend buffer.
+- **K scatter:** For head h, chunk c contributes a contiguous block at `k_full[h × T_total × hd + T_so_far × hd]`.
+- **V scatter:** For head h and dim d, chunk c contributes a contiguous slice at `v_full[h × hd × T_total + d × T_total + T_so_far]`.
 
 ### 3. GGML Infrastructure
 - **GGUF Memory Bug:** `gguf_init_from_file` with `no_alloc=true` has a known edge case where it might not calculate enough overhead for the `ggml_context` if many tensors are present. Adding a safety margin (`+10` descriptors) to the allocation in `gguf.cpp` fixes this.
