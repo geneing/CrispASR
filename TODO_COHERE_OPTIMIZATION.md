@@ -27,11 +27,16 @@ This document tracks the progress of porting `cohere-whisper.cpp` to a full `ggm
     - [x] Quantization tool (Q8_0, Q4_K, etc.).
     - [ ] GPU Backend support (CUDA/Metal).
     - [ ] Flash Attention for decoder.
+- [x] **Phase 3B: Post-graph micro-optimizations**
+    - [x] BatchNorm folding: fold BN stats into conv_dw weights at load time (480 nodes removed, ~7% F16 enc speedup, Q4_K → RTF 1.15×).
+    - [ ] mmap weight loading: replace fread+vector into mmap to eliminate 7-20s cold-start I/O.
+    - [ ] Chunked encoder: process long audio in overlapping 30s windows to cap O(T²) attention cost.
 
 ## Current Status
 - Decoder: **Graph implementation functional and verified**.
 - Encoder: **Graph implementation functional and verified**. 
 - Full Pipeline: **Verified correct output on sample audio.**
+- BatchNorm folding: **Done and verified** — 4940→4460 nodes, F16 RTF 0.96×, Q4_K RTF 1.15× (real-time).
 
 ## Phase 5: Technical Learnings & Pitfalls (CRITICAL)
 

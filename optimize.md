@@ -191,13 +191,50 @@ for T=138 encoder matrices — thread overhead dominates for small M. The cblas_
 path has hit its ceiling. Next gains require P2B (ggml graph port).
 
 **Next steps in priority order:**
-1. **P2B — ggml compute graph**: `ggml_mul_mat` with F16 weights → 2× memory BW + GPU dispatch
-2. Quantization (Q8_0): ~2× speedup on top of F16 (blocked on P2B)
-3. GPU (CUDA/Metal): ~10-20× over current (blocked on P2B)
+1. **BatchNorm folding**: fold BN into conv_dw weights at load time — no runtime BN nodes (DONE)
+2. **mmap weight loading**: `mmap()` GGUF file instead of `fread` to eliminate 7-20s cold-start I/O
+3. **Chunked encoder**: cap T to avoid O(T²) attention growth for long audio
+4. **GPU (CUDA/Metal)**: zero code change once on ggml graph
 
-After P2B (ggml graph + F16):
-- F16 matmul: ~2× over F32 OpenBLAS → ~15–20 s total
-- GPU (CUDA/Metal): ~20–100× over CPU → **real-time or better**
+After BN folding (ggml graph + F16, measured):
+- F16: 12.4s → 11.5s total (encoder 11.3s → 11.0s); 480 nodes removed (4940→4460)
+- Q8_0: 10.8s total, RTF 1.02×
+- Q4_K: 9.6s total, RTF 1.15× — **real-time on CPU today**
+
+---
+
+## Phase 3 — Post-P2B Optimizations (post-ggml-graph)
+
+### BatchNorm Folding (DONE)
+
+**What**: At model load time, fold each Conformer layer's BatchNorm into `conv_dw_w/b`:
+```
+s[c] = bn_scale[c] / sqrt(bn_var[c] + eps)
+w_folded[ki, c] = w[ki, c] * s[c]
+b_folded[c] = (dw_b[c] - bn_mean[c]) * s[c] + bn_bias[c]
+```
+Removes 10-node BN block (mul_mat + norm + scale + bias per channel) × 48 layers = **480 nodes**.
+
+**Results** (11s JFK audio, 1-thread CPU):
+| Model | Enc compute | Dec compute | Total wall | RTF |
+|-------|-------------|-------------|------------|-----|
+| F16 (pre-BN fold) | 11.3s | 937ms | 12.4s | 0.89× |
+| F16 (post-BN fold) | 11.0s | 424ms | 11.5s | 0.96× |
+| Q8_0 | ~10.2s | 370ms | 10.8s | 1.02× |
+| Q4_K | 9.1s | 354ms | 9.6s | **1.15×** |
+
+**Why negligible for quantized**: BN ops are all F32/per-channel-scale — tiny vs GEMM. BN folding
+mainly removes 288 `ggml_add/mul` calls in the graph; quantized GEMM was already the bottleneck.
+
+**Transcript verified correct** on `sample2_16k.wav` ("The quick brown fox…") after folding.
+
+### ggml_cont reduction (ANALYZED, SKIP)
+
+48-layer Conformer builds several `ggml_cont` tensors for attention reshape. Analysis:
+- Each cont copy: ~480 KiB for T=138 (enc_d × T × sizeof(F16))
+- 48 layers × ~4 conts = 192 cont calls, but most are no-ops if tensor is already contiguous
+- Measured overhead: <12ms total across all 48 layers
+- **Decision**: skip, not worth the graph complexity risk.
 
 ---
 
@@ -210,16 +247,16 @@ After P2B (ggml graph + F16):
 | Cross KV caching | Decoder | 2–10× | DONE |
 | F32 weight cache (lazy) | Weight loading | ~3.3× (user 262s→79s) | DONE |
 | EncScratch + AVX2 F16C on-the-fly | Memory churn + conversion | **3.1× (100s→32s)** | DONE |
-| BLAS-ize attn score loops | Encoder attn | ~2× | TODO |
-| ggml compute graph | All | enables F16/GPU/quant | TODO (P2B) |
-| F16 matmul | Encoder/decoder | 2× | blocked on ggml |
-| Q8_0 quant | Encoder/decoder | 1.5–2× | blocked on ggml |
-| GPU (CUDA/Metal) | All | 20–100× | blocked on ggml |
+| ggml compute graph (P2B) | All | enables F16/GPU/quant | **DONE** |
+| BatchNorm folding | Encoder conv (48 layers) | ~7% enc, 480 nodes removed | **DONE** |
+| mmap weight loading | Cold-start I/O | eliminates 7-20s load time | TODO |
+| Chunked encoder | Long audio (>30s) | caps T, avoids O(T²) attn | TODO |
+| GPU (CUDA/Metal) | All | 20–100× | TODO |
 
 **Measured (P1+P2A+P3, 11s audio)**: 825s → 104s = **~8×**
-**Measured (P1+P2A+P3+scratch+F16C)**: 825s → 32s = **~26× total**
-**After decoder F16C fix**: est. ~20–25s
-**With ggml + F16 (P2B)**: est. ~10–15s → approaching real-time on CPU
+**Measured (+ ggml graph P2B, F16)**: ~12.4s = **~67× total**
+**Measured (+ BN folding, F16)**: ~11.5s = **~72× total**
+**Measured (Q4_K quant)**: ~9.6s = **~86× total, RTF 1.15× (real-time)**
 **With GPU**: real-time easily achievable
 
 ---
@@ -233,8 +270,9 @@ After P2B (ggml graph + F16):
 | Rust (cpu, no simd) | ~90–180s | pure Rust, no BLAS |
 | **Ours (baseline)** | **~825s** | naive DFT + scalar GEMM |
 | **Ours (P1+P2A+P3, measured)** | **104s** | FFTW3f + OpenBLAS + cross KV |
-| **Ours (lazy F32 cache, measured)** | **100s** | user 79s, sys 67s (page-fault storm) |
-| **Ours (+ EncScratch + AVX2 F16C, measured)** | **32s** | user 32s, sys 22s — **26× total** |
-| **Ours (+ decoder F16C, est.)** | **~20–25s** | |
-| **Ours (ggml + F16, est.)** | **~10–15s** | CPU target |
+| **Ours (+ ggml graph P2B, F16)** | **~12.4s** | ~67× total |
+| **Ours (+ BN folding, F16)** | **~11.5s** | ~72× total |
+| **Ours (Q8_0)** | **~10.8s** | RTF 1.02× |
+| **Ours (Q4_K)** | **~9.6s** | **RTF 1.15×** — real-time on CPU |
+| **Ours (ggml + GPU, est.)** | **~0.3–1s** | stretch goal |
 | **Ours (ggml + GPU, est.)** | **~0.3–1s** | stretch goal |

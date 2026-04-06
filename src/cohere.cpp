@@ -357,6 +357,7 @@ struct cohere_context {
 static void cohere_log_tensor(const char * name, const struct ggml_tensor * t);
 static struct ggml_cgraph * cohere_build_graph_encoder(struct cohere_context * ctx, int T_mel);
 static struct ggml_cgraph * cohere_build_graph_decoder(struct cohere_context * ctx, const int * tokens, int n_tokens, int offset);
+static void cohere_fold_batchnorm(cohere_model & model);
 
 // ---------------------------------------------------------------------------
 // Encoder Graph Builder
@@ -529,19 +530,8 @@ static struct ggml_cgraph * cohere_build_graph_encoder(struct cohere_context * c
         // p2 is where old_ne2 (C) goes -> 0
         cnv = ggml_cont(ctx0, ggml_permute(ctx0, cnv, 1, 2, 0, 3));
         
-        // Add bias: reshape to [C, 1, 1, 1] then broadcast to [C, T, 1, 1]
-        struct ggml_tensor * b = ggml_reshape_4d(ctx0, layer.conv_dw_b, d, 1, 1, 1);
-        cnv = ggml_add(ctx0, cnv, b);
-        
-        // batchnorm: y = (x - mean) / sqrt(var + eps) * scale + bias
-        struct ggml_tensor * bn_mean = ggml_reshape_4d(ctx0, layer.conv_bn_mean, d, 1, 1, 1);
-        struct ggml_tensor * bn_var  = ggml_reshape_4d(ctx0, layer.conv_bn_var,  d, 1, 1, 1);
-        struct ggml_tensor * bn_w    = ggml_reshape_4d(ctx0, layer.conv_bn_w,    d, 1, 1, 1);
-        struct ggml_tensor * bn_b    = ggml_reshape_4d(ctx0, layer.conv_bn_b,    d, 1, 1, 1);
-
-        cnv = ggml_sub(ctx0, cnv, bn_mean);
-        cnv = ggml_mul(ctx0, cnv, ggml_div(ctx0, bn_w, ggml_sqrt(ctx0, ggml_add(ctx0, bn_var, ctx->eps))));
-        cnv = ggml_add(ctx0, cnv, bn_b);
+        // Add folded bias (BN folded into conv_dw_w/b at init by cohere_fold_batchnorm)
+        cnv = ggml_add(ctx0, cnv, ggml_reshape_4d(ctx0, layer.conv_dw_b, d, 1, 1, 1));
         
         cnv = ggml_silu_inplace(ctx0, cnv); // swish
         
@@ -1367,6 +1357,9 @@ struct cohere_context * cohere_init_from_file(const char * path_model,
         return nullptr;
     }
 
+    // Fold inference BN into depthwise conv weights — removes 6 graph nodes × 48 layers
+    cohere_fold_batchnorm(ctx->model);
+
     const auto & hp = ctx->model.hparams;
 
     // Allocate persistent KV cache
@@ -1459,6 +1452,68 @@ static std::vector<float> ct_get_f32(const ggml_tensor * t) {
         abort();
     }
     return res;
+}
+
+// ---------------------------------------------------------------------------
+// BatchNorm folding — called once after model load.
+//
+// Inference-time BN is: y = (x - mean) / sqrt(var + eps) * scale + bn_b
+// Equivalently:         y = x * s + (bn_b - mean * s)   where s = scale/sqrt(var+eps)
+//
+// Since mean/var are fixed constants after training, we fold s into the
+// depthwise conv kernel weights and absorb the full bias shift into conv_dw_b:
+//
+//   conv_dw_w[:, c] *= s[c]
+//   conv_dw_b[c]     = (conv_dw_b[c] - mean[c]) * s[c] + bn_b[c]
+//
+// After this the encoder graph drops the 6-node BN block (288 nodes total for
+// 48 layers) and replaces it with nothing — the folded conv already applies it.
+// ---------------------------------------------------------------------------
+static void cohere_fold_batchnorm(cohere_model & model) {
+    const int d   = model.hparams.enc_d_model;   // 1280
+    const int k   = model.hparams.enc_conv_k;    // 9
+    const float eps = 1e-5f;
+
+    for (int il = 0; il < model.hparams.enc_n_layers; il++) {
+        auto & layer = model.enc_layers[il];
+
+        // Read all F32 BN parameters (all are F32 in the GGUF)
+        std::vector<float> bn_mean(d), bn_var(d), bn_scale(d), bn_bias(d);
+        ggml_backend_tensor_get(layer.conv_bn_mean, bn_mean.data(),  0, d * sizeof(float));
+        ggml_backend_tensor_get(layer.conv_bn_var,  bn_var.data(),   0, d * sizeof(float));
+        ggml_backend_tensor_get(layer.conv_bn_w,    bn_scale.data(), 0, d * sizeof(float));
+        ggml_backend_tensor_get(layer.conv_bn_b,    bn_bias.data(),  0, d * sizeof(float));
+
+        // Per-channel fold factor: s[c] = bn_scale[c] / sqrt(bn_var[c] + eps)
+        std::vector<float> s(d);
+        for (int c = 0; c < d; c++)
+            s[c] = bn_scale[c] / sqrtf(bn_var[c] + eps);
+
+        // Fold s into conv_dw_w (F16 tensor, ggml shape ne[0]=k, ne[1]=1, ne[2]=d)
+        // Linear index for kernel pos ki, channel c: ki + c*k
+        {
+            std::vector<float> w_f32 = ct_get_f32(layer.conv_dw_w); // k*d elements
+            for (int c = 0; c < d; c++)
+                for (int ki = 0; ki < k; ki++)
+                    w_f32[ki + c * k] *= s[c];
+            // Write back as F16
+            std::vector<ggml_fp16_t> w_f16(k * d);
+            ggml_fp32_to_fp16_row(w_f32.data(), w_f16.data(), k * d);
+            ggml_backend_tensor_set(layer.conv_dw_w, w_f16.data(), 0, k * d * sizeof(ggml_fp16_t));
+        }
+
+        // Fold into conv_dw_b (F32 tensor, shape [d]):
+        // b_folded[c] = (dw_b[c] - mean[c]) * s[c] + bn_bias[c]
+        {
+            std::vector<float> dw_b(d);
+            ggml_backend_tensor_get(layer.conv_dw_b, dw_b.data(), 0, d * sizeof(float));
+            for (int c = 0; c < d; c++)
+                dw_b[c] = (dw_b[c] - bn_mean[c]) * s[c] + bn_bias[c];
+            ggml_backend_tensor_set(layer.conv_dw_b, dw_b.data(), 0, d * sizeof(float));
+        }
+    }
+    fprintf(stderr, "cohere: BN folded into conv_dw weights for %d layers\n",
+            model.hparams.enc_n_layers);
 }
 
 char * cohere_transcribe(struct cohere_context * ctx,
