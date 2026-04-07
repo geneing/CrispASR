@@ -1,111 +1,357 @@
-// parakeet-main — minimal CLI driver for the Parakeet TDT runtime.
+// parakeet-main — CLI driver for the Parakeet TDT runtime.
 //
-// Iteration 1: just loads the model and prints hyperparams + a few token strings.
-// The full transcription pipeline (encoder forward + LSTM predictor + TDT
-// greedy decode) lands in subsequent commits.
+// Mirrors cohere-main's flag set: VAD-based segmentation, long-audio
+// chunking fallback, SRT/VTT/TXT output, per-token timestamps via -v.
+//
+// Usage:
+//   parakeet-main -m MODEL.gguf -f AUDIO.wav [-t 4] [-v]
+//   parakeet-main -m MODEL.gguf -f AUDIO.wav -vad-model ggml-silero-vad.bin
+//   parakeet-main -m MODEL.gguf -f AUDIO.wav -osrt -ovtt -ot
 
 #include "parakeet.h"
 #include "common-whisper.h"
+#include "whisper.h"   // for Silero VAD API
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+// ---------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------
+
+struct parakeet_params {
+    std::string model;
+    std::string fname_inp;
+    int         n_threads      = std::min(4, (int)std::thread::hardware_concurrency());
+    int         verbosity      = 1;
+    bool        no_prints      = false;
+    bool        output_txt     = false;
+    bool        output_srt     = false;
+    bool        output_vtt     = false;
+    int         max_len        = 0;       // -ml N: max chars per output segment (0 = unlimited)
+    int         chunk_seconds  = 30;      // long-audio fallback chunk size
+    std::string vad_model;                 // -vad-model FNAME
+    float       vad_thold      = 0.5f;
+    int         vad_min_speech_ms  = 250;
+    int         vad_min_silence_ms = 100;
+    float       vad_speech_pad_ms  = 30.0f;
+};
 
 static void print_usage(const char * prog) {
     fprintf(stderr,
-        "\nusage: %s -m MODEL.gguf [-f AUDIO.wav]\n\n"
+        "\nusage: %s [options] -m MODEL.gguf -f AUDIO.wav\n\n"
         "options:\n"
-        "  -h, --help        show this help\n"
-        "  -m FNAME          parakeet GGUF model (from convert-parakeet-to-gguf.py)\n"
-        "  -f FNAME          input audio (16 kHz mono WAV) — for future iterations\n"
-        "  -t N              threads (default: 4)\n"
-        "  -v                verbose\n\n",
-        prog);
+        "  -h,  --help              show this help\n"
+        "  -m   FNAME               parakeet GGUF model (from convert-parakeet-to-gguf.py)\n"
+        "  -f   FNAME               input audio (16 kHz mono WAV)\n"
+        "  -t   N                   threads (default: %d)\n"
+        "  -ot, --output-txt        write transcript to <audio>.txt\n"
+        "  -osrt, --output-srt      write .srt subtitle file\n"
+        "  -ovtt, --output-vtt      write .vtt subtitle file\n"
+        "  -ml N                    max chars per output segment (0 = unlimited, 1 = per-word)\n"
+        "  -ck N                    long-audio chunk size in seconds when no VAD (default: 30)\n"
+        "  -vad-model FNAME         Silero VAD model (recommended for long audio)\n"
+        "  -vad-thold F             VAD threshold (default: 0.5)\n"
+        "  -v,  --verbose           dump per-word and per-token timestamps\n"
+        "  -np, --no-prints         suppress all informational output\n\n"
+        "input must be 16 kHz mono WAV (or any format common-whisper can decode).\n"
+        "VAD model download:\n"
+        "  ./models/download-ggml-model.sh silero-vad\n\n",
+        prog,
+        std::min(4, (int)std::thread::hardware_concurrency()));
 }
 
-int main(int argc, char ** argv) {
-    std::string model_path;
-    std::string audio_path;
-    int n_threads = 4;
-    int verbosity = 1;
-
+static bool parse_args(int argc, char ** argv, parakeet_params & p) {
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if (a == "-h" || a == "--help") { print_usage(argv[0]); return 0; }
-        else if (a == "-m" && i+1 < argc) model_path = argv[++i];
-        else if (a == "-f" && i+1 < argc) audio_path = argv[++i];
-        else if (a == "-t" && i+1 < argc) n_threads  = std::atoi(argv[++i]);
-        else if (a == "-v")               verbosity  = 2;
-        else { fprintf(stderr, "unknown option '%s'\n", a.c_str()); print_usage(argv[0]); return 1; }
+        if      (a == "-h"   || a == "--help")        { print_usage(argv[0]); exit(0); }
+        else if ((a == "-m") && i+1 < argc)            p.model         = argv[++i];
+        else if ((a == "-f") && i+1 < argc)            p.fname_inp     = argv[++i];
+        else if ((a == "-t") && i+1 < argc)            p.n_threads     = std::atoi(argv[++i]);
+        else if ((a == "-ml") && i+1 < argc)           p.max_len       = std::atoi(argv[++i]);
+        else if ((a == "-ck") && i+1 < argc)           p.chunk_seconds = std::atoi(argv[++i]);
+        else if (a == "-vad-model" && i+1 < argc)      p.vad_model     = argv[++i];
+        else if (a == "-vad-thold" && i+1 < argc)      p.vad_thold     = std::atof(argv[++i]);
+        else if (a == "-ot"   || a == "--output-txt")  p.output_txt    = true;
+        else if (a == "-osrt" || a == "--output-srt")  p.output_srt    = true;
+        else if (a == "-ovtt" || a == "--output-vtt")  p.output_vtt    = true;
+        else if (a == "-v"    || a == "--verbose")     p.verbosity     = 2;
+        else if (a == "-np"   || a == "--no-prints") { p.verbosity     = 0; p.no_prints = true; }
+        else {
+            fprintf(stderr, "error: unknown option '%s'\n\n", a.c_str());
+            print_usage(argv[0]);
+            return false;
+        }
+    }
+    if (p.model.empty() || p.fname_inp.empty()) {
+        fprintf(stderr, "error: -m MODEL and -f AUDIO are required\n\n");
+        print_usage(argv[0]);
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Display segments (one line of output: [t0 --> t1] text)
+// ---------------------------------------------------------------------------
+
+struct disp_segment {
+    int64_t     t0, t1;        // centiseconds
+    std::string text;
+};
+
+// Build display segments from a parakeet_result.
+// max_len = 0 → one segment for the whole result; otherwise split at word
+// boundaries when accumulated text would exceed max_len chars.
+// max_len = 1 is a special case meaning "one word per segment".
+static std::vector<disp_segment> make_disp_segments(
+        const parakeet_result * r,
+        int64_t t0_seg, int64_t t1_seg,
+        int max_len)
+{
+    std::vector<disp_segment> out;
+    if (!r) return out;
+
+    if (r->n_words == 0) {
+        // No word data — emit the whole text as one segment
+        if (r->text && r->text[0]) {
+            out.push_back({t0_seg, t1_seg, r->text});
+        }
+        return out;
     }
 
-    if (model_path.empty()) { print_usage(argv[0]); return 1; }
+    // Per-word: one segment per word
+    if (max_len == 1) {
+        for (int i = 0; i < r->n_words; i++) {
+            const auto & w = r->words[i];
+            out.push_back({w.t0, w.t1, w.text});
+        }
+        return out;
+    }
 
-    parakeet_context_params p = parakeet_context_default_params();
-    p.n_threads = n_threads;
-    p.verbosity = verbosity;
+    // Group words into segments, splitting only when adding the next word
+    // would push the line over max_len chars.
+    disp_segment cur;
+    cur.t0 = -1;
+    auto flush = [&]() {
+        if (!cur.text.empty()) out.push_back(cur);
+        cur = {};
+        cur.t0 = -1;
+    };
 
-    parakeet_context * ctx = parakeet_init_from_file(model_path.c_str(), p);
+    for (int i = 0; i < r->n_words; i++) {
+        const auto & w = r->words[i];
+        if (cur.t0 < 0) cur.t0 = w.t0;
+        cur.t1 = w.t1;
+
+        const std::string sep = cur.text.empty() ? "" : " ";
+        const bool would_overflow =
+            max_len > 0 && !cur.text.empty() &&
+            (int)(cur.text.size() + sep.size() + strlen(w.text)) > max_len;
+
+        if (would_overflow) {
+            flush();
+            cur.t0 = w.t0;
+            cur.t1 = w.t1;
+        }
+        cur.text += sep + w.text;
+    }
+    flush();
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Output writers
+// ---------------------------------------------------------------------------
+
+static std::string make_out_path(const std::string & audio, const std::string & ext) {
+    std::string base = audio;
+    for (const char * e : {".wav", ".WAV", ".mp3", ".MP3", ".flac", ".FLAC",
+                            ".ogg", ".OGG", ".m4a", ".M4A", ".opus", ".OPUS"}) {
+        size_t el = strlen(e);
+        if (base.size() > el && base.compare(base.size()-el, el, e) == 0) {
+            base = base.substr(0, base.size()-el);
+            break;
+        }
+    }
+    return base + ext;
+}
+
+static void write_srt(const std::string & path,
+                      const std::vector<disp_segment> & segs,
+                      int verbosity, const char * prog)
+{
+    std::ofstream f(path);
+    if (!f) { fprintf(stderr, "%s: warning: cannot write SRT '%s'\n", prog, path.c_str()); return; }
+    for (int i = 0; i < (int)segs.size(); i++) {
+        f << (i + 1) << "\n"
+          << to_timestamp(segs[i].t0, /*comma=*/true)
+          << " --> "
+          << to_timestamp(segs[i].t1, /*comma=*/true) << "\n"
+          << segs[i].text << "\n\n";
+    }
+    if (verbosity >= 1) fprintf(stderr, "%s: SRT written to '%s'\n", prog, path.c_str());
+}
+
+static void write_vtt(const std::string & path,
+                      const std::vector<disp_segment> & segs,
+                      int verbosity, const char * prog)
+{
+    std::ofstream f(path);
+    if (!f) { fprintf(stderr, "%s: warning: cannot write VTT '%s'\n", prog, path.c_str()); return; }
+    f << "WEBVTT\n\n";
+    for (const auto & s : segs)
+        f << to_timestamp(s.t0) << " --> " << to_timestamp(s.t1) << "\n" << s.text << "\n\n";
+    if (verbosity >= 1) fprintf(stderr, "%s: VTT written to '%s'\n", prog, path.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+int main(int argc, char ** argv) {
+    parakeet_params p;
+    if (!parse_args(argc, argv, p)) return 1;
+
+    parakeet_context_params cp = parakeet_context_default_params();
+    cp.n_threads = p.n_threads;
+    cp.verbosity = p.verbosity;
+
+    if (p.verbosity >= 1)
+        fprintf(stderr, "%s: loading '%s'\n", argv[0], p.model.c_str());
+
+    parakeet_context * ctx = parakeet_init_from_file(p.model.c_str(), cp);
     if (!ctx) {
-        fprintf(stderr, "%s: failed to load '%s'\n", argv[0], model_path.c_str());
+        fprintf(stderr, "%s: failed to load model '%s'\n", argv[0], p.model.c_str());
         return 1;
     }
 
-    fprintf(stderr,
-        "%s: loaded OK\n"
-        "  vocab_size    = %d\n"
-        "  blank_id      = %d\n"
-        "  n_mels        = %d\n"
-        "  sample_rate   = %d\n"
-        "  frame_dur_cs  = %d\n",
-        argv[0],
-        parakeet_n_vocab(ctx),
-        parakeet_blank_id(ctx),
-        parakeet_n_mels(ctx),
-        parakeet_sample_rate(ctx),
-        parakeet_frame_dur_cs(ctx));
-
-    fprintf(stderr, "  sample tokens:");
-    for (int id : {0, 1, 2, 100, 1000, 8000, 8191}) {
-        const char * s = parakeet_token_to_str(ctx, id);
-        fprintf(stderr, "  [%d]='%s'", id, s);
-    }
-    fprintf(stderr, "\n");
-
-    // Smoke test: run the encoder on a zero mel of 100 frames (~1 s of audio
-    // post-mel) to verify the FastConformer graph compiles and computes.
-    fprintf(stderr, "%s: encoder smoke test ...\n", argv[0]);
-    int T_enc = parakeet_test_encoder(ctx, 100);
-    if (T_enc < 0) {
-        fprintf(stderr, "%s: encoder smoke test FAILED\n", argv[0]);
+    // ---- load audio ----
+    std::vector<float> samples;
+    std::vector<std::vector<float>> stereo;
+    if (!read_audio_data(p.fname_inp, samples, stereo, /*stereo=*/false)) {
+        fprintf(stderr, "%s: failed to read audio '%s'\n", argv[0], p.fname_inp.c_str());
         parakeet_free(ctx);
         return 2;
     }
 
-    if (!audio_path.empty()) {
-        std::vector<float> pcm;
-        std::vector<std::vector<float>> stereo;
-        if (!read_audio_data(audio_path, pcm, stereo, /*stereo=*/false)) {
-            fprintf(stderr, "%s: failed to read audio '%s'\n", argv[0], audio_path.c_str());
+    const int SR = parakeet_sample_rate(ctx);
+    if (p.verbosity >= 1) {
+        fprintf(stderr, "%s: audio: %d samples (%.1f s) @ %d Hz, %d threads\n",
+                argv[0], (int)samples.size(),
+                (double)samples.size() / SR, SR, p.n_threads);
+    }
+
+    // ---- build audio slices ----
+    struct audio_slice {
+        int     start, end;       // sample indices
+        int64_t t0_cs, t1_cs;     // centiseconds (absolute)
+    };
+    std::vector<audio_slice> slices;
+
+    whisper_vad_context * vctx = nullptr;
+    if (!p.vad_model.empty()) {
+        whisper_vad_context_params vcp = whisper_vad_default_context_params();
+        vcp.n_threads = p.n_threads;
+        vctx = whisper_vad_init_from_file_with_params(p.vad_model.c_str(), vcp);
+        if (!vctx)
+            fprintf(stderr, "%s: warning: VAD load failed, using fixed chunking\n", argv[0]);
+    }
+
+    if (vctx) {
+        whisper_vad_params vp = whisper_vad_default_params();
+        vp.threshold               = p.vad_thold;
+        vp.min_speech_duration_ms  = p.vad_min_speech_ms;
+        vp.min_silence_duration_ms = p.vad_min_silence_ms;
+        vp.speech_pad_ms           = p.vad_speech_pad_ms;
+
+        whisper_vad_segments * vseg =
+            whisper_vad_segments_from_samples(vctx, vp, samples.data(), (int)samples.size());
+
+        int nv = vseg ? whisper_vad_segments_n_segments(vseg) : 0;
+        if (nv == 0) {
+            fprintf(stderr, "%s: VAD found no speech\n", argv[0]);
+            if (vseg) whisper_vad_free_segments(vseg);
+            whisper_vad_free(vctx);
             parakeet_free(ctx);
             return 3;
         }
-        fprintf(stderr, "%s: audio loaded — %d samples (%.2fs) @ %d Hz\n",
-                argv[0], (int)pcm.size(),
-                (double)pcm.size() / parakeet_sample_rate(ctx),
-                parakeet_sample_rate(ctx));
+        if (p.verbosity >= 1)
+            fprintf(stderr, "%s: VAD detected %d speech segment(s)\n", argv[0], nv);
 
-        parakeet_result * r = parakeet_transcribe_ex(ctx, pcm.data(), (int)pcm.size(), 0);
-        if (!r) {
-            fprintf(stderr, "%s: transcription failed\n", argv[0]);
-            parakeet_free(ctx);
-            return 4;
+        for (int i = 0; i < nv; i++) {
+            float t0s = whisper_vad_segments_get_segment_t0(vseg, i);
+            float t1s = whisper_vad_segments_get_segment_t1(vseg, i);
+            int s = std::max(0, (int)(t0s * SR));
+            int e = std::min((int)samples.size(), (int)(t1s * SR));
+            if (e > s)
+                slices.push_back({s, e, (int64_t)(t0s*100.f), (int64_t)(t1s*100.f)});
         }
-        printf("%s\n", r->text ? r->text : "");
-        if (verbosity >= 2) {
-            fprintf(stderr, "\n  --- words (%d) ---\n", r->n_words);
+        whisper_vad_free_segments(vseg);
+        whisper_vad_free(vctx);
+        vctx = nullptr;
+    } else {
+        // No VAD: chunk at p.chunk_seconds boundaries (default 30 s).
+        // The encoder is O(T²) in the number of frames, so very long unchunked
+        // audio runs into memory + latency walls even though parakeet itself
+        // accepts up to 24 minutes.
+        const int chunk_samples = p.chunk_seconds * SR;
+        if ((int)samples.size() <= chunk_samples) {
+            int64_t dur = (int64_t)((double)samples.size() / SR * 100.0);
+            slices.push_back({0, (int)samples.size(), 0, dur});
+        } else {
+            for (int s = 0; s < (int)samples.size(); s += chunk_samples) {
+                int e = std::min((int)samples.size(), s + chunk_samples);
+                slices.push_back({
+                    s, e,
+                    (int64_t)((double)s / SR * 100.0),
+                    (int64_t)((double)e / SR * 100.0)});
+            }
+            if (p.verbosity >= 1)
+                fprintf(stderr, "%s: long audio chunked into %d × %d s windows\n",
+                        argv[0], (int)slices.size(), p.chunk_seconds);
+        }
+    }
+
+    // ---- transcribe each slice ----
+    std::vector<disp_segment> all_segs;
+    std::string plain_text;
+
+    for (const auto & sl : slices) {
+        parakeet_result * r = parakeet_transcribe_ex(
+            ctx,
+            samples.data() + sl.start,
+            sl.end - sl.start,
+            sl.t0_cs);
+
+        if (!r) {
+            fprintf(stderr, "%s: transcription failed for [%s --> %s]\n",
+                    argv[0],
+                    to_timestamp(sl.t0_cs).c_str(),
+                    to_timestamp(sl.t1_cs).c_str());
+            continue;
+        }
+
+        auto segs = make_disp_segments(r, sl.t0_cs, sl.t1_cs, p.max_len);
+        all_segs.insert(all_segs.end(), segs.begin(), segs.end());
+
+        if (r->text && r->text[0]) {
+            if (!plain_text.empty()) plain_text += " ";
+            plain_text += r->text;
+        }
+
+        if (p.verbosity >= 2) {
+            fprintf(stderr, "\n  --- words (%d) for slice [%s --> %s] ---\n",
+                    r->n_words,
+                    to_timestamp(sl.t0_cs).c_str(),
+                    to_timestamp(sl.t1_cs).c_str());
             for (int i = 0; i < r->n_words; i++) {
                 const auto & w = r->words[i];
                 fprintf(stderr, "  [%5d.%02ds → %5d.%02ds]  %s\n",
@@ -113,17 +359,40 @@ int main(int argc, char ** argv) {
                     (int)(w.t1 / 100), (int)(w.t1 % 100),
                     w.text);
             }
-            fprintf(stderr, "\n  --- tokens (%d) ---\n", r->n_tokens);
-            for (int i = 0; i < r->n_tokens; i++) {
-                const auto & td = r->tokens[i];
-                fprintf(stderr, "  [%5d.%02ds → %5d.%02ds]  id=%5d  '%s'\n",
-                    (int)(td.t0 / 100), (int)(td.t0 % 100),
-                    (int)(td.t1 / 100), (int)(td.t1 % 100),
-                    td.id, td.text);
-            }
         }
+
         parakeet_result_free(r);
     }
+
+    // ---- output ----
+    const bool show_timestamps = p.output_srt || p.output_vtt || p.max_len > 0 || p.verbosity >= 2;
+
+    if (show_timestamps) {
+        for (const auto & s : all_segs) {
+            printf("[%s --> %s]  %s\n",
+                to_timestamp(s.t0).c_str(),
+                to_timestamp(s.t1).c_str(),
+                s.text.c_str());
+        }
+    } else {
+        printf("%s\n", plain_text.c_str());
+    }
+
+    if (p.output_srt)
+        write_srt(make_out_path(p.fname_inp, ".srt"), all_segs, p.verbosity, argv[0]);
+    if (p.output_vtt)
+        write_vtt(make_out_path(p.fname_inp, ".vtt"), all_segs, p.verbosity, argv[0]);
+
+    if (p.output_txt) {
+        const std::string tp = make_out_path(p.fname_inp, ".txt");
+        std::ofstream f(tp);
+        if (f) {
+            f << plain_text << "\n";
+            if (p.verbosity >= 1) fprintf(stderr, "%s: text written to '%s'\n", argv[0], tp.c_str());
+        }
+    }
+
+    if (p.verbosity >= 1) fprintf(stderr, "\n%s: done\n", argv[0]);
 
     parakeet_free(ctx);
     return 0;
