@@ -2177,10 +2177,10 @@ struct cohere_result * cohere_transcribe_ex(struct cohere_context * ctx,
         full_text += t;
     }
     if (!full_text.empty() && full_text[0] == ' ') full_text = full_text.substr(1);
-    // Strip leading space from first token text too
-    if (!tok_data.empty() && tok_data[0].text[0] == ' ') {
-        memmove(tok_data[0].text, tok_data[0].text + 1, strlen(tok_data[0].text));
-    }
+    // Do NOT strip the leading space from tok_data[0].text.
+    // That space is the SentencePiece word-start marker (▁ → ' ').
+    // make_disp_segments uses it as a word-boundary signal; flush() strips it on output.
+    // Stripping here causes cross-chunk merges like "ofAmerican." and "point.Representative."
 
     // Linear time interpolation: distribute segment duration proportional to char length
     const int64_t seg_dur_cs = (int64_t)((double)n_samples / hp.sample_rate * 100.0);
