@@ -81,6 +81,15 @@ static void cohere_log_tensor(const char * name, const struct ggml_tensor * t) {
         (int)t->type);
 }
 
+// Verbosity helpers — use these everywhere instead of bare fprintf(stderr).
+// vlog: shown at verbosity >= 1 (model loading info)
+// vlog2: shown at verbosity >= 2 (per-inference timing, steps, perf report)
+// Always print errors/warnings regardless of verbosity.
+#define COHERE_VLOG(v, fmt, ...) \
+    do { if ((v) >= 1) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
+#define COHERE_VLOG2(v, fmt, ...) \
+    do { if ((v) >= 2) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
+
 // ---------------------------------------------------------------------------
 // Performance counters — accumulated per cohere_transcribe() call
 // ---------------------------------------------------------------------------
@@ -115,7 +124,8 @@ static void cohere_perf_reset(cohere_perf & p) {
     p = cohere_perf{};
 }
 
-static void cohere_perf_print(const cohere_perf & p, int n_samples, int sample_rate) {
+static void cohere_perf_print(const cohere_perf & p, int n_samples, int sample_rate, int verbosity) {
+    if (verbosity < 2) return;
     double audio_sec = (double)n_samples / sample_rate;
     double total_sec = p.t_total_us / 1e6;
     double rtf       = (total_sec > 0) ? (audio_sec / total_sec) : 0.0;
@@ -464,7 +474,7 @@ struct cohere_context {
 static void cohere_log_tensor(const char * name, const struct ggml_tensor * t);
 static struct ggml_cgraph * cohere_build_graph_encoder(struct cohere_context * ctx, int T_mel);
 static struct ggml_cgraph * cohere_build_graph_decoder(struct cohere_context * ctx, const int * /*tokens*/, int n_tokens, int offset);
-static void cohere_fold_batchnorm(cohere_model & model);
+static void cohere_fold_batchnorm(cohere_model & model, int verbosity = 1);
 
 // ---------------------------------------------------------------------------
 // Encoder Graph Builder
@@ -1463,7 +1473,7 @@ static void cohere_model_warm_cache(const cohere_model & m) {
 }
 
 struct cohere_context_params cohere_context_default_params(void) {
-    return { .n_threads = 4, .use_flash = false };
+    return { .n_threads = 4, .use_flash = false, .verbosity = 1 };
 }
 
 struct cohere_context * cohere_init_from_file(const char * path_model,
@@ -1511,20 +1521,21 @@ struct cohere_context * cohere_init_from_file(const char * path_model,
     // Always have a CPU backend available as scheduler fallback for unsupported ops
     ctx->ggml_backend_cpu = ggml_backend_cpu_init();
     bool using_gpu = !ggml_backend_is_cpu(ctx->ggml_backend);
-    fprintf(stderr, "cohere: backend: %s%s\n",
+    const int vb = params.verbosity;
+    COHERE_VLOG(vb, "cohere: backend: %s%s\n",
             ggml_backend_name(ctx->ggml_backend),
             using_gpu ? "" : " (CPU-only)");
 
     // Apply thread count only when explicitly requested via env var
     if (getenv("COHERE_THREADS")) {
-        fprintf(stderr, "cohere: applying n_threads=%d to CPU backend [COHERE_THREADS override]\n",
+        COHERE_VLOG(vb, "cohere: applying n_threads=%d to CPU backend [COHERE_THREADS override]\n",
                 params.n_threads);
         ggml_backend_cpu_set_n_threads(ctx->ggml_backend_cpu, params.n_threads);
         if (!using_gpu) {
             ggml_backend_cpu_set_n_threads(ctx->ggml_backend, params.n_threads);
         }
     } else {
-        fprintf(stderr, "cohere: n_threads param=%d (use COHERE_THREADS=N to override)\n",
+        COHERE_VLOG(vb, "cohere: n_threads param=%d (use COHERE_THREADS=N to override)\n",
                 params.n_threads);
     }
 
@@ -1534,7 +1545,7 @@ struct cohere_context * cohere_init_from_file(const char * path_model,
     }
 
     // Fold inference BN into depthwise conv weights — removes 6 graph nodes × 48 layers
-    cohere_fold_batchnorm(ctx->model);
+    cohere_fold_batchnorm(ctx->model, params.verbosity);
 
     const auto & hp = ctx->model.hparams;
 
@@ -1555,7 +1566,7 @@ struct cohere_context * cohere_init_from_file(const char * path_model,
         ggml_backend_tensor_alloc(kv_buf, ctx->kv_k, (void *)(base));
         ggml_backend_tensor_alloc(kv_buf, ctx->kv_v, (void *)(base + ggml_nbytes(ctx->kv_k)));
 
-        fprintf(stderr, "cohere: kv cache     = %.1f MiB  (dec_head_dim=%d max_ctx=%d n_heads=%d n_layers=%d)\n",
+        COHERE_VLOG(vb, "cohere: kv cache     = %.1f MiB  (dec_head_dim=%d max_ctx=%d n_heads=%d n_layers=%d)\n",
                 ggml_backend_buffer_get_size(kv_buf) / 1048576.0,
                 hp.dec_head_dim, hp.dec_max_ctx, hp.dec_n_heads, hp.dec_n_layers);
     }
@@ -1582,10 +1593,10 @@ struct cohere_context * cohere_init_from_file(const char * path_model,
 
     // Log static memory layout
     if (ctx->model.buf) {
-        fprintf(stderr, "cohere: model weights = %.1f MiB\n",
+        COHERE_VLOG(vb, "cohere: model weights = %.1f MiB\n",
                 ggml_backend_buffer_get_size(ctx->model.buf) / 1048576.0);
     }
-    fprintf(stderr, "cohere: compute_meta  = %.1f KiB\n", ctx->compute_meta.size() / 1024.0);
+    COHERE_VLOG(vb, "cohere: compute_meta  = %.1f KiB\n", ctx->compute_meta.size() / 1024.0);
 
     return ctx;
 }
@@ -1655,7 +1666,7 @@ static std::vector<float> ct_get_f32(const ggml_tensor * t) {
 // After this the encoder graph drops the 6-node BN block (288 nodes total for
 // 48 layers) and replaces it with nothing — the folded conv already applies it.
 // ---------------------------------------------------------------------------
-static void cohere_fold_batchnorm(cohere_model & model) {
+static void cohere_fold_batchnorm(cohere_model & model, int verbosity) {
     const int d   = model.hparams.enc_d_model;   // 1280
     const int k   = model.hparams.enc_conv_k;    // 9
     const float eps = 1e-5f;
@@ -1698,7 +1709,7 @@ static void cohere_fold_batchnorm(cohere_model & model) {
             ggml_backend_tensor_set(layer.conv_dw_b, dw_b.data(), 0, d * sizeof(float));
         }
     }
-    fprintf(stderr, "cohere: BN folded into conv_dw weights for %d layers\n",
+    COHERE_VLOG(verbosity, "cohere: BN folded into conv_dw weights for %d layers\n",
             model.hparams.enc_n_layers);
 }
 
@@ -1714,8 +1725,9 @@ char * cohere_transcribe(struct cohere_context * ctx,
 
     cohere_perf_reset(perf);
     int64_t t_total_start = ggml_time_us();
+    const int vb = ctx->params.verbosity;
 
-    fprintf(stderr, "cohere: transcribe started   n_samples=%d  audio=%.2fs\n",
+    COHERE_VLOG2(vb, "cohere: transcribe started   n_samples=%d  audio=%.2fs\n",
             n_samples, (double)n_samples / hp.sample_rate);
 
     // --- Feature extraction ---
@@ -1762,10 +1774,10 @@ char * cohere_transcribe(struct cohere_context * ctx,
             perf.t_features_us += (t1 - t0);
 
             if (do_chunked) {
-                fprintf(stderr, "cohere: chunk %d/%d  n=%d  T_mel=%d\n",
+                COHERE_VLOG2(vb, "cohere: chunk %d/%d  n=%d  T_mel=%d\n",
                         n_chunks, (n_samples + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES, chunk_n, T_mel_c);
             } else {
-                fprintf(stderr, "cohere: features done         T_mel=%d  %.1f ms\n",
+                COHERE_VLOG2(vb, "cohere: features done         T_mel=%d  %.1f ms\n",
                         T_mel_c, perf.t_features_us / 1e3);
             }
 
@@ -1777,7 +1789,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
             perf.enc_n_nodes = ggml_graph_n_nodes(gf_enc);
 
             if (!do_chunked) {
-                fprintf(stderr, "cohere: enc graph built       nodes=%d  %.1f ms\n",
+                COHERE_VLOG2(vb, "cohere: enc graph built       nodes=%d  %.1f ms\n",
                         perf.enc_n_nodes, perf.t_enc_build_us / 1e3);
             }
 
@@ -1792,7 +1804,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
             perf.t_enc_alloc_us += (t1 - t0);
             perf.mem_sched_buf = ggml_backend_sched_get_buffer_size(ctx->ggml_alloc, ctx->ggml_backend);
             if (!do_chunked) {
-                fprintf(stderr, "cohere: enc sched alloc       %.1f ms   sched_buf=%.1f MiB\n",
+                COHERE_VLOG2(vb, "cohere: enc sched alloc       %.1f ms   sched_buf=%.1f MiB\n",
                         perf.t_enc_alloc_us / 1e3, perf.mem_sched_buf / 1048576.0);
             }
 
@@ -1823,9 +1835,9 @@ char * cohere_transcribe(struct cohere_context * ctx,
             perf.t_enc_compute_us += (t1 - t0);
 
             if (do_chunked) {
-                fprintf(stderr, "cohere: chunk %d enc done     %.1f ms\n", n_chunks, (t1-t0)/1e3);
+                COHERE_VLOG2(vb, "cohere: chunk %d enc done     %.1f ms\n", n_chunks, (t1-t0)/1e3);
             } else {
-                fprintf(stderr, "cohere: enc compute done      %.1f ms\n", perf.t_enc_compute_us / 1e3);
+                COHERE_VLOG2(vb, "cohere: enc compute done      %.1f ms\n", perf.t_enc_compute_us / 1e3);
             }
 
             if (do_prof) {
@@ -1860,7 +1872,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
         } // end chunk loop
 
         if (do_chunked) {
-            fprintf(stderr, "cohere: enc compute done      %.1f ms  (chunked %d×30s)\n",
+            COHERE_VLOG2(vb, "cohere: enc compute done      %.1f ms  (chunked %d×30s)\n",
                     perf.t_enc_compute_us / 1e3, n_chunks);
         }
 
@@ -1978,7 +1990,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
     };
     prompt.erase(std::remove_if(prompt.begin(), prompt.end(),
                                 [](int t){ return t == -1; }), prompt.end());
-    fprintf(stderr, "cohere: prompt               n=%d\n", (int)prompt.size());
+    COHERE_VLOG2(vb, "cohere: prompt               n=%d\n", (int)prompt.size());
     cohere_debug("cohere: prompt IDs: ");
     for (int id : prompt) cohere_debug("%d ", id);
     cohere_debug("\n");
@@ -1993,7 +2005,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
     auto logits = cohere_decode_step(ctx, T_enc, prompt.data(), (int)prompt.size(), 0);
     perf.n_dec_steps++;
     int offset = (int)prompt.size();
-    fprintf(stderr, "cohere: prompt pass done      nodes=%d  build=%.1f alloc=%.1f compute=%.1f ms\n",
+    COHERE_VLOG2(vb, "cohere: prompt pass done      nodes=%d  build=%.1f alloc=%.1f compute=%.1f ms\n",
             perf.dec_n_nodes_prompt,
             perf.t_dec_build_us / 1e3,
             perf.t_dec_alloc_us / 1e3,
@@ -2019,7 +2031,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
             : logits.data();
 
         int next_tok = (int)(std::max_element(last_logits, last_logits + vocab) - last_logits);
-        fprintf(stderr, "cohere: step %3d  tok=%5d  %s\n",
+        COHERE_VLOG2(vb, "cohere: step %3d  tok=%5d  %s\n",
                 step, next_tok,
                 (next_tok >= 0 && next_tok < (int)voc.id_to_token.size())
                     ? voc.id_to_token[next_tok].c_str() : "?");
@@ -2039,7 +2051,7 @@ char * cohere_transcribe(struct cohere_context * ctx,
     perf.mem_compute_meta = ctx->compute_meta.size();
     perf.t_total_us       = ggml_time_us() - t_total_start;
 
-    cohere_perf_print(perf, n_samples, hp.sample_rate);
+    cohere_perf_print(perf, n_samples, hp.sample_rate, vb);
 
     // --- Decode tokens to text ---
     std::string text;

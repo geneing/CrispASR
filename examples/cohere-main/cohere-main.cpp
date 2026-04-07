@@ -1,139 +1,155 @@
-// cohere-main.cpp — CLI for Cohere Transcribe via ggml
+// cohere-main.cpp — CLI for Cohere Transcribe
 //
-// Usage:
-//   cohere-main -m cohere-transcribe.gguf -f audio.wav [-l en] [-t 4]
+// Usage matches whisper-cli conventions:
+//   cohere-main -m MODEL.gguf -f audio.wav [-l en] [-t 4] [--verbose]
+//
+// By default only the transcript is written to stdout; all progress info
+// goes to stderr and is suppressed unless --verbose is passed.
 
 #include "cohere.h"
 #include "common.h"
+#include "common-whisper.h"
 #include "ggml.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
-// Minimal WAV reader (16-bit PCM, mono or stereo → mono downmix)
-static bool read_wav(const char * path, std::vector<float> & out, int target_sr = 16000) {
-    FILE * f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cohere-main: cannot open '%s'\n", path); return false; }
-
-    // RIFF header
-    char riff[4]; fread(riff, 1, 4, f);
-    if (memcmp(riff, "RIFF", 4) != 0) { fclose(f); fprintf(stderr, "cohere-main: not a RIFF file\n"); return false; }
-    fseek(f, 4, SEEK_CUR); // file size
-    char wave[4]; fread(wave, 1, 4, f);
-    if (memcmp(wave, "WAVE", 4) != 0) { fclose(f); fprintf(stderr, "cohere-main: not a WAVE file\n"); return false; }
-
-    // Chunk loop
-    int channels = 1, sample_rate = 16000, bits = 16;
-    bool data_found = false;
-    while (!data_found) {
-        char chunk_id[4]; if (fread(chunk_id, 1, 4, f) != 4) break;
-        int chunk_size; fread(&chunk_size, 4, 1, f);
-        if (memcmp(chunk_id, "fmt ", 4) == 0) {
-            short audio_fmt; fread(&audio_fmt, 2, 1, f);
-            short nch;       fread(&nch, 2, 1, f);      channels    = nch;
-            int   sr;        fread(&sr,  4, 1, f);      sample_rate = sr;
-            fseek(f, 4, SEEK_CUR);  // byte rate
-            fseek(f, 2, SEEK_CUR);  // block align
-            short bps;       fread(&bps, 2, 1, f);      bits = bps;
-            if (chunk_size > 16) fseek(f, chunk_size - 16, SEEK_CUR);
-        } else if (memcmp(chunk_id, "data", 4) == 0) {
-            int n_samples = chunk_size / (bits / 8) / channels;
-            out.resize(n_samples);
-            for (int i = 0; i < n_samples; i++) {
-                float v = 0.0f;
-                for (int c = 0; c < channels; c++) {
-                    if (bits == 16) {
-                        short s; fread(&s, 2, 1, f); v += s / 32768.0f;
-                    } else if (bits == 32) {
-                        float s; fread(&s, 4, 1, f); v += s;
-                    }
-                }
-                out[i] = v / channels; // downmix to mono
-            }
-            if (sample_rate != target_sr)
-                fprintf(stderr, "cohere-main: warning: audio is %d Hz, model expects %d Hz\n", sample_rate, target_sr);
-            data_found = true;
-        } else {
-            fseek(f, chunk_size, SEEK_CUR);
-        }
-    }
-    fclose(f);
-    return data_found;
-}
+struct cohere_params {
+    std::string model;
+    std::string fname_inp;
+    std::string language   = "en";
+    int         n_threads  = std::min(4, (int)std::thread::hardware_concurrency());
+    int         verbosity  = 1;   // 0=silent 1=normal(loading only) 2=verbose(timing+steps)
+    bool        use_flash  = false;
+    bool        no_prints  = false;
+    bool        debug      = false;   // enables COHERE_DEBUG + COHERE_PROF env vars
+};
 
 static void print_usage(const char * prog) {
-    fprintf(stderr, "Usage: %s -m MODEL.gguf -f AUDIO.wav [-l LANG] [-t THREADS] [--flash]\n", prog);
-    fprintf(stderr, "  -m   path to cohere-transcribe.gguf\n");
-    fprintf(stderr, "  -f   input WAV file (16 kHz mono PCM recommended)\n");
-    fprintf(stderr, "  -l   language code (default: en)\n");
-    fprintf(stderr, "  -t   number of threads (default: 4)\n");
-    fprintf(stderr, "  --flash  use flash attention\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "usage: %s [options] -m MODEL -f AUDIO\n", prog);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "options:\n");
+    fprintf(stderr, "  -h,        --help          show this help message\n");
+    fprintf(stderr, "  -m FNAME,  --model FNAME   path to cohere-transcribe.gguf\n");
+    fprintf(stderr, "  -f FNAME,  --file FNAME    input audio file (WAV 16 kHz mono)\n");
+    fprintf(stderr, "  -l LANG,   --language LANG language code (default: en)\n");
+    fprintf(stderr, "  -t N,      --threads N     number of threads (default: %d)\n", std::min(4, (int)std::thread::hardware_concurrency()));
+    fprintf(stderr, "  -v,        --verbose       show timing info and per-step tokens\n");
+    fprintf(stderr, "  -np,       --no-prints     suppress all informational output\n");
+    fprintf(stderr, "  -d,        --debug         enable COHERE_DEBUG and COHERE_PROF\n");
+    fprintf(stderr, "  --flash                    enable flash attention in decoder\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "environment:\n");
+    fprintf(stderr, "  COHERE_DEVICE=metal|cuda|cpu  force backend selection\n");
+    fprintf(stderr, "  COHERE_THREADS=N              override thread count\n");
+    fprintf(stderr, "  COHERE_DEBUG=1                verbose tensor/graph logging\n");
+    fprintf(stderr, "  COHERE_PROF=1                 per-op profiling\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "input must be 16 kHz mono WAV; convert with:\n");
+    fprintf(stderr, "  ffmpeg -i input.mp3 -ar 16000 -ac 1 -c:a pcm_s16le audio.wav\n");
+    fprintf(stderr, "\n");
+}
+
+static bool parse_args(int argc, char ** argv, cohere_params & p) {
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_usage(argv[0]);
+            exit(0);
+        } else if ((arg == "-m" || arg == "--model")    && i+1 < argc) { p.model     = argv[++i];
+        } else if ((arg == "-f" || arg == "--file")     && i+1 < argc) { p.fname_inp = argv[++i];
+        } else if ((arg == "-l" || arg == "--language") && i+1 < argc) { p.language  = argv[++i];
+        } else if ((arg == "-t" || arg == "--threads")  && i+1 < argc) { p.n_threads = std::atoi(argv[++i]);
+        } else if (arg == "-v"  || arg == "--verbose")  { p.verbosity = 2;
+        } else if (arg == "-np" || arg == "--no-prints"){ p.no_prints = true;
+        } else if (arg == "-d"  || arg == "--debug")    { p.debug     = true;
+        } else if (arg == "--flash")                    { p.use_flash = true;
+        } else {
+            fprintf(stderr, "error: unknown option '%s'\n\n", arg.c_str());
+            print_usage(argv[0]);
+            return false;
+        }
+    }
+
+    if (p.model.empty() || p.fname_inp.empty()) {
+        fprintf(stderr, "error: -m MODEL and -f AUDIO are required\n\n");
+        print_usage(argv[0]);
+        return false;
+    }
+
+    if (p.no_prints) p.verbosity = 0;
+
+    return true;
 }
 
 int main(int argc, char ** argv) {
-    const char * model_path = nullptr;
-    const char * audio_path = nullptr;
-    const char * lang       = "en";
-    int n_threads = 4;
-    bool use_flash = false;
+    cohere_params p;
+    if (!parse_args(argc, argv, p)) return 1;
 
-    for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "-m") == 0 && i+1 < argc) model_path = argv[++i];
-        else if (strcmp(argv[i], "-f") == 0 && i+1 < argc) audio_path = argv[++i];
-        else if (strcmp(argv[i], "-l") == 0 && i+1 < argc) lang       = argv[++i];
-        else if (strcmp(argv[i], "-t") == 0 && i+1 < argc) n_threads  = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--flash") == 0)          use_flash  = true;
-        else if (strcmp(argv[i], "-h") == 0) { print_usage(argv[0]); return 0; }
-        else { fprintf(stderr, "Unknown option: %s\n", argv[i]); print_usage(argv[0]); return 1; }
-    }
-
-    if (!model_path || !audio_path) {
-        print_usage(argv[0]);
-        return 1;
+    // --debug: activate COHERE_DEBUG and COHERE_PROF environment variables.
+    // setenv is POSIX; on Windows use _putenv_s.
+    if (p.debug) {
+#if defined(_WIN32)
+        _putenv_s("COHERE_DEBUG", "1");
+        _putenv_s("COHERE_PROF",  "1");
+#else
+        setenv("COHERE_DEBUG", "1", 1);
+        setenv("COHERE_PROF",  "1", 1);
+#endif
+        p.verbosity = std::max(p.verbosity, 2);
     }
 
     // Load model
     struct cohere_context_params params = cohere_context_default_params();
-    params.n_threads = n_threads;
-    params.use_flash = use_flash;
+    params.n_threads  = p.n_threads;
+    params.use_flash  = p.use_flash;
+    params.verbosity  = p.verbosity;
 
-    fprintf(stderr, "cohere-main: loading model from '%s'...\n", model_path);
-    struct cohere_context * ctx = cohere_init_from_file(model_path, params);
+    if (p.verbosity >= 1) {
+        fprintf(stderr, "%s: loading model '%s'\n", argv[0], p.model.c_str());
+    }
+    struct cohere_context * ctx = cohere_init_from_file(p.model.c_str(), params);
     if (!ctx) {
-        fprintf(stderr, "cohere-main: failed to load model\n");
+        fprintf(stderr, "%s: failed to load model '%s'\n", argv[0], p.model.c_str());
         return 1;
     }
-    fprintf(stderr, "cohere-main: model loaded, vocab size = %d\n", cohere_n_vocab(ctx));
 
-    // Load audio
+    // Load audio via common-whisper helper (handles stereo→mono downmix)
     std::vector<float> samples;
-    fprintf(stderr, "cohere-main: loading audio from '%s'...\n", audio_path);
-    if (!read_wav(audio_path, samples)) {
+    std::vector<std::vector<float>> samples_stereo; // unused, mono only
+    if (!read_audio_data(p.fname_inp, samples, samples_stereo, /*stereo=*/false)) {
+        fprintf(stderr, "%s: failed to read audio '%s'\n", argv[0], p.fname_inp.c_str());
         cohere_free(ctx);
         return 1;
     }
-    fprintf(stderr, "cohere-main: audio: %d samples (%.1fs)\n",
-            (int)samples.size(), samples.size() / 16000.0f);
+    if (p.verbosity >= 1) {
+        fprintf(stderr, "%s: processing '%s' (%d samples, %.1f sec), %d threads\n",
+                argv[0], p.fname_inp.c_str(),
+                (int)samples.size(), (float)samples.size() / 16000.0f,
+                p.n_threads);
+    }
 
     // Transcribe
-    const int64_t t_start_ms = ggml_time_ms();
-    char * text = cohere_transcribe(ctx, samples.data(), (int)samples.size(), lang);
-    const int64_t t_end_ms = ggml_time_ms();
+    char * text = cohere_transcribe(ctx, samples.data(), (int)samples.size(), p.language.c_str());
 
     if (text) {
         printf("%s\n", text);
         free(text);
     } else {
-        fprintf(stderr, "cohere-main: transcription failed\n");
+        fprintf(stderr, "%s: transcription failed\n", argv[0]);
+        cohere_free(ctx);
+        return 1;
     }
 
-    const double t_inference_s = (t_end_ms - t_start_ms) / 1000.0;
-    const double audio_duration_s = samples.size() / 16000.0f;
-    fprintf(stderr, "cohere-main: inference took %.2fs (%.2fx realtime)\n",
-            t_inference_s, audio_duration_s / t_inference_s);
+    if (p.verbosity >= 1) {
+        fprintf(stderr, "\n%s: done\n", argv[0]);
+    }
 
     cohere_free(ctx);
     return 0;

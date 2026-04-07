@@ -13,6 +13,11 @@ struct cohere_context;
 struct cohere_context_params {
     int   n_threads;   // default: number of physical cores
     bool  use_flash;   // flash attention in decoder (default: false for now)
+    // Output verbosity:
+    //   0 = silent  — only hard errors (failed/cannot) go to stderr
+    //   1 = normal  — model loading info printed (default)
+    //   2 = verbose — per-inference timing, per-step tokens, performance report
+    int   verbosity;
 };
 
 struct cohere_context_params cohere_context_default_params(void);
