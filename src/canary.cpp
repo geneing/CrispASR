@@ -949,11 +949,18 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
 
     for (uint32_t il = 0; il < hp.dec_n_layers; il++) {
         const auto & dl = m.dec[il];
-
-        // ---- Self-attention (POST-LN: x = LN1(x + SA(x)), causal, with KV cache) ----
-        // NeMo TransformerDecoderBlock default is post-LN. The SA acts on the
-        // raw input, then we add residual and apply norm_sa AFTER.
         ggml_tensor * inpL = cur;
+
+        // ---- Self-attention (PRE-LN: x = x + SA(LN1(x)), causal, with KV cache) ----
+        // Confirmed via NeMo source (transformer_decoders.py forward_preln):
+        //   residual = decoder_query
+        //   decoder_query = layer_norm_1(decoder_query)
+        //   decoder_keys  = layer_norm_1(decoder_keys)
+        //   self_attn_output = first_sub_layer(decoder_query, decoder_keys, decoder_keys, mask)
+        //   self_attn_output += residual
+        cur = ggml_norm(ctx0, inpL, kLayerNormEps);
+        cur = ggml_mul(ctx0, cur, dl.norm_sa_w);
+        cur = ggml_add(ctx0, cur, dl.norm_sa_b);
 
         ggml_tensor * Qcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_q_w, cur), dl.sa_q_b);
         ggml_tensor * Kcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_k_w, cur), dl.sa_k_b);
@@ -1011,13 +1018,11 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
         cur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_out_w, cur), dl.sa_out_b);
         cur = ggml_add(ctx0, cur, inpL);
 
-        // POST-LN after self-attention
-        cur = ggml_norm(ctx0, cur, kLayerNormEps);
-        cur = ggml_mul(ctx0, cur, dl.norm_sa_w);
-        cur = ggml_add(ctx0, cur, dl.norm_sa_b);
-
-        // ---- Cross-attention (POST-LN, no causal mask) ----
+        // ---- Cross-attention (PRE-LN: x = x + CA(LN2(x)), no causal mask) ----
         ggml_tensor * inpCA = cur;
+        cur = ggml_norm(ctx0, cur, kLayerNormEps);
+        cur = ggml_mul(ctx0, cur, dl.norm_ca_w);
+        cur = ggml_add(ctx0, cur, dl.norm_ca_b);
 
         ggml_tensor * CQ = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.ca_q_w, cur), dl.ca_q_b);
         CQ = ggml_reshape_3d(ctx0, CQ, head_dim, n_heads, n_tokens);
@@ -1033,22 +1038,16 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
         cur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.ca_out_w, cur), dl.ca_out_b);
         cur = ggml_add(ctx0, cur, inpCA);
 
-        // POST-LN after cross-attention
-        cur = ggml_norm(ctx0, cur, kLayerNormEps);
-        cur = ggml_mul(ctx0, cur, dl.norm_ca_w);
-        cur = ggml_add(ctx0, cur, dl.norm_ca_b);
-
-        // ---- FFN (POST-LN, ReLU) ----
+        // ---- FFN (PRE-LN: x = x + FFN(LN3(x)), ReLU activation) ----
         ggml_tensor * inpFF = cur;
+        cur = ggml_norm(ctx0, cur, kLayerNormEps);
+        cur = ggml_mul(ctx0, cur, dl.norm_ff_w);
+        cur = ggml_add(ctx0, cur, dl.norm_ff_b);
+
         cur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.ff_in_w, cur), dl.ff_in_b);
         cur = ggml_relu(ctx0, cur);
         cur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.ff_out_w, cur), dl.ff_out_b);
         cur = ggml_add(ctx0, cur, inpFF);
-
-        // POST-LN after FFN
-        cur = ggml_norm(ctx0, cur, kLayerNormEps);
-        cur = ggml_mul(ctx0, cur, dl.norm_ff_w);
-        cur = ggml_add(ctx0, cur, dl.norm_ff_b);
     }
 
     // Final layer norm + output head
