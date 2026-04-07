@@ -167,6 +167,28 @@ if(GGML_CUDA)
 endif()
 
 # ---------------------------------------------------------------------------
+# Canary 1B v2 — nvidia/canary-1b-v2 (FastConformer enc + Transformer dec, ASR + AST)
+# ---------------------------------------------------------------------------
+add_library(canary
+            canary.h
+            canary.cpp
+            )
+target_include_directories(canary PUBLIC . ../include)
+target_compile_features   (canary PUBLIC cxx_std_17)
+target_link_libraries     (canary PUBLIC ggml ggml-base Threads::Threads)
+if(NOT MSVC)
+    target_compile_options(canary PRIVATE -O3 -march=native)
+endif()
+if(GGML_METAL)
+    target_compile_definitions(canary PRIVATE GGML_USE_METAL)
+    target_link_libraries(canary PUBLIC ggml-metal)
+endif()
+if(GGML_CUDA)
+    target_compile_definitions(canary PRIVATE GGML_USE_CUDA)
+    target_link_libraries(canary PUBLIC ggml-cuda)
+endif()
+
+# ---------------------------------------------------------------------------
 # Parakeet TDT — nvidia/parakeet-tdt-0.6b-v3 (FastConformer encoder + TDT decoder)
 # ---------------------------------------------------------------------------
 add_library(parakeet
