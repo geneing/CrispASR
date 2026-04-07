@@ -1473,7 +1473,7 @@ static void cohere_model_warm_cache(const cohere_model & m) {
 }
 
 struct cohere_context_params cohere_context_default_params(void) {
-    return { .n_threads = 4, .use_flash = false, .no_punctuation = false, .verbosity = 1 };
+    return { .n_threads = 4, .use_flash = false, .no_punctuation = false, .diarize = false, .verbosity = 1 };
 }
 
 struct cohere_context * cohere_init_from_file(const char * path_model,
@@ -1988,7 +1988,8 @@ struct cohere_result * cohere_transcribe_ex(struct cohere_context * ctx,
     std::vector<int> prompt = {
         tid("<|startofcontext|>"), tid("<|startoftranscript|>"), tid("<|emo:undefined|>"),
         tid(lang_tok_str), tid(lang_tok_str),
-        tid(pnc_tok), tid("<|noitn|>"), tid("<|notimestamp|>"), tid("<|nodiarize|>"),
+        tid(pnc_tok), tid("<|noitn|>"), tid("<|notimestamp|>"),
+        tid(ctx->params.diarize ? "<|diarize|>" : "<|nodiarize|>"),
     };
     prompt.erase(std::remove_if(prompt.begin(), prompt.end(),
                                 [](int t){ return t == -1; }), prompt.end());
@@ -2069,14 +2070,37 @@ struct cohere_result * cohere_transcribe_ex(struct cohere_context * ctx,
     std::string full_text;
     std::vector<cohere_token_data> tok_data;
 
+    // Diarization token IDs (from vocabulary scan)
+    const int tok_spkchange = voc.token_id("<|spkchange|>");   // 14
+    // <|spk0|>..<|spk15|> are 205..220
+    auto is_spk_id = [&](int id) {
+        int spk0 = voc.token_id("<|spk0|>");
+        return (spk0 >= 0) && (id >= spk0) && (id < spk0 + 16);
+    };
+
     for (int i = 0; i < (int)generated.size(); i++) {
         int id = generated[i];
         if (id < 0 || id >= (int)voc.id_to_token.size()) continue;
         const std::string & tok = voc.id_to_token[id];
-        if (tok.front() == '<' && tok.back() == '>') continue;
-        std::string t = tok;
-        size_t pos;
-        while ((pos = t.find("\xe2\x96\x81")) != std::string::npos) t.replace(pos, 3, " ");
+
+        std::string t;
+        if (tok.front() == '<' && tok.back() == '>') {
+            // Render diarization tokens; drop all other special tokens
+            if (id == tok_spkchange) {
+                t = " [SPEAKER_TURN]";
+            } else if (is_spk_id(id)) {
+                int spk0 = voc.token_id("<|spk0|>");
+                char buf[32];
+                snprintf(buf, sizeof(buf), " [Speaker %d]", id - spk0);
+                t = buf;
+            } else {
+                continue;
+            }
+        } else {
+            t = tok;
+            size_t pos;
+            while ((pos = t.find("\xe2\x96\x81")) != std::string::npos) t.replace(pos, 3, " ");
+        }
 
         cohere_token_data td;
         td.id = id;

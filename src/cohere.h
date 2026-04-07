@@ -14,6 +14,8 @@ struct cohere_context_params {
     int   n_threads;        // default: number of physical cores
     bool  use_flash;        // flash attention in decoder (default: false for now)
     bool  no_punctuation;   // use <|nopnc|> instead of <|pnc|> in prompt (default: false)
+    bool  diarize;          // use <|diarize|> instead of <|nodiarize|>; model may emit
+                            // <|spkchange|> and <|spk0|>..<|spk15|> tokens (experimental)
     // Output verbosity:
     //   0 = silent  — only hard errors (failed/cannot) go to stderr
     //   1 = normal  — model loading info printed (default)

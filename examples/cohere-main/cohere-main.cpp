@@ -39,6 +39,7 @@ struct cohere_params {
     bool        no_prints      = false;
     bool        debug          = false;
     bool        no_punctuation = false;
+    bool        diarize        = false; // -tdrz: enable speaker diarization (experimental)
     bool        output_txt     = false; // -ot  : write transcript to <audio>.txt
     bool        timestamps     = false; // -ts  : enable timestamp output
     bool        print_colors   = false; // -pc  : ANSI confidence color-coding
@@ -71,6 +72,7 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  -ovtt,      --output-vtt         write WebVTT subtitle file\n");
     fprintf(stderr, "  -vad-model FNAME                 path to ggml-silero-vad.bin for VAD\n");
     fprintf(stderr, "  -vad-thold F                     VAD speech threshold (default: 0.5)\n");
+    fprintf(stderr, "  -tdrz,      --diarize            enable speaker diarization (experimental)\n");
     fprintf(stderr, "  -npnc,      --no-punctuation     disable punctuation in output\n");
     fprintf(stderr, "  -v,         --verbose            show timing info and per-step tokens\n");
     fprintf(stderr, "  -np,        --no-prints          suppress all informational output\n");
@@ -119,6 +121,7 @@ static bool parse_args(int argc, char ** argv, cohere_params & p) {
         } else if (arg == "-pc"   || arg == "--print-colors") { p.print_colors   = true;
         } else if (arg == "-osrt" || arg == "--output-srt")   { p.output_srt     = true;
         } else if (arg == "-ovtt" || arg == "--output-vtt")   { p.output_vtt     = true;
+        } else if (arg == "-tdrz" || arg == "--diarize")        { p.diarize        = true;
         } else if (arg == "-npnc" || arg == "--no-punctuation"){ p.no_punctuation = true;
         } else if (arg == "-v"    || arg == "--verbose")       { p.verbosity      = 2;
         } else if (arg == "-np"   || arg == "--no-prints")     { p.no_prints      = true;
@@ -336,6 +339,7 @@ int main(int argc, char ** argv) {
     params.n_threads      = p.n_threads;
     params.use_flash      = p.use_flash;
     params.no_punctuation = p.no_punctuation;
+    params.diarize        = p.diarize;
     params.verbosity      = p.verbosity;
 
     if (p.verbosity >= 1)
