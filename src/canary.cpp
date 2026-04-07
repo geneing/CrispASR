@@ -545,16 +545,21 @@ static ggml_tensor * canary_rel_shift(ggml_context * ctx, ggml_tensor * a) {
         (T - 1) * a->nb[0]);
 }
 
-// Sinusoidal rel-pos table [d, 2T-1], descending positions [T-1 .. -(T-1)]
+// Sinusoidal rel-pos table [d, 2T-1], descending positions [T-1 .. -(T-1)].
+// IMPORTANT layout note: the tensor is created as ggml_new_tensor_2d(F32, d, 2T-1)
+// which has ne[0]=d (fast) and ne[1]=2T-1 (slow). So the correct memory layout
+// is `pe[dim + pos*d]`, NOT `pe[(2*i)*K + j]` (which transposes the axes and was
+// the bug copied from parakeet/cohere — parakeet's TDT decoder is robust to it,
+// but canary's encoder–decoder cross-attention is not).
 static std::vector<float> canary_make_pos_enc(int d_model, int T) {
-    const int K = 2 * T - 1;
-    std::vector<float> pe((size_t)d_model * K, 0.0f);
-    for (int j = 0; j < K; j++) {
-        const float p = (float)(T - 1 - j);
+    const int n_pos = 2 * T - 1;
+    std::vector<float> pe((size_t)n_pos * d_model, 0.0f);
+    for (int p = 0; p < n_pos; p++) {
+        const float pos = (float)(T - 1 - p);   // descending: [T-1, T-2, ..., -(T-1)]
         for (int i = 0; i < d_model / 2; i++) {
             const float div = expf(-logf(10000.0f) * (float)(2 * i) / (float)d_model);
-            pe[(size_t)(2 * i)     * K + j] = sinf(p * div);
-            pe[(size_t)(2 * i + 1) * K + j] = cosf(p * div);
+            pe[(size_t)p * d_model + 2 * i    ] = sinf(pos * div);
+            pe[(size_t)p * d_model + 2 * i + 1] = cosf(pos * div);
         }
     }
     return pe;
@@ -848,10 +853,16 @@ static void canary_build_cross_kv(canary_context * ctx,
     ctx->cross_v.resize(n_layers);
 
     for (int il = 0; il < n_layers; il++) {
-        ctx->cross_k[il] = ggml_new_tensor_3d(ctx->cross_ctx, GGML_TYPE_F32, head_dim, T_enc, n_heads);
-        ctx->cross_v[il] = ggml_new_tensor_3d(ctx->cross_ctx, GGML_TYPE_F32, head_dim, T_enc, n_heads);
+        // ggml_flash_attn_ext requires F16 K/V on the CPU backend (the F32 path
+        // is not implemented and falls through to broken behaviour). Match the
+        // pattern cohere.cpp uses.
+        ctx->cross_k[il] = ggml_new_tensor_3d(ctx->cross_ctx, GGML_TYPE_F16, head_dim, T_enc, n_heads);
+        ctx->cross_v[il] = ggml_new_tensor_3d(ctx->cross_ctx, GGML_TYPE_F16, head_dim, T_enc, n_heads);
     }
-    ctx->cross_buf = ggml_backend_alloc_ctx_tensors(ctx->cross_ctx, ctx->backend_cpu);
+    // Allocate on the SAME backend the decoder graph runs on. Allocating on
+    // a separate CPU backend instance breaks the scheduler's cross-graph
+    // tensor references — even when both backends happen to be CPU.
+    ctx->cross_buf = ggml_backend_alloc_ctx_tensors(ctx->cross_ctx, ctx->backend);
 
     // Compute K/V projections per layer using a tiny graph
     for (int il = 0; il < n_layers; il++) {
@@ -901,8 +912,14 @@ static void canary_build_cross_kv(canary_context * ctx,
         std::vector<float> vbuf((size_t)head_dim * T_enc * n_heads);
         ggml_backend_tensor_get(CK_out, kbuf.data(), 0, kbuf.size() * sizeof(float));
         ggml_backend_tensor_get(CV_out, vbuf.data(), 0, vbuf.size() * sizeof(float));
-        ggml_backend_tensor_set(ctx->cross_k[il], kbuf.data(), 0, kbuf.size() * sizeof(float));
-        ggml_backend_tensor_set(ctx->cross_v[il], vbuf.data(), 0, vbuf.size() * sizeof(float));
+
+        // Convert F32 → F16 before uploading into the F16 cross-KV slots.
+        std::vector<ggml_fp16_t> kbuf16(kbuf.size());
+        std::vector<ggml_fp16_t> vbuf16(vbuf.size());
+        ggml_fp32_to_fp16_row(kbuf.data(), kbuf16.data(), kbuf.size());
+        ggml_fp32_to_fp16_row(vbuf.data(), vbuf16.data(), vbuf.size());
+        ggml_backend_tensor_set(ctx->cross_k[il], kbuf16.data(), 0, kbuf16.size() * sizeof(ggml_fp16_t));
+        ggml_backend_tensor_set(ctx->cross_v[il], vbuf16.data(), 0, vbuf16.size() * sizeof(ggml_fp16_t));
 
         ggml_free(gctx);
     }
@@ -1366,6 +1383,7 @@ extern "C" struct canary_result * canary_transcribe_ex(
         for (int t : prompt) fprintf(stderr, " %d(%s)", t, ctx->vocab.id_to_token[t].c_str());
         fprintf(stderr, "\n");
     }
+
 
     // First call: feed the entire prompt at once
     auto logits = canary_decode_step(ctx, prompt.data(), (int)prompt.size(), 0);

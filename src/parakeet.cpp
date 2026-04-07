@@ -834,17 +834,21 @@ static ggml_cgraph * parakeet_build_graph_encoder(parakeet_context * ctx, int T_
     return gf;
 }
 
-// Helper: build the sinusoidal rel-pos table [d, 2T-1] expected by the encoder.
-// pos[i] = i - (T-1), then standard sinusoidal embedding (Transformer-XL style).
+// Helper: build the sinusoidal rel-pos table for the encoder.
+// The tensor is created as ggml_new_tensor_2d(F32, d, 2T-1) → ne[0]=d (fast),
+// ne[1]=2T-1 (slow). The correct memory layout is `pe[dim + pos*d]`.
+// (The previous implementation used `pe[(2*i)*K + j]` which transposes the
+// axes — TDT decode is robust enough to mostly recover, but it produces
+// slightly worse word boundaries than the correct layout.)
 static std::vector<float> parakeet_make_pos_enc(int d_model, int T) {
-    const int K = 2 * T - 1;
-    std::vector<float> pe((size_t)d_model * K, 0.0f);
-    for (int j = 0; j < K; j++) {
-        const float p = (float)(T - 1 - j);     // descending: [T-1, T-2, ..., -(T-1)]
+    const int n_pos = 2 * T - 1;
+    std::vector<float> pe((size_t)n_pos * d_model, 0.0f);
+    for (int p = 0; p < n_pos; p++) {
+        const float pos = (float)(T - 1 - p);   // descending: [T-1, T-2, ..., -(T-1)]
         for (int i = 0; i < d_model / 2; i++) {
             const float div = expf(-logf(10000.0f) * (float)(2 * i) / (float)d_model);
-            pe[(size_t)(2 * i)     * K + j] = sinf(p * div);
-            pe[(size_t)(2 * i + 1) * K + j] = cosf(p * div);
+            pe[(size_t)p * d_model + 2 * i    ] = sinf(pos * div);
+            pe[(size_t)p * d_model + 2 * i + 1] = cosf(pos * div);
         }
     }
     return pe;
