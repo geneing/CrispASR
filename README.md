@@ -140,7 +140,78 @@ Confidence color-coding (red = low confidence → green = high):
 # Or manually copy ggml-silero-vad.bin to your working directory
 ```
 
-**Timestamp note:** The Cohere model v1 does not output timestamp tokens (Cohere Labs confirmed native timestamps are planned for a future version). Within each VAD segment, token timestamps are linearly interpolated from character counts — accurate at segment level, approximate at word level. VAD boundary accuracy depends on the Silero model.
+**Timestamp note:** The Cohere model v1 does not output timestamp tokens (Cohere Labs confirmed native timestamps are planned for a future version). `cohere-main` derives timestamps from cross-attention DTW (~360 ms MAE word-level). For 30-50 ms word-level accuracy, use `cohere-align` (next section).
+
+### 4b. Word-level timestamps via CTC forced alignment (`cohere-align`)
+
+`cohere-align` is a separate CLI that combines Cohere transcription with **CTC forced alignment** over a [wav2vec2](https://huggingface.co/docs/transformers/model_doc/wav2vec2) model. It targets ~30-50 ms per-word accuracy — roughly 10× tighter than the cross-attention DTW used by `cohere-main`.
+
+**Pipeline:** Cohere transcribes the audio → words are extracted from the per-token result → the same audio is encoded by a Wav2Vec2ForCTC model → Viterbi DP forces an alignment of the transcript onto the per-frame CTC logits → each word gets a precise `[t0 → t1]` based on which encoder frames it occupies.
+
+**Build:**
+```bash
+cmake --build build -j$(nproc) --target cohere-align
+```
+
+**One-time CTC model setup.** Convert any `Wav2Vec2ForCTC` model from HuggingFace to GGUF F16 (the conversion script lives in `models/`):
+```bash
+pip install gguf transformers torch huggingface_hub
+
+# Download a multilingual CTC model (xlsr-53 covers 14 languages):
+python -c "from huggingface_hub import snapshot_download; \
+  print(snapshot_download('jonatasgrosman/wav2vec2-large-xlsr-53-english'))"
+
+# Convert it (use the path printed above):
+python models/convert-wav2vec2-to-gguf.py \
+    --model-dir <snapshot-path> \
+    --output    wav2vec2-xlsr-en.gguf
+```
+
+For non-English languages, swap the model id (`-french`, `-german`, `-spanish`, …). Per-language fine-tunes give the best alignment accuracy.
+
+**Run it:**
+```bash
+./build/bin/cohere-align \
+    -m  cohere-transcribe-q4_k.gguf \
+    -cw wav2vec2-xlsr-en.gguf \
+    -f  samples/jfk.wav \
+    -t  8
+```
+
+Example output on `samples/jfk.wav`:
+```
+[00:00:00.390 --> 00:00:00.520]  And
+[00:00:00.620 --> 00:00:00.840]  so,
+[00:00:01.040 --> 00:00:01.190]  my
+[00:00:01.300 --> 00:00:01.590]  fellow
+[00:00:01.680 --> 00:00:02.240]  Americans,
+[00:00:03.520 --> 00:00:03.740]  ask
+[00:00:04.000 --> 00:00:04.360]  not
+...
+[00:00:10.050 --> 00:00:10.420]  country.
+```
+
+Word boundaries land on 10 ms encoder frames (50 fps), and each word is bracketed by its actual start/end times rather than interpolated.
+
+**Common options** (same conventions as `cohere-main`):
+
+| Flag | Meaning |
+| --- | --- |
+| `-m FNAME` | Cohere Transcribe GGUF |
+| `-cw FNAME` | wav2vec2 CTC GGUF (from `convert-wav2vec2-to-gguf.py`) |
+| `-f FNAME` | input WAV (16 kHz mono) |
+| `-l LANG` | language code (`en`, `fr`, `de`, …) |
+| `-osrt` / `-ovtt` | write `.srt` / `.vtt` subtitle files (one cue per word) |
+| `-ot` | write plain `.txt` transcript |
+| `-vad-model FNAME` | optional Silero VAD for long-audio segmentation |
+| `--no-ctc` | skip CTC, fall back to Cohere DTW timestamps |
+| `-t N` | threads |
+
+**Punctuation handling.** Words containing only punctuation (e.g. `,`) inherit timing from their nearest letter-bearing neighbour, so the output is always one cue per word — no orphaned punctuation lines.
+
+**How accurate is it?** On clean speech, CTC forced alignment is the standard reference (used by [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io/), `ctc-segmentation`, and `ctc-forced-aligner`). Expected MAE is in the 30-50 ms range, dominated by encoder frame rate (20 ms) and word-boundary ambiguity. On audio with strong noise, music, or non-target language, alignment quality degrades; in that case `--no-ctc` falls back to the cross-attention DTW path used by `cohere-main`.
+
+**License note.** The wav2vec2 ggml inference code in `src/wav2vec2-ggml.{h,cpp}` is adapted from [nabil6391/wav2vec2.cpp](https://github.com/nabil6391/wav2vec2.cpp) (MIT). The Viterbi alignment in `src/align.{h,cpp}` is original to this fork.
 
 ### Speaker diarization (experimental)
 
