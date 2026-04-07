@@ -125,10 +125,20 @@ if(APPLE)
     target_link_libraries(cohere PUBLIC ${ACCELERATE_LIB})
     target_compile_definitions(cohere PRIVATE HAVE_BLAS ACCELERATE_NEW_LAPACK)
 else()
+    # If COHERE_MKL=ON the parent CMakeLists.txt sets BLA_VENDOR=Intel10_64lp
+    # so this find_package(BLAS) call is steered toward MKL automatically.
     find_package(BLAS)
     if(BLAS_FOUND)
         target_link_libraries(cohere PUBLIC ${BLAS_LIBRARIES})
         target_compile_definitions(cohere PRIVATE HAVE_BLAS)
+        if(COHERE_MKL)
+            message(STATUS "cohere: linking MKL: ${BLAS_LIBRARIES}")
+        endif()
+    elseif(COHERE_MKL)
+        message(FATAL_ERROR
+            "COHERE_MKL=ON but Intel MKL was not found. "
+            "Install MKL (e.g. apt install intel-mkl, or via oneAPI), "
+            "or build without -DCOHERE_MKL=ON.")
     else()
         find_library(OPENBLAS_LIB openblas)
         if(OPENBLAS_LIB)

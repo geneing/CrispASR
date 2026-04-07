@@ -92,8 +92,28 @@ option(WHISPER_COREML                "whisper: enable Core ML framework"  OFF)
 option(WHISPER_COREML_ALLOW_FALLBACK "whisper: allow non-CoreML fallback" OFF)
 option(WHISPER_OPENVINO              "whisper: support for OpenVINO"      OFF)
 
+# ---------------------------------------------------------------------------
+# Cohere Transcribe options
+# ---------------------------------------------------------------------------
+# COHERE_MKL: route both ggml's GEMM and the Cohere mel filterbank through
+# Intel MKL. This typically gives a 1.5-2× speedup of the F16 / quantised
+# matmul paths on x86_64 (Cascade Lake / Ice Lake / Zen4) by using MLAS-class
+# INT8/F32 kernels with VNNI. Default OFF — turning it on adds a ~200 MB MKL
+# runtime dependency. Recommended only for x86_64 server deployments.
+option(COHERE_MKL "cohere: link Intel MKL for ggml GEMM + mel filterbank" OFF)
+
 # Required for relocatable CMake package
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
+
+# Wire COHERE_MKL into ggml's BLAS backend before add_subdirectory(ggml).
+# This must happen here so the values are visible to the ggml subproject.
+if (COHERE_MKL)
+    set(GGML_BLAS        ON  CACHE BOOL "ggml: use BLAS"               FORCE)
+    set(GGML_BLAS_VENDOR "Intel10_64lp" CACHE STRING "ggml: BLAS vendor" FORCE)
+    # Hint our own find_package(BLAS) call (in src/CMakeLists.txt) toward MKL too.
+    set(BLA_VENDOR       "Intel10_64lp")
+    message(STATUS "COHERE_MKL=ON: enabling GGML_BLAS with vendor Intel10_64lp")
+endif()
 
 # override ggml options
 set(GGML_SANITIZE_THREAD    ${WHISPER_SANITIZE_THREAD})

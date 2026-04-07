@@ -25,6 +25,15 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
 cmake --build build -j$(nproc) --target cohere-main
 ```
 
+For Intel MKL on x86_64 servers (optional, ~1.5-2× faster GEMM, adds ~200 MB MKL runtime dependency):
+```bash
+# Ubuntu/Debian:  apt install intel-mkl
+# Or via oneAPI:  source /opt/intel/oneapi/setvars.sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCOHERE_MKL=ON
+cmake --build build -j$(nproc) --target cohere-main
+```
+`COHERE_MKL=ON` enables `GGML_BLAS` with `Intel10_64lp` for ggml's matmul kernels and routes the Cohere mel filterbank `cblas_sgemm` through MKL too. Default is OFF — leave it off if you want a small portable binary or are on Apple Silicon (Accelerate is already used there) / ARM (where ggml's NEON Q4_K kernels already beat MKL).
+
 ### 2. Download a GGUF model
 
 Using `huggingface-cli` (recommended):
