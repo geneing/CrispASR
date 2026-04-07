@@ -230,12 +230,20 @@ static std::vector<disp_segment> make_disp_segments(
         int tlen = (int)strlen(td.text);
         if (tlen == 0) continue;
 
-        bool will_overflow = (max_len > 0) &&
-                             (!cur.text.empty()) &&
-                             ((int)cur.text.size() + tlen > max_len);
+        // SentencePiece uses '▁' (converted to ' ') as a word-start prefix.
+        // Tokens without a leading space are sub-word continuations (e.g. "bl"+"essed",
+        // "gu"+"ided") or punctuation attached to the preceding word (",", ".", "'s").
+        // Splits are only allowed at word boundaries to avoid mid-word line breaks
+        // and lone-punctuation segments.
+        const bool is_word_start = (td.text[0] == ' ') || cur.text.empty();
+
+        const bool will_overflow = (max_len > 0)
+                                && !cur.text.empty()
+                                && ((int)cur.text.size() + tlen > max_len)
+                                && is_word_start;
 
         if (will_overflow) {
-            cur.t1 = td.t0;  // end at the start of this token
+            cur.t1 = td.t0;
             flush();
         }
 
