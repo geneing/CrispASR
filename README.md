@@ -1,3 +1,157 @@
+# cohere-whisper.cpp
+
+A fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that adds a full C++ runtime for **[CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026)** — Cohere's open-source 2B-parameter ASR model, #1 on the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard) (avg WER 5.42, as of March 2026).
+
+Pre-converted GGUF weights are available on Hugging Face: **[cstr/cohere-transcribe-03-2026-GGUF](https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF)**
+
+---
+
+## Cohere Transcribe — Quick Start
+
+### 1. Build
+
+```bash
+git clone -b ggml https://github.com/CrispStrobe/cohere-whisper.cpp
+cd cohere-whisper.cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc) --target cohere-main
+```
+
+On macOS (Apple Silicon), Metal GPU acceleration is enabled automatically — no extra flags needed.
+
+For CUDA (Linux/Windows):
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+cmake --build build -j$(nproc) --target cohere-main
+```
+
+### 2. Download a GGUF model
+
+Using `huggingface-cli` (recommended):
+```bash
+pip install huggingface_hub
+huggingface-cli download cstr/cohere-transcribe-03-2026-GGUF \
+    cohere-transcribe-q4_k.gguf --local-dir .
+```
+
+Direct download:
+```bash
+wget "https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF/resolve/main/cohere-transcribe-q4_k.gguf?download=true" \
+    -O cohere-transcribe-q4_k.gguf
+```
+
+Available quantizations:
+
+| File | Size | Type | RTFx (8 threads, CPU) |
+|------|------|------|----------------------|
+| `cohere-transcribe.gguf` | 3.85 GB | F16 | 0.80x |
+| `cohere-transcribe-q8_0.gguf` | 2.05 GB | Q8_0 | 1.03x |
+| `cohere-transcribe-q6_k.gguf` | 1.62 GB | Q6_K | 1.05x |
+| `cohere-transcribe-q5_1.gguf` | 1.45 GB | Q5_1 | 1.06x |
+| `cohere-transcribe-q5_0.gguf` | 1.38 GB | Q5_0 | 1.07x |
+| `cohere-transcribe-q4_k.gguf` | 1.21 GB | Q4_K | 1.08x |
+
+RTFx > 1.0 means faster than real-time. Measured on an 11s clip with 8 CPU threads.
+
+### 3. Transcribe
+
+```bash
+./build/bin/cohere-main \
+    -m cohere-transcribe-q4_k.gguf \
+    -f audio.wav \
+    -t 8
+```
+
+Input must be 16 kHz mono WAV. Convert with ffmpeg:
+```bash
+ffmpeg -i input.mp3 -ar 16000 -ac 1 -c:a pcm_s16le audio.wav
+```
+
+Environment variables:
+```
+COHERE_THREADS=8     # override thread count
+COHERE_DEVICE=metal  # force backend: metal | cuda | cpu
+COHERE_DEBUG=1       # verbose tensor/graph logging
+COHERE_PROF=1        # per-op profiling (mul_mat, conv, etc.)
+```
+
+### 4. Quantize your own model
+
+Convert from the original HF checkpoint first (see `export_gguf.py`), then quantize:
+```bash
+./build/bin/cohere-quantize cohere-transcribe.gguf cohere-transcribe-q4_k.gguf Q4_K
+```
+
+---
+
+## Architecture
+
+The Cohere Transcribe model is a Conformer-encoder / Transformer-decoder architecture, distinct from the Whisper encoder-decoder used in the original whisper.cpp.
+
+| Component | Details |
+|-----------|---------|
+| **Encoder** | 48-layer Conformer, d=1280, 8 heads, head_dim=160, FFN=5120, conv kernel=9 |
+| **Decoder** | 8-layer causal Transformer, d=1024, 8 heads, head_dim=128, FFN=4096, max_ctx=1024 |
+| **Vocab** | 16,384 SentencePiece tokens |
+| **Audio** | 16 kHz mono, 128 mel bins, n_fft=512, hop=160, win=400 |
+| **Parameters** | ~2B |
+
+The full implementation lives in [`src/cohere.cpp`](src/cohere.cpp) and [`src/cohere.h`](src/cohere.h).
+
+### What was ported
+
+The original model ships as ONNX. This repo implements a from-scratch GGML compute graph:
+
+- **Encoder**: 48-layer Conformer with Transformer-XL relative-position attention (relative shift), Conv2D subsampling (×8), depthwise convolution module (kernel=9), BatchNorm folded into conv weights at load time
+- **Decoder**: 8-layer causal Transformer with cross-attention, autoregressive KV cache, Flash Attention for cross-attention
+- **Feature extraction**: pre-emphasis → center-pad → STFT (self-contained Cooley-Tukey FFT, no external dependencies) → 128-bin mel filterbank → log → per-feature normalization
+- **Quantization**: Q8_0, Q6_K, Q5_1, Q5_0, Q4_K — weight-only, encoder and decoder
+- **Backends**: CPU (AVX2), Metal (Apple Silicon), CUDA
+- **Chunked encoding**: long audio processed in 30s windows to cap O(T²) attention cost
+
+### Critical implementation details
+
+**Mel normalization — biased std:**
+Per-feature normalization uses `std = sqrt(mean(diff²) + ε)` (biased, matching ONNX). The Bessel-corrected unbiased formula produces a `sqrt(T) ≈ 20×` larger denominator and completely corrupts encoder output.
+
+**Conformer attention scaling:**
+The relative-position self-attention must be scaled by `1/sqrt(head_dim)` before softmax. Without this, attention saturates and the decoder outputs repetitive garbage (e.g., "what what what...").
+
+**Audio preprocessing pipeline:**
+1. Pre-emphasis: `y[n] = x[n] - 0.97·x[n-1]`
+2. Center-pad: `n_fft/2 = 256` samples on each side
+3. STFT: Hann window (length 400, zero-padded to 512), hop 160, rfft → power spectrum
+4. Mel filterbank: 128 bins → log → per-feature normalization (biased std)
+
+**Cross-KV pre-computation:**
+Cross-attention K/V tensors are computed once per utterance inside the encoder GGML graph, stored as F16, and reused across all decoder steps. This halves cross-KV memory vs F32 (e.g., 4.3 MiB vs 8.6 MiB for an 11s clip).
+
+**Chunked encoder for long audio:**
+Audio longer than 30s is split into overlapping 30s windows. Cross-KV tensors are extracted per chunk and scatter-copied into a contiguous `[head_dim, T_total, n_heads]` buffer, avoiding O(T²) attention over the full sequence.
+
+**Depthwise convolution:**
+Uses `ggml_conv_2d_dw_direct` (`GGML_OP_CONV_2D_DW`) — a direct sliding-window kernel with no im2col intermediate buffer. 9.6× faster than the im2col path for kernel size 9, contributing ~10% overall encoder speedup.
+
+**BatchNorm folding:**
+BatchNorm statistics are folded into the depthwise conv weights at model load time, eliminating 480 graph nodes and giving ~7% encoder speedup (F16) with no effect on accuracy.
+
+---
+
+## Related
+
+- **Upstream**: [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) — the whisper.cpp project this is forked from
+- **Source model**: [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026)
+- **GGUF weights**: [cstr/cohere-transcribe-03-2026-GGUF](https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF)
+- **Open ASR Leaderboard**: [hf-audio/open_asr_leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard)
+
+---
+
+## Original whisper.cpp
+
+The rest of this README covers the upstream whisper.cpp functionality (Whisper model support, bindings, examples, etc.), which is fully preserved in this fork.
+
+---
+
 # whisper.cpp
 
 ![whisper.cpp](https://user-images.githubusercontent.com/1991296/235238348-05d0f6a4-da44-4900-a1de-d0707e75b763.jpeg)
