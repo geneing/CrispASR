@@ -1551,10 +1551,16 @@ extern "C" struct canary_result * canary_transcribe_ex(
         canary_token_data & td = r->tokens[i];
         td.id  = tid;
         if (have_attn) {
-            td.t0 = t_offset_cs + (int64_t)path[i] * frame_dur_cs;
-            td.t1 = (i+1 < n_emitted)
+            int64_t a = t_offset_cs + (int64_t)path[i] * frame_dur_cs;
+            int64_t b = (i+1 < n_emitted)
                 ? (t_offset_cs + (int64_t)path[i+1] * frame_dur_cs)
                 : seg_end_cs;
+            // Guarantee at least one frame of duration so adjacent tokens that
+            // collapse to the same DTW frame still have a non-zero span.
+            if (b <= a) b = a + frame_dur_cs;
+            if (b > seg_end_cs) b = seg_end_cs;
+            td.t0 = a;
+            td.t1 = b;
         } else {
             // Fallback: linear interpolation
             td.t0 = t_offset_cs + (int64_t)((double)i       / std::max(1, n_emitted) * total_cs);

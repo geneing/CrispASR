@@ -180,6 +180,58 @@ For a working CPU runtime with explicit language control, ASR + AST, and
 word/segment timestamps. Roughly **half** the parakeet effort because
 ~80 % of the code is already written.
 
+## Status update (after v1 ship)
+
+All v1 tasks above are complete and shipping. End-to-end working:
+  - JFK English ASR → "And so, my fellow Americans, ask not what your country..."
+  - Sarma German ASR → clean German
+  - Sarma DE→EN translation → fluent English at 2× realtime CPU
+  - DTW word timestamps via cross-attention (cohere-style)
+  - VAD + chunking + SRT/VTT/TXT
+  - Q4_K/Q5_0/Q8_0 + F16 on HuggingFace at cstr/canary-1b-v2-GGUF
+
+## v1.1 — auxiliary CTC forced alignment for ~30-50 ms word stamps
+
+The Canary `.nemo` ships an extra 600M-parameter Parakeet CTC model
+(`timestamps_asr_model_weights.ckpt` + `timestamps_asr_model_config.yaml`)
+that NeMo Forced Aligner uses for word-level timestamps. Per the Canary
+paper, this is the *intended* timestamp path — cross-attention DTW (which
+we currently use) tops out around 360 ms MAE, while CTC forced alignment
+gives 30-50 ms.
+
+The good news: it's a parakeet-style 24-layer FastConformer with the
+same vocab as canary's main model, and we already have all the pieces:
+
+  - `models/convert-parakeet-to-gguf.py` for the encoder (same shape as
+    parakeet-tdt-0.6b-v3, identical 725 tensor count)
+  - `src/parakeet.cpp` encoder forward pass (works as-is)
+  - `src/align.cpp` Viterbi forced alignment (already used by cohere-align
+    for the same kind of task on wav2vec2)
+
+The work needed:
+
+- [ ] `models/convert-canary-timestamps-to-gguf.py` — extract the
+      auxiliary CTC model from inside the canary `.nemo` tarball, repackage
+      as a parakeet-style GGUF but write the CTC head weights instead of
+      the TDT decoder + joint
+- [ ] Add a `parakeet_compute_logits()` C API entry that returns raw
+      `[T_enc, vocab_size]` CTC logits (currently parakeet's encoder forward
+      is internal-only)
+- [ ] `canary-main` flag `-ts-model FNAME` that loads the aux CTC GGUF,
+      runs it on the same audio, and uses `ctc_forced_align()` (from
+      `src/align.cpp`) to map canary's transcript text to encoder frames
+- [ ] Patch the canary_result word timings with the CTC stamps
+
+Estimated effort: ~600 LOC, mostly plumbing. Most of the heavy lifting
+is already done in cohere-align.
+
+## v1.2 — per-language WER benchmark on FLEURS
+
+- [ ] Small eval harness that downloads FLEURS, runs canary on each
+      language, computes WER, and reports a per-language table.
+- [ ] Compare against the per-language WER table in the Canary paper
+      (Appendix B) to validate the C++ port matches the Python reference.
+
 ## Out of scope for v1
 
 - Streaming / chunked inference (matches parakeet's v1 stance)

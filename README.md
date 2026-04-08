@@ -65,6 +65,23 @@ Each boundary is one encoder frame = **80 ms**. Long audio + VAD + SRT/VTT/TXT a
 
 The auto-language detect on parakeet works well for clean speech but can misfire on accented or noisy audio (we found it picked Russian on Angela Merkel's German speech, see [`test_german.md`](test_german.md)). For German production use, prefer canary with `-sl de`.
 
+### Parakeet — German fine-tunes
+
+Any fine-tune of `parakeet-tdt-0.6b-v3` can be loaded with the same `parakeet-main` runtime, since the GGUF converter and C++ loader work on the architecture, not on a specific checkpoint. We've tested:
+
+- **[`johannhartmann/parakeet_de_med`](https://huggingface.co/johannhartmann/parakeet_de_med)** — PEFT decoder+joint fine-tune on German medical documentation, **3.28% WER** on the German medical test set (vs 11.73% for the base model). Encoder is frozen so it inherits the base model's auto-language behaviour, but the German bias on the decoder makes it the right choice for German medical transcription on CPU.
+
+```bash
+# Convert + run
+python models/convert-parakeet-to-gguf.py \
+    --nemo  parakeet_de_med.nemo \
+    --output parakeet_de_med.gguf
+./build/bin/cohere-quantize parakeet_de_med.gguf parakeet_de_med-q4_k.gguf q4_k
+./build/bin/parakeet-main -m parakeet_de_med-q4_k.gguf -f german_audio.wav -t 8
+```
+
+Pre-converted GGUFs at **[cstr/parakeet_de_med-GGUF](https://huggingface.co/cstr/parakeet_de_med-GGUF)** (F16 + Q4_K/Q5_0/Q8_0).
+
 ---
 
 ## Quick start — canary (explicit language + translation)
