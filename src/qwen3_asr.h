@@ -3,10 +3,7 @@
 // Multilingual speech recognition (30 languages) using a 2D-conv subsampler
 // + 18-layer Whisper-style encoder + 28-layer Qwen3 0.6B LLM with audio-token
 // injection. Models are loaded from GGUF files produced by:
-//
-//   python models/convert-qwen3-asr-to-gguf.py \
-//       --input  /path/to/Qwen3-ASR-0.6B \
-//       --output qwen3-asr-0.6b.gguf
+//   `python models/convert-qwen3-asr-to-gguf.py --input <hf_dir> --output X.gguf`
 //
 // Reference: github.com/predict-woo/qwen3-asr.cpp (MIT) — used for
 // architecture discovery only; no source vendored.

@@ -283,30 +283,39 @@ int main(int argc, char ** argv) {
             gen.size() - 1, dec_ms, dec_ms / std::max((size_t)1, gen.size() - 1));
 
     // ----- Decode token IDs to text -----
-    // Qwen3-ASR emits language-detection markers (e.g. token 151704) before
-    // the actual transcript. Strip:
-    //   - the EOS sentinel
-    //   - any "<|...|>" special-token names
-    //   - any "[PADxxxxx]" placeholders (vocab IDs above 151643 that don't
-    //     have a name in vocab.json)
-    //   - the literal word "language" + the next text token, which the model
-    //     emits as a language tag (e.g. "language English")
+    // Qwen3-ASR emits a language-tag prefix before the transcript:
+    //   "language" + " <LangName>" + <special-token, often 151704>
+    // followed by the actual text. Capture the language name and strip the
+    // prefix; also drop any "<|...|>" special-token names and "[PADxxx]"
+    // placeholders for tokens beyond vocab.json's 151643 normal entries.
     std::string transcript;
-    bool skip_next_word = false;
+    std::string detected_language;
+    bool capture_language = false;
     for (auto id : gen) {
         if (id == EOS) break;
         std::string raw = qwen3_asr_token_text(ctx, id);
         if (raw.size() >= 2 && raw[0] == '<' && raw[1] == '|') continue;
         if (raw.size() >= 5 && raw[0] == '[' && raw[1] == 'P' && raw[2] == 'A' && raw[3] == 'D') continue;
         std::string txt = decode_token(raw);
-        if (txt == "language") { skip_next_word = true; continue; }
-        if (skip_next_word) { skip_next_word = false; continue; }
+        if (txt == "language") { capture_language = true; continue; }
+        if (capture_language) {
+            // Strip leading whitespace from the language name
+            size_t s = 0;
+            while (s < txt.size() && (txt[s] == ' ' || txt[s] == '\t')) s++;
+            detected_language = txt.substr(s);
+            capture_language = false;
+            continue;
+        }
         transcript += txt;
     }
-    // Trim leading whitespace
+    // Trim leading whitespace from transcript
     size_t start = 0;
     while (start < transcript.size() && (transcript[start] == ' ' || transcript[start] == '\t')) start++;
     transcript = transcript.substr(start);
+
+    if (!detected_language.empty()) {
+        fprintf(stderr, "language: %s\n", detected_language.c_str());
+    }
 
     auto t_total = std::chrono::steady_clock::now();
     fprintf(stderr, "total: %.0f ms\n",

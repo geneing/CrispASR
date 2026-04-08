@@ -592,7 +592,6 @@ static ggml_cgraph * qwen3_asr_build_graph_conv(qwen3_asr_context * ctx,
     const auto & m  = ctx->model;
     const auto & hp = m.hparams;
     const int n_mels = (int)hp.n_mels;
-    const int d      = (int)hp.audio_d_model;
 
     ggml_init_params ip = {
         /*mem_size=*/   ctx->compute_meta.size(),

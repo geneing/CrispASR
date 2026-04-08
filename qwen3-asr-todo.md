@@ -228,15 +228,61 @@ trickiest part of the C++ port.
    `torch.hann_window(N, periodic=True)` (which librosa/scipy use) divides
    by N. Cosmetic ~1e-7 difference but fixed for cleanliness.
 
-#### Remaining for production
-- [ ] F16 KV cache to halve memory + potentially ~2× speedup on the read path
-- [ ] Quantize the weights via `cohere-quantize` (Q8_0, Q5_K, Q4_K)
-      → big prefill speedup
-- [ ] `ggml_flash_attn_ext` for the cached attention path
-- [ ] README runtime table entry (this fork's main README)
-- [ ] HF upload `cstr/qwen3-asr-0.6b-GGUF` (F16 + Q8_0 + Q4_K)
-- [ ] Implement BPE for arbitrary text input (not needed for ASR but enables
-      few-shot prompting / language hints in the future)
+#### Stage 5b — F16 KV cache + quantization + long audio + HF release ✅ DONE (2026-04-08)
+
+- [x] **F16 KV cache** — two-line change (`GGML_TYPE_F32 → GGML_TYPE_F16`).
+      `ggml_cpy()` handles F32→F16 conversion on write into the cache view,
+      `ggml_mul_mat()` consumes F16 K/V on the read path natively.
+      - KV cache: 896 MiB → **448 MiB** (-50%)
+      - Decode: 118 ms/tok → **102 ms/tok** at Q4_K
+- [x] **Weight quantization** via the existing generic `cohere-quantize`.
+      No qwen3-asr-specific changes needed — `cohere-quantize` already
+      auto-skips 1D tensors, conv4D weights, anything with `norm` in the
+      name, and anything without `weight` in the name (so `audio.mel_filters`
+      and `audio.mel_window` are correctly preserved as F32).
+      - F16 → Q8_0: 1.88 GB → 961 MB
+      - F16 → Q4_K: 1.88 GB → **676 MB**
+      - All quants produce correct transcripts on jfk.wav
+- [x] **Long-audio support** — pad partial last chunk with zeros, the
+      LLM handles the trailing silence frames naturally.
+      - Tested on 89s Obama speech: 145s wall clock (~1.6× realtime),
+        full multi-paragraph transcript correct, language detected as English
+- [x] **lm_head last-token-only slice** — wraps the lm_head matmul in a
+      `ggml_view_2d` slicing the hidden state to (d, 1) when T > 1, so
+      prefill only computes 1 vocab projection instead of T. ~25% prefill
+      speedup with no correctness change.
+- [x] **README runtime table entry** — qwen3-asr-main added as the 6th
+      runtime in the family table on the main README, plus use-case rows
+      and the speech-LLM positioning paragraph
+- [x] **HF release**: `cstr/qwen3-asr-0.6b-GGUF` (F16 + Q8_0 + Q4_K + README)
+      published at https://huggingface.co/cstr/qwen3-asr-0.6b-GGUF
+- [x] **Detected-language metadata** — surface the model's language tag
+      prefix as a stderr metadata line ("language: English") instead of
+      silently stripping it
+- [x] **Final perf table** (jfk.wav, 11s, 4 threads, F16 KV cache):
+      | weights | total | decode/tok | KV cache |
+      |---------|-------|------------|----------|
+      | F16     | 9.4 s | 129 ms     | 448 MiB  |
+      | Q8_0    | 9.5 s | 137 ms     | 448 MiB  |
+      | **Q4_K**| **8.2 s** | **102 ms** | 448 MiB |
+
+#### Remaining (low-priority polish)
+- [ ] `ggml_flash_attn_ext` on the cached attention path. Tried a quick
+      implementation; CPU backend asserted (likely needs F16 Q + a
+      properly-shaped F16 mask). Reverted with a TODO note in the source.
+      The bottleneck on CPU is currently the lm_head matmul, not attention,
+      so the perf delta on short audio would be small. **Big payoff would
+      be on long audio** where attention against the growing KV history
+      dominates per-token cost (375 ms/tok at 1170+ KV slots vs 102 ms/tok
+      at 158 slots).
+- [ ] BPE encoder for arbitrary text input — not needed for ASR (the chat
+      template prompt is fixed) but enables few-shot prompting / language
+      hints in the future
+- [ ] Multi-language smoke tests — no non-English samples available
+      locally; needs a Chinese / German / Japanese clip to verify the
+      pipeline picks up the right language tag from the model
+- [ ] Cleanup: the unused `unused variable 'd'` warning in
+      `qwen3_asr_build_graph_conv` is cosmetic but should be silenced
 
 ### Deferred to v2
 - ForcedAligner-0.6B port (separate model, 1775 LOC of CTC-style alignment in
