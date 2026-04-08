@@ -44,6 +44,81 @@ Both share the same FastConformer encoder code and the same NeMo-style mel prepr
 
 ---
 
+## Audio formats
+
+Every CLI in this repo (`cohere-main`, `parakeet-main`, `canary-main`, `cohere-align`, `nfa-align`) routes input through the same `read_audio_data()` loader inherited from whisper.cpp. By default the loader uses two embedded single-header decoders:
+
+- **[miniaudio](https://miniaud.io/)** — handles **WAV** (any bit depth, including 16/24/32-bit PCM, IEEE float, A-law, μ-law, ADPCM), **FLAC**, and **MP3**
+- **[stb_vorbis](https://github.com/nothings/stb)** — handles **OGG Vorbis**
+
+So **out of the box, all five tools accept WAV / FLAC / MP3 / OGG Vorbis** at any bit depth, any sample rate (auto-resampled to 16 kHz), mono or stereo (auto-mixed to mono). No external dependencies needed.
+
+### What's NOT supported in the default build
+
+| Format | Workaround |
+| --- | --- |
+| `.opus` | Convert to WAV first, OR build with `WHISPER_FFMPEG=ON` (see below) |
+| `.m4a`, `.aac`, `.alac` | Same — convert or use ffmpeg build |
+| `.webm`, `.mp4`, `.mkv`, `.mov` (video containers with audio tracks) | Same |
+| `.aiff`, `.au`, `.wma`, raw PCM | Same |
+
+### Option A — pre-convert with ffmpeg (zero changes to this repo)
+
+Single-line workaround that handles **every audio/video format ffmpeg knows**:
+
+```bash
+ffmpeg -i input.opus -ar 16000 -ac 1 -c:a pcm_s16le -y /tmp/audio.wav
+./build/bin/parakeet-main -m model.gguf -f /tmp/audio.wav -t 8
+
+# Same for video files — just extract the audio track:
+ffmpeg -i input.mp4 -vn -ar 16000 -ac 1 -c:a pcm_s16le -y /tmp/audio.wav
+```
+
+Most users running ASR tools already have ffmpeg installed. This is the recommended path for occasional use.
+
+### Option B — build with `WHISPER_FFMPEG=ON` (transparent in-process decoding)
+
+The whisper.cpp loader has a built-in ffmpeg fallback path: if miniaudio refuses a file, it routes the bytes through `libavformat` / `libavcodec` / `libswresample` to extract a 16 kHz mono PCM stream in-process. **No `/tmp/audio.wav` round-trip, no shell invocation, no separate ffmpeg binary needed at runtime** — just the shared libs.
+
+```bash
+# Install the ffmpeg dev libraries first (one-time):
+#   Debian/Ubuntu:  apt install libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+#   macOS:          brew install ffmpeg
+#   Fedora:         dnf install ffmpeg-devel
+
+cmake -B build-ffmpeg -DCMAKE_BUILD_TYPE=Release -DWHISPER_FFMPEG=ON
+cmake --build build-ffmpeg -j$(nproc) --target parakeet-main canary-main nfa-align cohere-main cohere-align
+
+# Now every CLI accepts every format ffmpeg supports, transparently:
+./build-ffmpeg/bin/parakeet-main -m model.gguf -f input.opus -t 8
+./build-ffmpeg/bin/canary-main   -m model.gguf -f input.mp4  -sl en -tl en -t 8
+./build-ffmpeg/bin/nfa-align     -m model.gguf -f input.m4a  -tt "transcript text"
+```
+
+The runtime then depends on the ffmpeg shared libraries (`libavformat.so`, `libavcodec.so`, `libavutil.so`, `libswresample.so`) — anywhere those are installed, it just works.
+
+### Measured results (this fork, on jfk.wav transcoded to various formats)
+
+| Format | Default build | `WHISPER_FFMPEG=ON` build |
+| --- | :---: | :---: |
+| `.wav` (any bit depth) | ✅ | ✅ |
+| `.flac`                 | ✅ | ✅ |
+| `.mp3`                  | ✅ | ✅ |
+| `.ogg` (Vorbis)         | ✅ | ✅ |
+| `.opus`                 | ❌ "failed to read audio data as wav" | ✅ perfect transcript |
+| `.m4a` (AAC)            | ❌ | ⚠ **crashes** (`munmap_chunk()` — upstream `whisper.cpp` `ffmpeg-transcode.cpp` bug on mp4-container files) |
+| `.webm` (Opus inside)   | ❌ | ⚠ **hangs** (same upstream bug class) |
+
+The upstream `ffmpeg-transcode.cpp` integration in `whisper.cpp` has known issues with mp4-family container formats. **For these the safe path is still pre-conversion via ffmpeg one-liner.** Bare-codec files like `.opus` work cleanly in the FFmpeg build.
+
+### When to use which option
+
+- **Default build (no ffmpeg dep)** — for clean WAV/FLAC/MP3/OGG pipelines, smallest binary, no system dependencies. **Recommended for most users.**
+- **`WHISPER_FFMPEG=ON` build** — adds in-process Opus support and a one-step decode for any other format that doesn't crash the upstream `ffmpeg-transcode.cpp`. Useful but currently NOT a complete substitute for pre-conversion: m4a/mp4/webm containers still crash. Treat it as opt-in convenience for `.opus` ingestion.
+- **Pre-conversion via ffmpeg** (`ffmpeg -i in.X -ar 16000 -ac 1 -c:a pcm_s16le out.wav`) — **the universally safe path** for everything not in the default-build column above. No build flags, no upstream bugs, identical results.
+
+Both binaries can coexist — keep `build/` for the lean default build and `build-ffmpeg/` for the Opus-supporting one.
+
 ## Quick start — parakeet (fastest, multilingual ASR)
 
 ```bash
