@@ -1204,12 +1204,15 @@ static ggml_cgraph * qwen3_asr_build_graph_llm_kv(qwen3_asr_context * ctx,
         // ---- Permute Q to (hd, T, n_q) for attention ----
         Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
 
-        // ---- scores = Kfull^T @ Q ----  ne=(Lk, T, n_q)
+        // Manual attention: scores = K^T @ Q, mask, softmax, attn = scores @ V
+        // ggml_flash_attn_ext was tried for the T=1 decode path but needed
+        // additional Q-dtype + mask-shape work to match the CPU backend's
+        // expectations. Revisit when wiring up GPU. On CPU the bottleneck is
+        // the lm_head matmul, not attention, so the perf delta is small.
         ggml_tensor * scores = ggml_mul_mat(ctx0, Kfull, Q);
         scores = ggml_add(ctx0, scores, causal_mask);
         scores = ggml_soft_max_ext(ctx0, scores, nullptr, attn_scale, 0.0f);
 
-        // ---- attn = scores @ Vfull ----
         // Vfull ne=(hd, Lk, n_q). Permute to (Lk, hd, n_q) for the dot.
         ggml_tensor * V2 = ggml_cont(ctx0, ggml_permute(ctx0, Vfull, 1, 0, 2, 3));
         ggml_tensor * attn = ggml_mul_mat(ctx0, V2, scores);
@@ -1535,8 +1538,11 @@ extern "C" bool qwen3_asr_kv_init(qwen3_asr_context * ctx, int max_ctx) {
         /*no_alloc=*/   true,
     };
     ctx->kv_ctx = ggml_init(kp);
-    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hd, max_ctx, n_kv, n_lay);
-    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hd, max_ctx, n_kv, n_lay);
+    // F16 KV cache: halves memory + ~2× cache read bandwidth on decode.
+    // Conversion happens at the ggml_cpy() write into the cache view, and
+    // ggml_mul_mat handles F16-on-F32 dot products natively for the read path.
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, n_lay);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, n_lay);
     ggml_set_name(ctx->kv_k, "kv_k");
     ggml_set_name(ctx->kv_v, "kv_v");
 
