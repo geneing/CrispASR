@@ -266,23 +266,43 @@ trickiest part of the C++ port.
       | Q8_0    | 9.5 s | 137 ms     | 448 MiB  |
       | **Q4_K**| **8.2 s** | **102 ms** | 448 MiB |
 
+#### Stage 5c — flash-attn on prefill + decode ✅ DONE (2026-04-08)
+
+- [x] **`ggml_flash_attn_ext` on the cached decode path** (T = 1, no mask).
+      The earlier crash was a scheduler issue: declaring an unused
+      `causal_mask` input on the T=1 path → optimized away → null tensor
+      lookup. Fix: declare the mask conditionally on `T > 1` in the
+      graph builder, skip the corresponding `tensor_set` on the run side.
+- [x] **`ggml_flash_attn_ext` on the prefill path too** (T > 1, F16 mask).
+      Required rebuilding the causal mask with `ggml_fp16_t` storage and
+      changing the input tensor type from F32 to F16. The mask broadcast
+      rules for flash_attn are simpler than I expected: shape `(Lk, T)`
+      F16 contiguous, no padding required.
+- [x] **Combined results on jfk.wav (11s, Q4_K)**:
+      - prefill: 3032 → 2549 → **2112 ms** (-30% cumulative across the
+        decode-only and prefill flash-attn commits)
+      - decode/tok: 102 → 74 → **65 ms**
+      - total: 8.2 → 7.3 → **6.6 s**
+- [x] **Combined results on obama_speech_16k.wav (89s, Q4_K)** — the
+      win is much bigger here because attention against the 1170+ KV
+      slots dominates per-token cost on long audio:
+      - prefill: 24144 → 16762 ms (-30%)
+      - decode/tok: 375 → 195 → **185 ms**
+      - total: 145 → 98 → **89 s**  (now ~1.0× realtime, was 1.6× slower)
+- [x] **Both clips faster than realtime now**, with the remaining
+      bottlenecks being the encoder (constant per utterance) and the
+      lm_head matmul (constant per token).
+
 #### Remaining (low-priority polish)
-- [ ] `ggml_flash_attn_ext` on the cached attention path. Tried a quick
-      implementation; CPU backend asserted (likely needs F16 Q + a
-      properly-shaped F16 mask). Reverted with a TODO note in the source.
-      The bottleneck on CPU is currently the lm_head matmul, not attention,
-      so the perf delta on short audio would be small. **Big payoff would
-      be on long audio** where attention against the growing KV history
-      dominates per-token cost (375 ms/tok at 1170+ KV slots vs 102 ms/tok
-      at 158 slots).
 - [ ] BPE encoder for arbitrary text input — not needed for ASR (the chat
       template prompt is fixed) but enables few-shot prompting / language
       hints in the future
 - [ ] Multi-language smoke tests — no non-English samples available
       locally; needs a Chinese / German / Japanese clip to verify the
       pipeline picks up the right language tag from the model
-- [ ] Cleanup: the unused `unused variable 'd'` warning in
-      `qwen3_asr_build_graph_conv` is cosmetic but should be silenced
+- [ ] Quantize the encoder weights too (currently F32 because cohere-quantize
+      auto-skips them as conv4D, but the linear projector heads could
+      benefit). Would need a small filter tweak.
 
 ### Deferred to v2
 - ForcedAligner-0.6B port (separate model, 1775 LOC of CTC-style alignment in
