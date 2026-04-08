@@ -1127,9 +1127,17 @@ static ggml_cgraph * qwen3_asr_build_graph_llm_kv(qwen3_asr_context * ctx,
     ggml_set_name(positions, "positions");
     ggml_set_input(positions);
 
-    ggml_tensor * causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, Lk, T);
-    ggml_set_name(causal_mask, "causal_mask");
-    ggml_set_input(causal_mask);
+    // Only the prefill path (T > 1) needs the causal mask. Decode (T = 1)
+    // uses ggml_flash_attn_ext with no mask — the single new query attends
+    // to all cached keys including itself. If we always declared the mask
+    // input, the scheduler would optimize it away on the decode path and
+    // ggml_graph_get_tensor("causal_mask") would return null.
+    ggml_tensor * causal_mask = nullptr;
+    if (T > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, Lk, T);
+        ggml_set_name(causal_mask, "causal_mask");
+        ggml_set_input(causal_mask);
+    }
 
     ggml_tensor * cur = embeds;
 
@@ -1203,21 +1211,34 @@ static ggml_cgraph * qwen3_asr_build_graph_llm_kv(qwen3_asr_context * ctx,
         // ---- Permute Q to (hd, T, n_q) for attention ----
         Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
 
-        // Manual attention: scores = K^T @ Q, mask, softmax, attn = scores @ V
-        // ggml_flash_attn_ext was tried for the T=1 decode path but needed
-        // additional Q-dtype + mask-shape work to match the CPU backend's
-        // expectations. Revisit when wiring up GPU. On CPU the bottleneck is
-        // the lm_head matmul, not attention, so the perf delta is small.
-        ggml_tensor * scores = ggml_mul_mat(ctx0, Kfull, Q);
-        scores = ggml_add(ctx0, scores, causal_mask);
-        scores = ggml_soft_max_ext(ctx0, scores, nullptr, attn_scale, 0.0f);
+        ggml_tensor * attn;
+        if (T == 1) {
+            // Decode path: ggml_flash_attn_ext, no causal mask needed.
+            // For a single new query, all cached keys are valid attention
+            // targets (including the just-written K[n_past] which is the
+            // query's own self-attention). flash_attn_ext fuses
+            // QK^T → softmax → @V into one kernel and consumes the F16
+            // K/V cache directly without an explicit dequant.
+            // Output ne = (v->ne[0]=hd, q->ne[2]=n_q, q->ne[1]=T, 1).
+            attn = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, /*mask*/nullptr,
+                                       attn_scale, /*max_bias*/0.0f,
+                                       /*logit_softcap*/0.0f);
+            // Reshape (hd, n_q, T, 1) → (hd*n_q, T) directly. The (hd, n_q)
+            // sub-block is contiguous because hd is fast and n_q is next.
+            attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
+        } else {
+            // Prefill path: manual scores = K^T @ Q + mask, softmax, @ V.
+            ggml_tensor * scores = ggml_mul_mat(ctx0, Kfull, Q);
+            scores = ggml_add(ctx0, scores, causal_mask);
+            scores = ggml_soft_max_ext(ctx0, scores, nullptr, attn_scale, 0.0f);
 
-        // Vfull ne=(hd, Lk, n_q). Permute to (Lk, hd, n_q) for the dot.
-        ggml_tensor * V2 = ggml_cont(ctx0, ggml_permute(ctx0, Vfull, 1, 0, 2, 3));
-        ggml_tensor * attn = ggml_mul_mat(ctx0, V2, scores);
-        // attn ne=(hd, T, n_q) → permute back → reshape (hd*n_q, T)
-        attn = ggml_cont(ctx0, ggml_permute(ctx0, attn, 0, 2, 1, 3));
-        attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
+            // Vfull ne=(hd, Lk, n_q). Permute to (Lk, hd, n_q) for the dot.
+            ggml_tensor * V2 = ggml_cont(ctx0, ggml_permute(ctx0, Vfull, 1, 0, 2, 3));
+            attn = ggml_mul_mat(ctx0, V2, scores);
+            // attn ne=(hd, T, n_q) → permute back → reshape (hd*n_q, T)
+            attn = ggml_cont(ctx0, ggml_permute(ctx0, attn, 0, 2, 1, 3));
+            attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
+        }
 
         attn = ggml_mul_mat(ctx0, b.attn_output_w, attn);
         cur = ggml_add(ctx0, residual, attn);
@@ -1592,13 +1613,16 @@ extern "C" float * qwen3_asr_run_llm_kv(qwen3_asr_context * ctx,
     std::vector<int32_t> positions(n_tokens);
     for (int i = 0; i < n_tokens; i++) positions[i] = n_past + i;
 
-    // Causal mask (Lk, T): mask[k, q] = 0 if k <= n_past+q else -inf.
-    // ggml ne[0]=k (key, fast), ne[1]=q (query). Memory layout: q outer, k inner.
-    // Index = q*Lk + k.
-    std::vector<float> mask((size_t)Lk * n_tokens, 0.0f);
-    for (int q = 0; q < n_tokens; q++) {
-        for (int k = n_past + q + 1; k < Lk; k++) {
-            mask[(size_t)q * Lk + k] = -INFINITY;
+    // Causal mask: only needed for prefill (T > 1). Decode (T = 1) uses
+    // ggml_flash_attn_ext with no mask — the single new query attends to
+    // all cached keys including itself, so no masking is needed.
+    std::vector<float> mask;
+    if (n_tokens > 1) {
+        mask.assign((size_t)Lk * n_tokens, 0.0f);
+        for (int q = 0; q < n_tokens; q++) {
+            for (int k = n_past + q + 1; k < Lk; k++) {
+                mask[(size_t)q * Lk + k] = -INFINITY;
+            }
         }
     }
 
@@ -1620,8 +1644,10 @@ extern "C" float * qwen3_asr_run_llm_kv(qwen3_asr_context * ctx,
     ggml_backend_tensor_set(embeds_in, inputs_embeds, 0, (size_t)d * n_tokens * sizeof(float));
     ggml_tensor * pos_in = ggml_graph_get_tensor(gf, "positions");
     ggml_backend_tensor_set(pos_in, positions.data(), 0, positions.size() * sizeof(int32_t));
-    ggml_tensor * mask_in = ggml_graph_get_tensor(gf, "causal_mask");
-    ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(float));
+    if (n_tokens > 1) {
+        ggml_tensor * mask_in = ggml_graph_get_tensor(gf, "causal_mask");
+        ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(float));
+    }
 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "qwen3_asr: llm_kv graph compute failed\n"); return nullptr;
