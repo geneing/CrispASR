@@ -150,6 +150,61 @@ The full VAD / chunking / SRT / VTT / TXT plumbing matches `parakeet-main` and i
 
 The Conformer encoder is identical in structure to parakeet's (we share the encoder code). The decoder block is pre-LN with three sub-layers: `LN → SA → +residual → LN → CA → +residual → LN → FFN → +residual`, FFN activation is ReLU (per NeMo's `PositionWiseFF` default). Self-attention KV cache lives on a backend buffer for fast autoregressive generation. Cross-attention K/V is pre-computed once per audio slice from the encoder output.
 
+### `canary-align` — universal multilingual subword forced alignment
+
+`canary-1b-v2.nemo` actually ships with **two** weight files inside the tarball: the main encoder–decoder model AND a separate 600 M-parameter Parakeet-style FastConformer + CTC head trained with the same SentencePiece vocab. NVIDIA uses the latter inside [NeMo Forced Aligner](https://github.com/NVIDIA-NeMo/NeMo) (NFA) to compute reliable word-level timestamps for canary's transcripts.
+
+We extract that auxiliary model as a standalone GGUF and expose it via `canary-align` — a **universal multilingual forced aligner** that works on **any transcript text** in the 25 supported languages.
+
+```bash
+# Build
+cmake --build build -j$(nproc) --target canary-align
+
+# Download the aligner model
+huggingface-cli download cstr/canary-ctc-aligner-GGUF \
+    canary-ctc-aligner-q4_k.gguf --local-dir .
+
+# Forced-align an existing transcript (any source: canary, parakeet, cohere, whisper, hand-typed)
+./build/bin/canary-align \
+    -m canary-ctc-aligner-q4_k.gguf \
+    -f samples/jfk.wav \
+    -tt "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+```
+
+Output:
+```
+[ 0.40 →  0.48]  And
+[ 0.64 →  1.04]  so,
+[ 1.12 →  1.20]  my
+[ 1.36 →  1.60]  fellow
+[ 1.84 →  3.20]  Americans,
+[ 3.52 →  3.76]  ask
+[ 4.08 →  4.16]  not
+...
+[10.08 → 11.04]  country.
+```
+
+**Measured accuracy on JFK (22 words, vs `cohere-align` wav2vec2 ground truth):**
+
+| Method | MAE | Notes |
+| --- | ---: | --- |
+| `cohere-align` (wav2vec2 char CTC) | ~30-50 ms | English only, 1 model per language |
+| **`canary-align` (subword CTC, this fork)** | **78 ms** | **All 25 EU languages in one model** |
+| `canary-main` cross-attention DTW | ~414 ms | Built into canary-main, no extra model |
+
+**5.3× tighter** than canary's built-in DTW path, and the **first multilingual forced aligner** in this fork. Works as a drop-in replacement for `cohere-align` with broader language coverage but slightly looser per-word boundaries (subword vs character granularity). For 24 of the 25 supported languages there is no comparable wav2vec2 model, so this is the only option at this accuracy.
+
+It also doubles as a standalone CTC ASR via `-decode`:
+
+```bash
+$ ./build/bin/canary-align -m canary-ctc-aligner-q4_k.gguf -f samples/jfk.wav -decode
+And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.
+```
+
+Pre-converted GGUFs at **[cstr/canary-ctc-aligner-GGUF](https://huggingface.co/cstr/canary-ctc-aligner-GGUF)** (F16 + Q4_K/Q5_0/Q8_0). Q4_K alignment is byte-identical to F16 on the verification clip.
+
+**License note.** The aligner model is the auxiliary CTC component of `nvidia/canary-1b-v2`, **CC-BY-4.0**, full credit and attribution to NVIDIA's NeMo team. See the HF model card for the full attribution and citation.
+
 ### Decoder prompt format
 
 Canary uses task tokens in the decoder prompt prefix to drive ASR vs translation:
