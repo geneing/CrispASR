@@ -161,8 +161,8 @@ Task tokens drive ASR vs AST and source/target language selection.
 ### 10. Testing (2-3 days)
 
 - [ ] `samples/jfk.wav` (English ASR sanity)
-- [ ] The three German clips that broke parakeet (`jazeschann`,
-      `merkel`, `sarma`) — must produce coherent German with `-sl de -tl de`
+- [ ] The German clips that broke parakeet (`jazeschann`, `sarma`) —
+      must produce coherent German with `-sl de -tl de`
 - [ ] Translation: same German clips with `-sl de -tl en`
 - [ ] Quantise to Q4_K, Q5_0, Q8_0 with `cohere-quantize`
 - [ ] Benchmark vs cohere and parakeet on the voxpopuli demo clip

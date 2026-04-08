@@ -151,7 +151,7 @@ Word timestamps via `-v`:
 
 Each boundary is one encoder frame = **80 ms**. Long audio + VAD + SRT/VTT/TXT all supported via `-vad-model`, `-osrt`, `-ovtt`, `-ot`, `-ml N`. See the [parakeet quick start above](#quick-start--parakeet-fastest-multilingual-asr) for the full CLI reference.
 
-The auto-language detect on parakeet works well for clean speech but can misfire on accented or noisy audio (we found it picked Russian on Angela Merkel's German speech, see [`test_german.md`](test_german.md)). For German production use, prefer canary with `-sl de`.
+The auto-language detect on parakeet works well for clean speech but can code-switch into English on German clips with technical vocabulary or proper nouns (see [`test_german.md`](test_german.md)). For German production use, prefer canary with `-sl de`.
 
 ### Parakeet — German fine-tunes
 

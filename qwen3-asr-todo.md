@@ -305,17 +305,12 @@ trickiest part of the C++ port.
         by ~10% because of MKL-tuned F32 GEMM kernels; we win on short
         audio (jfk: 10s vs 13s) where the per-call PyTorch warmup tax
         dominates.
-- [x] **German / multilingual smoke test** on six Wikimedia clips
-      spanning 0.7s to 207s. CrispASR correctly detects German on every
-      clip, transcribes single words and phrases perfectly, and handles
-      full Wikipedia article-length transcripts.
-      **Important correction**: the 58.7s `merkel.wav` from Wikimedia
-      Commons (`Angela_Merkel_voice.ogg`) is NOT German — it's actually
-      Russian. Verified independently with whisper-cli auto language
-      detect (`ru` p=0.85). All three speech-LLMs (Qwen3-ASR, parakeet,
-      whisper) agree it's Russian. The earlier `test_german.md` analysis
-      treating Russian output on this clip as a parakeet bug was
-      incorrect.
+- [x] **German / multilingual smoke test** on five Wikimedia clips
+      spanning 0.7s to 207s (single words, short phrases, two
+      Wikipedia article readings). CrispASR correctly detects German on
+      every clip, transcribes single words and phrases perfectly, and
+      handles full Wikipedia article-length transcripts including dates,
+      numbers, and ISO codes.
 - [x] **GGML_BLAS=ON build experiment** — negative finding documented.
       MKL via CMake's FindBLAS gives essentially no speedup (~3% on Q4_K,
       slightly slower on F16) because:

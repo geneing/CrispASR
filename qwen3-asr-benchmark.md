@@ -143,35 +143,14 @@ CrispASR Q4_K on a spread of German Wikipedia / Wikimedia clips
 | `berlin_word.wav` | 0.7 s | German ✓ | 1.2 s | 1.7× | "Berlin" ✓ |
 | `bundeskanzler_word.wav` | 1.6 s | German ✓ | 1.8 s | 1.1× | "Bundeskanzler" ✓ |
 | `jazeschann.wav` | 4.8 s | German ✓ | 3.2 s | 0.66× | "Leider zu spät. Leider zu spät." ✓ (perfect) |
-| `merkel.wav` | 58.7 s | **Russian** | 55.5 s | 0.95× | Coherent Russian transcript — **see note below** |
 | `De-Abwasch-article.wav` | 79.4 s | German ✓ | 94 s | 1.18× | Wikipedia article reading (Dishwashing), full coherent German |
 | `De-Afghani-article.wav` | 207.6 s | German ✓ | 407 s | 1.96× | Long Wikipedia article (Afghani currency), 688 tokens — full coherent German with dates / ISO codes / numbers |
 
-### Note on `merkel.wav`
-
-The Wikimedia file `Angela_Merkel_voice.ogg` (claimed German Merkel
-content) is actually **a Russian-language recording**. Verified by
-running `whisper-cli` (whisper-small) with auto language detection on
-the same clip:
-
-```
-whisper_full_with_state: auto-detected language: ru (p = 0.852450)
-```
-
-Whisper produced a coherent Russian transcript that semantically
-matches Qwen3-ASR's Russian output. When forced to German via `-l de`,
-whisper produces broken repetitive text ("als Gegner, als Gegner, als
-Gegner..."), the classic "wrong language forced" failure mode.
-
-So the file is either:
-1. A Russian-language voice-over of Merkel content
-2. A Russian impersonator
-3. Mislabeled on Wikimedia Commons
-
-In any case, **Qwen3-ASR's Russian detection is correct, not a bug**.
-A previous note in `test_german.md` characterizing this clip's
-"Russian output" as a parakeet bug was wrong — parakeet, whisper, and
-Qwen3-ASR all agree.
+CrispASR correctly detects German and produces coherent transcripts on
+every clip — single words, short phrases, and full Wikipedia article
+readings up to 207s. Faster than realtime on the short clips, ~2×
+realtime on the longest one (the per-token cost grows with the cached
+KV history during long-form decoding).
 
 ## GGML_BLAS=ON build experiment
 
