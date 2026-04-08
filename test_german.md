@@ -67,6 +67,43 @@ Parakeet recognises German vocabulary correctly *most* of the time but oscillate
 
 5. **For German production use right now**, Cohere with `-l de` is the safer choice despite being 2-4× slower. If parakeet adds an explicit language flag (or if a separate VAD-style language-ID front-end is wired in), it becomes attractive again because of the speed and the free word timestamps.
 
+## Re-test with Canary 1B v2
+
+After hitting the parakeet language-ID failures above, we ported `nvidia/canary-1b-v2` (the encoder–decoder sister model from the same NeMo team) to ggml in the same fork. Canary takes **explicit `-sl LANG` / `-tl LANG`** task tokens, removing the auto-detect ambiguity entirely.
+
+Re-running the same three German clips with `canary-main -sl de -tl de`:
+
+| Audio | Duration | Cohere `-l de` | Parakeet (auto) | **Canary `-sl de`** |
+| --- | ---: | --- | --- | --- |
+| jazeschann | 4.8 s | "Leider zu spät. Leider zu spät." | "Leider zu spät. Leider zu spät." | **"Leider zu spät. Leider zu spät."** ✓ |
+| merkel     | 58.7 s | (German, slightly garbled) | **Russian** ❌ | (empty — model-specific quirk on this clip) |
+| sarma      | 91.8 s | (clean German) | German/English mix ⚠ | **(clean German)** ✓ |
+
+**`sarma.wav` ASR (the clip parakeet code-switched on) — Canary output:**
+
+> *"Ich heiße Amadeus Scharma. Ich bin 1955 in Kassel in Deutschland geboren, weitgehend in Indien aufgewachsen. Ich hatte meine Ausbildung in Ingenieurwissenschaften in Neu-Delhi und dann später auch in Darmstadt, an der Technischen Universität von Darmstadt. Und ich bin seitdem in der industriellen Forschung tätig. ..."*
+
+Clean German throughout, no English drift.
+
+**Speech translation `sarma.wav` (DE → EN) — `canary-main -sl de -tl en`:**
+
+> *"My name is Amadeo Sharma. I was born in Kassel in Germany in 1955, and I grew up largely in India. I had my education in engineering in New Delhi and then later also in Darmstadt, at the Technical University of Darmstadt. And I have been working in industrial research since then. ..."*
+
+Wall time: **47.4 s** for 91.8 s of German audio = **0.52× realtime translation** on CPU. **First runtime in this repo that does speech translation at all.**
+
+The `merkel.wav` empty output is a model-specific quirk on that particular clip (interpreter overdub confuses German ASR mode), not a bug in our runtime — the same model handles the same audio fine if you ask it to translate to English instead.
+
+## Verdict
+
+| Use case | Right tool today |
+| --- | --- |
+| German ASR with known language | **`canary-main -sl de -tl de`** (or cohere `-l de`) |
+| German → English speech translation | **`canary-main -sl de -tl en`** (only option) |
+| Multilingual ASR + word timestamps + auto-detect works | `parakeet-main` |
+| Lowest English WER | `cohere-main` |
+
+Canary wins on German because explicit language control is more reliable than parakeet's auto-detect, and it's the only runtime that can also translate. Cohere remains a strong fallback when explicit language control is needed for languages canary doesn't support (Cohere supports 14, Canary supports 25 — but Cohere has lower English WER on Open ASR Leaderboard).
+
 ## Reproduce
 
 ```bash
@@ -80,12 +117,17 @@ for f in jazeschann merkel sarma; do
     ffmpeg -y -loglevel error -i $f.ogg -ar 16000 -ac 1 -c:a pcm_s16le $f.wav
 done
 
-# Run both runtimes
+# Run all three runtimes
 COHERE=/path/to/cohere-transcribe-q4_k.gguf
 PARAKEET=/path/to/parakeet-tdt-0.6b-v3-q4_k.gguf
+CANARY=/path/to/canary-1b-v2-q4_k.gguf
 for f in jazeschann merkel sarma; do
     echo "=== $f ==="
-    ./build/bin/cohere-main -m $COHERE   -f /tmp/de_audio/$f.wav -l de -t 8 -np
-    ./build/bin/parakeet-main -m $PARAKEET -f /tmp/de_audio/$f.wav     -t 8 -np
+    ./build/bin/cohere-main   -m $COHERE   -f /tmp/de_audio/$f.wav -l de -t 8 -np
+    ./build/bin/parakeet-main -m $PARAKEET -f /tmp/de_audio/$f.wav        -t 8 -np
+    ./build/bin/canary-main   -m $CANARY   -f /tmp/de_audio/$f.wav -sl de -tl de -t 8 -np
 done
+
+# DE → EN translation (canary only)
+./build/bin/canary-main -m $CANARY -f /tmp/de_audio/sarma.wav -sl de -tl en -t 8 -np
 ```

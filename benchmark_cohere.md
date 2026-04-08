@@ -24,19 +24,40 @@ Hardware: 8-thread CPU, single process. All paths produce the same transcript:
 | 10 | C++ `cohere-align` | ggml Q4_K + wav2vec2-xlsr-large | 80.9 s | — | 14.9× | 3.0 GB |
 | 11 | **C++ `parakeet-main`** | **ggml Q4_K (parakeet-tdt-0.6b-v3)** | **5.3 s** | — | **0.97×** | **0.96 GB** |
 | 12 | C++ `parakeet-main` | ggml F16 (parakeet-tdt-0.6b-v3) | 9.3 s | — | 1.71× | 2.5 GB |
+| 13 | **C++ `canary-main`** | **ggml Q4_K (canary-1b-v2)** | **6.5 s** | — | **1.19×** | **1.4 GB** |
+| 14 | C++ `canary-main` | ggml F16 (canary-1b-v2) | 13.0 s | — | 2.40× | 3.8 GB |
 
-## Parakeet vs Cohere
+## All three runtimes side-by-side
 
-| | Cohere Transcribe Q4_K | **Parakeet TDT Q4_K** |
-| --- | ---: | ---: |
-| Wall time (5.4 s clip) | 14.8 s | **5.3 s** (2.8× faster) |
-| Peak RSS                | 3.0 GB | **0.96 GB** (3× less) |
-| Model size on disk      | 1.2 GB | **467 MB** (2.6× smaller) |
-| Word timestamp accuracy | ~360 ms (cross-attn DTW) | **~80 ms** (TDT durations) |
-| Languages               | 14 | **25** (auto-detect) |
-| Open ASR WER (avg)      | **5.42 %** | 6.34 % |
+| | Cohere Q4_K | **Parakeet Q4_K** | **Canary Q4_K** |
+| --- | ---: | ---: | ---: |
+| Wall on 5.4 s clip      | 14.8 s | **5.3 s** | 6.5 s |
+| Realtime factor         | 2.72× | **0.97×** | 1.19× |
+| Peak RSS                | 3.0 GB | **0.96 GB** | 1.4 GB |
+| Disk size               | 1.2 GB | **467 MB** | 673 MB |
+| Languages               | 14 | 25 (auto-detect) | **25 (explicit)** |
+| **Speech translation**  | ❌ | ❌ | **✅ X→En, En→X** |
+| Word timestamp accuracy | ~360 ms (DTW) | **~80 ms** (TDT) | linear interp (DTW pending) |
+| Open ASR WER (avg)      | **5.42 %** | 6.34 % | 7.15 % |
+| Architecture            | Conformer + Transformer dec | FastConformer + TDT | FastConformer + Transformer dec |
+| Parameters              | 2 B | **600 M** | 978 M |
+| License                 | Apache 2.0 | CC-BY-4.0 | CC-BY-4.0 |
 
-Parakeet is faster, smaller, multilingual with auto-detect, and produces precise word timestamps with no second model. Cohere wins on raw English WER. For applications that need timestamps and multilingual support on CPU, parakeet is the right default; for the absolute lowest WER on English, cohere is.
+**Key takeaways:**
+
+- **Parakeet is the speed champion** at 0.97× realtime. Best when you need the fastest CPU multilingual ASR + word-level timestamps and the language is well-detected.
+- **Canary is the all-rounder.** Slightly slower than parakeet but adds explicit `-sl/-tl` language control AND speech translation. **The only translation runtime in this repo.** Best when the source language is known (or when you need translation).
+- **Cohere is the WER champion** for English. Slower (2.72× realtime), uses more memory, but the lowest English WER on Open ASR Leaderboard. Best when English transcript quality matters more than speed.
+- **All three pulled from CPU into the 1-3× realtime range** without GPU. The fork's mmap'd GGUF + native ggml encoder graph + manual decoder give very competitive CPU throughput.
+
+## Speech translation timing (canary)
+
+| Audio | Duration | Mode | Wall time | RTF |
+| --- | ---: | --- | ---: | ---: |
+| sarma.wav (German) | 91.8 s | DE → DE ASR | (clean German output) | — |
+| sarma.wav (German) | 91.8 s | **DE → EN translation** | **47.4 s** | **0.52×** |
+
+Canary translates 91.8 seconds of German speech into English in 47 seconds — **2× realtime translation on a CPU**. Output is fluent English: *"My name is Amadeo Sharma. I was born in Kassel in Germany in 1955, and I grew up largely in India..."*
 
 RTF = total wall / audio duration. "Inference-only" excludes model load (only tracked for ONNX, where `benchmark_onnx.py` reports it explicitly).
 "Total wall" is `time(1)` end-to-end where measured; for ONNX rows it is `load + encoder + decoder` reported by `benchmark_onnx.py` (8.5-23 s of that is one-shot model load).
