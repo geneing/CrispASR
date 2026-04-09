@@ -42,6 +42,7 @@ struct canary_params {
     int         vad_min_speech_ms  = 250;
     int         vad_min_silence_ms = 100;
     float       vad_speech_pad_ms  = 30.0f;
+    bool        use_flash          = false;
 };
 
 static void print_usage(const char * prog) {
@@ -62,6 +63,7 @@ static void print_usage(const char * prog) {
         "  -vad-model FNAME         Silero VAD model (recommended for long audio)\n"
         "  -vad-thold F             VAD threshold (default: 0.5)\n"
         "  -npnc, --no-punctuation  disable punctuation in the output\n"
+        "  --flash                  enable flash attention in encoder/decoder\n"
         "  -v,  --verbose           dump per-token decoder steps for debugging\n"
         "  -np, --no-prints         suppress informational output\n\n"
         "supported languages (25):\n"
@@ -90,6 +92,7 @@ static bool parse_args(int argc, char ** argv, canary_params & p) {
         else if (a == "-osrt" || a == "--output-srt")   p.output_srt    = true;
         else if (a == "-ovtt" || a == "--output-vtt")   p.output_vtt    = true;
         else if (a == "-npnc" || a == "--no-punctuation") p.punctuation = false;
+        else if (a == "--flash")                        p.use_flash     = true;
         else if (a == "-v"    || a == "--verbose")      p.verbosity     = 2;
         else if (a == "-np"   || a == "--no-prints")    p.verbosity     = 0;
         else {
@@ -226,6 +229,7 @@ int main(int argc, char ** argv) {
     canary_context_params cp = canary_context_default_params();
     cp.n_threads = p.n_threads;
     cp.verbosity = p.verbosity;
+    cp.use_flash = p.use_flash;
 
     if (p.verbosity >= 1)
         fprintf(stderr, "%s: loading '%s'\n", argv[0], p.model.c_str());

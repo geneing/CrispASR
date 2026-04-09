@@ -41,6 +41,7 @@ struct parakeet_params {
     int         vad_min_speech_ms  = 250;
     int         vad_min_silence_ms = 100;
     float       vad_speech_pad_ms  = 30.0f;
+    bool        use_flash          = false;
 };
 
 static void print_usage(const char * prog) {
@@ -58,6 +59,7 @@ static void print_usage(const char * prog) {
         "  -ck N                    long-audio chunk size in seconds when no VAD (default: 30)\n"
         "  -vad-model FNAME         Silero VAD model (recommended for long audio)\n"
         "  -vad-thold F             VAD threshold (default: 0.5)\n"
+        "  --flash                  enable flash attention in encoder\n"
         "  -v,  --verbose           dump per-word and per-token timestamps\n"
         "  -np, --no-prints         suppress all informational output\n\n"
         "input must be 16 kHz mono WAV (or any format common-whisper can decode).\n"
@@ -81,6 +83,7 @@ static bool parse_args(int argc, char ** argv, parakeet_params & p) {
         else if (a == "-ot"   || a == "--output-txt")  p.output_txt    = true;
         else if (a == "-osrt" || a == "--output-srt")  p.output_srt    = true;
         else if (a == "-ovtt" || a == "--output-vtt")  p.output_vtt    = true;
+        else if (a == "--flash")                        p.use_flash     = true;
         else if (a == "-v"    || a == "--verbose")     p.verbosity     = 2;
         else if (a == "-np"   || a == "--no-prints") { p.verbosity     = 0; p.no_prints = true; }
         else {
@@ -223,6 +226,7 @@ int main(int argc, char ** argv) {
     parakeet_context_params cp = parakeet_context_default_params();
     cp.n_threads = p.n_threads;
     cp.verbosity = p.verbosity;
+    cp.use_flash = p.use_flash;
 
     if (p.verbosity >= 1)
         fprintf(stderr, "%s: loading '%s'\n", argv[0], p.model.c_str());

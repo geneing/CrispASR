@@ -4,10 +4,14 @@
 // → splice into [INST] prompt → Llama 3 LLM with KV cache → greedy decode),
 // prints the transcript.
 //
+// Optional word-level timestamps via a CTC aligner second pass (-am flag).
+//
 // Usage:
 //   voxtral-main -m voxtral-mini-3b-2507.gguf -f audio.wav [-t 4] [-l en]
+//   voxtral-main -m model.gguf -f audio.wav -am aligner.gguf -timestamps
 
 #include "voxtral.h"
+#include "canary_ctc.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -50,79 +54,154 @@ static bool load_wav_16k_mono(const std::string & path, std::vector<float> & out
     return true;
 }
 
-int main(int argc, char ** argv) {
-    std::string model_path, audio_path, lang = "en";
-    int n_threads = 4, max_new = 512;
-    for (int i=1;i<argc;i++) {
-        std::string a=argv[i];
-        if (a=="-m"&&i+1<argc) model_path=argv[++i];
-        else if (a=="-f"&&i+1<argc) audio_path=argv[++i];
-        else if (a=="-t"&&i+1<argc) n_threads=std::atoi(argv[++i]);
-        else if (a=="-l"&&i+1<argc) lang=argv[++i];
-        else if (a=="-n"&&i+1<argc) max_new=std::atoi(argv[++i]);
-        else if (a=="-h"||a=="--help") {
-            fprintf(stderr,"usage: %s -m model.gguf -f audio.wav [-t N] [-l LANG] [-n MAX]\n",argv[0]); return 0;
+// ---------------------------------------------------------------------------
+// Word tokenizer for CTC alignment
+// ---------------------------------------------------------------------------
+static std::vector<std::string> tokenise_words(const std::string & text) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : text) {
+        if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+            if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+        } else {
+            cur += c;
         }
     }
-    if (model_path.empty()||audio_path.empty()) { fprintf(stderr,"missing -m or -f\n"); return 1; }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// SRT / VTT output helpers
+// ---------------------------------------------------------------------------
+static std::string format_time_srt(int64_t cs) {
+    int h = (int)(cs / 360000);
+    int m = (int)((cs % 360000) / 6000);
+    int s = (int)((cs % 6000) / 100);
+    int ms = (int)(cs % 100) * 10;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d,%03d", h, m, s, ms);
+    return buf;
+}
+
+static std::string format_time_vtt(int64_t cs) {
+    int h = (int)(cs / 360000);
+    int m = (int)((cs % 360000) / 6000);
+    int s = (int)((cs % 6000) / 100);
+    int ms = (int)(cs % 100) * 10;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d", h, m, s, ms);
+    return buf;
+}
+
+static void print_usage(const char * prog) {
+    fprintf(stderr,
+        "\nusage: %s -m MODEL.gguf -f AUDIO.wav [options]\n\n"
+        "options:\n"
+        "  -h, --help       show this help\n"
+        "  -m  FNAME        voxtral GGUF model (required)\n"
+        "  -f  FNAME        input audio, 16 kHz mono WAV (required)\n"
+        "  -t  N            threads (default: 4)\n"
+        "  -l  LANG         language hint: en de fr es it pt nl hi (default: en)\n"
+        "  -n  N            max new tokens (default: 512)\n"
+        "  -am FNAME        CTC aligner GGUF (canary-ctc-aligner) for timestamps\n"
+        "  -timestamps      enable word-level timestamps (requires -am)\n"
+        "  -osrt            output SRT subtitle file (to stdout)\n"
+        "  -ovtt            output VTT subtitle file (to stdout)\n"
+        "  -np              no prints (suppress stderr info)\n"
+        "\n", prog);
+}
+
+int main(int argc, char ** argv) {
+    std::string model_path, audio_path, aligner_path, lang = "en";
+    int n_threads = 4, max_new = 512;
+    bool timestamps = false;
+    bool out_srt = false;
+    bool out_vtt = false;
+    bool no_prints = false;
+
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if      (a == "-m"  && i+1 < argc) model_path   = argv[++i];
+        else if (a == "-f"  && i+1 < argc) audio_path   = argv[++i];
+        else if (a == "-t"  && i+1 < argc) n_threads    = std::atoi(argv[++i]);
+        else if (a == "-l"  && i+1 < argc) lang         = argv[++i];
+        else if (a == "-n"  && i+1 < argc) max_new      = std::atoi(argv[++i]);
+        else if (a == "-am" && i+1 < argc) aligner_path = argv[++i];
+        else if (a == "-timestamps")       timestamps    = true;
+        else if (a == "-osrt")           { timestamps = true; out_srt = true; }
+        else if (a == "-ovtt")           { timestamps = true; out_vtt = true; }
+        else if (a == "-np")               no_prints    = true;
+        else if (a == "-h" || a == "--help") { print_usage(argv[0]); return 0; }
+        else { fprintf(stderr, "unknown option '%s'\n", a.c_str()); print_usage(argv[0]); return 1; }
+    }
+    if (model_path.empty() || audio_path.empty()) {
+        fprintf(stderr, "missing -m or -f. -h for help.\n"); return 1;
+    }
+    if (timestamps && aligner_path.empty()) {
+        fprintf(stderr, "error: -timestamps / -osrt / -ovtt require -am ALIGNER.gguf\n");
+        return 1;
+    }
 
     std::vector<float> samples;
     if (!load_wav_16k_mono(audio_path, samples)) return 2;
-    fprintf(stderr, "audio: %.2f s (%zu samples)\n", samples.size()/16000.0, samples.size());
+    if (!no_prints)
+        fprintf(stderr, "audio: %.2f s (%zu samples)\n", samples.size()/16000.0, samples.size());
 
     auto cp = voxtral_context_default_params(); cp.n_threads = n_threads;
+    cp.verbosity = no_prints ? 0 : 1;
     auto * ctx = voxtral_init_from_file(model_path.c_str(), cp);
-    if (!ctx) { fprintf(stderr,"init failed\n"); return 3; }
+    if (!ctx) { fprintf(stderr, "init failed\n"); return 3; }
 
     auto t0 = std::chrono::steady_clock::now();
 
     // Mel
-    int n_mels=0, T_mel=0;
+    int n_mels = 0, T_mel = 0;
     float * mel = voxtral_compute_mel(ctx, samples.data(), (int)samples.size(), &n_mels, &T_mel);
-    if (!mel) { fprintf(stderr,"mel failed\n"); voxtral_free(ctx); return 4; }
+    if (!mel) { fprintf(stderr, "mel failed\n"); voxtral_free(ctx); return 4; }
     auto t_mel = std::chrono::steady_clock::now();
-    fprintf(stderr, "mel: %d × %d  (%.0f ms)\n", n_mels, T_mel,
-            std::chrono::duration<double,std::milli>(t_mel-t0).count());
+    if (!no_prints)
+        fprintf(stderr, "mel: %d × %d  (%.0f ms)\n", n_mels, T_mel,
+                std::chrono::duration<double, std::milli>(t_mel - t0).count());
 
     // Encoder
-    int N_enc=0, pdim=0;
+    int N_enc = 0, pdim = 0;
     float * audio_embeds = voxtral_run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
     free(mel);
-    if (!audio_embeds) { fprintf(stderr,"encoder failed\n"); voxtral_free(ctx); return 5; }
+    if (!audio_embeds) { fprintf(stderr, "encoder failed\n"); voxtral_free(ctx); return 5; }
     auto t_enc = std::chrono::steady_clock::now();
-    fprintf(stderr, "encoder: %d frames × %d dim  (%.0f ms)\n", N_enc, pdim,
-            std::chrono::duration<double,std::milli>(t_enc-t_mel).count());
+    if (!no_prints)
+        fprintf(stderr, "encoder: %d frames × %d dim  (%.0f ms)\n", N_enc, pdim,
+                std::chrono::duration<double, std::milli>(t_enc - t_mel).count());
 
     // Build prompt: <s> [INST] [BEGIN_AUDIO] <audio_pad>×N [/INST] lang:LANG [TRANSCRIBE]
-    // Token IDs from the Tekken tokenizer (hardcoded for the transcription template):
-    //   <s>=1  [INST]=3  [BEGIN_AUDIO]=25  audio_pad=24  [/INST]=4
-    //   "lang"=9909  ":"=1058  "en"=1262  [TRANSCRIBE]=34
-    // For other languages, swap the language token.
     std::vector<int32_t> ids;
     ids.push_back(1); ids.push_back(3); ids.push_back(25);
-    for (int i=0;i<N_enc;i++) ids.push_back(24);
+    for (int i = 0; i < N_enc; i++) ids.push_back(24);
     ids.push_back(4); ids.push_back(9909); ids.push_back(1058);
-    // Language token — hardcoded for common languages
-    if      (lang=="en") ids.push_back(1262);
-    else if (lang=="de") ids.push_back(1005);
-    else if (lang=="fr") ids.push_back(3288);
-    else if (lang=="es") ids.push_back(1050);
-    else if (lang=="it") ids.push_back(2285);
-    else if (lang=="pt") ids.push_back(10804);
-    else if (lang=="nl") ids.push_back(5825);
-    else if (lang=="hi") ids.push_back(4979);
-    else                  ids.push_back(1262); // fallback to en
+    if      (lang == "en") ids.push_back(1262);
+    else if (lang == "de") ids.push_back(1005);
+    else if (lang == "fr") ids.push_back(3288);
+    else if (lang == "es") ids.push_back(1050);
+    else if (lang == "it") ids.push_back(2285);
+    else if (lang == "pt") ids.push_back(10804);
+    else if (lang == "nl") ids.push_back(5825);
+    else if (lang == "hi") ids.push_back(4979);
+    else                    ids.push_back(1262);
     ids.push_back(34);
     int T_prompt = (int)ids.size();
-    fprintf(stderr, "prompt: %d tokens (incl. %d audio_pad)\n", T_prompt, N_enc);
+    if (!no_prints)
+        fprintf(stderr, "prompt: %d tokens (incl. %d audio_pad)\n", T_prompt, N_enc);
 
     // Embed + splice
     float * text_embeds = voxtral_embed_tokens(ctx, ids.data(), T_prompt);
     if (!text_embeds) { free(audio_embeds); voxtral_free(ctx); return 6; }
     int spliced = 0;
-    for (int i=0;i<T_prompt&&spliced<N_enc;i++) {
-        if (ids[i]==24) {
-            std::memcpy(text_embeds+(size_t)i*pdim, audio_embeds+(size_t)spliced*pdim, pdim*sizeof(float));
+    for (int i = 0; i < T_prompt && spliced < N_enc; i++) {
+        if (ids[i] == 24) {
+            std::memcpy(text_embeds + (size_t)i * pdim,
+                        audio_embeds + (size_t)spliced * pdim,
+                        pdim * sizeof(float));
             spliced++;
         }
     }
@@ -132,15 +211,16 @@ int main(int argc, char ** argv) {
     if (!voxtral_kv_init(ctx, 4096)) { free(text_embeds); voxtral_free(ctx); return 7; }
     voxtral_kv_reset(ctx);
     auto t_pf0 = std::chrono::steady_clock::now();
-    int n_t=0, vocab=0;
+    int n_t = 0, vocab = 0;
     float * logits = voxtral_run_llm_kv(ctx, text_embeds, T_prompt, 0, &n_t, &vocab);
     auto t_pf1 = std::chrono::steady_clock::now();
     if (!logits) { free(text_embeds); voxtral_free(ctx); return 8; }
     free(text_embeds);
-    fprintf(stderr, "prefill: %.0f ms\n",
-            std::chrono::duration<double,std::milli>(t_pf1-t_pf0).count());
+    if (!no_prints)
+        fprintf(stderr, "prefill: %.0f ms\n",
+                std::chrono::duration<double, std::milli>(t_pf1 - t_pf0).count());
 
-    int next = 0; { float mx=-1e30f; for(int k=0;k<vocab;k++) if(logits[k]>mx){mx=logits[k];next=k;} }
+    int next = 0; { float mx = -1e30f; for (int k = 0; k < vocab; k++) if (logits[k] > mx) { mx = logits[k]; next = k; } }
     free(logits);
 
     // Greedy decode
@@ -155,14 +235,15 @@ int main(int argc, char ** argv) {
         float * lg = voxtral_run_llm_kv(ctx, tail, 1, n_past, nullptr, nullptr);
         free(tail); if (!lg) break;
         n_past++;
-        int nx=0; float mx=-1e30f;
-        for(int k=0;k<vocab;k++) if(lg[k]>mx){mx=lg[k];nx=k;}
+        int nx = 0; float mx = -1e30f;
+        for (int k = 0; k < vocab; k++) if (lg[k] > mx) { mx = lg[k]; nx = k; }
         free(lg); gen.push_back(nx);
     }
     auto t_dec1 = std::chrono::steady_clock::now();
-    double dec_ms = std::chrono::duration<double,std::milli>(t_dec1-t_dec0).count();
-    fprintf(stderr, "decode: %zu tokens in %.0f ms (%.0f ms/token)\n",
-            gen.size()-1, dec_ms, dec_ms/std::max((size_t)1,gen.size()-1));
+    double dec_ms = std::chrono::duration<double, std::milli>(t_dec1 - t_dec0).count();
+    if (!no_prints)
+        fprintf(stderr, "decode: %zu tokens in %.0f ms (%.0f ms/token)\n",
+                gen.size() - 1, dec_ms, dec_ms / std::max((size_t)1, gen.size() - 1));
 
     // Decode tokens to text
     std::string transcript;
@@ -172,10 +253,80 @@ int main(int argc, char ** argv) {
         const uint8_t * bytes = voxtral_token_text(ctx, id, &len);
         if (bytes && len > 0) transcript.append((const char*)bytes, len);
     }
+
     auto t_total = std::chrono::steady_clock::now();
-    fprintf(stderr, "total: %.0f ms\n",
-            std::chrono::duration<double,std::milli>(t_total-t0).count());
-    printf("%s\n", transcript.c_str());
+    if (!no_prints)
+        fprintf(stderr, "total: %.0f ms\n",
+                std::chrono::duration<double, std::milli>(t_total - t0).count());
+
+    // ----- Timestamps via CTC aligner second pass -----
+    if (timestamps) {
+        auto t_align0 = std::chrono::steady_clock::now();
+
+        canary_ctc_context_params acp = canary_ctc_context_default_params();
+        acp.n_threads = n_threads;
+        canary_ctc_context * actx = canary_ctc_init_from_file(aligner_path.c_str(), acp);
+        if (!actx) { fprintf(stderr, "failed to load aligner model\n"); voxtral_free(ctx); return 9; }
+
+        float * ctc_logits = nullptr;
+        int T_ctc = 0, V_ctc = 0;
+        int rc = canary_ctc_compute_logits(actx, samples.data(), (int)samples.size(),
+                                           &ctc_logits, &T_ctc, &V_ctc);
+        if (rc != 0) {
+            fprintf(stderr, "CTC logits failed (rc=%d)\n", rc);
+            canary_ctc_free(actx);
+            voxtral_free(ctx);
+            return 10;
+        }
+
+        auto words = tokenise_words(transcript);
+        if (words.empty()) {
+            if (!no_prints) fprintf(stderr, "no words to align\n");
+            printf("%s\n", transcript.c_str());
+        } else {
+            std::vector<canary_ctc_word> out_words(words.size());
+            std::vector<const char *> word_ptrs(words.size());
+            for (size_t i = 0; i < words.size(); i++) word_ptrs[i] = words[i].c_str();
+
+            rc = canary_ctc_align_words(actx, ctc_logits, T_ctc, V_ctc,
+                                        word_ptrs.data(), (int)words.size(),
+                                        out_words.data());
+            auto t_align1 = std::chrono::steady_clock::now();
+            if (!no_prints)
+                fprintf(stderr, "align: %zu words in %.0f ms\n", words.size(),
+                        std::chrono::duration<double, std::milli>(t_align1 - t_align0).count());
+
+            if (rc != 0) {
+                fprintf(stderr, "alignment failed (rc=%d), printing plain transcript\n", rc);
+                printf("%s\n", transcript.c_str());
+            } else if (out_srt) {
+                for (size_t i = 0; i < out_words.size(); i++) {
+                    printf("%zu\n%s --> %s\n%s\n\n",
+                           i + 1,
+                           format_time_srt(out_words[i].t0).c_str(),
+                           format_time_srt(out_words[i].t1).c_str(),
+                           out_words[i].text);
+                }
+            } else if (out_vtt) {
+                printf("WEBVTT\n\n");
+                for (size_t i = 0; i < out_words.size(); i++) {
+                    printf("%s --> %s\n%s\n\n",
+                           format_time_vtt(out_words[i].t0).c_str(),
+                           format_time_vtt(out_words[i].t1).c_str(),
+                           out_words[i].text);
+                }
+            } else {
+                for (const auto & w : out_words) {
+                    printf("[%8.2fs → %8.2fs]  %s\n",
+                           w.t0 / 100.0, w.t1 / 100.0, w.text);
+                }
+            }
+        }
+        free(ctc_logits);
+        canary_ctc_free(actx);
+    } else {
+        printf("%s\n", transcript.c_str());
+    }
 
     voxtral_free(ctx);
     return 0;

@@ -4,10 +4,14 @@
 // → splice into ChatML prompt → Qwen3 LLM forward with KV cache → greedy
 // decode), and prints the transcript.
 //
+// Optional word-level timestamps via a CTC aligner second pass (-am flag).
+//
 // Usage:
 //   qwen3-asr-main -m qwen3-asr-0.6b.gguf -f audio.wav [-t 4]
+//   qwen3-asr-main -m model.gguf -f audio.wav -am aligner.gguf -timestamps
 
 #include "qwen3_asr.h"
+#include "canary_ctc.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -90,8 +94,6 @@ static bool load_wav_16k_mono(const std::string & path, std::vector<float> & out
 // makes it trivial to add an explicit language hint or system prompt.
 // ---------------------------------------------------------------------------
 static std::vector<int32_t> build_prompt_ids(qwen3_asr_context * ctx, int n_audio_pad) {
-    // Build the chat-template string with N copies of <|audio_pad|> in the
-    // user message. The BPE tokenizer recognises all the special tokens.
     std::string text =
         "<|im_start|>system\n<|im_end|>\n"
         "<|im_start|>user\n"
@@ -113,20 +115,13 @@ static std::vector<int32_t> build_prompt_ids(qwen3_asr_context * ctx, int n_audi
 }
 
 // ---------------------------------------------------------------------------
-// GPT-2 byte-level decoder: maps a vocab string (made of unicode chars from
-// the byte-encoder mapping) back to a UTF-8 byte sequence.
-// The byte_encoder maps bytes 0-255 → safe unicode codepoints; we invert it.
+// GPT-2 byte-level decoder
 // ---------------------------------------------------------------------------
 static std::vector<int> & byte_decoder() {
-    static std::vector<int> dec(0x200, -1);  // unicode codepoint → byte
+    static std::vector<int> dec(0x200, -1);
     static bool initialized = false;
     if (initialized) return dec;
-    // Same construction as GPT-2 / Qwen2 tokenizers:
-    //   bs = list of "printable" bytes (33..126, 161..172, 174..255)
-    //   then for each byte n in 0..255 not yet in bs, append to bs and assign
-    //   unicode codepoint 256+offset
-    std::vector<int> bs;
-    std::vector<int> cs;
+    std::vector<int> bs, cs;
     for (int b = 0x21; b <= 0x7e; b++) { bs.push_back(b); cs.push_back(b); }
     for (int b = 0xa1; b <= 0xac; b++) { bs.push_back(b); cs.push_back(b); }
     for (int b = 0xae; b <= 0xff; b++) { bs.push_back(b); cs.push_back(b); }
@@ -143,19 +138,17 @@ static std::vector<int> & byte_decoder() {
     return dec;
 }
 
-// Decode UTF-8 string into codepoints, inverse-map each via byte_decoder, return raw bytes.
 static std::string decode_token(const std::string & s) {
     auto & dec = byte_decoder();
     std::string out;
     size_t i = 0;
     while (i < s.size()) {
         unsigned char c = s[i];
-        int cp = 0;
-        int len = 1;
-        if (c < 0x80) { cp = c; len = 1; }
-        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+        int cp = 0, len = 1;
+        if      (c < 0x80)            { cp = c;          len = 1; }
+        else if ((c & 0xE0) == 0xC0)  { cp = c & 0x1F;   len = 2; }
+        else if ((c & 0xF0) == 0xE0)  { cp = c & 0x0F;   len = 3; }
+        else if ((c & 0xF8) == 0xF0)  { cp = c & 0x07;   len = 4; }
         else { i++; continue; }
         if (i + len > s.size()) break;
         for (int k = 1; k < len; k++) cp = (cp << 6) | (s[i + k] & 0x3F);
@@ -167,35 +160,104 @@ static std::string decode_token(const std::string & s) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Word tokenizer for CTC alignment
+// ---------------------------------------------------------------------------
+static std::vector<std::string> tokenise_words(const std::string & text) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : text) {
+        if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+            if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// SRT / VTT output helpers
+// ---------------------------------------------------------------------------
+static std::string format_time_srt(int64_t cs) {
+    int h = (int)(cs / 360000);
+    int m = (int)((cs % 360000) / 6000);
+    int s = (int)((cs % 6000) / 100);
+    int ms = (int)(cs % 100) * 10;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d,%03d", h, m, s, ms);
+    return buf;
+}
+
+static std::string format_time_vtt(int64_t cs) {
+    int h = (int)(cs / 360000);
+    int m = (int)((cs % 360000) / 6000);
+    int s = (int)((cs % 6000) / 100);
+    int ms = (int)(cs % 100) * 10;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d", h, m, s, ms);
+    return buf;
+}
+
+static void print_usage(const char * prog) {
+    fprintf(stderr,
+        "\nusage: %s -m MODEL.gguf -f AUDIO.wav [options]\n\n"
+        "options:\n"
+        "  -h, --help       show this help\n"
+        "  -m  FNAME        qwen3-asr GGUF model (required)\n"
+        "  -f  FNAME        input audio, 16 kHz mono WAV (required)\n"
+        "  -t  N            threads (default: 4)\n"
+        "  -n  N            max new tokens (default: 256)\n"
+        "  -am FNAME        CTC aligner GGUF (canary-ctc-aligner) for timestamps\n"
+        "  -timestamps      enable word-level timestamps (requires -am)\n"
+        "  -osrt            output SRT subtitle file (to stdout)\n"
+        "  -ovtt            output VTT subtitle file (to stdout)\n"
+        "  -np              no prints (suppress stderr info)\n"
+        "\n", prog);
+}
+
 int main(int argc, char ** argv) {
-    std::string model_path, audio_path;
+    std::string model_path, audio_path, aligner_path;
     int n_threads = 4;
     int max_new = 256;
+    bool timestamps = false;
+    bool out_srt = false;
+    bool out_vtt = false;
+    bool no_prints = false;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if      (a == "-m" && i+1 < argc) model_path = argv[++i];
-        else if (a == "-f" && i+1 < argc) audio_path = argv[++i];
-        else if (a == "-t" && i+1 < argc) n_threads  = std::atoi(argv[++i]);
-        else if (a == "-n" && i+1 < argc) max_new    = std::atoi(argv[++i]);
-        else if (a == "-h" || a == "--help") {
-            fprintf(stderr, "usage: %s -m model.gguf -f audio.wav [-t N] [-n MAX_NEW]\n", argv[0]);
-            return 0;
-        }
+        if      (a == "-m"  && i+1 < argc) model_path   = argv[++i];
+        else if (a == "-f"  && i+1 < argc) audio_path   = argv[++i];
+        else if (a == "-t"  && i+1 < argc) n_threads    = std::atoi(argv[++i]);
+        else if (a == "-n"  && i+1 < argc) max_new      = std::atoi(argv[++i]);
+        else if (a == "-am" && i+1 < argc) aligner_path = argv[++i];
+        else if (a == "-timestamps")       timestamps    = true;
+        else if (a == "-osrt")           { timestamps = true; out_srt = true; }
+        else if (a == "-ovtt")           { timestamps = true; out_vtt = true; }
+        else if (a == "-np")               no_prints    = true;
+        else if (a == "-h" || a == "--help") { print_usage(argv[0]); return 0; }
+        else { fprintf(stderr, "unknown option '%s'\n", a.c_str()); print_usage(argv[0]); return 1; }
     }
     if (model_path.empty() || audio_path.empty()) {
         fprintf(stderr, "missing -m or -f. -h for help.\n"); return 1;
+    }
+    if (timestamps && aligner_path.empty()) {
+        fprintf(stderr, "error: -timestamps / -osrt / -ovtt require -am ALIGNER.gguf\n");
+        return 1;
     }
 
     // ----- Load WAV -----
     std::vector<float> samples;
     if (!load_wav_16k_mono(audio_path, samples)) return 2;
-    fprintf(stderr, "audio: %.2f s (%zu samples)\n", samples.size() / 16000.0, samples.size());
+    if (!no_prints)
+        fprintf(stderr, "audio: %.2f s (%zu samples)\n", samples.size() / 16000.0, samples.size());
 
     // ----- Init context -----
     auto cp = qwen3_asr_context_default_params();
     cp.n_threads = n_threads;
-    cp.verbosity = 1;
+    cp.verbosity = no_prints ? 0 : 1;
     auto * ctx = qwen3_asr_init_from_file(model_path.c_str(), cp);
     if (!ctx) { fprintf(stderr, "init failed\n"); return 3; }
 
@@ -207,8 +269,9 @@ int main(int argc, char ** argv) {
                                         &n_mels, &T_mel);
     if (!mel) { fprintf(stderr, "mel failed\n"); qwen3_asr_free(ctx); return 4; }
     auto t_mel = std::chrono::steady_clock::now();
-    fprintf(stderr, "mel: %d × %d  (%.0f ms)\n", n_mels, T_mel,
-            std::chrono::duration<double, std::milli>(t_mel - t0).count());
+    if (!no_prints)
+        fprintf(stderr, "mel: %d × %d  (%.0f ms)\n", n_mels, T_mel,
+                std::chrono::duration<double, std::milli>(t_mel - t0).count());
 
     // ----- Encoder -----
     int N_enc = 0, pdim = 0;
@@ -216,18 +279,19 @@ int main(int argc, char ** argv) {
     free(mel);
     if (!audio_embeds) { fprintf(stderr, "encoder failed\n"); qwen3_asr_free(ctx); return 5; }
     auto t_enc = std::chrono::steady_clock::now();
-    fprintf(stderr, "encoder: %d frames × %d dim  (%.0f ms)\n", N_enc, pdim,
-            std::chrono::duration<double, std::milli>(t_enc - t_mel).count());
+    if (!no_prints)
+        fprintf(stderr, "encoder: %d frames × %d dim  (%.0f ms)\n", N_enc, pdim,
+                std::chrono::duration<double, std::milli>(t_enc - t_mel).count());
 
     // ----- Build prompt + embed text + splice audio -----
     auto ids = build_prompt_ids(ctx, N_enc);
     int T_prompt = (int)ids.size();
-    fprintf(stderr, "prompt: %d tokens (incl. %d audio_pad)\n", T_prompt, N_enc);
+    if (!no_prints)
+        fprintf(stderr, "prompt: %d tokens (incl. %d audio_pad)\n", T_prompt, N_enc);
 
     float * text_embeds = qwen3_asr_embed_tokens(ctx, ids.data(), T_prompt);
     if (!text_embeds) { fprintf(stderr, "embed failed\n"); free(audio_embeds); qwen3_asr_free(ctx); return 6; }
 
-    // Find audio_pad positions and splice
     const int AUDIO_PAD = 151676;
     int spliced = 0;
     for (int i = 0; i < T_prompt && spliced < N_enc; i++) {
@@ -239,10 +303,11 @@ int main(int argc, char ** argv) {
         }
     }
     free(audio_embeds);
-    fprintf(stderr, "spliced %d audio frames\n", spliced);
+    if (!no_prints)
+        fprintf(stderr, "spliced %d audio frames\n", spliced);
 
     // ----- KV cache + prefill -----
-    if (!qwen3_asr_kv_init(ctx, /*max_ctx*/ 4096)) {
+    if (!qwen3_asr_kv_init(ctx, 4096)) {
         fprintf(stderr, "kv init failed\n"); free(text_embeds); qwen3_asr_free(ctx); return 7;
     }
     qwen3_asr_kv_reset(ctx);
@@ -252,11 +317,11 @@ int main(int argc, char ** argv) {
     float * logits = qwen3_asr_run_llm_kv(ctx, text_embeds, T_prompt, 0, &n_t, &vocab);
     auto t_pf1 = std::chrono::steady_clock::now();
     if (!logits) { fprintf(stderr, "prefill failed\n"); free(text_embeds); qwen3_asr_free(ctx); return 8; }
-    fprintf(stderr, "prefill: %.0f ms\n",
-            std::chrono::duration<double, std::milli>(t_pf1 - t_pf0).count());
+    if (!no_prints)
+        fprintf(stderr, "prefill: %.0f ms\n",
+                std::chrono::duration<double, std::milli>(t_pf1 - t_pf0).count());
     free(text_embeds);
 
-    // First token from prefill
     int next = 0; float mx = -1e30f;
     for (int k = 0; k < vocab; k++) if (logits[k] > mx) { mx = logits[k]; next = k; }
     free(logits);
@@ -284,15 +349,11 @@ int main(int argc, char ** argv) {
     }
     auto t_dec1 = std::chrono::steady_clock::now();
     double dec_ms = std::chrono::duration<double, std::milli>(t_dec1 - t_dec0).count();
-    fprintf(stderr, "decode: %zu tokens in %.0f ms (%.0f ms/token)\n",
-            gen.size() - 1, dec_ms, dec_ms / std::max((size_t)1, gen.size() - 1));
+    if (!no_prints)
+        fprintf(stderr, "decode: %zu tokens in %.0f ms (%.0f ms/token)\n",
+                gen.size() - 1, dec_ms, dec_ms / std::max((size_t)1, gen.size() - 1));
 
     // ----- Decode token IDs to text -----
-    // Qwen3-ASR emits a language-tag prefix before the transcript:
-    //   "language" + " <LangName>" + <special-token, often 151704>
-    // followed by the actual text. Capture the language name and strip the
-    // prefix; also drop any "<|...|>" special-token names and "[PADxxx]"
-    // placeholders for tokens beyond vocab.json's 151643 normal entries.
     std::string transcript;
     std::string detected_language;
     bool capture_language = false;
@@ -300,11 +361,11 @@ int main(int argc, char ** argv) {
         if (id == EOS) break;
         std::string raw = qwen3_asr_token_text(ctx, id);
         if (raw.size() >= 2 && raw[0] == '<' && raw[1] == '|') continue;
+        if (raw.size() >= 2 && raw[0] == '<' && raw.back() == '>') continue;  // <asr_text> etc.
         if (raw.size() >= 5 && raw[0] == '[' && raw[1] == 'P' && raw[2] == 'A' && raw[3] == 'D') continue;
         std::string txt = decode_token(raw);
         if (txt == "language") { capture_language = true; continue; }
         if (capture_language) {
-            // Strip leading whitespace from the language name
             size_t s = 0;
             while (s < txt.size() && (txt[s] == ' ' || txt[s] == '\t')) s++;
             detected_language = txt.substr(s);
@@ -313,20 +374,89 @@ int main(int argc, char ** argv) {
         }
         transcript += txt;
     }
-    // Trim leading whitespace from transcript
+    // Trim leading whitespace
     size_t start = 0;
     while (start < transcript.size() && (transcript[start] == ' ' || transcript[start] == '\t')) start++;
     transcript = transcript.substr(start);
 
-    if (!detected_language.empty()) {
+    if (!no_prints && !detected_language.empty()) {
         fprintf(stderr, "language: %s\n", detected_language.c_str());
     }
 
     auto t_total = std::chrono::steady_clock::now();
-    fprintf(stderr, "total: %.0f ms\n",
-            std::chrono::duration<double, std::milli>(t_total - t0).count());
+    if (!no_prints)
+        fprintf(stderr, "total: %.0f ms\n",
+                std::chrono::duration<double, std::milli>(t_total - t0).count());
 
-    fprintf(stdout, "%s\n", transcript.c_str());
+    // ----- Timestamps via CTC aligner second pass -----
+    if (timestamps) {
+        auto t_align0 = std::chrono::steady_clock::now();
+
+        canary_ctc_context_params acp = canary_ctc_context_default_params();
+        acp.n_threads = n_threads;
+        canary_ctc_context * actx = canary_ctc_init_from_file(aligner_path.c_str(), acp);
+        if (!actx) { fprintf(stderr, "failed to load aligner model\n"); qwen3_asr_free(ctx); return 9; }
+
+        float * ctc_logits = nullptr;
+        int T_ctc = 0, V_ctc = 0;
+        int rc = canary_ctc_compute_logits(actx, samples.data(), (int)samples.size(),
+                                           &ctc_logits, &T_ctc, &V_ctc);
+        if (rc != 0) {
+            fprintf(stderr, "CTC logits failed (rc=%d)\n", rc);
+            canary_ctc_free(actx);
+            qwen3_asr_free(ctx);
+            return 10;
+        }
+
+        auto words = tokenise_words(transcript);
+        if (words.empty()) {
+            if (!no_prints) fprintf(stderr, "no words to align\n");
+            printf("%s\n", transcript.c_str());
+        } else {
+            std::vector<canary_ctc_word> out_words(words.size());
+            std::vector<const char *> word_ptrs(words.size());
+            for (size_t i = 0; i < words.size(); i++) word_ptrs[i] = words[i].c_str();
+
+            rc = canary_ctc_align_words(actx, ctc_logits, T_ctc, V_ctc,
+                                        word_ptrs.data(), (int)words.size(),
+                                        out_words.data());
+            auto t_align1 = std::chrono::steady_clock::now();
+            if (!no_prints)
+                fprintf(stderr, "align: %zu words in %.0f ms\n", words.size(),
+                        std::chrono::duration<double, std::milli>(t_align1 - t_align0).count());
+
+            if (rc != 0) {
+                fprintf(stderr, "alignment failed (rc=%d), printing plain transcript\n", rc);
+                printf("%s\n", transcript.c_str());
+            } else if (out_srt) {
+                for (size_t i = 0; i < out_words.size(); i++) {
+                    printf("%zu\n%s --> %s\n%s\n\n",
+                           i + 1,
+                           format_time_srt(out_words[i].t0).c_str(),
+                           format_time_srt(out_words[i].t1).c_str(),
+                           out_words[i].text);
+                }
+            } else if (out_vtt) {
+                printf("WEBVTT\n\n");
+                for (size_t i = 0; i < out_words.size(); i++) {
+                    printf("%s --> %s\n%s\n\n",
+                           format_time_vtt(out_words[i].t0).c_str(),
+                           format_time_vtt(out_words[i].t1).c_str(),
+                           out_words[i].text);
+                }
+            } else {
+                for (const auto & w : out_words) {
+                    printf("[%8.2fs → %8.2fs]  %s\n",
+                           w.t0 / 100.0, w.t1 / 100.0, w.text);
+                }
+            }
+        }
+        free(ctc_logits);
+        canary_ctc_free(actx);
+    } else {
+        printf("%s\n", transcript.c_str());
+    }
+
     qwen3_asr_free(ctx);
     return 0;
 }
