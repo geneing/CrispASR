@@ -284,9 +284,11 @@ def convert(input_dir: Path, out_path: Path) -> None:
     # Vocab as a single bytes blob (length-prefixed entries)
     vocab_blob = serialize_tekken_vocab(tekken)
     print(f"  vocab blob: {len(vocab_blob)/1024:.1f} KB")
-    # gguf-py doesn't have a direct "raw bytes" type, so use uint8 array
-    writer.add_array("tokenizer.tekken.vocab",
-                     np.frombuffer(vocab_blob, dtype=np.uint8).tolist())
+    # Store the vocab blob as a 1D F32 tensor (one float per byte). Wasteful
+    # in storage (~5.3 MB for 1.3 MB of raw bytes) but the GGUF tensor path
+    # handles dtype correctly — the KV array path loses uint8 to int32.
+    vocab_f32 = np.frombuffer(vocab_blob, dtype=np.uint8).astype(np.float32)
+    writer.add_tensor("tokenizer.tekken.vocab_tensor", vocab_f32)
     writer.add_uint32("tokenizer.tekken.n_specials", len(specials))
     writer.add_uint32("tokenizer.tekken.n_vocab",    n_vocab)
 

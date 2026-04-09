@@ -168,6 +168,14 @@ struct voxtral_context {
 
     std::vector<uint8_t> compute_meta;
 
+    // KV cache (F16, same pattern as qwen3_asr)
+    ggml_context        * kv_ctx = nullptr;
+    ggml_backend_buffer_t kv_buf = nullptr;
+    ggml_tensor         * kv_k   = nullptr;
+    ggml_tensor         * kv_v   = nullptr;
+    int kv_max_ctx = 0;
+    int kv_n_used  = 0;
+
     int n_threads = 4;
 };
 
@@ -270,33 +278,9 @@ static bool voxtral_load_model(voxtral_model & model,
         vocab.n_specials = kv_u32(gctx, "tokenizer.tekken.n_specials", 1000);
         vocab.n_vocab    = kv_u32(gctx, "tokenizer.tekken.n_vocab",    150000);
 
-        // vocab blob (uint8 array, length-prefixed entries: u16 len + bytes per rank)
-        int kv = gguf_find_key(gctx, "tokenizer.tekken.vocab");
-        if (kv >= 0) {
-            int n = gguf_get_arr_n(gctx, kv);
-            vocab.tekken_vocab_blob.resize(n);
-            // gguf-py stored a uint8 array; in C++ we read each entry as a u8.
-            // The fastest path through the GGUF API is to ask for a raw array
-            // pointer, but the safe API is one-element-at-a-time. Use the
-            // typed accessor.
-            const uint8_t * data = (const uint8_t *)gguf_get_arr_data(gctx, kv);
-            std::memcpy(vocab.tekken_vocab_blob.data(), data, n);
-
-            // Build per-rank offset/length tables by walking the length prefixes
-            vocab.rank_offset.reserve(vocab.n_vocab);
-            vocab.rank_length.reserve(vocab.n_vocab);
-            size_t pos = 0;
-            for (int r = 0; r < vocab.n_vocab; r++) {
-                if (pos + 2 > (size_t)n) break;
-                uint16_t len;
-                std::memcpy(&len, vocab.tekken_vocab_blob.data() + pos, 2);
-                pos += 2;
-                if (pos + len > (size_t)n) break;
-                vocab.rank_offset.push_back((uint32_t)pos);
-                vocab.rank_length.push_back(len);
-                pos += len;
-            }
-        }
+        // The vocab blob is stored as a 1D F32 tensor (one float per byte)
+        // because the GGUF KV array path loses uint8 precision. We'll read
+        // it from the tensor data in pass 2 after the weights are loaded.
 
         gguf_free(gctx);
         ggml_free(meta_ctx);
@@ -375,6 +359,34 @@ static bool voxtral_load_model(voxtral_model & model,
         b.ffn_up_b    = get("ffn_up.bias");
         b.ffn_down_w  = get("ffn_down.weight");
         b.ffn_down_b  = get("ffn_down.bias");
+    }
+
+    // ---- Reconstruct the Tekken vocab blob from the F32 tensor ----
+    {
+        ggml_tensor * vt = try_get(model, "tokenizer.tekken.vocab_tensor");
+        if (vt) {
+            size_t n = (size_t)vt->ne[0];
+            std::vector<float> f32(n);
+            ggml_backend_tensor_get(vt, f32.data(), 0, n * sizeof(float));
+            vocab.tekken_vocab_blob.resize(n);
+            for (size_t i = 0; i < n; i++)
+                vocab.tekken_vocab_blob[i] = (uint8_t)(int)f32[i];
+
+            // Build per-rank offset/length tables by walking length prefixes
+            vocab.rank_offset.reserve(vocab.n_vocab);
+            vocab.rank_length.reserve(vocab.n_vocab);
+            size_t pos = 0;
+            for (int r = 0; r < vocab.n_vocab; r++) {
+                if (pos + 2 > n) break;
+                uint16_t len;
+                std::memcpy(&len, vocab.tekken_vocab_blob.data() + pos, 2);
+                pos += 2;
+                if (pos + len > n) break;
+                vocab.rank_offset.push_back((uint32_t)pos);
+                vocab.rank_length.push_back(len);
+                pos += len;
+            }
+        }
     }
 
     auto & p = model.projector;
@@ -739,6 +751,8 @@ extern "C" voxtral_context * voxtral_init_from_file(const char * path,
 extern "C" void voxtral_free(voxtral_context * ctx) {
     if (!ctx) return;
     if (ctx->sched)       ggml_backend_sched_free(ctx->sched);
+    if (ctx->kv_buf)      ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->kv_ctx)      ggml_free(ctx->kv_ctx);
     if (ctx->model.buf)   ggml_backend_buffer_free(ctx->model.buf);
     if (ctx->model.ctx)   ggml_free(ctx->model.ctx);
     if (ctx->backend_cpu) ggml_backend_free(ctx->backend_cpu);
@@ -763,6 +777,245 @@ extern "C" const uint8_t * voxtral_token_text(voxtral_context * ctx, int id, int
     }
     if (out_len) *out_len = (int)v.rank_length[r];
     return v.tekken_vocab_blob.data() + v.rank_offset[r];
+}
+
+// ===========================================================================
+// KV-cached LLM graph (Stage V3) — same pattern as qwen3_asr's build_graph_llm_kv
+// ===========================================================================
+
+static ggml_cgraph * voxtral_build_graph_llm_kv(voxtral_context * ctx,
+                                                int n_past, int n_tokens) {
+    const auto & m  = ctx->model;
+    const auto & hp = m.hparams;
+    const int d        = (int)hp.llm_d_model;
+    const int n_q      = (int)hp.llm_n_heads;
+    const int n_kv     = (int)hp.llm_n_kv_heads;
+    const int hd       = (int)hp.llm_head_dim;
+    const int n_kv_grp = n_q / n_kv;
+    const float eps    = hp.llm_rms_eps;
+    const float theta  = hp.llm_rope_theta;
+    const float attn_scale = 1.0f / std::sqrt((float)hd);
+    const int T  = n_tokens;
+    const int Lk = n_past + T;
+
+    GGML_ASSERT(ctx->kv_k && ctx->kv_v && Lk <= ctx->kv_max_ctx);
+
+    ggml_init_params ip = {
+        /*mem_size=*/ ctx->compute_meta.size(),
+        /*mem_buffer=*/ ctx->compute_meta.data(),
+        /*no_alloc=*/ true,
+    };
+    ggml_context * ctx0 = ggml_init(ip);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    ggml_tensor * embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+    ggml_set_name(embeds, "inputs_embeds"); ggml_set_input(embeds);
+    ggml_tensor * positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
+    ggml_set_name(positions, "positions"); ggml_set_input(positions);
+    ggml_tensor * causal_mask = nullptr;
+    if (T > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T);
+        ggml_set_name(causal_mask, "causal_mask"); ggml_set_input(causal_mask);
+    }
+
+    ggml_tensor * cur = embeds;
+
+    for (uint32_t il = 0; il < hp.llm_n_layers; il++) {
+        const auto & b = m.llm.blocks[il];
+        ggml_tensor * residual = cur;
+
+        ggml_tensor * x = ggml_rms_norm(ctx0, cur, eps);
+        x = ggml_mul(ctx0, x, b.attn_norm_w);
+
+        ggml_tensor * Q = ggml_mul_mat(ctx0, b.attn_q_w, x);
+        ggml_tensor * K = ggml_mul_mat(ctx0, b.attn_k_w, x);
+        ggml_tensor * V = ggml_mul_mat(ctx0, b.attn_v_w, x);
+        Q = ggml_reshape_3d(ctx0, Q, hd, n_q,  T);
+        K = ggml_reshape_3d(ctx0, K, hd, n_kv, T);
+        V = ggml_reshape_3d(ctx0, V, hd, n_kv, T);
+
+        Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX,
+                          (int)hp.llm_max_pos, theta, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+        K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX,
+                          (int)hp.llm_max_pos, theta, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+
+        // Write new K/V into the persistent cache
+        ggml_tensor * K_perm = ggml_permute(ctx0, K, 0, 2, 1, 3);
+        ggml_tensor * V_perm = ggml_permute(ctx0, V, 0, 2, 1, 3);
+        ggml_tensor * k_view = ggml_view_4d(ctx0, ctx->kv_k, hd, T, n_kv, 1,
+            ctx->kv_k->nb[1], ctx->kv_k->nb[2], ctx->kv_k->nb[3],
+            il * ctx->kv_k->nb[3] + n_past * ctx->kv_k->nb[1]);
+        ggml_tensor * v_view = ggml_view_4d(ctx0, ctx->kv_v, hd, T, n_kv, 1,
+            ctx->kv_v->nb[1], ctx->kv_v->nb[2], ctx->kv_v->nb[3],
+            il * ctx->kv_v->nb[3] + n_past * ctx->kv_v->nb[1]);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, K_perm, k_view));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, V_perm, v_view));
+
+        // Read full history
+        ggml_tensor * Kfull = ggml_cont(ctx0, ggml_view_3d(ctx0, ctx->kv_k,
+            hd, Lk, n_kv, ctx->kv_k->nb[1], ctx->kv_k->nb[2], il * ctx->kv_k->nb[3]));
+        ggml_tensor * Vfull = ggml_cont(ctx0, ggml_view_3d(ctx0, ctx->kv_v,
+            hd, Lk, n_kv, ctx->kv_v->nb[1], ctx->kv_v->nb[2], il * ctx->kv_v->nb[3]));
+
+        // GQA expand
+        if (n_kv_grp > 1) {
+            ggml_tensor * K4 = ggml_reshape_4d(ctx0, Kfull, hd, Lk, 1, n_kv);
+            ggml_tensor * V4 = ggml_reshape_4d(ctx0, Vfull, hd, Lk, 1, n_kv);
+            K4 = ggml_repeat_4d(ctx0, K4, hd, Lk, n_kv_grp, n_kv);
+            V4 = ggml_repeat_4d(ctx0, V4, hd, Lk, n_kv_grp, n_kv);
+            Kfull = ggml_cont(ctx0, ggml_reshape_3d(ctx0, K4, hd, Lk, n_q));
+            Vfull = ggml_cont(ctx0, ggml_reshape_3d(ctx0, V4, hd, Lk, n_q));
+        }
+
+        Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
+
+        ggml_tensor * attn;
+        if (T == 1) {
+            attn = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, nullptr,
+                                       attn_scale, 0.0f, 0.0f);
+            attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
+        } else {
+            attn = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, causal_mask,
+                                       attn_scale, 0.0f, 0.0f);
+            attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
+        }
+
+        attn = ggml_mul_mat(ctx0, b.attn_output_w, attn);
+        cur = ggml_add(ctx0, residual, attn);
+
+        residual = cur;
+        x = ggml_rms_norm(ctx0, cur, eps);
+        x = ggml_mul(ctx0, x, b.ffn_norm_w);
+        ggml_tensor * gate = ggml_mul_mat(ctx0, b.ffn_gate_w, x);
+        ggml_tensor * up   = ggml_mul_mat(ctx0, b.ffn_up_w, x);
+        ggml_tensor * mlp  = ggml_mul(ctx0, ggml_silu(ctx0, gate), up);
+        mlp = ggml_mul_mat(ctx0, b.ffn_down_w, mlp);
+        cur = ggml_add(ctx0, residual, mlp);
+    }
+
+    cur = ggml_rms_norm(ctx0, cur, eps);
+    cur = ggml_mul(ctx0, cur, m.llm.output_norm_w);
+    if (T > 1) cur = ggml_view_2d(ctx0, cur, d, 1, cur->nb[1], (size_t)(T-1)*cur->nb[1]);
+    cur = ggml_mul_mat(ctx0, m.llm.output_w, cur);
+    ggml_set_name(cur, "logits");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
+// Tiny embed lookup graph
+static ggml_cgraph * voxtral_build_graph_embed(voxtral_context * ctx, int n_tokens) {
+    ggml_init_params ip = { ctx->compute_meta.size(), ctx->compute_meta.data(), true };
+    ggml_context * ctx0 = ggml_init(ip);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 64, false);
+    ggml_tensor * ids = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+    ggml_set_name(ids, "input_ids"); ggml_set_input(ids);
+    ggml_tensor * out = ggml_get_rows(ctx0, ctx->model.llm.token_embd_w, ids);
+    ggml_set_name(out, "embeds");
+    ggml_build_forward_expand(gf, out);
+    ggml_free(ctx0);
+    return gf;
+}
+
+// ===========================================================================
+// Public C API — KV cache + embed + run_llm_kv
+// ===========================================================================
+
+extern "C" bool voxtral_kv_init(voxtral_context * ctx, int max_ctx) {
+    if (!ctx || max_ctx <= 0) return false;
+    if (ctx->kv_k) return true;
+    const auto & hp = ctx->model.hparams;
+    const int hd = (int)hp.llm_head_dim, n_kv = (int)hp.llm_n_kv_heads, nl = (int)hp.llm_n_layers;
+    ggml_init_params kp = { ggml_tensor_overhead()*4+1024, nullptr, true };
+    ctx->kv_ctx = ggml_init(kp);
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+    ggml_set_name(ctx->kv_k, "kv_k"); ggml_set_name(ctx->kv_v, "kv_v");
+    size_t kb = ggml_nbytes(ctx->kv_k), vb = ggml_nbytes(ctx->kv_v);
+    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kb + vb);
+    if (!ctx->kv_buf) { fprintf(stderr, "voxtral: kv alloc failed\n"); return false; }
+    char * base = (char *)ggml_backend_buffer_get_base(ctx->kv_buf);
+    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base);
+    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_v, base + kb);
+    ctx->kv_max_ctx = max_ctx; ctx->kv_n_used = 0;
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "voxtral: kv cache %d MiB (hd=%d max=%d n_kv=%d nl=%d)\n",
+                (int)((kb+vb)/1048576), hd, max_ctx, n_kv, nl);
+    return true;
+}
+
+extern "C" void voxtral_kv_reset(voxtral_context * ctx) { if (ctx) ctx->kv_n_used = 0; }
+
+extern "C" float * voxtral_embed_tokens(voxtral_context * ctx,
+                                        const int32_t * input_ids, int n_tokens) {
+    if (!ctx || !input_ids || n_tokens <= 0) return nullptr;
+    const int d = (int)ctx->model.hparams.llm_d_model;
+    if (ctx->sched) { ggml_backend_sched_free(ctx->sched); ctx->sched = nullptr; }
+    ctx->compute_meta.assign(ggml_tensor_overhead()*64+ggml_graph_overhead_custom(64,false), 0);
+    ggml_backend_t be[2] = { ctx->backend, ctx->backend_cpu };
+    int nb = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
+    ctx->sched = ggml_backend_sched_new(be, nullptr, nb, 64, false, false);
+    ggml_cgraph * gf = voxtral_build_graph_embed(ctx, n_tokens);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return nullptr;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"input_ids"), input_ids, 0,
+                            (size_t)n_tokens*sizeof(int32_t));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return nullptr;
+    ggml_tensor * out = ggml_graph_get_tensor(gf, "embeds");
+    float * r = (float*)malloc((size_t)d*n_tokens*sizeof(float));
+    ggml_backend_tensor_get(out, r, 0, (size_t)d*n_tokens*sizeof(float));
+    return r;
+}
+
+extern "C" float * voxtral_run_llm_kv(voxtral_context * ctx,
+                                      const float * inputs_embeds,
+                                      int n_tokens, int n_past,
+                                      int * out_n_tokens, int * out_vocab_size) {
+    if (!ctx || !inputs_embeds || n_tokens <= 0 || !ctx->kv_k) return nullptr;
+    const auto & hp = ctx->model.hparams;
+    const int d = (int)hp.llm_d_model, vocab = (int)hp.llm_vocab_size, Lk = n_past+n_tokens;
+
+    std::vector<int32_t> pos(n_tokens);
+    for (int i = 0; i < n_tokens; i++) pos[i] = n_past + i;
+    std::vector<ggml_fp16_t> mask;
+    if (n_tokens > 1) {
+        mask.assign((size_t)Lk*n_tokens, ggml_fp32_to_fp16(0.0f));
+        ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+        for (int q = 0; q < n_tokens; q++)
+            for (int k = n_past+q+1; k < Lk; k++)
+                mask[(size_t)q*Lk+k] = neg_inf;
+    }
+
+    if (ctx->sched) { ggml_backend_sched_free(ctx->sched); ctx->sched = nullptr; }
+    ctx->compute_meta.assign(ggml_tensor_overhead()*16384+ggml_graph_overhead_custom(16384,false), 0);
+    ggml_backend_t be[2] = { ctx->backend, ctx->backend_cpu };
+    int nb = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
+    ctx->sched = ggml_backend_sched_new(be, nullptr, nb, 16384, false, false);
+
+    ggml_cgraph * gf = voxtral_build_graph_llm_kv(ctx, n_past, n_tokens);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "voxtral: failed to alloc llm_kv graph\n"); return nullptr;
+    }
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"inputs_embeds"), inputs_embeds, 0,
+                            (size_t)d*n_tokens*sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"positions"), pos.data(), 0,
+                            pos.size()*sizeof(int32_t));
+    if (n_tokens > 1)
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"causal_mask"), mask.data(), 0,
+                                mask.size()*sizeof(ggml_fp16_t));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "voxtral: llm_kv graph compute failed\n"); return nullptr;
+    }
+    ggml_tensor * out = ggml_graph_get_tensor(gf, "logits");
+    if (!out) return nullptr;
+    ctx->kv_n_used = Lk;
+    if (out_n_tokens) *out_n_tokens = 1;
+    if (out_vocab_size) *out_vocab_size = vocab;
+    float * r = (float*)malloc((size_t)vocab*sizeof(float));
+    ggml_backend_tensor_get(out, r, 0, (size_t)vocab*sizeof(float));
+    return r;
 }
 
 extern "C" float * voxtral_run_encoder(voxtral_context * ctx,

@@ -74,6 +74,22 @@ float * voxtral_run_encoder(struct voxtral_context * ctx,
                             int n_mels, int T_mel,
                             int * out_N, int * out_dim);
 
+// Embed token IDs via the LLM's token_embd table.
+// Returns malloc'd (n_tokens, d_model=3072) F32 row-major. Caller frees.
+float * voxtral_embed_tokens(struct voxtral_context * ctx,
+                             const int32_t * input_ids, int n_tokens);
+
+// KV cache lifecycle (same pattern as qwen3_asr).
+bool voxtral_kv_init(struct voxtral_context * ctx, int max_ctx);
+void voxtral_kv_reset(struct voxtral_context * ctx);
+
+// Run the LLM forward writing into the persistent KV cache.
+// Returns last-token logits (vocab,) F32. Caller frees with free().
+float * voxtral_run_llm_kv(struct voxtral_context * ctx,
+                           const float * inputs_embeds,
+                           int n_tokens, int n_past,
+                           int * out_n_tokens, int * out_vocab_size);
+
 // Run the Llama 3 LLM forward (text-only, no audio injection, no KV cache).
 // Used for the LLM smoke test against models/voxtral-llm-dump.py.
 // Returns a malloc'd float buffer of shape (n_tokens, vocab_size=131072)
