@@ -289,7 +289,7 @@ print("5. Model time embedding")
 print("=" * 60)
 
 with torch.no_grad():
-    time_tensor = torch.full((1,), float(delay_tokens))
+    time_tensor = torch.full((1,), float(delay_tokens), device=_device, dtype=_dtype)
     t_cond_model = model.time_embedding(time_tensor)
     save_result("t_cond_model", to_np(t_cond_model), "t_cond from model.time_embedding(6)")
 
@@ -301,10 +301,10 @@ print("6. Ada-norm scales")
 print("=" * 60)
 
 with torch.no_grad():
-    t_cond_torch = torch.from_numpy(t_cond_np).unsqueeze(0)  # (1, 3072)
-    for il in range(min(3, len(model.language_model.model.layers))):  # first 3 layers
+    t_cond_torch = torch.from_numpy(t_cond_np).unsqueeze(0).to(device=_device, dtype=_dtype)
+    for il in range(min(3, len(model.language_model.model.layers))):
         layer = model.language_model.model.layers[il]
-        ada_out = layer.ada_rms_norm(t_cond_torch)  # (1, 3072)
+        ada_out = layer.ada_rms_norm(t_cond_torch)
         one_plus = to_np((1 + ada_out).squeeze(0))
         save_result(f"ada_scale_layer{il}", one_plus,
                     f"1 + ada_rms_norm(t_cond) for layer {il}")
