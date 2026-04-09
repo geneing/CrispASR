@@ -95,6 +95,9 @@ struct voxtral_audio_tower {
     ggml_tensor * embed_positions = nullptr;  // (max_pos, d_model) F32
     std::vector<voxtral_audio_block> blocks;
     ggml_tensor * ln_post_w = nullptr, * ln_post_b = nullptr;
+    // Mel preprocessor (baked from WhisperFeatureExtractor)
+    ggml_tensor * mel_filters = nullptr;  // (n_freqs=201, n_mels=128) F32
+    ggml_tensor * mel_window  = nullptr;  // (400,) F32 hann window
 };
 
 struct voxtral_projector {
@@ -335,6 +338,8 @@ static bool voxtral_load_model(voxtral_model & model,
     a.embed_positions = require(model, "audio.embed_positions");
     a.ln_post_w = require(model, "audio.ln_post.weight");
     a.ln_post_b = require(model, "audio.ln_post.bias");
+    a.mel_filters = try_get(model, "audio.mel_filters");
+    a.mel_window  = try_get(model, "audio.mel_window");
     a.blocks.resize(model.hparams.audio_n_layers);
     for (uint32_t i = 0; i < model.hparams.audio_n_layers; i++) {
         char buf[128];
@@ -418,6 +423,111 @@ static bool voxtral_load_model(voxtral_model & model,
     }
 
     return true;
+}
+
+// ===========================================================================
+// FFT + Mel computation (cargo-cult from qwen3_asr.cpp — same parameters)
+// ===========================================================================
+
+static void voxtral_dft(const float * in, int N, float * out) {
+    for (int k = 0; k < N; k++) {
+        float re = 0.0f, im = 0.0f;
+        for (int n = 0; n < N; n++) {
+            float ang = -2.0f * (float)M_PI * (float)k * (float)n / (float)N;
+            re += in[n] * std::cos(ang); im += in[n] * std::sin(ang);
+        }
+        out[2*k] = re; out[2*k+1] = im;
+    }
+}
+
+static void voxtral_fft(float * in, int N, float * out) {
+    if (N == 1) { out[0] = in[0]; out[1] = 0.0f; return; }
+    int half = N / 2;
+    if (N - half*2 == 1) { voxtral_dft(in, N, out); return; }
+    float * even = in + N;
+    for (int i = 0; i < half; i++) even[i] = in[2*i];
+    float * ef = out + 2*N; voxtral_fft(even, half, ef);
+    float * odd = even;
+    for (int i = 0; i < half; i++) odd[i] = in[2*i+1];
+    float * of = ef + N; voxtral_fft(odd, half, of);
+    for (int k = 0; k < half; k++) {
+        float ang = -2.0f*(float)M_PI*(float)k/(float)N;
+        float re = std::cos(ang), im = std::sin(ang);
+        float reo = of[2*k], imo = of[2*k+1];
+        out[2*k]          = ef[2*k]   + re*reo - im*imo;
+        out[2*k+1]        = ef[2*k+1] + re*imo + im*reo;
+        out[2*(k+half)]   = ef[2*k]   - re*reo + im*imo;
+        out[2*(k+half)+1] = ef[2*k+1] - re*imo - im*reo;
+    }
+}
+
+extern "C" float * voxtral_compute_mel(voxtral_context * ctx,
+                                       const float * samples, int n_samples,
+                                       int * out_n_mels, int * out_T_mel) {
+    if (!ctx || !samples || n_samples <= 0) return nullptr;
+    if (!ctx->model.audio.mel_filters || !ctx->model.audio.mel_window) {
+        fprintf(stderr, "voxtral: GGUF missing audio.mel_filters/mel_window — re-convert\n");
+        return nullptr;
+    }
+    const int n_fft = 400, hop = 160, n_mels = 128, n_freqs = 201;
+    const int T_out = 3000;  // Voxtral always pads to 30s
+
+    std::vector<float> hann(n_fft);
+    ggml_backend_tensor_get(ctx->model.audio.mel_window, hann.data(), 0, n_fft*sizeof(float));
+    std::vector<float> filt((size_t)n_freqs * n_mels);
+    ggml_backend_tensor_get(ctx->model.audio.mel_filters, filt.data(), 0, filt.size()*sizeof(float));
+
+    const int pad = n_fft / 2;
+    std::vector<float> padded((size_t)n_samples + 2*pad, 0.0f);
+    std::memcpy(padded.data() + pad, samples, n_samples*sizeof(float));
+
+    const int T_full = (int)((padded.size() - n_fft) / hop + 1);
+    const int T = T_full - 1;  // Whisper drops last frame
+
+    std::vector<float> power((size_t)n_freqs * T, 0.0f);
+    {
+        std::vector<float> fi((size_t)n_fft*4, 0.0f), fo((size_t)n_fft*8, 0.0f);
+        for (int t = 0; t < T; t++) {
+            const float * frame = padded.data() + (size_t)t*hop;
+            for (int n = 0; n < n_fft; n++) fi[n] = frame[n]*hann[n];
+            voxtral_fft(fi.data(), n_fft, fo.data());
+            for (int k = 0; k < n_freqs; k++) {
+                float re = fo[2*k], im = fo[2*k+1];
+                power[(size_t)k*T+t] = re*re + im*im;
+            }
+        }
+    }
+
+    // mel + log10 + clip + normalize — pad to T_out=3000
+    std::vector<float> mel((size_t)n_mels * T_out, 0.0f);
+    float mel_max = -1e30f;
+    for (int m = 0; m < n_mels; m++) {
+        for (int t = 0; t < std::min(T, T_out); t++) {
+            double s = 0.0;
+            for (int k = 0; k < n_freqs; k++)
+                s += (double)filt[(size_t)k*n_mels+m] * power[(size_t)k*T+t];
+            float lv = std::log10(std::max((float)s, 1e-10f));
+            mel[(size_t)m*T_out+t] = lv;
+            if (lv > mel_max) mel_max = lv;
+        }
+        // T..T_out remain 0 → log10(1e-10) = -10 after clipping
+        for (int t = T; t < T_out; t++) {
+            float lv = std::log10(1e-10f);
+            mel[(size_t)m*T_out+t] = lv;
+            if (lv > mel_max) mel_max = lv;
+        }
+    }
+    const float floor_v = mel_max - 8.0f;
+    for (size_t i = 0; i < mel.size(); i++) {
+        float v = mel[i]; if (v < floor_v) v = floor_v;
+        mel[i] = (v + 4.0f) / 4.0f;
+    }
+
+    if (out_n_mels) *out_n_mels = n_mels;
+    if (out_T_mel)  *out_T_mel  = T_out;
+    float * result = (float*)malloc(mel.size()*sizeof(float));
+    std::memcpy(result, mel.data(), mel.size()*sizeof(float));
+    return result;
 }
 
 // ===========================================================================

@@ -292,6 +292,20 @@ def convert(input_dir: Path, out_path: Path) -> None:
     writer.add_uint32("tokenizer.tekken.n_specials", len(specials))
     writer.add_uint32("tokenizer.tekken.n_vocab",    n_vocab)
 
+    # ----- Mel filterbank + Hann window (same as Qwen3-ASR, same params) -----
+    try:
+        from transformers import WhisperFeatureExtractor
+        fe = WhisperFeatureExtractor.from_pretrained(str(input_dir))
+    except Exception:
+        fe = processor.feature_extractor
+    mel_filters = np.asarray(fe.mel_filters, dtype=np.float32)  # (n_freqs, n_mels)
+    print(f"  mel_filters shape: {mel_filters.shape}")
+    writer.add_tensor("audio.mel_filters", mel_filters)
+    n_fft_w = 400
+    win = (0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(n_fft_w) / n_fft_w)).astype(np.float32)
+    writer.add_tensor("audio.mel_window", win)
+    print(f"  mel_window shape: {win.shape}")
+
     # ----- Tensors -----
     n_written = 0
     n_f16 = 0

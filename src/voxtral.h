@@ -74,6 +74,14 @@ float * voxtral_run_encoder(struct voxtral_context * ctx,
                             int n_mels, int T_mel,
                             int * out_N, int * out_dim);
 
+// Compute the log-mel spectrogram for raw 16 kHz mono PCM samples, matching
+// WhisperFeatureExtractor (n_fft=400, hop=160, 128 mels). The output is
+// zero-padded to exactly 3000 frames (30s) as required by the encoder.
+// Returns malloc'd (128, 3000) F32 row-major. Caller frees.
+float * voxtral_compute_mel(struct voxtral_context * ctx,
+                            const float * samples, int n_samples,
+                            int * out_n_mels, int * out_T_mel);
+
 // Embed token IDs via the LLM's token_embd table.
 // Returns malloc'd (n_tokens, d_model=3072) F32 row-major. Caller frees.
 float * voxtral_embed_tokens(struct voxtral_context * ctx,
