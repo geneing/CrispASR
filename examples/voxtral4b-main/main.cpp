@@ -209,10 +209,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "decode: %zu tokens in %.0f ms (%.0f ms/token)\n",
                 gen.size()-1, dec_ms, dec_ms/std::max((size_t)1,gen.size()-1));
 
-    // Decode tokens
+    // Decode tokens — filter control tokens (id < 1000) like STREAMING_PAD, STREAMING_WORD
     std::string transcript;
     for (auto id : gen) {
         if (id == EOS) break;
+        if (id < 1000) continue;  // skip control tokens (STREAMING_PAD=32, STREAMING_WORD=33, etc.)
         int len=0;
         const uint8_t * bytes = voxtral4b_token_text(ctx, id, &len);
         if (bytes && len > 0) transcript.append((const char*)bytes, len);
