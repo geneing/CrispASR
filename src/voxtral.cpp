@@ -409,6 +409,164 @@ static bool voxtral_load_model(voxtral_model & model,
 }
 
 // ===========================================================================
+// Audio encoder + projector graph (Stage V2)
+//
+// Architecture (from the reference dump):
+//   mel (128, 3000) F32 — padded to 30s
+//   → Conv1d(128→1280, k=3, stride=1, pad=1) + GELU → (1280, 3000)
+//   → Conv1d(1280→1280, k=3, stride=2, pad=1) + GELU → (1280, 1500)
+//   → transpose to (1500, 1280), add learned pos embed (1500, 1280)
+//   → 32 × Whisper-style pre-LN encoder block
+//   → layer_norm → (1500, 1280)
+//   → reshape to (375, 5120) — stack 4 adjacent frames
+//   → linear_1(5120→3072) + GELU + linear_2(3072→3072)
+//   → (375, 3072) audio embeddings for the LLM
+//
+// Note: Conv1d weights in ggml are stored as (K, IC, OC) after the
+// gguf-py dim reversal from PyTorch's (OC, IC, K). ggml_conv_1d expects
+// kernel shape (K_w, IC, OC) = (ne[0], ne[1], ne[2]).
+// ===========================================================================
+
+static const float kLayerNormEps = 1e-5f;
+
+static ggml_cgraph * voxtral_build_graph_encoder(voxtral_context * ctx) {
+    const auto & m  = ctx->model;
+    const auto & hp = m.hparams;
+    const int d         = (int)hp.audio_d_model;   // 1280
+    const int n_heads   = (int)hp.audio_n_heads;   // 20
+    const int head_dim  = (int)hp.audio_head_dim;  // 64
+    const int n_layers  = (int)hp.audio_n_layers;  // 32
+    const int max_pos   = (int)hp.audio_max_pos;   // 1500
+    const int proj_in   = (int)hp.proj_in_dim;     // 5120
+    const int proj_out  = (int)hp.proj_out_dim;    // 3072
+    const int n_mels    = (int)hp.n_mels;          // 128
+    const int T_mel     = 3000;                    // padded to 30s
+    const float attn_scale = 1.0f / std::sqrt((float)head_dim);
+
+    ggml_init_params ip = {
+        /*mem_size=*/   ctx->compute_meta.size(),
+        /*mem_buffer=*/ ctx->compute_meta.data(),
+        /*no_alloc=*/   true,
+    };
+    ggml_context * ctx0 = ggml_init(ip);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    // Input: mel spectrogram (n_mels=128, T_mel=3000) F32
+    ggml_tensor * mel = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_mel, n_mels);
+    ggml_set_name(mel, "mel");
+    ggml_set_input(mel);
+
+    // ---- Conv1d front-end ----
+    // conv1: (128→1280, k=3, stride=1, pad=1). Output T stays 3000.
+    // ggml_conv_1d(kernel, input, stride, pad, dilation)
+    // kernel ne = (3, 128, 1280), input ne = (T, 128) → need 3d input
+    // Actually ggml_conv_1d expects input (T, C_in) and kernel (K, C_in, C_out)
+    // BUT ggml_conv_1d is actually defined for 1D convolution:
+    //   a = kernel (KW, C_in, C_out)
+    //   b = input  (IW, C_in)  → BUT actually needs 3D for batched: (IW, C_in, N)
+    // For unbatched: just pass (IW, C_in, 1) or use the 2D input directly.
+    // Let's check: mel is ne=(T_mel, n_mels) = (3000, 128).
+    // conv1_w is ne=(3, 128, 1280) from the GGUF.
+    // ggml_conv_1d_s1_ph computes 1D conv with stride=1, pad=half_kernel.
+    // But we need stride=1, pad=1 which is half of kernel 3.
+    // ggml_conv_1d output ne = (OL, OC, N). For unbatched 2D input the
+    // batch dim N=1, so output is (OL, OC, 1). Bias (d=1280,) must be
+    // reshaped to (1, d, 1) to broadcast over OL and N.
+    auto bias_1d = [&](ggml_tensor * b) {
+        return ggml_reshape_3d(ctx0, b, 1, b->ne[0], 1);
+    };
+
+    ggml_tensor * cur = ggml_conv_1d(ctx0, m.audio.conv1_w, mel, /*s*/1, /*p*/1, /*d*/1);
+    cur = ggml_add(ctx0, cur, bias_1d(m.audio.conv1_b));
+    cur = ggml_gelu_erf(ctx0, cur);
+    // cur ne = (3000, 1280, 1)
+
+    cur = ggml_conv_1d(ctx0, m.audio.conv2_w, cur, /*s*/2, /*p*/1, /*d*/1);
+    cur = ggml_add(ctx0, cur, bias_1d(m.audio.conv2_b));
+    cur = ggml_gelu_erf(ctx0, cur);
+    // cur ne = (1500, 1280, 1)
+
+    // ggml_conv_1d output is (OL, OC, 1) = (1500, 1280, 1). We need (d, T_enc)
+    // = (1280, 1500) for the norm/mul/matmul ops downstream, which all expect
+    // ne[0] = feature_dim. Transpose:
+    const int T_enc = T_mel / 2;
+    cur = ggml_reshape_2d(ctx0, cur, T_enc, d);         // (1500, 1280) squeeze batch
+    cur = ggml_cont(ctx0, ggml_transpose(ctx0, cur));    // (1280, 1500) = (d, T_enc)
+
+    // ---- Add learned positional embedding ----
+    // embed_positions ggml ne = (d=1280, max_pos=1500) = (d, T_enc). Matches cur.
+    cur = ggml_add(ctx0, cur, m.audio.embed_positions);
+
+    // ---- 32 × Whisper encoder block ----
+    for (int il = 0; il < n_layers; il++) {
+        const auto & b = m.audio.blocks[il];
+        ggml_tensor * residual = cur;
+
+        // Pre-LN
+        ggml_tensor * x = ggml_norm(ctx0, cur, kLayerNormEps);
+        x = ggml_mul(ctx0, x, b.attn_norm_w);
+        x = ggml_add(ctx0, x, b.attn_norm_b);
+
+        // Self-attention (biased Q, V, out_proj; NO bias on K — Whisper quirk)
+        ggml_tensor * Q = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_q_w, x), b.attn_q_b);
+        ggml_tensor * K = ggml_mul_mat(ctx0, b.attn_k_w, x);  // no bias
+        ggml_tensor * V = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_v_w, x), b.attn_v_b);
+
+        // Reshape to (head_dim, n_heads, T_enc)
+        Q = ggml_reshape_3d(ctx0, Q, head_dim, n_heads, T_enc);
+        K = ggml_reshape_3d(ctx0, K, head_dim, n_heads, T_enc);
+        V = ggml_reshape_3d(ctx0, V, head_dim, n_heads, T_enc);
+
+        // Permute to (hd, T, n_h) for attention
+        Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
+        K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
+        V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
+
+        // No causal mask (encoder self-attention is bidirectional)
+        ggml_tensor * attn = ggml_flash_attn_ext(ctx0, Q, K, V, /*mask*/nullptr,
+                                                  attn_scale, 0.0f, 0.0f);
+        // attn ne = (hd, n_h, T, 1) → reshape to (d, T)
+        attn = ggml_reshape_2d(ctx0, attn, d, T_enc);
+
+        attn = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_out_w, attn), b.attn_out_b);
+        cur = ggml_add(ctx0, residual, attn);
+
+        // Pre-LN + FFN (GELU, biased)
+        residual = cur;
+        x = ggml_norm(ctx0, cur, kLayerNormEps);
+        x = ggml_mul(ctx0, x, b.ffn_norm_w);
+        x = ggml_add(ctx0, x, b.ffn_norm_b);
+        x = ggml_add(ctx0, ggml_mul_mat(ctx0, b.ffn_up_w, x), b.ffn_up_b);
+        x = ggml_gelu_erf(ctx0, x);
+        x = ggml_add(ctx0, ggml_mul_mat(ctx0, b.ffn_down_w, x), b.ffn_down_b);
+        cur = ggml_add(ctx0, residual, x);
+    }
+
+    // ---- Final layer norm ----
+    cur = ggml_norm(ctx0, cur, kLayerNormEps);
+    cur = ggml_mul(ctx0, cur, m.audio.ln_post_w);
+    cur = ggml_add(ctx0, cur, m.audio.ln_post_b);
+    // cur ne = (T_enc=1500, d=1280)
+
+    // ---- Projector: stack-4-frames + 2× Linear ----
+    // Reshape (1500, 1280) → (375, 5120) = stack 4 adjacent frames.
+    // In ggml memory (T_enc, d) row-major, 4 consecutive rows of 1280 become
+    // one row of 5120. ggml_reshape_2d just relabels.
+    cur = ggml_reshape_2d(ctx0, cur, proj_in, T_enc / 4);
+    // linear_1: (5120 → 3072)
+    cur = ggml_mul_mat(ctx0, m.projector.proj1, cur);
+    cur = ggml_gelu_erf(ctx0, cur);
+    // linear_2: (3072 → 3072)
+    cur = ggml_mul_mat(ctx0, m.projector.proj2, cur);
+    // cur ne = (proj_out=3072, 375)
+
+    ggml_set_name(cur, "encoder_out");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
+// ===========================================================================
 // LLM forward graph (Stage V1)
 //
 // Pure text-only Llama 3 / Mistral forward, no audio injection, no KV cache.
@@ -605,6 +763,51 @@ extern "C" const uint8_t * voxtral_token_text(voxtral_context * ctx, int id, int
     }
     if (out_len) *out_len = (int)v.rank_length[r];
     return v.tekken_vocab_blob.data() + v.rank_offset[r];
+}
+
+extern "C" float * voxtral_run_encoder(voxtral_context * ctx,
+                                      const float * mel_features,
+                                      int n_mels, int T_mel,
+                                      int * out_N, int * out_dim) {
+    if (!ctx || !mel_features) return nullptr;
+    const auto & hp = ctx->model.hparams;
+    if (n_mels != (int)hp.n_mels || T_mel != 3000) {
+        fprintf(stderr, "voxtral: encoder expects (128, 3000) mel, got (%d, %d)\n",
+                n_mels, T_mel);
+        return nullptr;
+    }
+
+    if (ctx->sched) { ggml_backend_sched_free(ctx->sched); ctx->sched = nullptr; }
+    ctx->compute_meta.assign(
+        ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false), 0);
+    ggml_backend_t backends[2] = { ctx->backend, ctx->backend_cpu };
+    int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
+    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
+
+    ggml_cgraph * gf = voxtral_build_graph_encoder(ctx);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "voxtral: failed to alloc encoder graph\n"); return nullptr;
+    }
+
+    ggml_tensor * mel_in = ggml_graph_get_tensor(gf, "mel");
+    ggml_backend_tensor_set(mel_in, mel_features, 0,
+                            (size_t)n_mels * T_mel * sizeof(float));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "voxtral: encoder graph compute failed\n"); return nullptr;
+    }
+
+    ggml_tensor * out = ggml_graph_get_tensor(gf, "encoder_out");
+    if (!out) { fprintf(stderr, "voxtral: missing encoder_out\n"); return nullptr; }
+    const int pdim = (int)out->ne[0];   // 3072
+    const int N    = (int)out->ne[1];   // 375
+    if (out_N)   *out_N   = N;
+    if (out_dim) *out_dim = pdim;
+    const size_t total = (size_t)pdim * N;
+    float * result = (float *)malloc(total * sizeof(float));
+    ggml_backend_tensor_get(out, result, 0, total * sizeof(float));
+    return result;
 }
 
 extern "C" int32_t * voxtral_tokenize(voxtral_context * /*ctx*/,

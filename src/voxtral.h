@@ -66,6 +66,14 @@ int32_t * voxtral_tokenize(struct voxtral_context * ctx,
 // These mirror the qwen3_asr_* test helpers — feed precomputed inputs and
 // pull intermediate activations back out for diffing against PyTorch dumps.
 
+// Run the audio encoder + projector on a (128, 3000) mel spectrogram (padded
+// to 30s). Returns malloc'd float buffer of shape (375, 3072) row-major.
+// Caller frees with free(). *out_N set to 375, *out_dim set to 3072.
+float * voxtral_run_encoder(struct voxtral_context * ctx,
+                            const float * mel_features,
+                            int n_mels, int T_mel,
+                            int * out_N, int * out_dim);
+
 // Run the Llama 3 LLM forward (text-only, no audio injection, no KV cache).
 // Used for the LLM smoke test against models/voxtral-llm-dump.py.
 // Returns a malloc'd float buffer of shape (n_tokens, vocab_size=131072)
