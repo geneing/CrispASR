@@ -94,9 +94,23 @@ int main(int argc, char ** argv) {
     if (model_path.empty()||audio_path.empty()) { fprintf(stderr,"missing -m or -f\n"); return 1; }
     if (timestamps && aligner_path.empty()) { fprintf(stderr,"-timestamps requires -am\n"); return 1; }
 
-    std::vector<float> samples;
-    if (!load_wav_16k_mono(audio_path, samples)) return 2;
-    if (!no_prints) fprintf(stderr, "audio: %.2f s (%zu samples)\n", samples.size()/16000.0, samples.size());
+    std::vector<float> raw_samples;
+    if (!load_wav_16k_mono(audio_path, raw_samples)) return 2;
+    if (!no_prints) fprintf(stderr, "audio: %.2f s (%zu samples)\n", raw_samples.size()/16000.0, raw_samples.size());
+
+    // Pad audio for streaming model: 32 tokens left pad + right alignment + 17 tokens right pad
+    // Each token = hop_length * conv_stride * downsample_factor = 160 * 2 * 4 = 1280 samples
+    const int SAMPLES_PER_TOKEN = 1280;
+    const int n_left_pad_tokens = 32;
+    const int n_right_pad_tokens = 17;
+    int left_pad = n_left_pad_tokens * SAMPLES_PER_TOKEN;
+    int right_align = (SAMPLES_PER_TOKEN - ((int)raw_samples.size() % SAMPLES_PER_TOKEN)) % SAMPLES_PER_TOKEN;
+    int right_pad = right_align + n_right_pad_tokens * SAMPLES_PER_TOKEN;
+
+    std::vector<float> samples(left_pad + raw_samples.size() + right_pad, 0.0f);
+    std::memcpy(samples.data() + left_pad, raw_samples.data(), raw_samples.size() * sizeof(float));
+    if (!no_prints) fprintf(stderr, "padded: %zu samples (left=%d, audio=%zu, right=%d)\n",
+                            samples.size(), left_pad, raw_samples.size(), right_pad);
 
     auto cp = voxtral4b_context_default_params();
     cp.n_threads = n_threads;
@@ -106,7 +120,7 @@ int main(int argc, char ** argv) {
 
     auto t0 = std::chrono::steady_clock::now();
 
-    // Mel
+    // Mel — computed on the padded audio
     int n_mels=0, T_mel=0;
     float * mel = voxtral4b_compute_mel(ctx, samples.data(), (int)samples.size(), &n_mels, &T_mel);
     if (!mel) { fprintf(stderr,"mel failed\n"); voxtral4b_free(ctx); return 4; }
