@@ -38,6 +38,8 @@ install("transformers>=5.2.0")
 install("safetensors")
 install("scipy")
 install("huggingface_hub")
+install("mistral-common[audio]")
+install("librosa")
 
 # Try to get GH_TOKEN from Kaggle secrets
 GH_TOKEN = None
