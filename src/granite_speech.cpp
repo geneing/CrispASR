@@ -1305,6 +1305,11 @@ extern "C" float * granite_speech_run_encoder(struct granite_speech_context * ct
                                  rpe_per_layer[il].empty() ? nullptr : rpe_per_layer[il].data(),
                                  T, n_heads, hd, ctx_size, attn_scale, remainder);
 
+        if (ctx->params.verbosity >= 2 && il == 0) {
+            fprintf(stderr, "  L0 after attn[0][:4] = %.4f %.4f %.4f %.4f\n",
+                    attn_out[0], attn_out[1], attn_out[2], attn_out[3]);
+        }
+
         // Output projection + residual
         std::vector<float> proj_out((size_t)d * T);
         run_matmul(ctx, proj_out.data(), attn_out.data(), d, T, b.attn_out_w, b.attn_out_b, d);
