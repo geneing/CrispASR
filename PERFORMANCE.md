@@ -14,6 +14,22 @@ Q4_K is 2.7× faster than F16 with identical output quality. German tested and w
 
 ---
 
+## Cross-Model Comparison (Q4_K, jfk.wav 11s, 4 threads, 2 vCPU)
+
+| Model | Params | GGUF | Wall time | RTFx | Architecture |
+|-------|--------|------|-----------|------|-------------|
+| **Qwen3-ASR** | 900M | 516 MB | **6.5s** | **1.7×** | Whisper enc + Qwen3 LLM |
+| **Parakeet TDT** | 600M | 467 MB | **6.9s** | **1.6×** | FastConformer + TDT |
+| Canary 1B | 978M | 673 MB | 49s | 0.22× | FastConformer + Transformer |
+| Cohere 2B | 2.0B | 1.2 GB | 53s | 0.21× | Conformer + Transformer |
+| **Voxtral 4B RT** | 4.4B | 2.4 GB | **54s** | 0.20× | Causal enc + Mistral LLM |
+| Voxtral 3B | 3.2B | 2.5 GB | 68s | 0.16× | Whisper enc + Llama LLM |
+
+Qwen3-ASR and Parakeet TDT achieve real-time or faster on a 2 vCPU server.
+With GPU (Metal/CUDA), all models would be significantly faster.
+
+---
+
 ## Cohere Transcribe Performance
 
 ## Real-Time Factor (RTFx)
