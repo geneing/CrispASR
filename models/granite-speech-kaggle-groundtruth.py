@@ -28,7 +28,16 @@ except: GH_TOKEN = os.environ.get("GH_TOKEN")
 
 # Download model + audio
 from huggingface_hub import snapshot_download
-model_dir = snapshot_download("ibm-granite/granite-4.0-1b-speech", local_dir="/tmp/granite-speech")
+
+# Use HF token for faster downloads (add HF_TOKEN secret in Kaggle)
+hf_token = None
+try:
+    from kaggle_secrets import UserSecretsClient
+    hf_token = UserSecretsClient().get_secret("HF_TOKEN")
+except: hf_token = os.environ.get("HF_TOKEN")
+
+model_dir = snapshot_download("ibm-granite/granite-4.0-1b-speech", local_dir="/tmp/granite-speech",
+                               token=hf_token)
 audio_url = "https://github.com/ggerganov/whisper.cpp/raw/master/samples/jfk.wav"
 audio_path = "/tmp/jfk.wav"
 if not os.path.exists(audio_path):
