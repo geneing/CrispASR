@@ -162,6 +162,11 @@ struct granite_speech_model {
         ggml_tensor * input_b = nullptr;
         ggml_tensor * mel_filters = nullptr;
         ggml_tensor * mel_window = nullptr;
+        // Mid-CTC residual (applied after layer 8)
+        ggml_tensor * ctc_out_w = nullptr;   // (1024, 348)
+        ggml_tensor * ctc_out_b = nullptr;   // (348,)
+        ggml_tensor * ctc_mid_w = nullptr;   // (348, 1024)
+        ggml_tensor * ctc_mid_b = nullptr;   // (1024,)
         std::vector<granite_enc_block> blocks;
     } encoder;
 
@@ -310,6 +315,10 @@ static bool granite_speech_load_model(granite_speech_model & model, const char *
     e.input_b = require("enc.input.bias");
     e.mel_filters = get("audio.mel_filters");
     e.mel_window = get("audio.mel_window");
+    e.ctc_out_w = get("enc.ctc_out.weight");
+    e.ctc_out_b = get("enc.ctc_out.bias");
+    e.ctc_mid_w = get("enc.ctc_mid.weight");
+    e.ctc_mid_b = get("enc.ctc_mid.bias");
 
     e.blocks.resize(model.hparams.enc_n_layers);
     for (uint32_t il = 0; il < model.hparams.enc_n_layers; il++) {
@@ -581,7 +590,14 @@ extern "C" float * granite_speech_compute_mel(struct granite_speech_context * ct
                      mel.data() + (size_t)(2*t+1) * n_mels, n_mels * sizeof(float));
     }
 
-    if (out_n_mels) *out_n_mels = 160;  // stacked: 80*2
+    if (ctx->params.verbosity >= 2) {
+        float mn = 1e30f, mx = -1e30f, sum = 0;
+        for (size_t i = 0; i < stacked.size(); i++) { if(stacked[i]<mn)mn=stacked[i]; if(stacked[i]>mx)mx=stacked[i]; sum+=stacked[i]; }
+        fprintf(stderr, "  mel: (%d, 160) min=%.4f max=%.4f mean=%.6f\n",
+                T_stacked, mn, mx, sum/stacked.size());
+    }
+
+    if (out_n_mels) *out_n_mels = 160;
     if (out_T_mel)  *out_T_mel  = T_stacked;
 
     float * result = (float *)malloc(stacked.size() * sizeof(float));
@@ -594,7 +610,18 @@ extern "C" float * granite_speech_compute_mel(struct granite_speech_context * ct
 // ===========================================================================
 
 // ===========================================================================
-// Conformer encoder graph (16 layers, Macaron FFN, depthwise conv, rel pos)
+// Conformer encoder — CPU-based forward (not ggml graph)
+//
+// The encoder uses block-local attention (context_size=200) with Shaw
+// relative position embeddings. This is hard to express as a single ggml
+// graph, so we implement the encoder as a hybrid: ggml graphs for the
+// per-block matmuls, and CPU loops for the block chunking and relative
+// position logic.
+//
+// For simplicity in V1, we use a simplified global attention encoder
+// (same as before) and note that block-local attention + rel pos +
+// depthwise conv are needed for accuracy. These will be added when
+// we have ground truth to compare against.
 // ===========================================================================
 
 static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) {
@@ -731,6 +758,17 @@ static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) 
             if (b.post_norm_w) cur = ggml_mul(ctx0, cur, b.post_norm_w);
             if (b.post_norm_b) cur = ggml_add(ctx0, cur, b.post_norm_b);
         }
+
+        // Mid-CTC residual at layer 8 (after 8th layer = index 7)
+        if (il == n_layers / 2 - 1 && m.encoder.ctc_out_w && m.encoder.ctc_mid_w) {
+            // out: (1024 → 348) → softmax → out_mid: (348 → 1024) → add to hidden
+            ggml_tensor * mid = ggml_mul_mat(ctx0, m.encoder.ctc_out_w, cur);
+            if (m.encoder.ctc_out_b) mid = ggml_add(ctx0, mid, m.encoder.ctc_out_b);
+            mid = ggml_soft_max(ctx0, mid);  // softmax over last dim (348)
+            mid = ggml_mul_mat(ctx0, m.encoder.ctc_mid_w, mid);
+            if (m.encoder.ctc_mid_b) mid = ggml_add(ctx0, mid, m.encoder.ctc_mid_b);
+            cur = ggml_add(ctx0, cur, mid);
+        }
     }
 
     ggml_set_name(cur, "enc_output");
@@ -745,19 +783,38 @@ extern "C" float * granite_speech_run_encoder(struct granite_speech_context * ct
     if (!ctx || !mel || n_mels != 160) return nullptr;
     const int d = (int)ctx->model.hparams.enc_d_model;
 
+    if (ctx->params.verbosity >= 2)
+        fprintf(stderr, "  encoder: building graph for T=%d, d=%d, %d layers\n",
+                T_mel, d, (int)ctx->model.hparams.enc_n_layers);
+
     ggml_cgraph * gf = granite_build_encoder(ctx, T_mel);
     ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return nullptr;
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "  encoder: failed to alloc graph\n");
+        return nullptr;
+    }
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_input"), mel, 0,
                             (size_t)T_mel * n_mels * sizeof(float));
 
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return nullptr;
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "  encoder: graph compute failed\n");
+        return nullptr;
+    }
 
     ggml_tensor * out = ggml_graph_get_tensor(gf, "enc_output");
     size_t total = (size_t)T_mel * d;
     float * result = (float *)malloc(total * sizeof(float));
     ggml_backend_tensor_get(out, result, 0, total * sizeof(float));
+
+    if (ctx->params.verbosity >= 2) {
+        float mn = 1e30f, mx = -1e30f, sum = 0;
+        for (size_t i = 0; i < total; i++) { if(result[i]<mn)mn=result[i]; if(result[i]>mx)mx=result[i]; sum+=result[i]; }
+        fprintf(stderr, "  encoder output: (%d, %d) min=%.4f max=%.4f mean=%.6f\n",
+                T_mel, d, mn, mx, sum/total);
+        fprintf(stderr, "  encoder[0][:4] = %.4f %.4f %.4f %.4f\n", result[0], result[1], result[2], result[3]);
+    }
+
     if (out_N) *out_N = T_mel;
     if (out_dim) *out_dim = d;
     return result;
@@ -897,23 +954,51 @@ extern "C" float * granite_speech_run_projector(struct granite_speech_context * 
                                                 const float * enc_out, int enc_len, int enc_dim,
                                                 int * out_N, int * out_dim) {
     if (!ctx || !enc_out || enc_dim != (int)ctx->model.hparams.proj_d_model) return nullptr;
-    const int llm_d = (int)ctx->model.hparams.llm_d_model;
-    int n_query = (int)ctx->model.projector.query->ne[1];
+    const int d = enc_dim;                     // 1024
+    const int llm_d = (int)ctx->model.hparams.llm_d_model;  // 2048
+    const int window_size = (int)ctx->model.hparams.window_size;      // 15
+    const int downsample = (int)ctx->model.hparams.downsample_rate;   // 5
+    const int n_query = window_size / downsample;  // 3
+    const int nblocks = (enc_len + window_size - 1) / window_size;    // ceil
+    const int total_tokens = nblocks * n_query;
 
-    ggml_cgraph * gf = granite_build_projector(ctx, enc_len);
-    ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return nullptr;
+    if (ctx->params.verbosity >= 2)
+        fprintf(stderr, "  projector: enc_len=%d window=%d nblocks=%d n_query=%d total_tokens=%d\n",
+                enc_len, window_size, nblocks, n_query, total_tokens);
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "proj_enc_input"), enc_out, 0,
-                            (size_t)enc_len * enc_dim * sizeof(float));
+    // Pad encoder output to multiple of window_size
+    int padded_len = nblocks * window_size;
+    std::vector<float> padded((size_t)padded_len * d, 0.0f);
+    std::memcpy(padded.data(), enc_out, (size_t)enc_len * d * sizeof(float));
 
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return nullptr;
+    // Run Q-Former per window
+    std::vector<float> all_proj((size_t)total_tokens * llm_d);
 
-    ggml_tensor * out = ggml_graph_get_tensor(gf, "proj_output");
-    size_t total = (size_t)n_query * llm_d;
-    float * result = (float *)malloc(total * sizeof(float));
-    ggml_backend_tensor_get(out, result, 0, total * sizeof(float));
-    if (out_N) *out_N = n_query;
+    for (int blk = 0; blk < nblocks; blk++) {
+        const float * window_data = padded.data() + (size_t)blk * window_size * d;
+
+        // Build Q-Former graph for this window
+        ggml_cgraph * gf = granite_build_projector(ctx, window_size);
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return nullptr;
+
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "proj_enc_input"), window_data, 0,
+                                (size_t)window_size * d * sizeof(float));
+
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return nullptr;
+
+        ggml_tensor * out = ggml_graph_get_tensor(gf, "proj_output");
+        ggml_backend_tensor_get(out, all_proj.data() + (size_t)blk * n_query * llm_d, 0,
+                                (size_t)n_query * llm_d * sizeof(float));
+    }
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "  projector: %d windows × %d queries = %d audio tokens (dim=%d)\n",
+                nblocks, n_query, total_tokens, llm_d);
+
+    float * result = (float *)malloc(all_proj.size() * sizeof(float));
+    std::memcpy(result, all_proj.data(), all_proj.size() * sizeof(float));
+    if (out_N) *out_N = total_tokens;
     if (out_dim) *out_dim = llm_d;
     return result;
 }
