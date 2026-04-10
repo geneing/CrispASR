@@ -206,6 +206,10 @@ struct granite_speech_context {
     ggml_tensor *         kv_v = nullptr;
 
     int n_threads = 4;
+
+    // Precomputed relative position embedding lookup (200, 200, 128) F32
+    // rpe_lookup[c][r][d] = rel_pos_emb(attention_dists[c][r])[d]
+    std::vector<float> rpe_lookup;
 };
 
 // ===========================================================================
@@ -474,6 +478,46 @@ extern "C" struct granite_speech_context * granite_speech_init_from_file(
             fprintf(stderr, "granite_speech: BN folded for %d encoder layers\n", folded);
     }
 
+    // Precompute relative position embedding lookup table
+    // attention_dists[c][r] = clamp(c - r, -ctx_size, ctx_size) + max_pos_emb
+    // RPE lookup: (ctx_size, ctx_size, head_dim) F32
+    {
+        const int C = 200;   // context_size
+        const int max_pos = 512; // max_pos_emb
+        const int hd = (int)ctx->model.hparams.enc_head_dim; // 128
+        const int emb_size = 2 * max_pos + 1; // 1025
+
+        // Compute attention_dists indices
+        std::vector<int> dists(C * C);
+        for (int c = 0; c < C; c++)
+            for (int r = 0; r < C; r++) {
+                int d = c - r;
+                if (d < -C) d = -C;
+                if (d > C) d = C;
+                dists[c * C + r] = d + max_pos;
+            }
+
+        // Read the rel_pos_emb weight from layer 0 (same for all layers)
+        // rel_pos_emb.weight: ne[0]=128 (head_dim), ne[1]=1025 (2*max_pos+1)
+        ggml_tensor * rpe_w = ctx->model.encoder.blocks[0].attn_rel_pos_w;
+        if (rpe_w) {
+            std::vector<float> emb_table((size_t)emb_size * hd);
+            ggml_backend_tensor_get(rpe_w, emb_table.data(), 0, emb_table.size() * sizeof(float));
+
+            // Build lookup: rpe_lookup[c * C * hd + r * hd + d] = emb_table[dists[c,r] * hd + d]
+            ctx->rpe_lookup.resize((size_t)C * C * hd);
+            for (int c = 0; c < C; c++)
+                for (int r = 0; r < C; r++) {
+                    int idx = dists[c * C + r];
+                    for (int d = 0; d < hd; d++)
+                        ctx->rpe_lookup[(size_t)(c * C + r) * hd + d] = emb_table[(size_t)idx * hd + d];
+                }
+
+            if (params.verbosity >= 1)
+                fprintf(stderr, "granite_speech: RPE lookup precomputed (%d × %d × %d)\n", C, C, hd);
+        }
+    }
+
     // Create scheduler
     {
         int n_be = 0;
@@ -702,12 +746,21 @@ static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) 
     ggml_tensor * cur = ggml_mul_mat(ctx0, m.encoder.input_w, inp);
     if (m.encoder.input_b) cur = ggml_add(ctx0, cur, m.encoder.input_b);
 
-    // Block-diagonal attention mask for block-local attention (context_size=200)
-    // mask[q][k] = 0 if same block, -inf if different blocks
-    const int ctx_size = 200;  // context_size from config
+    // Block-local attention with Shaw relative position embeddings
+    const int ctx_size = 200;  // context_size
+    const int n_blocks_attn = (T + ctx_size - 1) / ctx_size;
+    const int T_padded = n_blocks_attn * ctx_size;
+
+    // Block-diagonal mask: (T, T) F16
     ggml_tensor * block_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T, T);
     ggml_set_name(block_mask, "block_mask");
     ggml_set_input(block_mask);
+
+    // RPE lookup as input: (ctx_size * head_dim, ctx_size) = (200*128, 200) F32
+    // Layout: rpe[r * hd + d, c] = RPE_lookup[c, r, d] for matmul with Q
+    ggml_tensor * rpe_tensor = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ctx_size * hd, ctx_size);
+    ggml_set_name(rpe_tensor, "rpe_lookup");
+    ggml_set_input(rpe_tensor);
 
     // 16 × Conformer blocks
     for (int il = 0; il < n_layers; il++) {
@@ -747,13 +800,17 @@ static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) 
             K = ggml_reshape_3d(ctx0, K, hd, n_heads, T);
             V = ggml_reshape_3d(ctx0, V, hd, n_heads, T);
 
-            // Permute to (hd, T, nh) for flash attention
+            // Block-local attention with Shaw relative position embeddings
+            // Use flash_attn_ext with block mask (pos_attn added separately would
+            // require manual attention). For now, use flash attention with the block
+            // mask only — pos_attn will be implemented as a separate correction.
+            //
+            // TODO: Replace with manual attention that includes pos_attn for
+            // full accuracy. Current approach: flash_attn with block mask only.
             Q = ggml_permute(ctx0, Q, 0, 2, 1, 3);
             K = ggml_permute(ctx0, K, 0, 2, 1, 3);
             V = ggml_permute(ctx0, V, 0, 2, 1, 3);
 
-            // Block-diagonal attention mask: each 200-frame block attends within itself
-            // mask[q][k] = -inf if q and k are in different blocks
             ggml_tensor * attn = ggml_flash_attn_ext(ctx0, Q, K, V, block_mask,
                                                       attn_scale, 0.0f, 0.0f);
             attn = ggml_reshape_2d(ctx0, attn, n_heads * hd, T);
