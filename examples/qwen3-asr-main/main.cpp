@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // Tiny WAV reader: 16-bit PCM, mono, 16 kHz only.
@@ -243,6 +244,30 @@ int main(int argc, char ** argv) {
     if (model_path.empty() || audio_path.empty()) {
         fprintf(stderr, "missing -m or -f. -h for help.\n"); return 1;
     }
+
+    // Auto-download: "-m auto" downloads the default Q4_K from HuggingFace
+    if (model_path == "auto" || model_path == "default") {
+        const char * home = getenv("HOME");
+        std::string cache_dir = std::string(home ? home : "/tmp") + "/.cache/crispasr";
+        std::string cached = cache_dir + "/qwen3-asr-0.6b-q4_k.gguf";
+        if (access(cached.c_str(), F_OK) == 0) {
+            model_path = cached;
+            if (!no_prints) fprintf(stderr, "using cached model: %s\n", cached.c_str());
+        } else {
+            fprintf(stderr, "downloading qwen3-asr-0.6b-q4_k.gguf (~516 MB)...\n");
+            std::string cmd = "mkdir -p '" + cache_dir + "' && "
+                "hf download cstr/qwen3-asr-0.6b-GGUF "
+                "qwen3-asr-0.6b-q4_k.gguf "
+                "--local-dir '" + cache_dir + "' 2>&1";
+            int rc = system(cmd.c_str());
+            if (rc != 0) {
+                fprintf(stderr, "download failed (rc=%d). Install hf CLI: pip install huggingface_hub\n", rc);
+                return 1;
+            }
+            model_path = cached;
+        }
+    }
+
     if (timestamps && aligner_path.empty()) {
         fprintf(stderr, "error: -timestamps / -osrt / -ovtt require -am ALIGNER.gguf\n");
         return 1;
