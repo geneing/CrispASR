@@ -1233,6 +1233,13 @@ extern "C" float * granite_speech_run_encoder(struct granite_speech_context * ct
     run_matmul(ctx, hidden.data(), mel, n_mels, T,
                ctx->model.encoder.input_w, ctx->model.encoder.input_b, d);
 
+    if (ctx->params.verbosity >= 2) {
+        float mn=1e30,mx=-1e30,s=0;
+        for(size_t i=0;i<(size_t)d*T;i++){if(hidden[i]<mn)mn=hidden[i];if(hidden[i]>mx)mx=hidden[i];s+=hidden[i];}
+        fprintf(stderr, "  input_linear: min=%.4f max=%.4f mean=%.6f first_4=[%.4f,%.4f,%.4f,%.4f]\n",
+                mn, mx, s/(d*T), hidden[0], hidden[1], hidden[2], hidden[3]);
+    }
+
     // Buffers
     std::vector<float> ffn_out((size_t)d * T);
     std::vector<float> Q((size_t)d * T), KV((size_t)d * 2 * T);
@@ -1349,8 +1356,14 @@ extern "C" float * granite_speech_run_encoder(struct granite_speech_context * ct
             for (size_t i = 0; i < (size_t)d * T; i++) hidden[i] += mid_back[i];
         }
 
-        if (ctx->params.verbosity >= 2 && (il % 4 == 3 || il == n_layers - 1))
-            fprintf(stderr, "  encoder layer %d/%d\n", il + 1, n_layers);
+        if (ctx->params.verbosity >= 2) {
+            if (il == 0 || il == 3 || il == 7 || il == n_layers - 1) {
+                float mn=1e30,mx=-1e30,s=0;
+                for(size_t i=0;i<(size_t)d*T;i++){if(hidden[i]<mn)mn=hidden[i];if(hidden[i]>mx)mx=hidden[i];s+=hidden[i];}
+                fprintf(stderr, "  layer %d/%d: min=%.4f max=%.4f mean=%.6f first_4=[%.4f,%.4f,%.4f,%.4f]\n",
+                        il+1, n_layers, mn, mx, s/(d*T), hidden[0], hidden[1], hidden[2], hidden[3]);
+            }
+        }
     }
 
     size_t total = (size_t)T * d;
