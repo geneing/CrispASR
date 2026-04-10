@@ -1083,10 +1083,10 @@ extern "C" float * voxtral4b_run_encoder(voxtral4b_context * ctx,
         int swa = (int)ctx->model.hparams.audio_swa;
         std::vector<ggml_fp16_t> mask((size_t)T_enc * T_enc, ggml_fp32_to_fp16(0.0f));
         ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
-        // Causal + sliding window: mask k > q (causal) and k < q - swa (outside window)
+        // Causal + sliding window: mask k > q (causal) and k <= q - swa (outside window)
         for (int q = 0; q < T_enc; q++)
             for (int k = 0; k < T_enc; k++)
-                if (k > q || k < q - swa) mask[(size_t)q * T_enc + k] = neg_inf;
+                if (k > q || k <= q - swa) mask[(size_t)q * T_enc + k] = neg_inf;
         ggml_backend_tensor_set(swa_t, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
     }
 
@@ -1167,9 +1167,11 @@ extern "C" float * voxtral4b_run_llm_kv(voxtral4b_context * ctx,
         int Lk = n_past + n_tokens;
         mask.resize((size_t)n_tokens * Lk, ggml_fp32_to_fp16(0.0f));
         ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+        int swa = (int)hp.llm_swa;
         for (int q = 0; q < n_tokens; q++)
             for (int k = 0; k < Lk; k++)
-                if (k > n_past + q) mask[(size_t)q * Lk + k] = neg_inf;
+                if (k > n_past + q || k <= (n_past + q) - swa)
+                    mask[(size_t)q * Lk + k] = neg_inf;
     }
 
     ggml_cgraph * gf = voxtral4b_build_graph_llm_kv(ctx, n_past, n_tokens);
