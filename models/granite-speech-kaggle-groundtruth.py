@@ -79,8 +79,29 @@ print("Model loaded!")
 
 # Process audio through the processor
 print("\n=== Processor output ===")
-conversation = [{"role": "user", "content": [{"type": "audio", "url": audio_path}, {"type": "text", "text": "Transcribe the audio."}]}]
-inputs = processor(conversation, return_tensors="pt")
+# GraniteSpeechProcessor expects text + audio separately, not conversation dicts
+import soundfile as sf
+audio_sf, sr_sf = sf.read(audio_path, dtype="float32")
+if sr_sf != 16000:
+    print(f"  WARNING: audio is {sr_sf} Hz, processor expects 16000 Hz")
+
+# Build prompt text with audio placeholder
+prompt_text = "USER: <|audio|> Transcribe the audio.\n ASSISTANT:"
+try:
+    inputs = processor(text=prompt_text, audio=audio_sf, return_tensors="pt")
+except Exception as e:
+    print(f"  Processor with text+audio failed: {e}")
+    # Try alternative: pass audio as list
+    try:
+        inputs = processor(text=[prompt_text], audio=[audio_sf], return_tensors="pt")
+    except Exception as e2:
+        print(f"  Alternative also failed: {e2}")
+        # Last resort: build inputs manually
+        print("  Building inputs manually...")
+        fe = processor.feature_extractor if hasattr(processor, 'feature_extractor') else processor.audio_processor
+        mel_out = fe(audio_sf, return_tensors="pt")
+        tok_out = processor.tokenizer(prompt_text, return_tensors="pt")
+        inputs = {**mel_out, **tok_out}
 print(f"Input keys: {list(inputs.keys())}")
 for k, v in inputs.items():
     if hasattr(v, 'shape'):
