@@ -1696,18 +1696,8 @@ static ggml_cgraph * granite_build_llm_kv(granite_speech_context * ctx,
                                         ctx->kv_v->nb[1], ctx->kv_v->nb[2],
                                         (size_t)il * ctx->kv_v->nb[3]));
 
-        // GQA expansion
-        const int n_kv_grp = n_q / n_kv;
-        if (n_kv_grp > 1) {
-            ggml_tensor * K4 = ggml_reshape_4d(ctx0, Kfull, hd, Lk, 1, n_kv);
-            ggml_tensor * V4 = ggml_reshape_4d(ctx0, Vfull, hd, Lk, 1, n_kv);
-            K4 = ggml_repeat_4d(ctx0, K4, hd, Lk, n_kv_grp, n_kv);
-            V4 = ggml_repeat_4d(ctx0, V4, hd, Lk, n_kv_grp, n_kv);
-            Kfull = ggml_reshape_3d(ctx0, K4, hd, Lk, n_q);
-            Vfull = ggml_reshape_3d(ctx0, V4, hd, Lk, n_q);
-        }
-
-        // Flash attention (μP: attention_multiplier replaces 1/sqrt(hd))
+        // Flash attention with native GQA (n_q=16, n_kv=4)
+        // flash_attn_ext handles Q(hd, n_tokens, n_q) K(hd, Lk, n_kv) V(hd, Lk, n_kv)
         Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
         ggml_tensor * attn = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, causal_mask,
                                                   hp.attention_multiplier, 0.0f, 0.0f);
