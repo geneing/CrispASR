@@ -1,114 +1,102 @@
-> **STATUS (2026-04-10): NOT STARTED.** Granite Speech 4.0-1B evaluation pending.
-> See TODO.md for priorities.
+> **STATUS (2026-04-10): ARCHITECTURE INSPECTED.** Model downloaded and analyzed.
+> Ready to start. Estimated effort: ~1 week. See TODO.md for priorities.
 
 # ibm-granite/granite-4.0-1b-speech — port plan
 
-## What it actually is
+## Architecture (verified against config.json + safetensors index)
 
-Not a dedicated ASR like Cohere/Parakeet/Canary. It's a **speech-LLM**: a
-Conformer-CTC audio encoder feeds a BLIP-2 Q-former projector, which feeds
-prompt tokens into a 1 B Granite causal LLM that produces the transcript
-(or any other instruction-following text) via normal text generation.
+Total: 954 tensors, 4.4 GB BF16, three modules.
 
-## Architecture (from `config.json` + `model.safetensors.index.json`)
+### 1. Audio encoder — `granite_speech_encoder` (Conformer)
+- 16 layers, hidden=1024, 8 heads, dim_head=128
+- Conv module: kernel=15, depthwise conv + batch norm
+- Input: 160-dim (80 mels × 2 stacked frames), output: 348-dim (CTC head, ignored at inference)
+- **Relative position embedding** (`attn.rel_pos_emb`) — similar to Parakeet
+- Per-layer tensors (33 per layer, 528 total):
+  - attn: pre_norm, to_q, to_kv, to_out, rel_pos_emb
+  - conv: batch_norm (5 tensors), depth_conv, up_conv, down_conv, norm
+  - ff: pre_norm, ff.0 (Linear), ff.3 (Linear)
+  - ff_norm
+- **Reuse opportunity**: Very similar to Parakeet's FastConformer encoder.
+  Same Conformer pattern (MHSA + Conv + FFN with pre-norms).
 
-Total: **4.63 GB**, 954 tensors, three modules.
-
-### 1. Audio encoder — `granite_speech_encoder` (Conformer-CTC-ish)
-- 16 layers, hidden=1024, 8 heads, dim_head=128, FFN via `intermediate_size`
-- conv kernel=15, input_dim=160 (80 logmels × 2 stacked frames),
-  output_dim=348 (character CTC head — used at training, ignored at inference)
-- context_size=200, max_pos_emb=512
-- Tensor count: `input_linear` (2) + `layers` (528 = 16×33) + `out` (2) + `out_mid` (2)
-- Architecturally close to our existing Parakeet/Canary FastConformer, but
-  with a character-level CTC aux head instead of subword CTC. Should be a
-  ~1 week port reusing the parakeet encoder graph.
-
-### 2. Projector — BLIP-2 Q-former
+### 2. Projector — BLIP-2 Q-Former
 - 2 transformer layers, hidden=1024, 16 heads, FFN=4096
-- Learned `projector.query` tokens (1 tensor) → `qformer` (54 tensors)
-  → `linear` (2 tensors, projects 1024 → 2048 to match LLM hidden)
-- Outputs a fixed-length sequence of "soft audio tokens" that get
-  injected into the Granite prompt at a placeholder position.
-- Q-former is small but unusual for this repo — needs cross-attention from
-  query tokens to encoder output. Maybe 3-5 days.
+- **Learned query tokens**: `projector.query` (fixed-length query sequence)
+- Per-layer (27 tensors per layer, 54 total):
+  - Self-attention: Q/K/V (with bias) + dense output + LayerNorm
+  - Cross-attention: Q/K/V (with bias) + dense output + LayerNorm
+  - Intermediate query FFN + output query FFN + LayerNorm
+- Final: `projector.linear` (1024→2048, maps to LLM hidden dim)
+- `projector.qformer.layernorm` (input norm)
+- **New module** — no existing code to reuse. Cross-attention from query
+  tokens to encoder output is the core operation.
 
-### 3. Language model — `ibm-granite/granite-4.0-1b-base`
-- 40 layers, hidden=2048, 16 heads, **4 KV heads (GQA)**, FFN=4096
-- vocab=100353, max_pos=4096, **RoPE**, RMSNorm, SiLU
-- Granite "soft" multipliers: embedding_multiplier=12.0, logits_scaling=8.0,
-  attention_multiplier=0.0078125, residual_multiplier=0.22
-- 362 tensors. **This is the bulk of the parameters and the bulk of the work.**
+### 3. Language model — Granite 4.0-1B
+- 40 layers, hidden=2048, 16 heads, 4 KV heads (GQA), FFN=4096
+- RoPE θ=10000, RMSNorm eps=1e-5, SiLU activation
+- **μP (maximal update parameterization) multipliers**:
+  - `embedding_multiplier = 12.0` (scales token embeddings)
+  - `attention_multiplier = 0.0078125` (scales attention logits = 1/128 = 1/head_dim)
+  - `residual_multiplier = 0.22` (scales residual additions)
+  - `logits_scaling = 8.0` (scales output logits)
+- vocab=100353, max_pos=4096
+- `tie_word_embeddings = False` (separate lm_head)
+- 362 tensors
 
-## Strategic options
+### 4. Audio preprocessing
+- 80 mel bins (not 128 like Whisper/Voxtral)
+- Stacked frames: input_dim=160 = 80 × 2
+- downsample_rate=5 (encoder frames → LLM tokens)
+- window_size=15 (windowed attention in encoder conv)
 
-### Path A — bind to llama.cpp's existing Granite loader  ✅ recommended
-llama.cpp already has full Granite support (loader + forward + RoPE + GQA +
-the soft multipliers). We only need to port:
-1. The audio encoder (reuse parakeet's FastConformer graph)
-2. The Q-former projector
-3. A glue layer that injects projector outputs as input embeddings into a
-   llama.cpp Granite context at a placeholder token offset
+## Port approach — Path C (standalone, no llama.cpp dep)
 
-Pros: avoids re-implementing 40 transformer layers + RoPE + GQA + the
-Granite multipliers. Picks up llama.cpp's quantisation, sampling, KV
-cache, batching, and SIMD kernels for free. Granite-1B already has
-solid llama.cpp coverage.
+Given our success with Voxtral 4B (standalone 4.4B model, 1 week), the
+standalone approach is now proven. The Granite LLM (40 layers, 2048 dim)
+is actually smaller than Voxtral's LLM (26 layers, 3072 dim) in terms
+of per-token compute, so it should be faster.
 
-Cons: introduces a llama.cpp dependency (or vendored subset). The
-"speech tokens injection" hook requires either patching llama.cpp's
-`llama_decode` to accept pre-computed embeddings, or using the existing
-`llama_get_embeddings` / `llama_set_embeddings` API if available.
+### Implementation plan
 
-Estimated effort: **2-3 weeks**.
+1. **GGUF converter** (~0.5 day)
+   - Map all 954 tensors to GGUF names
+   - Bake mel filterbank (80 bins, same Slaney construction)
+   - Handle μP multiplier metadata
 
-### Path B — fully standalone Granite forward in this repo
-Write a slim Granite-1B forward in `src/granite_llm.{h,cpp}` matching
-what llama.cpp does, with the soft multipliers baked in.
+2. **Audio encoder** (~2 days)
+   - Reuse Parakeet Conformer graph patterns
+   - Adapt for 160-dim input (stacked frames)
+   - Implement rel_pos_emb (similar to Parakeet's)
+   - Batch norm folding (already have this from Parakeet/canary_ctc)
 
-Pros: no external runtime dependency, single binary, full control over
-the speech-token injection path.
+3. **Q-Former projector** (~2 days)
+   - Learned query tokens (fixed-length, loaded from GGUF)
+   - Self-attention among queries
+   - Cross-attention from queries to encoder output
+   - LayerNorm + FFN per layer
+   - Final linear projection (1024→2048)
 
-Cons: re-implements ~3000 lines of well-tested llama.cpp code. Easy to
-get GQA / RoPE / multiplier order wrong. Quantisation work doubles
-(need to verify Q4_K / Q8_0 paths against llama.cpp output). Slower
-inference than llama.cpp's tuned kernels.
+4. **LLM decoder** (~1.5 days)
+   - Copy Voxtral 4B LLM pattern (GQA, RoPE, SwiGLU, RMSNorm)
+   - Add μP multipliers (4 scalar multiplications)
+   - KV cache with F16
+   - Flash attention
 
-Estimated effort: **5-6 weeks**.
+5. **CLI + integration** (~1 day)
+   - Chat template parsing
+   - Audio token injection at placeholder
+   - Greedy decode + text output
+   - Auto-download support
 
-## Recommendation
+## Comparison with existing models
 
-**Path A.** The audio encoder + projector are the interesting / novel
-work and play to this repo's strengths. The LLM forward is a solved
-problem and llama.cpp already does it better than we would. Vendor
-llama.cpp as a subtree (same way we vendor ggml), expose its Granite
-loader, and write a thin `granite-speech-main` CLI that:
-
-1. Loads the audio encoder + Q-former from `granite-speech-encoder.gguf`
-   (our conversion)
-2. Loads the LLM from `granite-1b.gguf` (standard llama.cpp Granite GGUF —
-   may already exist on HF, otherwise convert via llama.cpp's
-   `convert_hf_to_gguf.py`)
-3. Computes mel → encoder → Q-former → soft audio tokens
-4. Builds a prompt: `<|system|>...<|user|><audio_placeholder>Transcribe<|assistant|>`
-5. Calls llama.cpp's decode loop, splicing soft tokens in at the
-   placeholder offset
-
-## Open questions before starting
-
-- **Does HF have a llama.cpp-compatible Granite-1B GGUF already?** If
-  yes, we only need to ship the encoder+projector GGUF (~500 MB) instead
-  of bundling the whole 4.6 GB.
-- **What does the chat template / audio placeholder token look like?**
-  Need to read `processor_config.json` and `chat_template.json` (not yet
-  downloaded) to find the exact prompt format.
-- **Is the BLIP-2 Q-former cross-attention standard?** Need to inspect
-  the actual tensor names under `projector.qformer.*` to confirm it's
-  the BERT-style Q-former and not something custom.
-- **Licensing.** Granite is Apache-2.0 — fine to redistribute the
-  encoder GGUF on HF.
-
-## Decision needed from user
-
-Path A or Path B? And: do we want to gate this on first finishing the
-upstream ffmpeg-transcode fix (UPSTREAM.md), or start in parallel?
+| | Granite 1B | Qwen3-ASR | Voxtral 4B |
+|---|---|---|---|
+| Params | ~1B | 900M | 4.4B |
+| Encoder | Conformer 16L | Whisper 18L | Causal 32L |
+| Projector | Q-Former (cross-attn) | Conv2D subsample | Linear stack-4 |
+| LLM | Granite 40L/2048d | Qwen3 28L/896d | Mistral 26L/3072d |
+| Languages | en, fr, de, es, pt, ja | 30 + 22 CN | 13 |
+| Expected speed | ~8-12s (Q4_K) | 6.5s | 54s |
+| License | Apache-2.0 | Apache-2.0 | Apache-2.0 |
