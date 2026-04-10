@@ -1,5 +1,21 @@
 # Performance — CrispASR
 
+## Speech-LLM Performance (Voxtral 4B Realtime)
+
+Measured on an 11s clip (`jfk.wav`), CPU-only (4 threads, AVX2).
+
+| Model | Size | Encoder | Prefill | Decode (ms/tok) | Total | RTFx |
+|-------|------|---------|---------|-----------------|-------|------|
+| F16 | 8.3 GB | 39s | 30s | 430 | 133s | 0.08× |
+| Q8_0 | 4.5 GB | 41s | 12s | 773 | 169s | 0.07× |
+| **Q4_K** | **2.4 GB** | **19s** | **3s** | **177** | **49s** | **0.22×** |
+
+Q4_K is 2.7× faster than F16 with identical output quality. German tested and working.
+
+---
+
+## Cohere Transcribe Performance
+
 ## Real-Time Factor (RTFx)
 
 Measured on an 11s clip (`jfk.wav`). RTFx > 1.0 = faster than real-time.
