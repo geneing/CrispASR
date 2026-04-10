@@ -287,6 +287,30 @@ def convert(input_dir: Path, out_path: Path) -> None:
     writer.add_uint32("granite_speech.window_size", cfg.get("window_size", 15))
     writer.add_uint32("granite_speech.audio_token_index", cfg.get("audio_token_index", 100352))
 
+    # Tokenizer vocab (GPT-2 BPE — store token strings for detokenization)
+    vocab_path = input_dir / "vocab.json"
+    if vocab_path.exists():
+        with open(vocab_path) as f:
+            vocab_json = json.load(f)  # {token_str: id}
+        # Build id→token list
+        n_vocab = text_cfg.get("vocab_size", 100353)
+        tokens = [""] * n_vocab
+        for tok_str, tok_id in vocab_json.items():
+            if tok_id < n_vocab:
+                tokens[tok_id] = tok_str
+        # Add special tokens from tokenizer_config.json
+        tok_cfg_path = input_dir / "tokenizer_config.json"
+        if tok_cfg_path.exists():
+            with open(tok_cfg_path) as f:
+                tok_cfg = json.load(f)
+            for tid_str, info in tok_cfg.get("added_tokens_decoder", {}).items():
+                tid = int(tid_str)
+                if tid < n_vocab:
+                    tokens[tid] = info["content"]
+        # Store as GGUF string array
+        writer.add_array("tokenizer.ggml.tokens", tokens)
+        print(f"  tokenizer: {len(tokens)} tokens")
+
     # Mel filterbank (80 bins)
     mel_filters = build_htk_mel_filters(sr=16000, n_fft=512, n_mels=80)
     writer.add_tensor("audio.mel_filters", mel_filters)

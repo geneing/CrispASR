@@ -74,6 +74,13 @@ float * granite_speech_run_llm_kv(struct granite_speech_context * ctx,
 float * granite_speech_embed_tokens(struct granite_speech_context * ctx,
                                      const int32_t * input_ids, int n_tokens);
 
+// Get text for a token ID (GPT-2 BPE vocab). Returns empty string if OOB.
+const char * granite_speech_token_text(struct granite_speech_context * ctx, int id);
+
+// Decode an array of token IDs to UTF-8 text. Caller frees with free().
+char * granite_speech_decode_tokens(struct granite_speech_context * ctx,
+                                     const int32_t * ids, int n_ids);
+
 #ifdef __cplusplus
 }
 #endif
