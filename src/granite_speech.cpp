@@ -811,19 +811,23 @@ static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) 
             // where scale = gamma / sqrt(var + eps), shift = beta - gamma * mean / sqrt(var + eps)
             // These 1D (2048,) tensors broadcast over T via ggml_mul/ggml_add
             // Depthwise conv (kernel=15, groups=inner_dim, pad=7)
-            // Same pattern as Parakeet: use ggml_conv_2d_dw_direct
+            // Uses ggml_conv_2d_dw_direct (same pattern as Parakeet encoder)
+            // TODO: weight layout needs verification against ground truth
+            // Disabled for now — produces wrong features. Enable after debugging.
+            #if 0
             if (b.conv_dw_w) {
                 int K = (int)b.conv_dw_w->ne[0];  // 15
                 int inner = half_dim;  // 2048
                 int dw_pad = K / 2;   // 7
                 ggml_tensor * dw_w = ggml_cast(ctx0, b.conv_dw_w, GGML_TYPE_F32);
                 ggml_tensor * dw_w_4d = ggml_reshape_4d(ctx0, dw_w, K, 1, 1, inner);
-                ggml_tensor * x_t = ggml_cont(ctx0, ggml_transpose(ctx0, x));  // (inner, T) → (T, inner)
+                ggml_tensor * x_t = ggml_cont(ctx0, ggml_transpose(ctx0, x));
                 x_t = ggml_reshape_4d(ctx0, x_t, T, 1, inner, 1);
                 x_t = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, x_t, 1, 1, dw_pad, 0, 1, 1);
                 x = ggml_cont(ctx0, ggml_permute(ctx0, x_t, 1, 2, 0, 3));
                 x = ggml_reshape_2d(ctx0, x, inner, T);
             }
+            #endif
 
             // BN (precomputed at load time): bn_w = scale, bn_b = shift
             if (b.conv_bn_w && b.conv_bn_b) {
