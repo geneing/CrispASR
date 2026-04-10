@@ -763,9 +763,159 @@ extern "C" float * granite_speech_run_encoder(struct granite_speech_context * ct
     return result;
 }
 
-extern "C" float * granite_speech_run_projector(struct granite_speech_context *, const float *, int, int, int *, int *) {
-    fprintf(stderr, "granite_speech: projector not yet implemented\n");
-    return nullptr;
+// ===========================================================================
+// Q-Former projector (2 layers: self-attn + cross-attn + FFN per layer)
+// ===========================================================================
+
+static ggml_cgraph * granite_build_projector(granite_speech_context * ctx, int enc_len) {
+    const auto & m = ctx->model;
+    const auto & hp = m.hparams;
+    const int d = (int)hp.proj_d_model;       // 1024
+    const int n_heads = (int)hp.proj_n_heads;  // 16
+    const int hd = d / n_heads;               // 64
+    const int ff = (int)hp.proj_ff_dim;       // 4096
+    const int n_layers = (int)hp.proj_n_layers;
+    const int llm_d = (int)hp.llm_d_model;    // 2048
+    const float attn_scale = 1.0f / std::sqrt((float)hd);
+
+    // Query tokens: (1, n_query=3, 1024)
+    int n_query = (int)m.projector.query->ne[1];  // 3
+
+    ggml_init_params ip = { ctx->compute_meta.size(), ctx->compute_meta.data(), true };
+    ggml_context * ctx0 = ggml_init(ip);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 4096, false);
+
+    // Encoder output as input
+    ggml_tensor * enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, enc_len);
+    ggml_set_name(enc, "proj_enc_input"); ggml_set_input(enc);
+
+    // Learned query tokens: extract from (1, n_query, d) → (d, n_query)
+    ggml_tensor * query = ggml_reshape_2d(ctx0, m.projector.query, d, n_query);
+
+    // Apply input LayerNorm to encoder features
+    ggml_tensor * enc_normed = enc;
+    if (m.projector.ln_w) {
+        enc_normed = ggml_norm(ctx0, enc, 1e-12f);
+        enc_normed = ggml_mul(ctx0, enc_normed, m.projector.ln_w);
+        if (m.projector.ln_b) enc_normed = ggml_add(ctx0, enc_normed, m.projector.ln_b);
+    }
+
+    ggml_tensor * cur = query;  // (d, n_query)
+
+    for (int il = 0; il < n_layers; il++) {
+        const auto & b = m.projector.blocks[il];
+
+        // --- Self-attention among query tokens ---
+        {
+            ggml_tensor * Q = ggml_mul_mat(ctx0, b.sa_q_w, cur);
+            if (b.sa_q_b) Q = ggml_add(ctx0, Q, b.sa_q_b);
+            ggml_tensor * K = ggml_mul_mat(ctx0, b.sa_k_w, cur);
+            if (b.sa_k_b) K = ggml_add(ctx0, K, b.sa_k_b);
+            ggml_tensor * V = ggml_mul_mat(ctx0, b.sa_v_w, cur);
+            if (b.sa_v_b) V = ggml_add(ctx0, V, b.sa_v_b);
+
+            Q = ggml_reshape_3d(ctx0, Q, hd, n_heads, n_query);
+            K = ggml_reshape_3d(ctx0, K, hd, n_heads, n_query);
+            V = ggml_reshape_3d(ctx0, V, hd, n_heads, n_query);
+            Q = ggml_permute(ctx0, Q, 0, 2, 1, 3);
+            K = ggml_permute(ctx0, K, 0, 2, 1, 3);
+            V = ggml_permute(ctx0, V, 0, 2, 1, 3);
+
+            ggml_tensor * sa = ggml_flash_attn_ext(ctx0, Q, K, V, nullptr,
+                                                    attn_scale, 0.0f, 0.0f);
+            sa = ggml_reshape_2d(ctx0, sa, d, n_query);
+            sa = ggml_mul_mat(ctx0, b.sa_out_w, sa);
+            if (b.sa_out_b) sa = ggml_add(ctx0, sa, b.sa_out_b);
+
+            cur = ggml_add(ctx0, cur, sa);
+            // LayerNorm
+            if (b.sa_norm_w) {
+                cur = ggml_norm(ctx0, cur, 1e-12f);
+                cur = ggml_mul(ctx0, cur, b.sa_norm_w);
+                if (b.sa_norm_b) cur = ggml_add(ctx0, cur, b.sa_norm_b);
+            }
+        }
+
+        // --- Cross-attention: queries attend to encoder output ---
+        {
+            ggml_tensor * Q = ggml_mul_mat(ctx0, b.ca_q_w, cur);
+            if (b.ca_q_b) Q = ggml_add(ctx0, Q, b.ca_q_b);
+            ggml_tensor * K = ggml_mul_mat(ctx0, b.ca_k_w, enc_normed);
+            if (b.ca_k_b) K = ggml_add(ctx0, K, b.ca_k_b);
+            ggml_tensor * V = ggml_mul_mat(ctx0, b.ca_v_w, enc_normed);
+            if (b.ca_v_b) V = ggml_add(ctx0, V, b.ca_v_b);
+
+            Q = ggml_reshape_3d(ctx0, Q, hd, n_heads, n_query);
+            K = ggml_reshape_3d(ctx0, K, hd, n_heads, enc_len);
+            V = ggml_reshape_3d(ctx0, V, hd, n_heads, enc_len);
+            Q = ggml_permute(ctx0, Q, 0, 2, 1, 3);
+            K = ggml_permute(ctx0, K, 0, 2, 1, 3);
+            V = ggml_permute(ctx0, V, 0, 2, 1, 3);
+
+            ggml_tensor * ca = ggml_flash_attn_ext(ctx0, Q, K, V, nullptr,
+                                                    attn_scale, 0.0f, 0.0f);
+            ca = ggml_reshape_2d(ctx0, ca, d, n_query);
+            ca = ggml_mul_mat(ctx0, b.ca_out_w, ca);
+            if (b.ca_out_b) ca = ggml_add(ctx0, ca, b.ca_out_b);
+
+            cur = ggml_add(ctx0, cur, ca);
+            if (b.ca_norm_w) {
+                cur = ggml_norm(ctx0, cur, 1e-12f);
+                cur = ggml_mul(ctx0, cur, b.ca_norm_w);
+                if (b.ca_norm_b) cur = ggml_add(ctx0, cur, b.ca_norm_b);
+            }
+        }
+
+        // --- FFN ---
+        {
+            ggml_tensor * x = ggml_mul_mat(ctx0, b.ffn_up_w, cur);
+            if (b.ffn_up_b) x = ggml_add(ctx0, x, b.ffn_up_b);
+            x = ggml_gelu_erf(ctx0, x);
+            x = ggml_mul_mat(ctx0, b.ffn_down_w, x);
+            if (b.ffn_down_b) x = ggml_add(ctx0, x, b.ffn_down_b);
+
+            cur = ggml_add(ctx0, cur, x);
+            if (b.ffn_norm_w) {
+                cur = ggml_norm(ctx0, cur, 1e-12f);
+                cur = ggml_mul(ctx0, cur, b.ffn_norm_w);
+                if (b.ffn_norm_b) cur = ggml_add(ctx0, cur, b.ffn_norm_b);
+            }
+        }
+    }
+
+    // Final linear projection: (1024 → 2048)
+    cur = ggml_mul_mat(ctx0, m.projector.linear_w, cur);
+    if (m.projector.linear_b) cur = ggml_add(ctx0, cur, m.projector.linear_b);
+
+    ggml_set_name(cur, "proj_output");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
+extern "C" float * granite_speech_run_projector(struct granite_speech_context * ctx,
+                                                const float * enc_out, int enc_len, int enc_dim,
+                                                int * out_N, int * out_dim) {
+    if (!ctx || !enc_out || enc_dim != (int)ctx->model.hparams.proj_d_model) return nullptr;
+    const int llm_d = (int)ctx->model.hparams.llm_d_model;
+    int n_query = (int)ctx->model.projector.query->ne[1];
+
+    ggml_cgraph * gf = granite_build_projector(ctx, enc_len);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return nullptr;
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "proj_enc_input"), enc_out, 0,
+                            (size_t)enc_len * enc_dim * sizeof(float));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return nullptr;
+
+    ggml_tensor * out = ggml_graph_get_tensor(gf, "proj_output");
+    size_t total = (size_t)n_query * llm_d;
+    float * result = (float *)malloc(total * sizeof(float));
+    ggml_backend_tensor_get(out, result, 0, total * sizeof(float));
+    if (out_N) *out_N = n_query;
+    if (out_dim) *out_dim = llm_d;
+    return result;
 }
 
 extern "C" bool granite_speech_kv_init(struct granite_speech_context * ctx, int max_ctx) {
