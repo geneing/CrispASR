@@ -1647,6 +1647,7 @@ static ggml_cgraph * granite_build_llm_kv(granite_speech_context * ctx,
     // Apply μP embedding multiplier to ALL inputs (text + audio) uniformly
     // This matches HF/mlx: h = h * embedding_multiplier after splicing audio features
     ggml_tensor * cur = ggml_scale(ctx0, embeds, hp.embedding_multiplier);
+    ggml_set_name(cur, "emb_scaled");
 
     for (int il = 0; il < n_layers; il++) {
         const auto & b = m.llm.blocks[il];
@@ -1665,10 +1666,11 @@ static ggml_cgraph * granite_build_llm_kv(granite_speech_context * ctx,
         K = ggml_reshape_3d(ctx0, K, hd, n_kv, n_tokens);
         V = ggml_reshape_3d(ctx0, V, hd, n_kv, n_tokens);
 
-        // RoPE
-        Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, 0, 0,
+        // RoPE — Granite uses half-rotation (split-half) style like HF rotate_half:
+        // pairs (i, i+dim/2), which maps to GGML_ROPE_TYPE_NEOX (mode=2)
+        Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, 2 /*NEOX*/, 0,
                           hp.llm_rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, 0, 0,
+        K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, 2 /*NEOX*/, 0,
                           hp.llm_rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
         // Permute K/V for cache write
@@ -1697,7 +1699,6 @@ static ggml_cgraph * granite_build_llm_kv(granite_speech_context * ctx,
                                         (size_t)il * ctx->kv_v->nb[3]));
 
         // Flash attention with native GQA (n_q=16, n_kv=4)
-        // flash_attn_ext handles Q(hd, n_tokens, n_q) K(hd, Lk, n_kv) V(hd, Lk, n_kv)
         Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
         ggml_tensor * attn = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, causal_mask,
                                                   hp.attention_multiplier, 0.0f, 0.0f);
@@ -1716,6 +1717,13 @@ static ggml_cgraph * granite_build_llm_kv(granite_speech_context * ctx,
         ggml_tensor * up = ggml_mul_mat(ctx0, b.ffn_up_w, cur);
         cur = ggml_mul_mat(ctx0, b.ffn_down_w, ggml_mul(ctx0, gate, up));
         cur = ggml_add(ctx0, residual, ggml_scale(ctx0, cur, hp.residual_multiplier));
+
+        // Debug: name select layer outputs
+        if (il == 0 || il == 1 || il == 19 || il == 38 || il == 39) {
+            char name[32];
+            snprintf(name, sizeof(name), "layer_%d", il);
+            ggml_set_name(cur, name);
+        }
     }
 
     // Final RMSNorm
@@ -1756,6 +1764,7 @@ extern "C" float * granite_speech_run_llm_kv(struct granite_speech_context * ctx
         for (int q = 0; q < n_tokens; q++)
             for (int k = 0; k < Lk; k++)
                 if (k > n_past + q) mask[(size_t)q * Lk + k] = neg_inf;
+
     }
 
     ggml_cgraph * gf = granite_build_llm_kv(ctx, n_past, n_tokens);
@@ -1771,6 +1780,58 @@ extern "C" float * granite_speech_run_llm_kv(struct granite_speech_context * ctx
                                 mask.size() * sizeof(ggml_fp16_t));
 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return nullptr;
+
+    // Debug: dump per-layer values during prefill
+    if (ctx->params.verbosity >= 2 && n_tokens > 1) {
+        auto dump = [&](const char * name) {
+            ggml_tensor * t = ggml_graph_get_tensor(gf, name);
+            if (!t) return;
+            float buf[8];
+            ggml_backend_tensor_get(t, buf, 0, 4 * sizeof(float));
+            float buf2[4];
+            size_t last_off = (size_t)(n_tokens - 1) * d * sizeof(float);
+            ggml_backend_tensor_get(t, buf2, last_off, 4 * sizeof(float));
+            fprintf(stderr, "  %s: [0,:4]=[%.4f,%.4f,%.4f,%.4f] [-1,:4]=[%.4f,%.4f,%.4f,%.4f]\n",
+                    name, buf[0], buf[1], buf[2], buf[3], buf2[0], buf2[1], buf2[2], buf2[3]);
+        };
+        dump("emb_scaled");
+
+        // Q/K before/after RoPE for layer 0
+        // Q shape: (hd, n_q, n_tokens) = (128, 16, 89) in ggml
+        // To read head 0, pos 0: offset 0, 4 floats
+        // To read head 0, pos 88: offset = 88 * hd * n_q * sizeof(float)? No...
+        // ggml layout: ne[0]=hd=128, ne[1]=n_q=16, ne[2]=n_tokens=89
+        // element [d, head, tok] = data[tok * n_q * hd + head * hd + d]
+        // head 0, tok 0: offset=0
+        // head 0, tok 88: offset = 88 * 16 * 128 * sizeof(float)
+        {
+            const int hd_loc = (int)hp.llm_head_dim;
+            const int n_q_loc = (int)hp.llm_n_heads;
+            auto dump_qk = [&](const char * name) {
+                ggml_tensor * t = ggml_graph_get_tensor(gf, name);
+                if (!t) return;
+                float buf0[4], buf88[4];
+                // head0, pos0
+                ggml_backend_tensor_get(t, buf0, 0, 4 * sizeof(float));
+                // head0, pos 88
+                size_t off88 = (size_t)(n_tokens - 1) * n_q_loc * hd_loc * sizeof(float);
+                ggml_backend_tensor_get(t, buf88, off88, 4 * sizeof(float));
+                fprintf(stderr, "  %s [h0,p0,:4]=[%.4f,%.4f,%.4f,%.4f] [h0,p88,:4]=[%.4f,%.4f,%.4f,%.4f]\n",
+                        name, buf0[0], buf0[1], buf0[2], buf0[3],
+                        buf88[0], buf88[1], buf88[2], buf88[3]);
+            };
+            dump_qk("L0_Q_pre");
+            dump_qk("L0_Q_post");
+            dump_qk("L0_K_pre");
+            dump_qk("L0_K_post");
+        }
+
+        dump("layer_0");
+        dump("layer_1");
+        dump("layer_19");
+        dump("layer_38");
+        dump("layer_39");
+    }
 
     ggml_tensor * logits_t = ggml_graph_get_tensor(gf, "logits");
     float * result = (float *)malloc((size_t)vocab * sizeof(float));
