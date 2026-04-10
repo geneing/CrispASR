@@ -288,6 +288,25 @@ if(GGML_CUDA)
     target_link_libraries(voxtral4b PUBLIC ggml-cuda)
 endif()
 
+add_library(granite_speech
+            granite_speech.h
+            granite_speech.cpp
+            )
+target_include_directories(granite_speech PUBLIC . ../include)
+target_compile_features   (granite_speech PUBLIC cxx_std_17)
+target_link_libraries     (granite_speech PUBLIC ggml ggml-base Threads::Threads)
+if(NOT MSVC)
+    target_compile_options(granite_speech PRIVATE -O3 -march=native)
+endif()
+if(GGML_METAL)
+    target_compile_definitions(granite_speech PRIVATE GGML_USE_METAL)
+    target_link_libraries(granite_speech PUBLIC ggml-metal)
+endif()
+if(GGML_CUDA)
+    target_compile_definitions(granite_speech PRIVATE GGML_USE_CUDA)
+    target_link_libraries(granite_speech PUBLIC ggml-cuda)
+endif()
+
 # ---------------------------------------------------------------------------
 # wav2vec2-ggml — Wav2Vec2ForCTC encoder (GGUF, ggml-based)
 # ---------------------------------------------------------------------------
