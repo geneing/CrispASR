@@ -140,4 +140,11 @@ struct whisper_params {
     // path for the chosen backend.
     std::string lid_backend;
     std::string lid_model;
+
+    // Generic stereo diarize post-step. Empty = "energy" (default
+    // method, same as historical whisper-cli). Other choices:
+    // "xcorr" (cross-correlation TDOA), "pyannote" / "ecapa" (TODO,
+    // pending native GGUF ports). Only fires when `diarize` is true
+    // and the input is stereo.
+    std::string diarize_method;
 };

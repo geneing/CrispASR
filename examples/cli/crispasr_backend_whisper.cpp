@@ -28,6 +28,7 @@
 #include "grammar-parser.h"  // grammar_parser::parse_state::c_rules()
 #include "whisper.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -61,6 +62,7 @@ public:
              | CAP_FLASH_ATTN
              | CAP_VAD_INTERNAL
              | CAP_PARALLEL_PROCESSORS
+             | CAP_DIARIZE
              | CAP_AUTO_DOWNLOAD;
     }
 
@@ -236,6 +238,10 @@ public:
         return out;
     }
 
+    // No stereo override here — diarize is now a generic
+    // dispatcher-level post-step (crispasr_diarize.cpp). The whisper
+    // wrapper just transcribes mono and lets the dispatcher label
+    // segments based on stereo channel energy.
     void shutdown() override {
         if (ctx_) {
             whisper_free(ctx_);

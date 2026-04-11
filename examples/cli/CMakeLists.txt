@@ -27,6 +27,7 @@ add_executable(${TARGET}
     crispasr_aligner.cpp
     crispasr_vad.cpp
     crispasr_lid.cpp
+    crispasr_diarize.cpp
     crispasr_cache.cpp
     crispasr_output.cpp
     crispasr_model_mgr.cpp

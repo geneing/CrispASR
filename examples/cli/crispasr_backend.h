@@ -105,6 +105,28 @@ public:
         int64_t t_offset_cs,
         const whisper_params & params) = 0;
 
+    // Optional stereo-aware overload for backends that can split stereo
+    // channels for diarization (currently: whisper). Default
+    // implementation falls through to mono transcribe(); override when
+    // your backend can use stereo. The two channel buffers each have
+    // n_samples_per_channel elements at 16 kHz.
+    virtual std::vector<crispasr_segment> transcribe_stereo(
+        const float * left_samples,
+        const float * right_samples,
+        int n_samples_per_channel,
+        int64_t t_offset_cs,
+        const whisper_params & params)
+    {
+        // Mono fallback: average L+R into a temporary buffer and dispatch
+        // through the main transcribe(). Backends that don't override
+        // this method get sane behaviour without any extra wiring.
+        std::vector<float> mono((size_t)n_samples_per_channel);
+        for (int i = 0; i < n_samples_per_channel; i++) {
+            mono[(size_t)i] = 0.5f * (left_samples[i] + right_samples[i]);
+        }
+        return transcribe(mono.data(), n_samples_per_channel, t_offset_cs, params);
+    }
+
     // Release all resources.
     virtual void shutdown() = 0;
 };

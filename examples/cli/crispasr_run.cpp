@@ -13,6 +13,7 @@
 #include "crispasr_model_mgr.h"
 #include "crispasr_aligner.h"
 #include "crispasr_lid.h"
+#include "crispasr_diarize.h"
 #include "whisper_params.h"
 
 #include "common-whisper.h" // read_audio_data
@@ -40,7 +41,12 @@ int warn_unsupported(const CrispasrBackend & backend, const whisper_params & p) 
         warns++;
     };
 
-    if (p.diarize      && !(caps & CAP_DIARIZE))          warn("--diarize");
+    // Diarize is now handled at the dispatcher level via the generic
+    // crispasr_apply_diarize() post-step (energy / xcorr / future
+    // pyannote / ecapa), so no warning even when the backend itself
+    // doesn't claim CAP_DIARIZE — the dispatcher will label the
+    // segments after transcribe() returns. Tinydiarize still requires
+    // backend support (whisper-only).
     if (p.tinydiarize  && !(caps & CAP_DIARIZE))          warn("--tinydiarize");
     if (p.translate    && !(caps & CAP_TRANSLATE))        warn("--translate");
     if (!p.grammar.empty() && !(caps & CAP_GRAMMAR))      warn("--grammar");
@@ -122,11 +128,36 @@ int crispasr_run_backend(const whisper_params & params_in) {
     for (const auto & fname_inp : params.fname_inp) {
         std::vector<float> samples;
         std::vector<std::vector<float>> stereo;
-        if (!read_audio_data(fname_inp, samples, stereo, /*stereo=*/false)) {
+        // Request stereo split when --diarize is set. Diarize is now
+        // a generic dispatcher post-step (crispasr_diarize.cpp), so we
+        // try it for every backend rather than only those that
+        // advertise CAP_DIARIZE — the backend itself doesn't have to
+        // know anything about stereo; the dispatcher labels its
+        // segments after transcribe() returns.
+        const bool want_stereo = params.diarize;
+        if (!read_audio_data(fname_inp, samples, stereo, want_stereo)) {
             fprintf(stderr, "crispasr: error: failed to read audio '%s'\n",
                     fname_inp.c_str());
             rc = 20;
             continue;
+        }
+        bool have_stereo = want_stereo &&
+            stereo.size() == 2 &&
+            !stereo[0].empty() &&
+            stereo[0].size() == stereo[1].size();
+        // miniaudio duplicates mono -> both channels when we ask for
+        // stereo, so a mono input file gives us pcmf32s[0] == pcmf32s[1].
+        // Detect that and downgrade to mono so the diarize post-step
+        // takes the mono-friendly path (vad-turns) instead of the
+        // tie-only energy path.
+        if (have_stereo) {
+            const size_t n = stereo[0].size();
+            const size_t check = std::min<size_t>(n, 4096);
+            bool channels_equal = true;
+            for (size_t i = 0; i < check; i++) {
+                if (stereo[0][i] != stereo[1][i]) { channels_equal = false; break; }
+            }
+            if (channels_equal) have_stereo = false;
         }
 
         constexpr int SR = 16000;
@@ -189,11 +220,37 @@ int crispasr_run_backend(const whisper_params & params_in) {
         per_slice.reserve(slices.size());
         for (size_t i = 0; i < slices.size(); i++) {
             const auto & sl = slices[i];
-            auto segs = backend->transcribe(
+            // Always transcribe in mono — every backend takes mono PCM
+            // and the diarize step happens later as a generic post-pass.
+            std::vector<crispasr_segment> segs = backend->transcribe(
                 samples.data() + sl.start,
                 sl.end - sl.start,
                 sl.t0_cs,
                 params);
+
+            // Apply the generic diarize post-step. Stereo-only methods
+            // (energy, xcorr) need have_stereo == true; mono-friendly
+            // methods (vad-turns, future sherpa/pyannote) work either
+            // way. Pass both channel buffers and an is_stereo hint;
+            // when have_stereo is false we point both at the mono
+            // buffer so the helper has data to look at without
+            // special-casing.
+            if (params.diarize && !segs.empty()) {
+                if (have_stereo) {
+                    std::vector<float> sl_l(stereo[0].begin() + sl.start,
+                                            stereo[0].begin() + sl.end);
+                    std::vector<float> sl_r(stereo[1].begin() + sl.start,
+                                            stereo[1].begin() + sl.end);
+                    crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true,
+                                           sl.t0_cs, segs, params);
+                } else {
+                    std::vector<float> mono_slice(samples.begin() + sl.start,
+                                                  samples.begin() + sl.end);
+                    crispasr_apply_diarize(mono_slice, mono_slice,
+                                           /*is_stereo=*/false,
+                                           sl.t0_cs, segs, params);
+                }
+            }
 
             // Optional CTC forced alignment to attach word-level timestamps.
             // Applies to backends that expose CAP_TIMESTAMPS_CTC and don't

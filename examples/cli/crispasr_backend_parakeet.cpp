@@ -30,6 +30,7 @@ public:
              | CAP_LANGUAGE_DETECT
              | CAP_PUNCTUATION_TOGGLE
              | CAP_TEMPERATURE
+             | CAP_DIARIZE
              | CAP_AUTO_DOWNLOAD;
     }
 
