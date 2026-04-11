@@ -60,6 +60,7 @@ public:
              | CAP_GRAMMAR
              | CAP_FLASH_ATTN
              | CAP_VAD_INTERNAL
+             | CAP_PARALLEL_PROCESSORS
              | CAP_AUTO_DOWNLOAD;
     }
 
@@ -165,8 +166,20 @@ public:
             }
         }
 
-        if (whisper_full(ctx_, wp, samples, n_samples) != 0) {
-            fprintf(stderr, "crispasr[whisper]: whisper_full failed\n");
+        // When the user asked for n_processors > 1, delegate parallelism
+        // to whisper_full_parallel which internally clones N decoder
+        // states and splits the audio into N roughly equal chunks.
+        // Each chunk runs concurrently and whisper stitches the
+        // segments back together. When n_processors == 1 this falls
+        // through to the plain whisper_full path so the default is
+        // byte-identical with the historical cli.
+        const int nproc = (p.n_processors > 1) ? p.n_processors : 1;
+        const int rc = (nproc > 1)
+            ? whisper_full_parallel(ctx_, wp, samples, n_samples, nproc)
+            : whisper_full        (ctx_, wp, samples, n_samples);
+        if (rc != 0) {
+            fprintf(stderr, "crispasr[whisper]: %s failed\n",
+                    nproc > 1 ? "whisper_full_parallel" : "whisper_full");
             return out;
         }
 
