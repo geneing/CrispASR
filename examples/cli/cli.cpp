@@ -323,7 +323,8 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  -am FNAME, --aligner-model FNAME  [%-7s] CTC aligner GGUF (LLM backends word timestamps)\n",params.aligner_model.c_str());
     fprintf(stderr, "  --lid-backend NAME                [%-7s] language-detect backend: whisper|silero (for non-native backends)\n", params.lid_backend.c_str());
     fprintf(stderr, "  --lid-model FNAME                 [%-7s] optional LID model path (default ggml-tiny.bin)\n", params.lid_model.c_str());
-    fprintf(stderr, "  --diarize-method NAME             [%-7s] diarize method: energy|xcorr|vad-turns|sherpa|pyannote (default energy)\n", params.diarize_method.c_str());
+    fprintf(stderr, "  --diarize-method NAME             [%-7s] diarize method: energy|xcorr|vad-turns|sherpa|pyannote|ecapa\n", params.diarize_method.c_str());
+    fprintf(stderr, "                                             (sherpa/pyannote/ecapa all use the sherpa-onnx subprocess)\n");
     fprintf(stderr, "  --sherpa-bin PATH                 [%-7s] sherpa-onnx-offline-speaker-diarization binary (default: in PATH)\n", params.sherpa_bin.c_str());
     fprintf(stderr, "  --sherpa-segment-model PATH       [%-7s] sherpa pyannote segmentation ONNX\n",                 params.sherpa_segment_model.c_str());
     fprintf(stderr, "  --sherpa-embedding-model PATH     [%-7s] sherpa speaker embedding ONNX\n",                     params.sherpa_embedding_model.c_str());

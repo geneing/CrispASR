@@ -417,7 +417,15 @@ bool crispasr_apply_diarize(
         apply_vad_turns(segs);
         return true;
     }
-    if (method == "sherpa" || method == "sherpa-onnx") {
+    // sherpa / pyannote / ecapa all land in the same subprocess path —
+    // sherpa-onnx-offline-speaker-diarization uses pyannote-v3 for the
+    // segmentation model and a speaker-embedding ONNX (titanet /
+    // 3dspeaker / ecapa-tdnn) for the embedding model. The method name
+    // is just a user-facing label for the same underlying pipeline, so
+    // we unify them into one code path.
+    if (method == "sherpa"   || method == "sherpa-onnx" ||
+        method == "pyannote" || method == "ecapa")
+    {
         // Build a mono view of the input. If we have stereo, mix both
         // channels. Otherwise the "left" buffer already holds mono.
         std::vector<float> mono;
@@ -434,19 +442,7 @@ bool crispasr_apply_diarize(
         // sherpa failed — log already printed — fall through to a safe
         // default so the run still produces output.
         fprintf(stderr,
-                "crispasr[diarize]: sherpa failed — falling back to %s\n",
-                is_stereo ? "energy" : "vad-turns");
-        if (is_stereo) apply_energy(left.data(), right.data(),
-                                    (int)left.size(), slice_t0_cs, segs);
-        else           apply_vad_turns(segs);
-        return true;
-    }
-    if (method == "pyannote" || method == "ecapa") {
-        fprintf(stderr,
-                "crispasr[diarize]: --diarize-method '%s' is not implemented yet.\n"
-                "                   pyannote v3 segmentation is MIT-licensed and a\n"
-                "                   native GGUF port is on the TODO. Falling back\n"
-                "                   to %s for this run.\n",
+                "crispasr[diarize]: %s diarization failed — falling back to %s\n",
                 method.c_str(),
                 is_stereo ? "energy" : "vad-turns");
         if (is_stereo) apply_energy(left.data(), right.data(),
@@ -456,8 +452,14 @@ bool crispasr_apply_diarize(
     }
 
     fprintf(stderr,
-            "crispasr[diarize]: unknown --diarize-method '%s' "
-            "(expected energy|xcorr|vad-turns|sherpa|pyannote|ecapa)\n",
+            "crispasr[diarize]: unknown --diarize-method '%s'\n"
+            "                   expected energy|xcorr|vad-turns|sherpa|pyannote|ecapa\n"
+            "                     energy/xcorr require stereo input\n"
+            "                     vad-turns is the mono default\n"
+            "                     sherpa/pyannote/ecapa all dispatch through the\n"
+            "                       same sherpa-onnx subprocess (pyannote v3\n"
+            "                       segmentation + speaker-embedding ONNX), see\n"
+            "                       --sherpa-segment-model / --sherpa-embedding-model\n",
             method.c_str());
     return false;
 }
