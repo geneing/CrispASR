@@ -59,6 +59,7 @@ public:
              | CAP_BEAM_SEARCH
              | CAP_GRAMMAR
              | CAP_FLASH_ATTN
+             | CAP_VAD_INTERNAL
              | CAP_AUTO_DOWNLOAD;
     }
 
@@ -121,6 +122,23 @@ public:
         wp.suppress_nst     = p.suppress_nst;
 
         wp.no_timestamps    = p.no_timestamps;
+
+        // Whisper-internal VAD. Note this is distinct from the Silero-VAD
+        // slicing the crispasr dispatcher does upstream — that one produces
+        // `crispasr_audio_slice` batches that we transcribe one slice at a
+        // time. This is whisper's in-graph energy-based VAD that skips
+        // silent regions while decoding a single call. The two compose
+        // without interfering: the dispatcher's slicing is a no-op when
+        // params.vad_model is empty, in which case all of whisper-internal
+        // VAD's behaviour is preserved.
+        wp.vad            = p.vad;
+        wp.vad_model_path = p.vad_model.c_str();
+        wp.vad_params.threshold               = p.vad_threshold;
+        wp.vad_params.min_speech_duration_ms  = p.vad_min_speech_duration_ms;
+        wp.vad_params.min_silence_duration_ms = p.vad_min_silence_duration_ms;
+        wp.vad_params.max_speech_duration_s   = p.vad_max_speech_duration_s;
+        wp.vad_params.speech_pad_ms           = p.vad_speech_pad_ms;
+        wp.vad_params.samples_overlap         = p.vad_samples_overlap;
 
         // Grammar. When the user passed --grammar + --grammar-rule, the CLI
         // has already parsed the GBNF and stashed it in params.grammar_parsed.
