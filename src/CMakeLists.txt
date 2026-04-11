@@ -204,6 +204,13 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# OpenMP — optional shared dependency for parallelisable hot loops in the
+# per-model encoders (currently cohere; granite linked as preparation for
+# follow-up parallelisation). find_package runs once here so every model
+# below can reference OpenMP_CXX_FOUND without re-probing.
+find_package(OpenMP QUIET)
+
+# ---------------------------------------------------------------------------
 # crispasr-core — shared primitives used by multiple model implementations.
 #
 # This is the first piece of the model-level DRY refactor: one log-mel
@@ -319,7 +326,14 @@ add_library(granite_speech
             )
 target_include_directories(granite_speech PUBLIC . ../include)
 target_compile_features   (granite_speech PUBLIC cxx_std_17)
-target_link_libraries     (granite_speech PUBLIC ggml ggml-base Threads::Threads crispasr-core)
+# OpenMP: linked when available so future `#pragma omp parallel for` on the
+# encoder hot loops can land without a CMake change. Adding the pragmas
+# themselves is a follow-up — see TODO.md → "Per-model follow-ups → granite".
+if(OpenMP_CXX_FOUND)
+    target_link_libraries (granite_speech PUBLIC ggml ggml-base Threads::Threads OpenMP::OpenMP_CXX crispasr-core)
+else()
+    target_link_libraries (granite_speech PUBLIC ggml ggml-base Threads::Threads crispasr-core)
+endif()
 if(NOT MSVC)
     target_compile_options(granite_speech PRIVATE -O3 -march=native)
 endif()
