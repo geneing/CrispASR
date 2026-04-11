@@ -216,6 +216,8 @@ add_library(crispasr-core STATIC
             core/mel.h
             core/mel.cpp
             core/ffn.h
+            core/gguf_loader.h
+            core/gguf_loader.cpp
             )
 target_include_directories(crispasr-core PUBLIC . ../include)
 target_compile_features   (crispasr-core PUBLIC cxx_std_17)
