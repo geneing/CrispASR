@@ -2,7 +2,7 @@
 
 **One C++ binary, eight ASR model families, zero Python dependencies.**
 
-CrispASR is a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that extends the familiar `whisper-cli` interface into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for every major open-weights ASR architecture. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
+CrispASR is a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that extends the familiar `whisper-cli` interface into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR architecture. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
 
 ```console
 $ crispasr -m ggml-base.en.bin          -f samples/jfk.wav        # OpenAI Whisper
@@ -403,7 +403,7 @@ CrispASR is structured around two new layers on top of whisper.cpp:
 
 ### `src/core/` — the shared model primitives
 
-The big DRY win: ~900 lines of duplicated scaffolding that every model file used to carry were extracted into a single static library, `crispasr-core`, linked into every non-whisper model target.
+Duplicated scaffolding is bundled in a single static library, `crispasr-core`, linked into every non-whisper model target.
 
 | Header | Replaces | Consumers |
 |---|---|---|
@@ -418,7 +418,7 @@ The big DRY win: ~900 lines of duplicated scaffolding that every model file used
 
 ### Whisper is the reference implementation
 
-`src/whisper.cpp` is **intentionally not migrated** to `src/core/` — it's the battle-tested reference and the `crispasr -m ggml-base.en.bin …` code path is byte-identical to upstream `whisper-cli`. This guarantee is a test gate: every CrispASR commit that touches the CLI is checked against it.
+`src/whisper.cpp` is **intentionally not migrated** to `src/core/` (yet) — it's (for the time being) the battle-tested reference and the `crispasr -m ggml-base.en.bin …` code path is byte-identical to upstream `whisper-cli`. This guarantee is a test gate: every CrispASR commit that touches the CLI is checked against it.
 
 ### Regression discipline
 
@@ -573,4 +573,4 @@ diff before.txt after.txt && echo BIT-IDENTICAL
 
 Same as upstream whisper.cpp: **MIT**.
 
-Per-model weights are covered by their respective HuggingFace model licenses (see [Supported backends](#supported-backends)). The `crispasr` binary itself links model runtimes that are all permissively licensed (MIT / Apache-2.0 / CC-BY-4.0 for weights); the **cohere** backend's model weights are CC-BY-NC-4.0 and not suitable for commercial use — the runtime code is MIT but the model is not.
+Per-model weights are covered by their respective HuggingFace model licenses (see [Supported backends](#supported-backends)). The `crispasr` binary itself links model runtimes that are mostly permissively licensed (MIT / Apache-2.0 / CC-BY-4.0 for weights).
