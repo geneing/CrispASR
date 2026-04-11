@@ -89,6 +89,20 @@ static inline int argmax(const float * logits, int vocab) {
     return best;
 }
 
+// Softmax probability of a specific token id under a logit vector.
+// Uses the same numerically-stable trick as sample_temp (subtract
+// the argmax logit before exp) but without the temperature division.
+// Caller passes `best` == the argmax to avoid computing it twice.
+static inline float softmax_of(const float * logits, int vocab,
+                               int best, float best_lp) {
+    (void)best;  // computed by caller; keeps the interface symmetric
+    double sum = 0.0;
+    for (int k = 0; k < vocab; k++) {
+        sum += std::exp((double)(logits[k] - best_lp));
+    }
+    return sum > 0.0 ? (float)(1.0 / sum) : 0.0f;
+}
+
 // Temperature sampling over a vocab-sized float logit vector. Computes the
 // numerically stable softmax of logits/temperature and draws one token via
 // std::discrete_distribution. Caller owns the rng state.
@@ -124,6 +138,14 @@ static inline int sample_temp(const float * logits, int vocab,
 // the body at call sites that don't need a hook.
 struct NoHook {
     inline bool operator()(int /*step*/, float * /*embed*/) const { return true; }
+};
+
+// Optional per-token confidence output, aligned with the returned token
+// vector. Callers that don't need confidences can pass nullptr and the
+// helper skips the extra softmax pass entirely.
+struct Result {
+    std::vector<int32_t> tokens;   // generated token ids (incl. first, incl. eos if hit)
+    std::vector<float>   probs;    // softmax prob per token in [0,1]; empty when skipped
 };
 
 // Run the greedy decode loop.
@@ -212,6 +234,65 @@ inline std::vector<int32_t> run(
 {
     return run(ctx, first_token, initial_n_past,
                embed_fn, forward_fn, NoHook{}, cfg);
+}
+
+// --- run_with_probs: same loop as run() but also records the softmax
+// probability of each emitted token so the caller can surface
+// per-token confidence to the crispasr_segment vector. The first_prob
+// parameter is the pre-computed softmax probability of `first_token`
+// under the prefill logits — the caller already computed it when
+// picking first_token so we don't redo the softmax here.
+template <typename Ctx, typename EmbedFn, typename ForwardFn>
+inline Result run_with_probs(
+    Ctx        * ctx,
+    int32_t      first_token,
+    float        first_prob,
+    int          initial_n_past,
+    EmbedFn      embed_fn,
+    ForwardFn    forward_fn,
+    const Config & cfg)
+{
+    Result r;
+    r.tokens.reserve((size_t)cfg.max_new_tokens);
+    r.probs.reserve((size_t)cfg.max_new_tokens);
+    r.tokens.push_back(first_token);
+    r.probs.push_back(first_prob);
+
+    if (first_token == cfg.eos_id) return r;
+
+    std::mt19937_64 rng(cfg.seed != 0 ? cfg.seed
+                        : (uint64_t)std::random_device{}());
+    const bool sampling = cfg.temperature > 0.0f;
+
+    int n_past = initial_n_past;
+    while ((int)r.tokens.size() < cfg.max_new_tokens &&
+           r.tokens.back() != cfg.eos_id) {
+        int32_t last = r.tokens.back();
+        float * emb = embed_fn(ctx, &last, 1);
+        if (!emb) break;
+
+        float * lg = forward_fn(ctx, emb, 1, n_past, nullptr, nullptr);
+        std::free(emb);
+        if (!lg) break;
+        n_past++;
+
+        // Pick next token + compute its softmax probability.
+        int nx;
+        float nx_lp;
+        if (sampling) {
+            nx = sample_temp(lg, cfg.vocab_size, cfg.temperature, rng);
+            nx_lp = lg[nx];
+        } else {
+            nx = argmax(lg, cfg.vocab_size);
+            nx_lp = lg[nx];
+        }
+        const float nx_p = softmax_of(lg, cfg.vocab_size, nx, nx_lp);
+        std::free(lg);
+
+        r.tokens.push_back(nx);
+        r.probs.push_back(nx_p);
+    }
+    return r;
 }
 
 } // namespace core_greedy_decode

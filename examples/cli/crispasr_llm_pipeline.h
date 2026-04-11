@@ -165,7 +165,8 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     dec_cfg.vocab_size     = vocab;
     dec_cfg.temperature    = params.temperature;
 
-    int next = 0;
+    int   next    = 0;
+    float next_p  = 1.0f;
     if (dec_cfg.temperature > 0.0f) {
         std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed
                                   : (uint64_t)std::random_device{}());
@@ -174,29 +175,40 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     } else {
         next = core_greedy_decode::argmax(logits, vocab);
     }
+    next_p = core_greedy_decode::softmax_of(logits, vocab, next, logits[next]);
     free(logits);
 
-    // ---- Greedy / temperature-sampled decode loop ----
-    auto gen = core_greedy_decode::run(
+    // ---- Greedy / temperature-sampled decode loop with per-token probs ----
+    auto dec = core_greedy_decode::run_with_probs(
         ctx,
         /*first_token=*/next,
+        /*first_prob=*/next_p,
         /*initial_n_past=*/T_prompt,
         Ops::embed_tokens,
         Ops::run_llm_kv,
         dec_cfg);
+    const std::vector<int32_t> & gen   = dec.tokens;
+    const std::vector<float>   & probs = dec.probs;
 
-    // ---- Detokenize ----
+    // ---- Detokenize + attach per-token confidence to the segment ----
     std::string transcript;
-    for (int32_t id : gen) {
+    crispasr_segment seg;
+    seg.tokens.reserve(gen.size());
+    for (size_t i = 0; i < gen.size(); i++) {
+        const int32_t id = gen[i];
         if (id == Ops::eos_id) break;
         int len = 0;
         const uint8_t * bytes = Ops::token_text(ctx, id, &len);
+        crispasr_token ct;
+        ct.id         = id;
+        ct.confidence = (i < probs.size()) ? probs[i] : -1.0f;
         if (bytes && len > 0) {
+            ct.text.assign((const char *)bytes, (size_t)len);
             transcript.append((const char *)bytes, (size_t)len);
         }
+        seg.tokens.push_back(std::move(ct));
     }
 
-    crispasr_segment seg;
     seg.t0 = t_offset_cs;
     seg.t1 = t_offset_cs + (int64_t)((double)n_samples / 16000.0 * 100.0);
     seg.text = transcript;

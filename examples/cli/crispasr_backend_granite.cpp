@@ -50,7 +50,7 @@ public:
 
     uint32_t capabilities() const override {
         return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE
-             | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN;
+             | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN | CAP_TOKEN_CONFIDENCE;
     }
 
     bool init(const whisper_params & p) override {
@@ -150,7 +150,8 @@ public:
         dec_cfg.vocab_size     = vocab;
         dec_cfg.temperature    = params.temperature;
 
-        int next = 0;
+        int   next   = 0;
+        float next_p = 1.0f;
         if (dec_cfg.temperature > 0.0f) {
             std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed
                                        : (uint64_t)std::random_device{}());
@@ -159,15 +160,20 @@ public:
         } else {
             next = core_greedy_decode::argmax(logits, vocab);
         }
+        next_p = core_greedy_decode::softmax_of(
+            logits, vocab, next, logits[next]);
         free(logits);
 
-        auto gen_ids = core_greedy_decode::run(
+        auto dec = core_greedy_decode::run_with_probs(
             ctx_,
             /*first_token=*/next,
+            /*first_prob=*/next_p,
             /*initial_n_past=*/total_prompt,
             granite_speech_embed_tokens,
             granite_speech_run_llm_kv,
             dec_cfg);
+        const std::vector<int32_t> & gen_ids = dec.tokens;
+        const std::vector<float>   & probs   = dec.probs;
 
         // Strip EOS from generated IDs before detokenizing.
         std::vector<int32_t> text_ids;
@@ -185,6 +191,21 @@ public:
         // Trim leading whitespace emitted by the chat template.
         while (!seg.text.empty() && (seg.text.front() == ' ' || seg.text.front() == '\n')) {
             seg.text.erase(seg.text.begin());
+        }
+
+        // Per-token entries with decode-loop confidences. granite uses
+        // its own batch detokenizer (granite_speech_decode_tokens) for
+        // the segment text, but we still surface per-token id + prob so
+        // downstream consumers (JSON full, confidence filters) have the
+        // raw signal. Token text is intentionally left empty here to
+        // avoid duplicating the batch detokenizer's merging logic.
+        seg.tokens.reserve(gen_ids.size());
+        for (size_t i = 0; i < gen_ids.size(); i++) {
+            if (gen_ids[i] == kEos) break;
+            crispasr_token ct;
+            ct.id         = gen_ids[i];
+            ct.confidence = (i < probs.size()) ? probs[i] : -1.0f;
+            seg.tokens.push_back(std::move(ct));
         }
 
         out.push_back(std::move(seg));

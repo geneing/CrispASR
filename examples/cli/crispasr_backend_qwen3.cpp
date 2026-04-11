@@ -83,7 +83,8 @@ public:
 
     uint32_t capabilities() const override {
         return CAP_TIMESTAMPS_CTC | CAP_LANGUAGE_DETECT | CAP_AUTO_DOWNLOAD
-             | CAP_TEMPERATURE | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN;
+             | CAP_TEMPERATURE | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN
+             | CAP_TOKEN_CONFIDENCE;
     }
 
     bool init(const whisper_params & p) override {
@@ -207,7 +208,8 @@ public:
         dec_cfg.temperature    = params.temperature;
 
         const int last_off = (n_t - 1) * vocab;
-        int next = 0;
+        int   next   = 0;
+        float next_p = 1.0f;
         if (dec_cfg.temperature > 0.0f) {
             std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed
                                        : (uint64_t)std::random_device{}());
@@ -216,15 +218,20 @@ public:
         } else {
             next = core_greedy_decode::argmax(logits + last_off, vocab);
         }
+        next_p = core_greedy_decode::softmax_of(
+            logits + last_off, vocab, next, logits[last_off + next]);
         free(logits);
 
-        auto gen = core_greedy_decode::run(
+        auto dec = core_greedy_decode::run_with_probs(
             ctx_,
             /*first_token=*/next,
+            /*first_prob=*/next_p,
             /*initial_n_past=*/(int)ids.size(),
             qwen3_asr_embed_tokens,
             qwen3_asr_run_llm_kv,
             dec_cfg);
+        const std::vector<int32_t> & gen   = dec.tokens;
+        const std::vector<float>   & probs = dec.probs;
 
         // ---- Detokenize via GPT-2 byte decoder ----
         // Qwen3-ASR emits structured metadata tokens before the transcript:
@@ -234,7 +241,10 @@ public:
         std::string transcript;
         std::string detected_language;
         bool capture_language = false;
-        for (int32_t id : gen) {
+        std::vector<crispasr_token> out_tokens;
+        out_tokens.reserve(gen.size());
+        for (size_t i = 0; i < gen.size(); i++) {
+            const int32_t id = gen[i];
             if (id == eos_id) break;
             const char * raw_piece = qwen3_asr_token_text(ctx_, id);
             if (!raw_piece || !*raw_piece) continue;
@@ -257,6 +267,12 @@ public:
                 continue;
             }
             transcript += txt;
+
+            crispasr_token ct;
+            ct.id         = id;
+            ct.text       = std::move(txt);
+            ct.confidence = (i < probs.size()) ? probs[i] : -1.0f;
+            out_tokens.push_back(std::move(ct));
         }
 
         // Trim leading whitespace left over from the prompt template.
@@ -274,6 +290,7 @@ public:
         seg.t0 = t_offset_cs;
         seg.t1 = t_offset_cs + (int64_t)((double)n_samples / 16000.0 * 100.0);
         seg.text = transcript;
+        seg.tokens = std::move(out_tokens);
         out.push_back(std::move(seg));
         return out;
     }
