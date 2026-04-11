@@ -204,6 +204,27 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# crispasr-core — shared primitives used by multiple model implementations.
+#
+# This is the first piece of the model-level DRY refactor: one log-mel
+# spectrogram helper (src/core/mel.{h,cpp}) that replaces what were 9
+# copy-pasted mel functions across the model files. Additional helpers
+# (gguf_loader, ffn, attention, greedy_decode) will land here in
+# subsequent commits as we peel off more duplicated patterns.
+# ---------------------------------------------------------------------------
+add_library(crispasr-core STATIC
+            core/mel.h
+            core/mel.cpp
+            )
+target_include_directories(crispasr-core PUBLIC . ../include)
+target_compile_features   (crispasr-core PUBLIC cxx_std_17)
+target_link_libraries     (crispasr-core PUBLIC ggml-base)
+if(NOT MSVC)
+    target_compile_options(crispasr-core PRIVATE -O3 -march=native)
+endif()
+set_target_properties(crispasr-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ---------------------------------------------------------------------------
 # Parakeet TDT — nvidia/parakeet-tdt-0.6b-v3 (FastConformer encoder + TDT decoder)
 # ---------------------------------------------------------------------------
 add_library(parakeet
@@ -212,7 +233,7 @@ add_library(parakeet
             )
 target_include_directories(parakeet PUBLIC . ../include)
 target_compile_features   (parakeet PUBLIC cxx_std_17)
-target_link_libraries     (parakeet PUBLIC ggml ggml-base Threads::Threads)
+target_link_libraries     (parakeet PUBLIC ggml ggml-base Threads::Threads crispasr-core)
 if(NOT MSVC)
     target_compile_options(parakeet PRIVATE -O3 -march=native)
 endif()
