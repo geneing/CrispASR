@@ -10,6 +10,8 @@ std::unique_ptr<CrispasrBackend> crispasr_make_parakeet_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_canary_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_cohere_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_granite_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_voxtral_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_voxtral4b_backend();
 // Remaining constructors will land in subsequent steps:
 // std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_backend();
 // std::unique_ptr<CrispasrBackend> crispasr_make_voxtral_backend();
@@ -31,10 +33,12 @@ std::unique_ptr<CrispasrBackend> crispasr_make_granite_backend();
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string & name) {
-    if (name == "parakeet") return crispasr_make_parakeet_backend();
-    if (name == "canary")   return crispasr_make_canary_backend();
-    if (name == "cohere")   return crispasr_make_cohere_backend();
-    if (name == "granite")  return crispasr_make_granite_backend();
+    if (name == "parakeet")  return crispasr_make_parakeet_backend();
+    if (name == "canary")    return crispasr_make_canary_backend();
+    if (name == "cohere")    return crispasr_make_cohere_backend();
+    if (name == "granite")   return crispasr_make_granite_backend();
+    if (name == "voxtral")   return crispasr_make_voxtral_backend();
+    if (name == "voxtral4b") return crispasr_make_voxtral4b_backend();
 
     // Additional backends plug in here as they're added.
     // if (name == "cohere")    return crispasr_make_cohere_backend();
@@ -54,7 +58,9 @@ std::vector<std::string> crispasr_list_backends() {
         "canary",
         "cohere",
         "granite",
-        // future: "qwen3", "voxtral", "voxtral4b"
+        "voxtral",
+        "voxtral4b",
+        // future: "qwen3"
     };
 }
 
