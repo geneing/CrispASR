@@ -435,19 +435,78 @@ extern "C" struct granite_speech_context_params granite_speech_context_default_p
 
 // ---- Tokenizer encode side (delegates to src/core/bpe.h) ----
 
+// Pre-split text at Granite-style special-token markers (<|foo|>) so
+// they resolve to their single vocab id instead of being byte-encoded
+// and BPE-merged. Non-special segments go through tokenize_simple as
+// before, preserving the bit-identical path for granite-4.0 prompts
+// that don't contain any <|...|> markers.
+//
+// Markers are picked up from token_to_id: we look for any vocab entry
+// matching "<|...|>" and sort them by length descending so overlapping
+// markers match the longest form first.
 extern "C" int32_t * granite_speech_tokenize(struct granite_speech_context * ctx,
                                              const char * text, int * out_n) {
     if (!ctx || !text) {
         if (out_n) *out_n = 0;
         return nullptr;
     }
-    auto result = core_bpe::tokenize_simple(ctx->token_to_id,
-                                            ctx->merge_rank,
-                                            std::string(text));
-    int * out_arr = (int *)malloc(result.size() * sizeof(int));
+    const std::string input(text);
+
+    // Build the marker list once (lazily, cached on the context would be
+    // cleaner, but the cost is negligible — O(vocab) string compares).
+    static thread_local std::vector<std::pair<std::string, int32_t>> specials;
+    static thread_local const granite_speech_context * specials_for = nullptr;
+    if (specials_for != ctx) {
+        specials.clear();
+        for (const auto & kv : ctx->token_to_id) {
+            const std::string & s = kv.first;
+            if (s.size() >= 4 && s.front() == '<' && s.back() == '>'
+                && s[1] == '|' && s[s.size() - 2] == '|') {
+                specials.emplace_back(s, kv.second);
+            }
+        }
+        std::sort(specials.begin(), specials.end(),
+            [](const auto & a, const auto & b) { return a.first.size() > b.first.size(); });
+        specials_for = ctx;
+    }
+
+    std::vector<int32_t> out_ids;
+    size_t i = 0;
+    size_t plain_start = 0;
+
+    auto flush_plain = [&](size_t end) {
+        if (end <= plain_start) return;
+        std::string seg = input.substr(plain_start, end - plain_start);
+        auto ids = core_bpe::tokenize_simple(
+            ctx->token_to_id, ctx->merge_rank, seg);
+        out_ids.insert(out_ids.end(), ids.begin(), ids.end());
+    };
+
+    while (i < input.size()) {
+        // Try to match a special token starting at input[i].
+        bool matched = false;
+        if (input[i] == '<' && i + 1 < input.size() && input[i + 1] == '|') {
+            for (const auto & p : specials) {
+                const std::string & s = p.first;
+                if (i + s.size() <= input.size()
+                    && std::memcmp(input.data() + i, s.data(), s.size()) == 0) {
+                    flush_plain(i);
+                    out_ids.push_back(p.second);
+                    i += s.size();
+                    plain_start = i;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) i++;
+    }
+    flush_plain(i);
+
+    int * out_arr = (int *)malloc(out_ids.size() * sizeof(int));
     if (!out_arr) { if (out_n) *out_n = 0; return nullptr; }
-    std::memcpy(out_arr, result.data(), result.size() * sizeof(int));
-    if (out_n) *out_n = (int)result.size();
+    std::memcpy(out_arr, out_ids.data(), out_ids.size() * sizeof(int));
+    if (out_n) *out_n = (int)out_ids.size();
     return out_arr;
 }
 

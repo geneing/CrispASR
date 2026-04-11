@@ -149,49 +149,73 @@ public:
             return c;
         };
 
-        const std::string prefix_str = "USER: ";
-        std::string suffix_str =
-            "can you transcribe the speech into a written format?\n ASSISTANT:";
-        if (params.translate) {
-            const std::string tgt = params.target_lang.empty()
-                                  ? std::string("English")
-                                  : iso_to_eng(params.target_lang);
-            suffix_str = "can you translate the speech to " + tgt +
-                         "?\n ASSISTANT:";
-        }
+        // Chat-template selection.
+        //
+        // granite-4.0-1b was trained with a simple "USER: …\n ASSISTANT:"
+        // format. granite-3.x uses the IBM Granite control-token scheme:
+        //   <|start_of_role|>user<|end_of_role|>…<|end_of_text|>
+        //   <|start_of_role|>assistant<|end_of_role|>
+        //
+        // Discriminator: audio_token_index. granite-4.0 uses 100352 (in
+        // the 100k-vocab range), every granite-3.x variant we've seen
+        // uses a value < 50000. This is more reliable than checking for
+        // the <|start_of_role|> marker directly, because granite-4.0's
+        // vocab happens to include it as a regular token (it's in the
+        // shared GPT-NeoX table) even though the 4.0 model wasn't trained
+        // on that chat template.
+        const bool use_v3_template = (audio_tok < 50000);
 
-        // Try runtime tokenization first.
         std::vector<int32_t> prefix_ids, suffix_ids;
-        {
+
+        if (use_v3_template) {
+            // Runtime-tokenize the granite-3.x control-token template.
+            // granite_speech_tokenize() detects <|...|> markers and
+            // emits their vocab id directly.
+            const std::string prefix_str = "<|start_of_role|>user<|end_of_role|>";
+            std::string suffix_str =
+                "can you transcribe the speech into a written format?"
+                "<|end_of_text|>\n"
+                "<|start_of_role|>assistant<|end_of_role|>";
+            if (params.translate) {
+                const std::string tgt = params.target_lang.empty()
+                                      ? std::string("English")
+                                      : iso_to_eng(params.target_lang);
+                suffix_str = "can you translate the speech to " + tgt + "?"
+                             "<|end_of_text|>\n"
+                             "<|start_of_role|>assistant<|end_of_role|>";
+            }
             int n = 0;
             int32_t * a = granite_speech_tokenize(ctx_, prefix_str.c_str(), &n);
-            if (a && n > 0) { prefix_ids.assign(a, a + n); free(a); }
-        }
-        {
-            int n = 0;
-            int32_t * a = granite_speech_tokenize(ctx_, suffix_str.c_str(), &n);
-            if (a && n > 0) { suffix_ids.assign(a, a + n); free(a); }
+            if (a && n > 0) { prefix_ids.assign(a, a + n); free(a); } else if (a) free(a);
+            a = granite_speech_tokenize(ctx_, suffix_str.c_str(), &n);
+            if (a && n > 0) { suffix_ids.assign(a, a + n); free(a); } else if (a) free(a);
+        } else {
+            // granite-4.0-1b legacy prompt. Use the hardcoded kPrefix4/
+            // kSuffix4 arrays because tokenize_simple's whitespace-skip
+            // logic drops trailing spaces (losing token 220), which
+            // changes the prefix from 3 tokens to 2 and breaks decoding.
+            prefix_ids.assign(kPrefix4, kPrefix4 + kNumPrefix4);
+            if (params.translate) {
+                const std::string tgt = params.target_lang.empty()
+                                      ? std::string("English")
+                                      : iso_to_eng(params.target_lang);
+                const std::string instr =
+                    "can you translate the speech to " + tgt + "?\n ASSISTANT:";
+                int n = 0;
+                int32_t * a = granite_speech_tokenize(ctx_, instr.c_str(), &n);
+                if (a && n > 0) { suffix_ids.assign(a, a + n); free(a); } else if (a) free(a);
+            } else {
+                suffix_ids.assign(kSuffix4, kSuffix4 + kNumSuffix4);
+            }
         }
 
-        // Fall back to the hardcoded granite-4.0 arrays when runtime
-        // tokenization failed AND the model looks like granite-4.0 (its
-        // audio_token_index lives in the 100k+ range that matches the
-        // GPT-NeoX table the old arrays were captured under).
         if (prefix_ids.empty() || suffix_ids.empty()) {
-            if (audio_tok == kLegacyAudioTok4) {
-                if (prefix_ids.empty())
-                    prefix_ids.assign(kPrefix4, kPrefix4 + kNumPrefix4);
-                if (suffix_ids.empty() && !params.translate)
-                    suffix_ids.assign(kSuffix4, kSuffix4 + kNumSuffix4);
-            }
-            if (prefix_ids.empty() || suffix_ids.empty()) {
-                fprintf(stderr,
-                        "crispasr[granite]: tokenize failed — re-convert the GGUF "
-                        "with the newer models/convert-granite-speech-to-gguf.py "
-                        "to pick up the merges table\n");
-                free(proj);
-                return out;
-            }
+            fprintf(stderr,
+                    "crispasr[granite]: tokenize failed — re-convert the GGUF "
+                    "with the newer models/convert-granite-speech-to-gguf.py "
+                    "to pick up the merges table\n");
+            free(proj);
+            return out;
         }
 
         const int n_prefix = (int)prefix_ids.size();

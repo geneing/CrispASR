@@ -167,7 +167,76 @@ LLM_LAYER_PATTERNS = [
 ]
 
 
+def _normalize_rnn_tr_name(hf_name: str) -> str:
+    """Rewrite granite-3.2-style ``encoder.rnn_tr.N.*`` tensor names into the
+    canonical granite-3.3/4.0 ``encoder.layers.(N-1).*`` form.
+
+    granite-speech 3.2-8b uses an older PyTorch module structure that wraps
+    each Conformer sub-block in a functional-decorator nesting
+    (``.attn.fn.*``, ``.ff1.fn.fn.net.N.*``, ``.conv.net.N.*``) and
+    anchors the input-linear at index 0 of a single ``rnn_tr`` ModuleList,
+    with the encoder blocks starting at index 1. granite-3.3 / 4.0
+    flattened this into ``encoder.input_linear`` + ``encoder.layers.N``.
+
+    The function takes an rnn_tr name and returns its granite-3.3
+    equivalent. Non-rnn_tr names pass through unchanged.
+    """
+    if not hf_name.startswith("encoder.rnn_tr."):
+        return hf_name
+
+    # encoder.rnn_tr.0.weight/bias is the input linear.
+    m = re.match(r"encoder\.rnn_tr\.0\.(weight|bias)$", hf_name)
+    if m:
+        return f"encoder.input_linear.{m.group(1)}"
+
+    # encoder.rnn_tr.N.* for N>=1 → encoder.layers.(N-1).*  with sub-path
+    # rewrites below. We shift the layer index down by one so the output
+    # matches the granite-3.3 convention of layers.0 being the first block.
+    m = re.match(r"encoder\.rnn_tr\.(\d+)\.(.*)$", hf_name)
+    if not m:
+        return hf_name
+    layer = int(m.group(1)) - 1
+    rest  = m.group(2)
+
+    # Sub-path rewrites inside one block.
+    #   attn.norm.*                  → attn.pre_norm.*
+    #   attn.fn.<x>                  → attn.<x>
+    rest = re.sub(r"^attn\.norm\.",            "attn.pre_norm.", rest)
+    rest = re.sub(r"^attn\.fn\.",              "attn.",           rest)
+
+    #   ff1.fn.norm.*                → ff1.pre_norm.*
+    #   ff1.fn.fn.net.0.*            → ff1.up_proj.*     (first Linear)
+    #   ff1.fn.fn.net.3.*            → ff1.down_proj.*   (Linear after GELU+dropout)
+    rest = re.sub(r"^ff1\.fn\.norm\.",         "ff1.pre_norm.",  rest)
+    rest = re.sub(r"^ff1\.fn\.fn\.net\.0\.",   "ff1.up_proj.",   rest)
+    rest = re.sub(r"^ff1\.fn\.fn\.net\.3\.",   "ff1.down_proj.", rest)
+
+    rest = re.sub(r"^ff2\.fn\.norm\.",         "ff2.pre_norm.",  rest)
+    rest = re.sub(r"^ff2\.fn\.fn\.net\.0\.",   "ff2.up_proj.",   rest)
+    rest = re.sub(r"^ff2\.fn\.fn\.net\.3\.",   "ff2.down_proj.", rest)
+
+    # Conv module is a Sequential:
+    #   net.0 = LayerNorm              → conv.norm
+    #   net.2 = up pointwise 1×1       → conv.up_conv
+    #   net.4.conv = depthwise         → conv.depth_conv.conv
+    #   net.5 = BatchNorm              → conv.batch_norm
+    #   net.7 = down pointwise 1×1     → conv.down_conv
+    rest = re.sub(r"^conv\.net\.0\.",          "conv.norm.",          rest)
+    rest = re.sub(r"^conv\.net\.2\.",          "conv.up_conv.",       rest)
+    rest = re.sub(r"^conv\.net\.4\.conv\.",    "conv.depth_conv.conv.", rest)
+    rest = re.sub(r"^conv\.net\.5\.",          "conv.batch_norm.",    rest)
+    rest = re.sub(r"^conv\.net\.7\.",          "conv.down_conv.",     rest)
+
+    return f"encoder.layers.{layer}.{rest}"
+
+
 def remap_name(hf_name: str) -> str | None:
+    # Normalize granite-3.2 rnn_tr layout into granite-3.3/4.0 names first,
+    # then run the single pattern set below (shared by all granite-speech
+    # variants). This keeps the C++ runtime's tensor-name expectations
+    # unchanged across the family.
+    hf_name = _normalize_rnn_tr_name(hf_name)
+
     if hf_name in DIRECT:
         return DIRECT[hf_name]
     for patterns in [ENC_LAYER_PATTERNS, PROJ_LAYER_PATTERNS, LLM_LAYER_PATTERNS]:
@@ -324,7 +393,13 @@ def convert(input_dir: Path, out_path: Path) -> None:
 
     print(f"Writing: {out_path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = gguf.GGUFWriter(str(out_path), arch="granite_speech")
+    # use_temp_file=True spills tensor data to a disk-backed temp file
+    # as we call add_tensor(), so the resident set stays bounded at the
+    # largest single tensor rather than growing with the whole model.
+    # This matters for granite-speech-3.2-8b / 3.3-8b (~16 GB total in
+    # F16) on machines with under ~16 GB of RAM.
+    writer = gguf.GGUFWriter(str(out_path), arch="granite_speech",
+                             use_temp_file=True)
 
     # Metadata
     writer.add_uint32("granite_speech.sample_rate", 16000)
