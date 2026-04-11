@@ -4,16 +4,14 @@
 // Extracted from examples/parakeet-main/main.cpp.
 
 #include "crispasr_vad.h"
+#include "crispasr_cache.h"
 #include "whisper_params.h"
 
 #include "whisper.h" // whisper_vad_* API
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <string>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace {
 
@@ -23,37 +21,6 @@ namespace {
 constexpr const char * kVadDefaultUrl =
     "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
 constexpr const char * kVadDefaultFile = "ggml-silero-v5.1.2.bin";
-
-bool vad_file_exists(const std::string & p) {
-    struct stat st;
-    if (stat(p.c_str(), &st) != 0) return false;
-    // Treat 0-byte zombies (from a failed earlier download) as missing
-    // so the next attempt retries the fetch instead of handing a
-    // corrupted path to whisper_vad_init_from_file_with_params.
-    return st.st_size > 0;
-}
-
-std::string vad_cache_dir() {
-    const char * home = std::getenv("HOME");
-    std::string dir = (home && *home) ? home : "/tmp";
-    dir += "/.cache/crispasr";
-    mkdir(dir.c_str(), 0755);
-    return dir;
-}
-
-bool vad_fetch_url(const std::string & url, const std::string & dst,
-                   bool no_prints) {
-    if (!no_prints) {
-        fprintf(stderr, "crispasr[vad]: downloading %s\n", url.c_str());
-    }
-    const std::string cmd_curl =
-        "curl -fL --progress-bar -o " + dst + " " + url;
-    if (std::system(cmd_curl.c_str()) == 0 && vad_file_exists(dst)) return true;
-    const std::string cmd_wget =
-        "wget -q --show-progress -O " + dst + " " + url;
-    if (std::system(cmd_wget.c_str()) == 0 && vad_file_exists(dst)) return true;
-    return false;
-}
 
 // Resolve params.vad_model into a real file path. When empty (user passed
 // --vad without --vad-model), or set to "auto"/"default", download the
@@ -67,11 +34,9 @@ std::string resolve_vad_model(const whisper_params & p) {
     // Explicit path (not auto/default) — use as-is.
     if (!v.empty() && v != "auto" && v != "default") return v;
 
-    // Auto path: check the cache, download on miss.
-    const std::string dst = vad_cache_dir() + "/" + kVadDefaultFile;
-    if (vad_file_exists(dst)) return dst;
-    if (!vad_fetch_url(kVadDefaultUrl, dst, p.no_prints)) return "";
-    return dst;
+    // Auto path: delegate to the shared cache helper.
+    return crispasr_cache::ensure_cached_file(
+        kVadDefaultFile, kVadDefaultUrl, p.no_prints, "crispasr[vad]");
 }
 
 } // namespace

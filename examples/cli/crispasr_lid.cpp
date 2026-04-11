@@ -21,6 +21,7 @@
 // path if the reload cost becomes noticeable.
 
 #include "crispasr_lid.h"
+#include "crispasr_cache.h"
 #include "whisper_params.h"
 
 #include "whisper.h"
@@ -32,9 +33,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-
-#include <unistd.h>
-#include <sys/stat.h>
 
 namespace {
 
@@ -49,36 +47,6 @@ std::string expand_home(const std::string & p) {
     return std::string(home) + p.substr(1);
 }
 
-bool file_exists(const std::string & p) {
-    return access(p.c_str(), F_OK) == 0;
-}
-
-std::string default_cache_dir() {
-    const char * home = std::getenv("HOME");
-    std::string dir = (home && *home) ? home : "/tmp";
-    dir += "/.cache/crispasr";
-    mkdir(dir.c_str(), 0755);
-    return dir;
-}
-
-// Try curl then wget to fetch a URL into the given destination path.
-// Returns true on success. Used only for the whisper-tiny default
-// model auto-download. Same two-tool fallback as crispasr_model_mgr.cpp.
-bool fetch_url(const std::string & url, const std::string & dst,
-               bool no_prints) {
-    if (!no_prints) {
-        fprintf(stderr, "crispasr[lid]: downloading %s\n", url.c_str());
-    }
-    const std::string cmd_curl =
-        "curl -fL --progress-bar -o " + dst + " " + url;
-    if (std::system(cmd_curl.c_str()) == 0 && file_exists(dst)) return true;
-    const std::string cmd_wget =
-        "wget -q --show-progress -O " + dst + " " + url;
-    if (std::system(cmd_wget.c_str()) == 0 && file_exists(dst)) return true;
-    fprintf(stderr, "crispasr[lid]: failed to download (curl + wget both failed)\n");
-    return false;
-}
-
 // -----------------------------------------------------------------------
 // Backend 1: whisper-tiny LID via whisper.h
 // -----------------------------------------------------------------------
@@ -90,16 +58,15 @@ constexpr const char * kWhisperLidDefaultUrl =
 constexpr const char * kWhisperLidDefaultFile = "ggml-tiny.bin";
 
 // Resolve the LID model path. If params.lid_model is set we use that
-// directly. Otherwise we check for the default file in the crispasr
-// cache dir, auto-downloading it on first use.
+// directly. Otherwise delegate to the shared cache helper which checks
+// ~/.cache/crispasr and auto-downloads on miss.
 std::string resolve_whisper_lid_model(const whisper_params & p) {
     if (!p.lid_model.empty()) {
         return expand_home(p.lid_model);
     }
-    const std::string dst = default_cache_dir() + "/" + kWhisperLidDefaultFile;
-    if (file_exists(dst)) return dst;
-    if (!fetch_url(kWhisperLidDefaultUrl, dst, p.no_prints)) return "";
-    return dst;
+    return crispasr_cache::ensure_cached_file(
+        kWhisperLidDefaultFile, kWhisperLidDefaultUrl, p.no_prints,
+        "crispasr[lid]");
 }
 
 // Process-lifetime cache: keep the whisper LID context around between
