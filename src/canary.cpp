@@ -26,6 +26,8 @@
 #include "ggml-cpu.h"
 #include "gguf.h"
 
+#include "core/fastconformer.h"
+
 #ifdef GGML_USE_METAL
 #  include "ggml-metal.h"
 #endif
@@ -77,41 +79,15 @@ struct canary_hparams {
 // Per-layer tensor containers
 // ===========================================================================
 
-struct canary_pre_encode {
-    ggml_tensor * conv0_w = nullptr, * conv0_b = nullptr;
-    ggml_tensor * conv2_w = nullptr, * conv2_b = nullptr;
-    ggml_tensor * conv3_w = nullptr, * conv3_b = nullptr;
-    ggml_tensor * conv5_w = nullptr, * conv5_b = nullptr;
-    ggml_tensor * conv6_w = nullptr, * conv6_b = nullptr;
-    ggml_tensor * out_w   = nullptr, * out_b   = nullptr;
-};
+// Pre-encode weights: exactly the shared FastConformer layout.
+using canary_pre_encode = core_conformer::PreEncodeWeights;
 
-struct canary_enc_layer {
-    ggml_tensor * norm_ff1_w = nullptr, * norm_ff1_b = nullptr;
-    ggml_tensor * ff1_l1_w   = nullptr, * ff1_l1_b   = nullptr;
-    ggml_tensor * ff1_l2_w   = nullptr, * ff1_l2_b   = nullptr;
-
-    ggml_tensor * norm_attn_w = nullptr, * norm_attn_b = nullptr;
-    ggml_tensor * attn_q_w    = nullptr, * attn_q_b    = nullptr;
-    ggml_tensor * attn_k_w    = nullptr, * attn_k_b    = nullptr;
-    ggml_tensor * attn_v_w    = nullptr, * attn_v_b    = nullptr;
-    ggml_tensor * attn_out_w  = nullptr, * attn_out_b  = nullptr;
-    ggml_tensor * attn_pos_w  = nullptr;     // no bias on the rel-pos projection
-    ggml_tensor * pos_bias_u  = nullptr;
-    ggml_tensor * pos_bias_v  = nullptr;
-
-    ggml_tensor * norm_conv_w = nullptr, * norm_conv_b = nullptr;
-    ggml_tensor * conv_pw1_w  = nullptr, * conv_pw1_b  = nullptr;
-    ggml_tensor * conv_dw_w   = nullptr, * conv_dw_b   = nullptr;
-    ggml_tensor * conv_bn_w   = nullptr, * conv_bn_b   = nullptr;
-    ggml_tensor * conv_bn_rm  = nullptr, * conv_bn_rv  = nullptr;
-    ggml_tensor * conv_pw2_w  = nullptr, * conv_pw2_b  = nullptr;
-
-    ggml_tensor * norm_ff2_w = nullptr, * norm_ff2_b = nullptr;
-    ggml_tensor * ff2_l1_w   = nullptr, * ff2_l1_b   = nullptr;
-    ggml_tensor * ff2_l2_w   = nullptr, * ff2_l2_b   = nullptr;
-
-    ggml_tensor * norm_out_w = nullptr, * norm_out_b = nullptr;
+// Per-layer tensor container: inherits the shared Conformer block weights
+// (all biases populated for canary) and adds the BN tensors used only at
+// load time (BN folding).
+struct canary_enc_layer : core_conformer::BlockWeights {
+    ggml_tensor * conv_bn_w  = nullptr, * conv_bn_b  = nullptr;
+    ggml_tensor * conv_bn_rm = nullptr, * conv_bn_rv = nullptr;
 };
 
 struct canary_dec_layer {
@@ -466,35 +442,7 @@ static std::vector<float> canary_compute_mel_impl(canary_context * ctx,
 // rel-pos shift (Transformer-XL trick): single zero-cost ggml_view_3d
 // ===========================================================================
 
-static ggml_tensor * canary_rel_shift(ggml_context * ctx, ggml_tensor * a) {
-    const int T = (int)a->ne[1];
-    const int H = (int)a->ne[2];
-    return ggml_view_3d(ctx, a,
-        T, T, H,
-        a->nb[1] - a->nb[0],
-        a->nb[2],
-        (T - 1) * a->nb[0]);
-}
-
-// Sinusoidal rel-pos table [d, 2T-1], descending positions [T-1 .. -(T-1)].
-// IMPORTANT layout note: the tensor is created as ggml_new_tensor_2d(F32, d, 2T-1)
-// which has ne[0]=d (fast) and ne[1]=2T-1 (slow). So the correct memory layout
-// is `pe[dim + pos*d]`, NOT `pe[(2*i)*K + j]` (which transposes the axes and was
-// the bug copied from parakeet/cohere — parakeet's TDT decoder is robust to it,
-// but canary's encoder–decoder cross-attention is not).
-static std::vector<float> canary_make_pos_enc(int d_model, int T) {
-    const int n_pos = 2 * T - 1;
-    std::vector<float> pe((size_t)n_pos * d_model, 0.0f);
-    for (int p = 0; p < n_pos; p++) {
-        const float pos = (float)(T - 1 - p);   // descending: [T-1, T-2, ..., -(T-1)]
-        for (int i = 0; i < d_model / 2; i++) {
-            const float div = expf(-logf(10000.0f) * (float)(2 * i) / (float)d_model);
-            pe[(size_t)p * d_model + 2 * i    ] = sinf(pos * div);
-            pe[(size_t)p * d_model + 2 * i + 1] = cosf(pos * div);
-        }
-    }
-    return pe;
-}
+// rel_shift and make_pos_enc moved to core_conformer in src/core/fastconformer.h.
 
 // ===========================================================================
 // Encoder graph
@@ -509,11 +457,7 @@ static const float kLayerNormEps = 1e-5f;
 static ggml_cgraph * canary_build_graph_encoder(canary_context * ctx, int T_mel) {
     const auto & m  = ctx->model;
     const auto & hp = m.hparams;
-    const int d        = (int)hp.d_model;
-    const int n_heads  = (int)hp.n_heads;
-    const int head_dim = (int)hp.head_dim;
-    const int n_mels   = (int)hp.n_mels;
-    const int K        = (int)hp.conv_kernel;
+    const int n_mels = (int)hp.n_mels;
 
     ggml_init_params ip = {
         /*mem_size=*/   ctx->compute_meta.size(),
@@ -528,141 +472,23 @@ static ggml_cgraph * canary_build_graph_encoder(canary_context * ctx, int T_mel)
     ggml_set_name(mel, "mel");
     ggml_set_input(mel);
 
-    auto bias_4d = [&](ggml_context * ctx0, ggml_tensor * b) {
-        return ggml_cast(ctx0,
-            ggml_reshape_4d(ctx0, b, 1, 1, b->ne[0], 1),
-            GGML_TYPE_F32);
-    };
-
     // ----- Pre-encode (dw_striding 8×) -----
-    ggml_tensor * cur = ggml_conv_2d(ctx0, m.pre_encode.conv0_w, mel, 2, 2, 1, 1, 1, 1);
-    cur = ggml_add(ctx0, cur, bias_4d(ctx0, m.pre_encode.conv0_b));
-    cur = ggml_relu(ctx0, cur);
-
-    cur = ggml_conv_2d_dw(ctx0, m.pre_encode.conv2_w, cur, 2, 2, 1, 1, 1, 1);
-    cur = ggml_add(ctx0, cur, bias_4d(ctx0, m.pre_encode.conv2_b));
-    cur = ggml_conv_2d   (ctx0, m.pre_encode.conv3_w, cur, 1, 1, 0, 0, 1, 1);
-    cur = ggml_add(ctx0, cur, bias_4d(ctx0, m.pre_encode.conv3_b));
-    cur = ggml_relu(ctx0, cur);
-
-    cur = ggml_conv_2d_dw(ctx0, m.pre_encode.conv5_w, cur, 2, 2, 1, 1, 1, 1);
-    cur = ggml_add(ctx0, cur, bias_4d(ctx0, m.pre_encode.conv5_b));
-    cur = ggml_conv_2d   (ctx0, m.pre_encode.conv6_w, cur, 1, 1, 0, 0, 1, 1);
-    cur = ggml_add(ctx0, cur, bias_4d(ctx0, m.pre_encode.conv6_b));
-    cur = ggml_relu(ctx0, cur);
-
-    const int H3 = (int)cur->ne[1];
-    const int W3 = (int)cur->ne[0];
-    const int C  = (int)hp.subsampling_channels;
-    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3));
-    cur = ggml_reshape_2d(ctx0, cur, W3 * C, H3);
-
-    cur = ggml_add(ctx0, ggml_mul_mat(ctx0, m.pre_encode.out_w, cur), m.pre_encode.out_b);
-
-    const int T = H3;
+    int T = 0;
+    ggml_tensor * cur = core_conformer::build_pre_encode(
+        ctx0, mel, m.pre_encode, (int)hp.subsampling_channels, &T);
 
     // ----- Sinusoidal rel-pos table -----
-    ggml_tensor * pos_enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, 2 * T - 1);
+    ggml_tensor * pos_enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, (int)hp.d_model, 2 * T - 1);
     ggml_set_name(pos_enc, "pos_enc");
     ggml_set_input(pos_enc);
 
-    // ----- 32× Conformer block -----
+    // ----- 32× FastConformer block (with biases) -----
+    core_conformer::BlockParams bp = {
+        (int)hp.d_model, (int)hp.n_heads, (int)hp.head_dim,
+        (int)hp.conv_kernel, kLayerNormEps,
+    };
     for (uint32_t il = 0; il < hp.enc_n_layers; il++) {
-        const auto & e = m.enc[il];
-        ggml_tensor * inpL = cur;
-
-        // ---- FFN1 (macaron half) ----
-        ggml_tensor * x = ggml_norm(ctx0, cur, kLayerNormEps);
-        x = ggml_mul(ctx0, x, e.norm_ff1_w);
-        x = ggml_add(ctx0, x, e.norm_ff1_b);
-        x = ggml_add(ctx0, ggml_mul_mat(ctx0, e.ff1_l1_w, x), e.ff1_l1_b);
-        x = ggml_silu(ctx0, x);
-        x = ggml_add(ctx0, ggml_mul_mat(ctx0, e.ff1_l2_w, x), e.ff1_l2_b);
-        cur = ggml_add(ctx0, inpL, ggml_scale(ctx0, x, 0.5f));
-
-        ggml_tensor * inpAttn = cur;
-
-        // ---- Self-Attention (rel_pos with untied biases) ----
-        x = ggml_norm(ctx0, cur, kLayerNormEps);
-        x = ggml_mul(ctx0, x, e.norm_attn_w);
-        x = ggml_add(ctx0, x, e.norm_attn_b);
-
-        ggml_tensor * Q  = ggml_add(ctx0, ggml_mul_mat(ctx0, e.attn_q_w, x), e.attn_q_b);
-        ggml_tensor * K_ = ggml_add(ctx0, ggml_mul_mat(ctx0, e.attn_k_w, x), e.attn_k_b);
-        ggml_tensor * V  = ggml_add(ctx0, ggml_mul_mat(ctx0, e.attn_v_w, x), e.attn_v_b);
-        ggml_tensor * R  = ggml_mul_mat(ctx0, e.attn_pos_w, pos_enc);  // no bias on rel-pos proj
-
-        ggml_tensor * Q_u = ggml_add(ctx0, Q, ggml_reshape_1d(ctx0, e.pos_bias_u, d));
-        ggml_tensor * Q_v = ggml_add(ctx0, Q, ggml_reshape_1d(ctx0, e.pos_bias_v, d));
-
-        Q_u = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q_u, head_dim, n_heads, T), 0, 2, 1, 3);
-        Q_v = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q_v, head_dim, n_heads, T), 0, 2, 1, 3);
-        K_  = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K_,  head_dim, n_heads, T), 0, 2, 1, 3);
-        R   = ggml_permute(ctx0, ggml_reshape_3d(ctx0, R,   head_dim, n_heads, 2 * T - 1), 0, 2, 1, 3);
-
-        ggml_tensor * AC = ggml_mul_mat(ctx0, ggml_cont(ctx0, K_), Q_u);
-        ggml_tensor * BD_raw = ggml_mul_mat(ctx0, ggml_cont(ctx0, R), Q_v);
-        ggml_tensor * BD = canary_rel_shift(ctx0, BD_raw);
-
-        ggml_tensor * scores = ggml_add(ctx0, AC, BD);
-        scores = ggml_scale(ctx0, scores, 1.0f / sqrtf((float)head_dim));
-        scores = ggml_soft_max(ctx0, scores);
-
-        ggml_tensor * V3 = ggml_reshape_3d(ctx0, V, head_dim, n_heads, T);
-        ggml_tensor * V_t = ggml_permute(ctx0, V3, 1, 2, 0, 3);
-        ggml_tensor * attn_out = ggml_mul_mat(ctx0, ggml_cont(ctx0, V_t), scores);
-        attn_out = ggml_reshape_2d(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, attn_out, 0, 2, 1, 3)), d, T);
-
-        attn_out = ggml_add(ctx0, ggml_mul_mat(ctx0, e.attn_out_w, attn_out), e.attn_out_b);
-        cur = ggml_add(ctx0, inpAttn, attn_out);
-
-        // ---- Convolution module ----
-        ggml_tensor * inpConv = cur;
-        x = ggml_norm(ctx0, cur, kLayerNormEps);
-        x = ggml_mul(ctx0, x, e.norm_conv_w);
-        x = ggml_add(ctx0, x, e.norm_conv_b);
-
-        // pw1: [d → 2d] + bias, then GLU
-        ggml_tensor * pw1_w = ggml_reshape_2d(ctx0, e.conv_pw1_w, d, 2 * d);
-        ggml_tensor * cnv = ggml_add(ctx0, ggml_mul_mat(ctx0, pw1_w, x), e.conv_pw1_b);
-        ggml_tensor * cnv_gate = ggml_view_2d(ctx0, cnv, d, T, cnv->nb[1], d * sizeof(float));
-        cnv = ggml_mul(ctx0,
-            ggml_view_2d(ctx0, cnv, d, T, cnv->nb[1], 0),
-            ggml_sigmoid(ctx0, cnv_gate));
-
-        // dw conv (kernel 9, padding K/2)
-        ggml_tensor * dw_w_f32 = ggml_cast(ctx0, e.conv_dw_w, GGML_TYPE_F32);
-        ggml_tensor * dw_w_4d  = ggml_reshape_4d(ctx0, dw_w_f32, K, 1, 1, d);
-        cnv = ggml_cont(ctx0, ggml_transpose(ctx0, cnv));
-        cnv = ggml_reshape_4d(ctx0, cnv, T, 1, d, 1);
-        cnv = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, cnv, 1, 1, (K - 1) / 2, 0, 1, 1);
-        cnv = ggml_cont(ctx0, ggml_permute(ctx0, cnv, 1, 2, 0, 3));
-        cnv = ggml_reshape_2d(ctx0, cnv, d, T);
-
-        // BN was folded into conv_dw_w/b at load time → just add the folded bias
-        cnv = ggml_add(ctx0, cnv, ggml_reshape_2d(ctx0, e.conv_dw_b, d, 1));
-
-        cnv = ggml_silu(ctx0, cnv);
-
-        // pw2: [d → d] + bias
-        ggml_tensor * pw2_w = ggml_reshape_2d(ctx0, e.conv_pw2_w, d, d);
-        cnv = ggml_add(ctx0, ggml_mul_mat(ctx0, pw2_w, cnv), e.conv_pw2_b);
-        cur = ggml_add(ctx0, inpConv, cnv);
-
-        // ---- FFN2 (macaron half) ----
-        ggml_tensor * inpFF2 = cur;
-        x = ggml_norm(ctx0, cur, kLayerNormEps);
-        x = ggml_mul(ctx0, x, e.norm_ff2_w);
-        x = ggml_add(ctx0, x, e.norm_ff2_b);
-        x = ggml_add(ctx0, ggml_mul_mat(ctx0, e.ff2_l1_w, x), e.ff2_l1_b);
-        x = ggml_silu(ctx0, x);
-        x = ggml_add(ctx0, ggml_mul_mat(ctx0, e.ff2_l2_w, x), e.ff2_l2_b);
-        cur = ggml_add(ctx0, inpFF2, ggml_scale(ctx0, x, 0.5f));
-
-        // ---- Final block LN ----
-        cur = ggml_norm(ctx0, cur, kLayerNormEps);
-        cur = ggml_mul(ctx0, cur, e.norm_out_w);
-        cur = ggml_add(ctx0, cur, e.norm_out_b);
+        cur = core_conformer::build_block(ctx0, cur, pos_enc, T, m.enc[il], bp);
     }
 
     ggml_set_name(cur, "enc_out");
@@ -705,7 +531,7 @@ static std::vector<float> canary_encode_mel(canary_context * ctx,
     ggml_tensor * pos_in = ggml_graph_get_tensor(gf, "pos_enc");
     int T_enc = (int)pos_in->ne[1];
     T_enc = (T_enc + 1) / 2;
-    auto pe = canary_make_pos_enc((int)ctx->model.hparams.d_model, T_enc);
+    auto pe = core_conformer::make_pos_enc((int)ctx->model.hparams.d_model, T_enc);
     ggml_backend_tensor_set(pos_in, pe.data(), 0, pe.size() * sizeof(float));
 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
