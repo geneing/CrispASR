@@ -1090,6 +1090,8 @@ static void cohere_fft_r2c(const float * in, int N, float * out) {
 // Returns float array of shape (n_mels, T_mel), row-major.
 // ---------------------------------------------------------------------------
 
+#include "core/mel.h"
+
 static std::vector<float> cohere_compute_features(const cohere_hparams & hp,
                                                    const float * fe_mel_fb_data,
                                                    const float * fe_window_data,
@@ -1101,73 +1103,47 @@ static std::vector<float> cohere_compute_features(const cohere_hparams & hp,
     const int n_freqs   = hp.n_freqs();
     const int n_mels    = hp.n_mels;
     const float preemph = 0.97f;
-    const float log_grd = (float)(1.0 / (1 << 24));
 
-    // Pre-emphasis
-    std::vector<float> pe(n_samples);
+    // Cohere's pre-emphasis filter: pe[i] = samples[i] - 0.97 * samples[i-1].
+    // This is Cohere-specific (none of the other NeMo-cluster models apply
+    // it). We run it here and feed the pre-emphasised signal to the shared
+    // core_mel::compute() helper.
+    std::vector<float> pe((size_t)n_samples);
     pe[0] = samples[0];
     for (int i = 1; i < n_samples; i++) pe[i] = samples[i] - preemph * samples[i-1];
 
-    // Center-pad
-    int pad = n_fft / 2;
-    std::vector<float> padded(pad + n_samples + pad, 0.0f);
-    memcpy(padded.data() + pad, pe.data(), n_samples * sizeof(float));
+    // Configure the shared helper for the NeMo cluster. Note: the original
+    // cohere path used cblas_sgemm for the power->mel matmul, while
+    // core_mel::compute() does a manual O(n_mels*n_freqs*T) loop. This
+    // changes the floating-point accumulation order and can shift the mel
+    // output by a handful of ULPs. The resulting transcript is still
+    // correct; the regression guard measures transcript-level equality,
+    // not bit-exact matmul output.
+    core_mel::Params p;
+    p.n_fft      = n_fft;
+    p.hop_length = hop;
+    p.win_length = win;
+    p.n_mels     = n_mels;
+    p.log_base   = core_mel::LogBase::Ln;
+    p.norm       = core_mel::Normalization::PerFeatureZ;
+    p.layout     = core_mel::Layout::TimeMels;
+    p.log_eps    = (float)(1.0 / (1 << 24));
+    p.center_pad = true;
 
-    // Number of frames
-    int n_pad = (int)padded.size();
-    int T = (n_pad - n_fft) / hop + 1;
-    T_out = T;
-
-    // Hann window (from fe_window tensor, length win_length, padded to n_fft)
-    std::vector<float> window(n_fft, 0.0f);
-    int lpad = (n_fft - win) / 2;
-    for (int i = 0; i < win; i++) window[lpad + i] = fe_window_data[i];
-
-    // STFT → power spectrum → mel → log → normalize
-    // Self-contained iterative Cooley-Tukey FFT (no external dependencies).
-    std::vector<float> power(n_freqs * T, 0.0f);
-    {
-        std::vector<float> fft_in(n_fft);
-        std::vector<float> fft_out(n_fft * 2); // complex interleaved
-        for (int t = 0; t < T; t++) {
-            const float * frame = padded.data() + t * hop;
-            for (int n = 0; n < n_fft; n++) fft_in[n] = frame[n] * window[n];
-            cohere_fft_r2c(fft_in.data(), n_fft, fft_out.data());
-            for (int k = 0; k < n_freqs; k++) {
-                float re = fft_out[2*k], im = fft_out[2*k+1];
-                power[t * n_freqs + k] = re*re + im*im;
-            }
-        }
-    }
-
-    // mel filterbank: fe_mel_fb shape [1, n_mels, n_freqs]
-    // power [T, n_freqs] @ fe_mel_fb^T [n_freqs, n_mels] = mel [T, n_mels]
-    std::vector<float> mel(n_mels * T, 0.0f);
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                T, n_mels, n_freqs,
-                1.0f, power.data(), n_freqs, fe_mel_fb_data, n_freqs,
-                0.0f, mel.data(), n_mels);
-
-    for (int i = 0; i < T * n_mels; i++) {
-        mel[i] = logf(mel[i] + log_grd);
-    }
-
-    // Per-feature normalization: biased std (matches ONNX: std = sqrt(mean(diff²)))
-    for (int m = 0; m < n_mels; m++) {
-        double mean = 0.0, var = 0.0;
-        for (int t = 0; t < T; t++) mean += mel[t * n_mels + m];
-        mean /= T;
-        for (int t = 0; t < T; t++) { double d = mel[t * n_mels + m] - mean; var += d*d; }
-        float std = sqrtf((float)(var / T + 1e-5));
-        for (int t = 0; t < T; t++) mel[t * n_mels + m] = (mel[t * n_mels + m] - (float)mean) / std;
-    }
+    auto mel = core_mel::compute(
+        pe.data(), n_samples,
+        fe_window_data, win,
+        fe_mel_fb_data, n_freqs,
+        cohere_fft_r2c,
+        p,
+        T_out);
 
     cohere_debug("cohere: mel m=0, t=0..4: [%.4f, %.4f, %.4f, %.4f, %.4f]\n",
            mel[0*n_mels + 0], mel[1*n_mels + 0], mel[2*n_mels + 0], mel[3*n_mels + 0], mel[4*n_mels + 0]);
     cohere_debug("cohere: mel t=0, m=0..4: [%.4f, %.4f, %.4f, %.4f, %.4f]\n",
            mel[0*n_mels + 0], mel[0*n_mels + 1], mel[0*n_mels + 2], mel[0*n_mels + 3], mel[0*n_mels + 4]);
 
-    return mel; // shape: [n_mels, T], time-major
+    return mel; // shape: [T, n_mels], time-major
 }
 
 // ---------------------------------------------------------------------------
