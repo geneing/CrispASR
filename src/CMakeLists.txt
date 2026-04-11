@@ -255,7 +255,7 @@ add_library(qwen3_asr
             )
 target_include_directories(qwen3_asr PUBLIC . ../include)
 target_compile_features   (qwen3_asr PUBLIC cxx_std_17)
-target_link_libraries     (qwen3_asr PUBLIC ggml ggml-base Threads::Threads)
+target_link_libraries     (qwen3_asr PUBLIC ggml ggml-base Threads::Threads crispasr-core)
 if(NOT MSVC)
     target_compile_options(qwen3_asr PRIVATE -O3 -march=native)
 endif()

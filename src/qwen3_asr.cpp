@@ -537,6 +537,21 @@ static void qwen3_asr_fft(float * in, int N, float * out) {
 // Returns a flat (n_mels, T) row-major buffer.
 // ===========================================================================
 
+#include "core/mel.h"
+
+// qwen3_asr_fft uses its input buffer as scratch during recursion (needs
+// ~4N extra floats past the input pointer). Wrap it to match core_mel's
+// const-input FftR2C signature, same trick as voxtral / voxtral4b.
+static void qwen3_asr_fft_wrapper(const float * in, int N, float * out) {
+    static thread_local std::vector<float> scratch_in;
+    static thread_local std::vector<float> scratch_out;
+    if ((int)scratch_in.size()  < 4 * N) scratch_in.assign((size_t)4 * N, 0.0f);
+    if ((int)scratch_out.size() < 8 * N) scratch_out.assign((size_t)8 * N, 0.0f);
+    std::memcpy(scratch_in.data(), in, (size_t)N * sizeof(float));
+    qwen3_asr_fft(scratch_in.data(), N, scratch_out.data());
+    std::memcpy(out, scratch_out.data(), (size_t)(2 * N) * sizeof(float));
+}
+
 extern "C" float * qwen3_asr_compute_mel(qwen3_asr_context * ctx,
                                          const float * samples, int n_samples,
                                          int * out_n_mels, int * out_T_mel) {
@@ -552,70 +567,44 @@ extern "C" float * qwen3_asr_compute_mel(qwen3_asr_context * ctx,
     const int n_mels  = (int)hp.n_mels;       // 128
     const int n_freqs = n_fft / 2 + 1;        // 201
 
-    // Pull window and filterbank from the backend
     std::vector<float> hann(n_fft);
     ggml_backend_tensor_get(ctx->model.audio.mel_window, hann.data(), 0,
                             n_fft * sizeof(float));
-    std::vector<float> filt((size_t)n_mels * n_freqs);
+    std::vector<float> filt((size_t)n_freqs * n_mels);
     ggml_backend_tensor_get(ctx->model.audio.mel_filters, filt.data(), 0,
                             filt.size() * sizeof(float));
 
-    // Center-pad audio with n_fft/2 zeros on each side
-    const int pad = n_fft / 2;
-    std::vector<float> padded((size_t)n_samples + 2 * pad, 0.0f);
-    std::memcpy(padded.data() + pad, samples, n_samples * sizeof(float));
+    // Qwen3-ASR / Whisper HF feature extractor: log10 + max-clip guard,
+    // double-accumulator matmul, drop last STFT frame, fb in (n_freqs, n_mels)
+    // layout. No fixed-size padding — output T is whatever the audio yields.
+    core_mel::Params p;
+    p.n_fft      = n_fft;
+    p.hop_length = hop;
+    p.win_length = n_fft;
+    p.n_mels     = n_mels;
+    p.log_base   = core_mel::LogBase::Log10;
+    p.log_guard  = core_mel::LogGuard::MaxClip;
+    p.norm       = core_mel::Normalization::GlobalClipMax;
+    p.layout     = core_mel::Layout::MelsTime;
+    p.fb_layout  = core_mel::FbLayout::FreqsMels;
+    p.matmul     = core_mel::MatmulPrecision::Double;
+    p.log_eps    = 1e-10f;
+    p.center_pad = true;
+    p.drop_last_frame = true;
 
-    // Number of STFT frames before dropping the last one
-    const int T_full = (int)((padded.size() - n_fft) / hop + 1);
-    const int T = T_full - 1;  // Whisper drops the last frame
-    if (T <= 0) return nullptr;
+    int T_ret = 0;
+    auto mel = core_mel::compute(
+        samples, n_samples,
+        hann.data(), n_fft,
+        filt.data(), n_freqs,
+        qwen3_asr_fft_wrapper,
+        p,
+        T_ret);
 
-    // STFT → power spectrum, store as (n_freqs, T) row-major
-    std::vector<float> power((size_t)n_freqs * T, 0.0f);
-    {
-        // Scratch space for the recursive FFT (worst case ~6N floats)
-        std::vector<float> fft_in((size_t)n_fft * 4, 0.0f);
-        std::vector<float> fft_out((size_t)n_fft * 8, 0.0f);
-        for (int t = 0; t < T; t++) {
-            const float * frame = padded.data() + (size_t)t * hop;
-            for (int n = 0; n < n_fft; n++) fft_in[n] = frame[n] * hann[n];
-            qwen3_asr_fft(fft_in.data(), n_fft, fft_out.data());
-            for (int k = 0; k < n_freqs; k++) {
-                float re = fft_out[2*k], im = fft_out[2*k+1];
-                power[(size_t)k * T + t] = re * re + im * im;
-            }
-        }
-    }
-
-    // Mel projection. WhisperFeatureExtractor.mel_filters has shape (n_freqs, n_mels)
-    // (i.e. filters[k, m] = coefficient for mel band m at freq bin k). The numpy
-    // array is row-major so the byte layout is filters[k * n_mels + m].
-    //
-    // log_mel[m, t] = log10(max(sum_k filters[k, m] * power[k, t], 1e-10))
-    std::vector<float> mel((size_t)n_mels * T, 0.0f);
-    float mel_max = -1e30f;
-    for (int m = 0; m < n_mels; m++) {
-        for (int t = 0; t < T; t++) {
-            double s = 0.0;
-            for (int k = 0; k < n_freqs; k++) {
-                s += (double)filt[(size_t)k * n_mels + m] * power[(size_t)k * T + t];
-            }
-            float lv = std::log10(std::max((float)s, 1e-10f));
-            mel[(size_t)m * T + t] = lv;
-            if (lv > mel_max) mel_max = lv;
-        }
-    }
-
-    // Clip + normalize
-    const float floor_v = mel_max - 8.0f;
-    for (size_t i = 0; i < mel.size(); i++) {
-        float v = mel[i];
-        if (v < floor_v) v = floor_v;
-        mel[i] = (v + 4.0f) / 4.0f;
-    }
+    if (mel.empty()) return nullptr;
 
     if (out_n_mels) *out_n_mels = n_mels;
-    if (out_T_mel)  *out_T_mel  = T;
+    if (out_T_mel)  *out_T_mel  = T_ret;
 
     float * result = (float *)malloc(mel.size() * sizeof(float));
     std::memcpy(result, mel.data(), mel.size() * sizeof(float));
