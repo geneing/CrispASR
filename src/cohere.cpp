@@ -738,59 +738,43 @@ static ggml_tensor * ct_get_tensor_fmt(cohere_model & model, const char * fmt, i
 // Model loading
 // ---------------------------------------------------------------------------
 
+#include "core/gguf_loader.h"
+
 static bool cohere_load_model(cohere_model & model,
                                cohere_vocab  & vocab,
                                const char * path,
                                ggml_backend_t backend) {
     // First pass: read metadata
-    struct ggml_init_params meta_params = {
-        .mem_size   = 4 * 1024 * 1024, // 4 MB for metadata
-        .mem_buffer = nullptr,
-        .no_alloc   = true,
-    };
-    struct ggml_context * meta_ctx = ggml_init(meta_params);
-    struct gguf_init_params load_params_meta = { .no_alloc = true, .ctx = &meta_ctx };
-    struct gguf_context * gguf_ctx = gguf_init_from_file(path, load_params_meta);
-    if (!gguf_ctx) {
-        fprintf(stderr, "cohere: failed to open '%s'\n", path);
-        if (meta_ctx) ggml_free(meta_ctx);
-        return false;
-    }
+    gguf_context * gguf_ctx = core_gguf::open_metadata(path);
+    if (!gguf_ctx) return false;
 
     auto & hp = model.hparams;
-    auto kv_i = [&](const char * key) -> int {
-        int ki = gguf_find_key(gguf_ctx, key);
-        if (ki < 0) { fprintf(stderr, "cohere: missing key '%s'\n", key); return 0; }
-        return (int)gguf_get_val_u32(gguf_ctx, ki);
-    };
 
-    hp.vocab_size   = kv_i(CT_KEY_VOCAB_SIZE);
-    hp.enc_n_layers = kv_i(CT_KEY_ENC_N_LAYERS);
-    hp.enc_d_model  = kv_i(CT_KEY_ENC_D_MODEL);
-    hp.enc_n_heads  = kv_i(CT_KEY_ENC_N_HEADS);
-    hp.enc_head_dim = kv_i(CT_KEY_ENC_HEAD_DIM);
-    hp.enc_ffn_dim  = kv_i(CT_KEY_ENC_FFN_DIM);
-    hp.enc_conv_k   = kv_i(CT_KEY_ENC_CONV_KERNEL);
-    hp.dec_n_layers = kv_i(CT_KEY_DEC_N_LAYERS);
-    hp.dec_d_model  = kv_i(CT_KEY_DEC_D_MODEL);
-    hp.dec_n_heads = kv_i(CT_KEY_DEC_N_HEADS);
-    hp.dec_head_dim = kv_i(CT_KEY_DEC_HEAD_DIM);
-    hp.dec_ffn_dim  = kv_i(CT_KEY_DEC_FFN_DIM);
-    hp.dec_max_ctx  = kv_i(CT_KEY_DEC_MAX_CTX);
-    hp.n_mels       = kv_i(CT_KEY_AUDIO_N_MELS);
-    hp.n_fft        = kv_i(CT_KEY_AUDIO_N_FFT);
-    hp.hop_length   = kv_i(CT_KEY_AUDIO_HOP);
-    hp.win_length   = kv_i(CT_KEY_AUDIO_WIN);
+    hp.vocab_size   = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_VOCAB_SIZE,    0);
+    hp.enc_n_layers = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_ENC_N_LAYERS, 0);
+    hp.enc_d_model  = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_ENC_D_MODEL,  0);
+    hp.enc_n_heads  = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_ENC_N_HEADS,  0);
+    hp.enc_head_dim = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_ENC_HEAD_DIM, 0);
+    hp.enc_ffn_dim  = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_ENC_FFN_DIM,  0);
+    hp.enc_conv_k   = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_ENC_CONV_KERNEL, 0);
+    hp.dec_n_layers = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_DEC_N_LAYERS, 0);
+    hp.dec_d_model  = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_DEC_D_MODEL,  0);
+    hp.dec_n_heads  = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_DEC_N_HEADS,  0);
+    hp.dec_head_dim = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_DEC_HEAD_DIM, 0);
+    hp.dec_ffn_dim  = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_DEC_FFN_DIM,  0);
+    hp.dec_max_ctx  = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_DEC_MAX_CTX,  0);
+    hp.n_mels       = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_AUDIO_N_MELS, 0);
+    hp.n_fft        = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_AUDIO_N_FFT,  0);
+    hp.hop_length   = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_AUDIO_HOP,    0);
+    hp.win_length   = (int)core_gguf::kv_u32(gguf_ctx, CT_KEY_AUDIO_WIN,    0);
 
     // Load vocabulary
     {
-        int ki = gguf_find_key(gguf_ctx, "tokenizer.ggml.tokens");
-        if (ki >= 0) {
-            int n = gguf_get_arr_n(gguf_ctx, ki);
-            cohere_debug("cohere: loading %d tokens from GGUF\n", n);
-            vocab.id_to_token.resize(n);
-            for (int i = 0; i < n; i++) {
-                vocab.id_to_token[i] = gguf_get_arr_str(gguf_ctx, ki, i);
+        auto tokens = core_gguf::kv_str_array(gguf_ctx, "tokenizer.ggml.tokens");
+        if (!tokens.empty()) {
+            cohere_debug("cohere: loading %d tokens from GGUF\n", (int)tokens.size());
+            vocab.id_to_token = std::move(tokens);
+            for (int i = 0; i < (int)vocab.id_to_token.size(); i++) {
                 vocab.token_to_id[vocab.id_to_token[i]] = i;
             }
             const char * specials[] = {"<|startoftranscript|>", "<|en|>", "<|endoftext|>"};
@@ -802,70 +786,17 @@ static bool cohere_load_model(cohere_model & model,
         }
     }
 
-    gguf_free(gguf_ctx);
-    ggml_free(meta_ctx);
+    core_gguf::free_metadata(gguf_ctx);
 
-    // Second pass: load all tensor metadata (no_alloc=true)
-    struct ggml_context * weight_ctx = nullptr;
+    // Second pass: tensor data via shared helper
     {
-        struct gguf_init_params load_params = { .no_alloc = true, .ctx = &weight_ctx };
-        gguf_ctx = gguf_init_from_file(path, load_params);
-        if (!gguf_ctx || !weight_ctx) {
-            fprintf(stderr, "cohere: failed to load tensor metadata from '%s'\n", path);
+        core_gguf::WeightLoad wl;
+        if (!core_gguf::load_weights(path, backend, "cohere", wl)) {
             return false;
         }
-
-        // Create backend buffer for all tensors
-        model.buf = ggml_backend_alloc_ctx_tensors(weight_ctx, backend);
-
-        // mmap the GGUF file — one syscall instead of N fread calls, zero per-tensor heap alloc
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) {
-            fprintf(stderr, "cohere: failed to open '%s' for mmap\n", path);
-            return false;
-        }
-        struct stat st;
-        fstat(fd, &st);
-        size_t file_size = (size_t)st.st_size;
-        void * mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
-        close(fd);
-        if (mmap_base == MAP_FAILED) {
-            fprintf(stderr, "cohere: mmap failed for '%s', falling back to fread\n", path);
-            mmap_base = nullptr;
-        }
-
-        size_t data_offset = gguf_get_data_offset(gguf_ctx);
-
-        for (ggml_tensor * t = ggml_get_first_tensor(weight_ctx); t;
-             t = ggml_get_next_tensor(weight_ctx, t)) {
-            model.tensors[ggml_get_name(t)] = t;
-
-            int64_t tensor_id = gguf_find_tensor(gguf_ctx, ggml_get_name(t));
-            if (tensor_id < 0) continue;
-
-            size_t t_offset = gguf_get_tensor_offset(gguf_ctx, tensor_id);
-            size_t nbytes   = ggml_nbytes(t);
-
-            if (mmap_base) {
-                // Direct pointer into mmap region — no heap allocation, no fread
-                ggml_backend_tensor_set(t, (const char *)mmap_base + data_offset + t_offset, 0, nbytes);
-            } else {
-                // Fallback: fread per tensor
-                FILE * file = fopen(path, "rb");
-                if (file) {
-                    fseek(file, (long)(data_offset + t_offset), SEEK_SET);
-                    std::vector<uint8_t> tmp(nbytes);
-                    if (fread(tmp.data(), 1, nbytes, file) == nbytes)
-                        ggml_backend_tensor_set(t, tmp.data(), 0, nbytes);
-                    fclose(file);
-                }
-            }
-        }
-
-        if (mmap_base) munmap(mmap_base, file_size);
-
-        model.ctx = weight_ctx;
-        gguf_free(gguf_ctx);
+        model.ctx     = wl.ctx;
+        model.buf     = wl.buf;
+        model.tensors = std::move(wl.tensors);
 
         struct ggml_tensor * tp = model.tensors["enc.proj.weight"];
         if (tp) {

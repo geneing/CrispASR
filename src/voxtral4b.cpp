@@ -178,98 +178,67 @@ struct voxtral4b_context {
 // GGUF loader
 // ===========================================================================
 
-static uint32_t kv_u32(gguf_context * g, const char * key, uint32_t def) {
-    int i = gguf_find_key(g, key);
-    return i >= 0 ? (uint32_t)gguf_get_val_u32(g, i) : def;
-}
-static float kv_f32(gguf_context * g, const char * key, float def) {
-    int i = gguf_find_key(g, key);
-    return i >= 0 ? gguf_get_val_f32(g, i) : def;
-}
+#include "core/gguf_loader.h"
 
 static bool voxtral4b_load_model(voxtral4b_model & model, voxtral4b_vocab & vocab,
                                  const char * path, ggml_backend_t backend) {
     // Pass 1: metadata
     {
-        gguf_init_params mp = { /*no_alloc=*/true, /*ctx=*/nullptr };
-        gguf_context * gctx = gguf_init_from_file(path, mp);
-        if (!gctx) { fprintf(stderr, "voxtral4b: failed to open '%s'\n", path); return false; }
+        gguf_context * gctx = core_gguf::open_metadata(path);
+        if (!gctx) return false;
         auto & hp = model.hparams;
 
-        hp.audio_n_layers = kv_u32(gctx, "voxtral4b.audio.n_layers", hp.audio_n_layers);
-        hp.audio_d_model  = kv_u32(gctx, "voxtral4b.audio.d_model",  hp.audio_d_model);
-        hp.audio_n_heads  = kv_u32(gctx, "voxtral4b.audio.n_heads",  hp.audio_n_heads);
-        hp.audio_head_dim = kv_u32(gctx, "voxtral4b.audio.head_dim", hp.audio_head_dim);
-        hp.audio_ff_dim   = kv_u32(gctx, "voxtral4b.audio.ff_dim",   hp.audio_ff_dim);
-        hp.audio_max_pos  = kv_u32(gctx, "voxtral4b.audio.max_pos",  hp.audio_max_pos);
-        hp.audio_rope_theta = kv_f32(gctx, "voxtral4b.audio.rope_theta", hp.audio_rope_theta);
-        hp.audio_swa      = kv_u32(gctx, "voxtral4b.audio.sliding_window", hp.audio_swa);
+        hp.audio_n_layers = core_gguf::kv_u32(gctx, "voxtral4b.audio.n_layers", hp.audio_n_layers);
+        hp.audio_d_model  = core_gguf::kv_u32(gctx, "voxtral4b.audio.d_model",  hp.audio_d_model);
+        hp.audio_n_heads  = core_gguf::kv_u32(gctx, "voxtral4b.audio.n_heads",  hp.audio_n_heads);
+        hp.audio_head_dim = core_gguf::kv_u32(gctx, "voxtral4b.audio.head_dim", hp.audio_head_dim);
+        hp.audio_ff_dim   = core_gguf::kv_u32(gctx, "voxtral4b.audio.ff_dim",   hp.audio_ff_dim);
+        hp.audio_max_pos  = core_gguf::kv_u32(gctx, "voxtral4b.audio.max_pos",  hp.audio_max_pos);
+        hp.audio_rope_theta = core_gguf::kv_f32(gctx, "voxtral4b.audio.rope_theta", hp.audio_rope_theta);
+        hp.audio_swa      = core_gguf::kv_u32(gctx, "voxtral4b.audio.sliding_window", hp.audio_swa);
 
-        hp.proj_in_dim    = kv_u32(gctx, "voxtral4b.proj.in_dim",      hp.proj_in_dim);
-        hp.proj_out_dim   = kv_u32(gctx, "voxtral4b.proj.out_dim",     hp.proj_out_dim);
-        hp.proj_frame_stack = kv_u32(gctx, "voxtral4b.proj.frame_stack", hp.proj_frame_stack);
+        hp.proj_in_dim    = core_gguf::kv_u32(gctx, "voxtral4b.proj.in_dim",      hp.proj_in_dim);
+        hp.proj_out_dim   = core_gguf::kv_u32(gctx, "voxtral4b.proj.out_dim",     hp.proj_out_dim);
+        hp.proj_frame_stack = core_gguf::kv_u32(gctx, "voxtral4b.proj.frame_stack", hp.proj_frame_stack);
 
-        hp.llm_n_layers   = kv_u32(gctx, "voxtral4b.llm.n_layers",     hp.llm_n_layers);
-        hp.llm_d_model    = kv_u32(gctx, "voxtral4b.llm.d_model",      hp.llm_d_model);
-        hp.llm_n_heads    = kv_u32(gctx, "voxtral4b.llm.n_heads",      hp.llm_n_heads);
-        hp.llm_n_kv_heads = kv_u32(gctx, "voxtral4b.llm.n_kv_heads",   hp.llm_n_kv_heads);
-        hp.llm_head_dim   = kv_u32(gctx, "voxtral4b.llm.head_dim",     hp.llm_head_dim);
-        hp.llm_ff_dim     = kv_u32(gctx, "voxtral4b.llm.ff_dim",       hp.llm_ff_dim);
-        hp.llm_rope_theta = kv_f32(gctx, "voxtral4b.llm.rope_theta",   hp.llm_rope_theta);
-        hp.llm_rms_eps    = kv_f32(gctx, "voxtral4b.llm.rms_norm_eps", hp.llm_rms_eps);
-        hp.llm_vocab_size = kv_u32(gctx, "voxtral4b.llm.vocab_size",   hp.llm_vocab_size);
-        hp.llm_max_pos    = kv_u32(gctx, "voxtral4b.llm.max_pos",      hp.llm_max_pos);
-        hp.llm_swa        = kv_u32(gctx, "voxtral4b.llm.sliding_window", hp.llm_swa);
-        hp.ada_norm_dim   = kv_u32(gctx, "voxtral4b.llm.ada_norm_dim", hp.ada_norm_dim);
-        hp.audio_token_id = kv_u32(gctx, "voxtral4b.audio_token_id",   hp.audio_token_id);
+        hp.llm_n_layers   = core_gguf::kv_u32(gctx, "voxtral4b.llm.n_layers",     hp.llm_n_layers);
+        hp.llm_d_model    = core_gguf::kv_u32(gctx, "voxtral4b.llm.d_model",      hp.llm_d_model);
+        hp.llm_n_heads    = core_gguf::kv_u32(gctx, "voxtral4b.llm.n_heads",      hp.llm_n_heads);
+        hp.llm_n_kv_heads = core_gguf::kv_u32(gctx, "voxtral4b.llm.n_kv_heads",   hp.llm_n_kv_heads);
+        hp.llm_head_dim   = core_gguf::kv_u32(gctx, "voxtral4b.llm.head_dim",     hp.llm_head_dim);
+        hp.llm_ff_dim     = core_gguf::kv_u32(gctx, "voxtral4b.llm.ff_dim",       hp.llm_ff_dim);
+        hp.llm_rope_theta = core_gguf::kv_f32(gctx, "voxtral4b.llm.rope_theta",   hp.llm_rope_theta);
+        hp.llm_rms_eps    = core_gguf::kv_f32(gctx, "voxtral4b.llm.rms_norm_eps", hp.llm_rms_eps);
+        hp.llm_vocab_size = core_gguf::kv_u32(gctx, "voxtral4b.llm.vocab_size",   hp.llm_vocab_size);
+        hp.llm_max_pos    = core_gguf::kv_u32(gctx, "voxtral4b.llm.max_pos",      hp.llm_max_pos);
+        hp.llm_swa        = core_gguf::kv_u32(gctx, "voxtral4b.llm.sliding_window", hp.llm_swa);
+        hp.ada_norm_dim   = core_gguf::kv_u32(gctx, "voxtral4b.llm.ada_norm_dim", hp.ada_norm_dim);
+        hp.audio_token_id = core_gguf::kv_u32(gctx, "voxtral4b.audio_token_id",   hp.audio_token_id);
 
         // Tekken tokenizer
-        int kp = gguf_find_key(gctx, "tokenizer.tekken.pattern");
-        if (kp >= 0) vocab.pre_pattern = gguf_get_val_str(gctx, kp);
-        int ks = gguf_find_key(gctx, "tokenizer.tekken.specials");
-        if (ks >= 0) {
-            int n = gguf_get_arr_n(gctx, ks);
-            vocab.specials.resize(n);
-            vocab.special_to_rank.reserve(n);
-            for (int i = 0; i < n; i++) {
-                vocab.specials[i] = gguf_get_arr_str(gctx, ks, i);
+        vocab.pre_pattern = core_gguf::kv_str(gctx, "tokenizer.tekken.pattern", "");
+        auto specials = core_gguf::kv_str_array(gctx, "tokenizer.tekken.specials");
+        if (!specials.empty()) {
+            vocab.specials = std::move(specials);
+            vocab.special_to_rank.reserve(vocab.specials.size());
+            for (int i = 0; i < (int)vocab.specials.size(); i++) {
                 vocab.special_to_rank[vocab.specials[i]] = i;
             }
         }
-        vocab.n_specials = kv_u32(gctx, "tokenizer.tekken.n_specials", 1000);
-        vocab.n_vocab    = kv_u32(gctx, "tokenizer.tekken.n_vocab",    150000);
+        vocab.n_specials = core_gguf::kv_u32(gctx, "tokenizer.tekken.n_specials", 1000);
+        vocab.n_vocab    = core_gguf::kv_u32(gctx, "tokenizer.tekken.n_vocab",    150000);
 
-        gguf_free(gctx);
+        core_gguf::free_metadata(gctx);
     }
 
-    // Pass 2: load tensors
-    ggml_context * weight_ctx = nullptr;
-    {
-        gguf_init_params lp = { /*no_alloc=*/true, /*ctx=*/&weight_ctx };
-        gguf_context * gctx = gguf_init_from_file(path, lp);
-        if (!gctx || !weight_ctx) return false;
-
-        model.buf = ggml_backend_alloc_ctx_tensors(weight_ctx, backend);
-
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) return false;
-        struct stat st; fstat(fd, &st);
-        void * mmap_base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-        close(fd);
-
-        int n_tensors = gguf_get_n_tensors(gctx);
-        for (int i = 0; i < n_tensors; i++) {
-            const char * name = gguf_get_tensor_name(gctx, i);
-            ggml_tensor * t = ggml_get_tensor(weight_ctx, name);
-            if (!t) continue;
-            size_t offset = gguf_get_data_offset(gctx) + gguf_get_tensor_offset(gctx, i);
-            ggml_backend_tensor_set(t, (const char *)mmap_base + offset, 0, ggml_nbytes(t));
-            model.tensors[name] = t;
-        }
-        munmap(mmap_base, (size_t)st.st_size);
-        gguf_free(gctx);
+    // Pass 2: load tensors via shared helper
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, backend, "voxtral4b", wl)) {
+        return false;
     }
-    model.ctx = weight_ctx;
+    model.ctx     = wl.ctx;
+    model.buf     = wl.buf;
+    model.tensors = std::move(wl.tensors);
 
     // Bind tensors
     auto get = [&](const std::string & n) -> ggml_tensor * {

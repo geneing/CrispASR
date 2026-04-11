@@ -220,91 +220,65 @@ struct granite_speech_context {
 // GGUF loader helpers
 // ===========================================================================
 
-static uint32_t kv_u32(gguf_context * g, const char * key, uint32_t def) {
-    int i = gguf_find_key(g, key);
-    return i >= 0 ? (uint32_t)gguf_get_val_u32(g, i) : def;
-}
-static float kv_f32(gguf_context * g, const char * key, float def) {
-    int i = gguf_find_key(g, key);
-    return i >= 0 ? gguf_get_val_f32(g, i) : def;
-}
+// Loader helpers moved to src/core/gguf_loader.
 
 // ===========================================================================
 // Model loading
 // ===========================================================================
 
+#include "core/gguf_loader.h"
+
 static bool granite_speech_load_model(granite_speech_model & model, const char * path,
                                       ggml_backend_t backend) {
     // Pass 1: metadata
     {
-        gguf_init_params mp = { true, nullptr };
-        gguf_context * g = gguf_init_from_file(path, mp);
+        gguf_context * g = core_gguf::open_metadata(path);
         if (!g) return false;
         auto & hp = model.hparams;
 
-        hp.enc_n_layers = kv_u32(g, "granite_speech.enc.n_layers", hp.enc_n_layers);
-        hp.enc_d_model  = kv_u32(g, "granite_speech.enc.d_model", hp.enc_d_model);
-        hp.enc_n_heads  = kv_u32(g, "granite_speech.enc.n_heads", hp.enc_n_heads);
-        hp.enc_head_dim = kv_u32(g, "granite_speech.enc.head_dim", hp.enc_head_dim);
-        hp.enc_input_dim = kv_u32(g, "granite_speech.enc.input_dim", hp.enc_input_dim);
-        hp.enc_conv_kernel = kv_u32(g, "granite_speech.enc.conv_kernel", hp.enc_conv_kernel);
-        hp.enc_ff_dim   = kv_u32(g, "granite_speech.enc.ff_dim", hp.enc_ff_dim);
+        hp.enc_n_layers = core_gguf::kv_u32(g, "granite_speech.enc.n_layers", hp.enc_n_layers);
+        hp.enc_d_model  = core_gguf::kv_u32(g, "granite_speech.enc.d_model", hp.enc_d_model);
+        hp.enc_n_heads  = core_gguf::kv_u32(g, "granite_speech.enc.n_heads", hp.enc_n_heads);
+        hp.enc_head_dim = core_gguf::kv_u32(g, "granite_speech.enc.head_dim", hp.enc_head_dim);
+        hp.enc_input_dim = core_gguf::kv_u32(g, "granite_speech.enc.input_dim", hp.enc_input_dim);
+        hp.enc_conv_kernel = core_gguf::kv_u32(g, "granite_speech.enc.conv_kernel", hp.enc_conv_kernel);
+        hp.enc_ff_dim   = core_gguf::kv_u32(g, "granite_speech.enc.ff_dim", hp.enc_ff_dim);
 
-        hp.proj_n_layers = kv_u32(g, "granite_speech.proj.n_layers", hp.proj_n_layers);
-        hp.proj_d_model  = kv_u32(g, "granite_speech.proj.d_model", hp.proj_d_model);
-        hp.proj_n_heads  = kv_u32(g, "granite_speech.proj.n_heads", hp.proj_n_heads);
-        hp.proj_ff_dim   = kv_u32(g, "granite_speech.proj.ff_dim", hp.proj_ff_dim);
+        hp.proj_n_layers = core_gguf::kv_u32(g, "granite_speech.proj.n_layers", hp.proj_n_layers);
+        hp.proj_d_model  = core_gguf::kv_u32(g, "granite_speech.proj.d_model", hp.proj_d_model);
+        hp.proj_n_heads  = core_gguf::kv_u32(g, "granite_speech.proj.n_heads", hp.proj_n_heads);
+        hp.proj_ff_dim   = core_gguf::kv_u32(g, "granite_speech.proj.ff_dim", hp.proj_ff_dim);
 
-        hp.llm_n_layers   = kv_u32(g, "granite_speech.llm.n_layers", hp.llm_n_layers);
-        hp.llm_d_model    = kv_u32(g, "granite_speech.llm.d_model", hp.llm_d_model);
-        hp.llm_n_heads    = kv_u32(g, "granite_speech.llm.n_heads", hp.llm_n_heads);
-        hp.llm_n_kv_heads = kv_u32(g, "granite_speech.llm.n_kv_heads", hp.llm_n_kv_heads);
-        hp.llm_head_dim   = kv_u32(g, "granite_speech.llm.head_dim", hp.llm_head_dim);
-        hp.llm_ff_dim     = kv_u32(g, "granite_speech.llm.ff_dim", hp.llm_ff_dim);
-        hp.llm_rope_theta = kv_f32(g, "granite_speech.llm.rope_theta", hp.llm_rope_theta);
-        hp.llm_rms_eps    = kv_f32(g, "granite_speech.llm.rms_norm_eps", hp.llm_rms_eps);
-        hp.llm_vocab_size = kv_u32(g, "granite_speech.llm.vocab_size", hp.llm_vocab_size);
+        hp.llm_n_layers   = core_gguf::kv_u32(g, "granite_speech.llm.n_layers", hp.llm_n_layers);
+        hp.llm_d_model    = core_gguf::kv_u32(g, "granite_speech.llm.d_model", hp.llm_d_model);
+        hp.llm_n_heads    = core_gguf::kv_u32(g, "granite_speech.llm.n_heads", hp.llm_n_heads);
+        hp.llm_n_kv_heads = core_gguf::kv_u32(g, "granite_speech.llm.n_kv_heads", hp.llm_n_kv_heads);
+        hp.llm_head_dim   = core_gguf::kv_u32(g, "granite_speech.llm.head_dim", hp.llm_head_dim);
+        hp.llm_ff_dim     = core_gguf::kv_u32(g, "granite_speech.llm.ff_dim", hp.llm_ff_dim);
+        hp.llm_rope_theta = core_gguf::kv_f32(g, "granite_speech.llm.rope_theta", hp.llm_rope_theta);
+        hp.llm_rms_eps    = core_gguf::kv_f32(g, "granite_speech.llm.rms_norm_eps", hp.llm_rms_eps);
+        hp.llm_vocab_size = core_gguf::kv_u32(g, "granite_speech.llm.vocab_size", hp.llm_vocab_size);
 
-        hp.embedding_multiplier = kv_f32(g, "granite_speech.llm.embedding_multiplier", hp.embedding_multiplier);
-        hp.attention_multiplier = kv_f32(g, "granite_speech.llm.attention_multiplier", hp.attention_multiplier);
-        hp.residual_multiplier  = kv_f32(g, "granite_speech.llm.residual_multiplier", hp.residual_multiplier);
-        hp.logits_scaling       = kv_f32(g, "granite_speech.llm.logits_scaling", hp.logits_scaling);
+        hp.embedding_multiplier = core_gguf::kv_f32(g, "granite_speech.llm.embedding_multiplier", hp.embedding_multiplier);
+        hp.attention_multiplier = core_gguf::kv_f32(g, "granite_speech.llm.attention_multiplier", hp.attention_multiplier);
+        hp.residual_multiplier  = core_gguf::kv_f32(g, "granite_speech.llm.residual_multiplier", hp.residual_multiplier);
+        hp.logits_scaling       = core_gguf::kv_f32(g, "granite_speech.llm.logits_scaling", hp.logits_scaling);
 
-        hp.downsample_rate    = kv_u32(g, "granite_speech.downsample_rate", hp.downsample_rate);
-        hp.window_size        = kv_u32(g, "granite_speech.window_size", hp.window_size);
-        hp.audio_token_index  = kv_u32(g, "granite_speech.audio_token_index", hp.audio_token_index);
+        hp.downsample_rate    = core_gguf::kv_u32(g, "granite_speech.downsample_rate", hp.downsample_rate);
+        hp.window_size        = core_gguf::kv_u32(g, "granite_speech.window_size", hp.window_size);
+        hp.audio_token_index  = core_gguf::kv_u32(g, "granite_speech.audio_token_index", hp.audio_token_index);
 
-        gguf_free(g);
+        core_gguf::free_metadata(g);
     }
 
-    // Pass 2: load tensors
-    ggml_context * weight_ctx = nullptr;
-    {
-        gguf_init_params lp = { true, &weight_ctx };
-        gguf_context * g = gguf_init_from_file(path, lp);
-        if (!g || !weight_ctx) return false;
-
-        model.buf = ggml_backend_alloc_ctx_tensors(weight_ctx, backend);
-
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) return false;
-        struct stat st; fstat(fd, &st);
-        void * mmap_base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-        close(fd);
-
-        int n_tensors = gguf_get_n_tensors(g);
-        for (int i = 0; i < n_tensors; i++) {
-            const char * name = gguf_get_tensor_name(g, i);
-            ggml_tensor * t = ggml_get_tensor(weight_ctx, name);
-            if (!t) continue;
-            size_t offset = gguf_get_data_offset(g) + gguf_get_tensor_offset(g, i);
-            ggml_backend_tensor_set(t, (const char *)mmap_base + offset, 0, ggml_nbytes(t));
-            model.tensors[name] = t;
-        }
-        munmap(mmap_base, (size_t)st.st_size);
-        gguf_free(g);
+    // Pass 2: tensor data via shared helper
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, backend, "granite_speech", wl)) {
+        return false;
     }
-    model.ctx = weight_ctx;
+    model.ctx     = wl.ctx;
+    model.buf     = wl.buf;
+    model.tensors = std::move(wl.tensors);
 
     // Bind tensors
     auto get = [&](const std::string & n) -> ggml_tensor * {
