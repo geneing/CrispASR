@@ -246,10 +246,19 @@ contributor-facing path for adding backends with confidence. Status:
 - **[later]** Mirror the same for `tools/reference_backends/voxtral.py`
   so `voxtral-test-llm` stops reporting `[SKIP]`. Needs the Voxtral
   apply_chat_template → processor → embed → splice → forward path.
-- **[later]** Once the reference-backend migration settles, delete
-  the legacy `models/qwen3-asr-*-dump-*.py` and `models/voxtral4b-*`
-  scripts (only still used by `qwen3-asr-test-bpe`, which hardcodes
-  its expectations and doesn't really need a dump).
+- **[done]** ~~Delete the legacy `models/*-dump-*.py` scripts~~ — done.
+  Removed `qwen3-asr-{llm,reference,trace}-dump.py`,
+  `voxtral-{encoder,llm}-dump.py`, `voxtral4b-dump-ref.py`, and
+  `granite-speech-kaggle-groundtruth.py`. Everything they did is now
+  covered by `tools/dump_reference.py` + `tools/reference_backends/`.
+  The `voxtral4b-debug-{cpp,light}.py` deep-diagnostic scripts and
+  `voxtral-verify-gguf.py` (a converter sanity check) were kept —
+  they're useful tools with no GGUF-archive replacement yet.
+- **[later]** Delete the empty `examples/{parakeet,canary,cohere,
+  qwen3-asr,voxtral,voxtral4b,granite}-main/` directories. They no
+  longer have any source files (CMakeLists.txt already dropped them
+  from `add_subdirectory`), only stale build artifacts. Untracked,
+  so this is a filesystem cleanup rather than a git operation.
 
 ---
 
