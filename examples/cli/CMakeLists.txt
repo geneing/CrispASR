@@ -19,6 +19,7 @@ add_executable(${TARGET}
     crispasr_backend_parakeet.cpp
     crispasr_backend_canary.cpp
     crispasr_backend_cohere.cpp
+    crispasr_backend_granite.cpp
     crispasr_vad.cpp
     crispasr_output.cpp
     crispasr_model_mgr.cpp
@@ -35,6 +36,7 @@ target_link_libraries(${TARGET} PRIVATE
     parakeet
     canary
     cohere
+    granite_speech
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
 )
