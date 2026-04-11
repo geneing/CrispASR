@@ -34,6 +34,8 @@ struct crispasr_token {
     int64_t     t0 = -1;            // centiseconds, absolute; -1 if unavailable
     int64_t     t1 = -1;
     int32_t     id = -1;            // backend-specific token id, -1 if unavailable
+    int64_t     t_dtw = -1;         // whisper DTW token time, -1 if unused
+    bool        is_special = false; // whisper: token id >= eot; skipped by wts
 };
 
 struct crispasr_word {
@@ -46,9 +48,10 @@ struct crispasr_segment {
     std::string                 text;
     int64_t                     t0 = 0; // centiseconds, absolute
     int64_t                     t1 = 0;
-    std::string                 speaker;   // empty if no diarization
-    std::vector<crispasr_word>  words;     // may be empty
-    std::vector<crispasr_token> tokens;    // may be empty
+    std::string                 speaker;          // empty if no diarization
+    bool                        speaker_turn_next = false; // whisper tinydiarize
+    std::vector<crispasr_word>  words;            // may be empty
+    std::vector<crispasr_token> tokens;           // may be empty
 };
 
 // ---------------------------------------------------------------------------

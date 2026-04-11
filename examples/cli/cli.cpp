@@ -474,16 +474,52 @@ static void whisper_print_segment_callback(struct whisper_context * ctx, struct 
     }
 }
 
-static void output_txt(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
-    const int n_segments = whisper_full_n_segments(ctx);
+// Collect whisper segments + tokens into the unified crispasr_segment
+// vector. Called once per transcription, before any writer runs.
+// Everything the output functions need lives on the vector afterwards so
+// the writers are whisper_context-free (except output_json which still
+// needs ctx for systeminfo/model metadata).
+static std::vector<crispasr_segment> cli_whisper_collect_segments(struct whisper_context * ctx) {
+    std::vector<crispasr_segment> out;
+    const int n = whisper_full_n_segments(ctx);
+    out.reserve(n);
+    const whisper_token eot = whisper_token_eot(ctx);
+    for (int i = 0; i < n; ++i) {
+        crispasr_segment s;
+        s.text = whisper_full_get_segment_text(ctx, i);
+        s.t0 = whisper_full_get_segment_t0(ctx, i);
+        s.t1 = whisper_full_get_segment_t1(ctx, i);
+        s.speaker_turn_next = whisper_full_get_segment_speaker_turn_next(ctx, i);
+
+        const int nt = whisper_full_n_tokens(ctx, i);
+        s.tokens.reserve(nt);
+        for (int j = 0; j < nt; ++j) {
+            const auto d = whisper_full_get_token_data(ctx, i, j);
+            crispasr_token t;
+            t.id         = d.id;
+            t.text       = whisper_token_to_str(ctx, d.id);
+            t.confidence = d.p;
+            t.t0         = d.t0;
+            t.t1         = d.t1;
+            t.t_dtw      = d.t_dtw;
+            t.is_special = (d.id >= eot);
+            s.tokens.push_back(std::move(t));
+        }
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+static void output_txt(const std::vector<crispasr_segment> & segs, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
+    const int n_segments = (int)segs.size();
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+        const char * text = segs[i].text.c_str();
         std::string speaker = "";
 
         if (params.diarize && pcmf32s.size() == 2)
         {
-            const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-            const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+            const int64_t t0 = segs[i].t0;
+            const int64_t t1 = segs[i].t1;
             speaker = estimate_diarization_speaker(pcmf32s, t0, t1);
         }
 
@@ -491,14 +527,14 @@ static void output_txt(struct whisper_context * ctx, std::ofstream & fout, const
     }
 }
 
-static void output_vtt(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
+static void output_vtt(const std::vector<crispasr_segment> & segs, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
     fout << "WEBVTT\n\n";
 
-    const int n_segments = whisper_full_n_segments(ctx);
+    const int n_segments = (int)segs.size();
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
-        const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-        const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+        const char * text = segs[i].text.c_str();
+        const int64_t t0 = segs[i].t0;
+        const int64_t t1 = segs[i].t1;
         std::string speaker = "";
 
         if (params.diarize && pcmf32s.size() == 2)
@@ -513,12 +549,12 @@ static void output_vtt(struct whisper_context * ctx, std::ofstream & fout, const
     }
 }
 
-static void output_srt(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
-    const int n_segments = whisper_full_n_segments(ctx);
+static void output_srt(const std::vector<crispasr_segment> & segs, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
+    const int n_segments = (int)segs.size();
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
-        const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-        const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+        const char * text = segs[i].text.c_str();
+        const int64_t t0 = segs[i].t0;
+        const int64_t t1 = segs[i].t1;
         std::string speaker = "";
 
         if (params.diarize && pcmf32s.size() == 2)
@@ -595,8 +631,8 @@ static char * escape_double_quotes_in_csv(const char * str) {
     return escaped;
 }
 
-static void output_csv(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
-    const int n_segments = whisper_full_n_segments(ctx);
+static void output_csv(const std::vector<crispasr_segment> & segs, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
+    const int n_segments = (int)segs.size();
     fout << "start,end,";
     if (params.diarize && pcmf32s.size() == 2)
     {
@@ -605,9 +641,9 @@ static void output_csv(struct whisper_context * ctx, std::ofstream & fout, const
     fout << "text\n";
 
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
-        const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-        const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+        const char * text = segs[i].text.c_str();
+        const int64_t t0 = segs[i].t0;
+        const int64_t t1 = segs[i].t1;
         char * text_escaped = escape_double_quotes_in_csv(text);
 
         //need to multiply times returned from whisper_full_get_segment_t{0,1}() by 10 to get milliseconds.
@@ -620,15 +656,15 @@ static void output_csv(struct whisper_context * ctx, std::ofstream & fout, const
     }
 }
 
-static void output_score(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & /*params*/, std::vector<std::vector<float>> /*pcmf32s*/) {
-    const int n_segments = whisper_full_n_segments(ctx);
+static void output_score(const std::vector<crispasr_segment> & segs, std::ofstream & fout, const whisper_params & /*params*/, std::vector<std::vector<float>> /*pcmf32s*/) {
+    const int n_segments = (int)segs.size();
     // fprintf(stderr,"segments: %d\n",n_segments);
     for (int i = 0; i < n_segments; ++i) {
-        const int n_tokens = whisper_full_n_tokens(ctx, i);
+        const int n_tokens = (int)segs[i].tokens.size();
         // fprintf(stderr,"tokens: %d\n",n_tokens);
         for (int j = 0; j < n_tokens; j++) {
-            auto token = whisper_full_get_token_text(ctx, i, j);
-            auto probability = whisper_full_get_token_p(ctx, i, j);
+            const char * token = segs[i].tokens[j].text.c_str();
+            const float  probability = segs[i].tokens[j].confidence;
             fout << token << '\t' << probability << std::endl;
             // fprintf(stderr,"token: %s %f\n",token,probability);
 	    }
@@ -636,10 +672,11 @@ static void output_score(struct whisper_context * ctx, std::ofstream & fout, con
 }
 
 static void output_json(
-             struct whisper_context * ctx,
+    const std::vector<crispasr_segment> & segs,
                       std::ofstream & fout,
                const whisper_params & params,
-    std::vector<std::vector<float>>   pcmf32s) {
+    std::vector<std::vector<float>>   pcmf32s,
+             struct whisper_context * ctx) {
     const bool full = params.output_jsn_full;
     int indent = 0;
 
@@ -751,12 +788,12 @@ static void output_json(
         end_obj(false);
         start_arr("transcription");
 
-            const int n_segments = whisper_full_n_segments(ctx);
+            const int n_segments = (int)segs.size();
             for (int i = 0; i < n_segments; ++i) {
-                const char * text = whisper_full_get_segment_text(ctx, i);
+                const char * text = segs[i].text.c_str();
 
-                const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-                const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+                const int64_t t0 = segs[i].t0;
+                const int64_t t1 = segs[i].t1;
 
                 start_obj(nullptr);
                     times_o(t0, t1, false);
@@ -764,17 +801,17 @@ static void output_json(
 
                     if (full) {
                         start_arr("tokens");
-                        const int n = whisper_full_n_tokens(ctx, i);
+                        const int n = (int)segs[i].tokens.size();
                         for (int j = 0; j < n; ++j) {
-                            auto token = whisper_full_get_token_data(ctx, i, j);
+                            const auto & token = segs[i].tokens[j];
                             start_obj(nullptr);
-                                value_s("text", whisper_token_to_str(ctx, token.id), false);
+                                value_s("text", token.text.c_str(), false);
                                 if(token.t0 > -1 && token.t1 > -1) {
                                     // If we have per-token timestamps, write them out
                                     times_o(token.t0, token.t1, false);
                                 }
                                 value_i("id", token.id, false);
-                                value_f("p", token.p, false);
+                                value_f("p", token.confidence, false);
                                 value_f("t_dtw", token.t_dtw, true);
                             end_obj(j == (n - 1));
                         }
@@ -786,7 +823,7 @@ static void output_json(
                     }
 
                     if (params.tinydiarize) {
-                        value_b("speaker_turn_next", whisper_full_get_segment_speaker_turn_next(ctx, i), true);
+                        value_b("speaker_turn_next", segs[i].speaker_turn_next, true);
                     }
                 end_obj(i == (n_segments - 1));
             }
@@ -798,7 +835,7 @@ static void output_json(
 // karaoke video generation
 // outputs a bash script that uses ffmpeg to generate a video with the subtitles
 // TODO: font parameter adjustments
-static bool output_wts(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s, const char * fname_inp, float t_sec, const char * fname_out) {
+static bool output_wts(const std::vector<crispasr_segment> & segs, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s, const char * fname_inp, float t_sec, const char * fname_out) {
     static const char * font = params.font_path.c_str();
 
     std::ifstream fin(font);
@@ -812,16 +849,13 @@ static bool output_wts(struct whisper_context * ctx, std::ofstream & fout, const
 
     fout << "ffmpeg -i " << fname_inp << " -f lavfi -i color=size=1200x120:duration=" << t_sec << ":rate=25:color=black -vf \"";
 
-    for (int i = 0; i < whisper_full_n_segments(ctx); i++) {
-        const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-        const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+    for (int i = 0; i < (int)segs.size(); i++) {
+        const int64_t t0 = segs[i].t0;
+        const int64_t t1 = segs[i].t1;
 
-        const int n = whisper_full_n_tokens(ctx, i);
+        const int n = (int)segs[i].tokens.size();
 
-        std::vector<whisper_token_data> tokens(n);
-        for (int j = 0; j < n; ++j) {
-            tokens[j] = whisper_full_get_token_data(ctx, i, j);
-        }
+        const std::vector<crispasr_token> & tokens = segs[i].tokens;
 
         if (i > 0) {
             fout << ",";
@@ -840,7 +874,7 @@ static bool output_wts(struct whisper_context * ctx, std::ofstream & fout, const
         for (int j = 0; j < n; ++j) {
             const auto & token = tokens[j];
 
-            if (tokens[j].id >= whisper_token_eot(ctx)) {
+            if (tokens[j].is_special) {
                 continue;
             }
 
@@ -862,11 +896,11 @@ static bool output_wts(struct whisper_context * ctx, std::ofstream & fout, const
                 for (int k = 0; k < n; ++k) {
                     const auto & token2 = tokens[k];
 
-                    if (tokens[k].id >= whisper_token_eot(ctx)) {
+                    if (tokens[k].is_special) {
                         continue;
                     }
 
-                    const std::string txt = whisper_token_to_str(ctx, token2.id);
+                    const std::string & txt = token2.text;
 
                     txt_bg += txt;
 
@@ -919,13 +953,13 @@ static bool output_wts(struct whisper_context * ctx, std::ofstream & fout, const
     return true;
 }
 
-static void output_lrc(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
+static void output_lrc(const std::vector<crispasr_segment> & segs, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
     fout << "[by:whisper.cpp]\n";
 
-    const int n_segments = whisper_full_n_segments(ctx);
+    const int n_segments = (int)segs.size();
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
-        const int64_t t = whisper_full_get_segment_t0(ctx, i);
+        const char * text = segs[i].text.c_str();
+        const int64_t t = segs[i].t0;
 
         int64_t msec = t * 10;
         int64_t min = msec / (1000 * 60);
@@ -940,8 +974,8 @@ static void output_lrc(struct whisper_context * ctx, std::ofstream & fout, const
 
         if (params.diarize && pcmf32s.size() == 2)
         {
-            const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-            const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+            const int64_t t0 = segs[i].t0;
+            const int64_t t1 = segs[i].t1;
             speaker = estimate_diarization_speaker(pcmf32s, t0, t1);
         }
 
@@ -1338,9 +1372,14 @@ int main(int argc, char ** argv) {
 
         // output stuff
         {
+            // Collect whisper segments + tokens into the unified vector once,
+            // so every writer below is whisper_context-free (except JSON,
+            // which still needs ctx for systeminfo/model metadata).
+            const std::vector<crispasr_segment> segs = cli_whisper_collect_segments(ctx);
+
             // macros to stringify function name
 #define output_func(func, ext, param, ...) if (param && fout_factory.open(ext, #func)) {\
-    func(ctx, fout_factory.fout, params, __VA_ARGS__); \
+    func(segs, fout_factory.fout, params, __VA_ARGS__); \
 }
 #define output_ext(ext, ...) output_func(output_##ext, "." #ext, params.output_##ext, __VA_ARGS__)
 
@@ -1349,7 +1388,7 @@ int main(int argc, char ** argv) {
             output_ext(srt, pcmf32s);
             output_ext(wts, pcmf32s, fname_inp.c_str(), float(pcmf32.size() + 1000)/WHISPER_SAMPLE_RATE, fout_factory.fname_out.c_str());
             output_ext(csv, pcmf32s);
-            output_func(output_json, ".json", params.output_jsn, pcmf32s);
+            output_func(output_json, ".json", params.output_jsn, pcmf32s, ctx);
             output_ext(lrc, pcmf32s);
             output_func(output_score, ".score.txt", params.log_score, pcmf32s);
 
