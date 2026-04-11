@@ -1,196 +1,200 @@
-# CrispASR — comprehensive TODO
+# CrispASR — TODO
 
-Last updated: 2026-04-10.
+Live tracker of pending work across the unified `crispasr` binary and the
+shared `src/core/` infrastructure. Items marked **[next]** are the current
+session's immediate targets; **[later]** are queued; **[upstream]** are
+blocked on external fixes (tracked in detail in `UPSTREAM.md`).
 
----
-
-## In-progress: GPU/performance correctness fixes
-
-### P1. Parakeet decoder: port LSTM+Joint to ggml graphs
-**Problem:** The TDT transducer decoder (LSTM predictor + Joint head) runs
-entirely on CPU using raw float* loops with weights explicitly downloaded
-from the backend buffer. The encoder is a proper ggml graph, but the
-decoder cannot benefit from GPU at all.
-
-**Fix:** Replace the manual LSTM step (`predictor_step`) and joint network
-(`joint_step`) with small ggml graphs. Each LSTM step is a small matmul
-(hidden_dim × 4*hidden_dim), so the graph overhead may not help for
-per-token stepping. Two options:
-- (a) Port to ggml matmul ops — gains GPU acceleration but adds per-step
-  graph build/compute overhead. Best for batch mode (multiple tokens).
-- (b) Keep CPU but use ggml_mul_mat with a CPU backend — at least gets
-  the weights in a consistent allocation pattern.
-
-**Risk:** The per-token LSTM stepping is inherently sequential (each step
-depends on the previous hidden state). Even on GPU the latency may not
-improve much. The encoder is the dominant cost anyway. Consider whether
-this is worth the complexity.
-
-**Effort:** ~200 LOC, ~1 day. Medium risk.
-
-### P2. canary_ctc: fix single-backend scheduler (no CPU fallback)
-**Problem:** `canary_ctc.cpp` line 713 creates `ggml_backend_sched` with
-only 1 backend, and `backend_cpu` is aliased to the primary backend (line
-676). If the primary is GPU, any unsupported op will fail instead of
-falling back to CPU.
-
-**Fix:** Add a proper 2-backend setup: `backends[0] = primary` (GPU or
-CPU), `backends[1] = cpu_fallback`. Match the pattern used by canary.cpp
-and cohere.cpp.
-
-**Effort:** ~20 LOC, 15 minutes. Low risk.
-
-### P3. qwen3_asr + voxtral: stop recreating ggml_backend_sched per call
-**Problem:** Both runtimes free and recreate `ggml_backend_sched` on every
-compute call (encoder, prefill, each decode step). This adds per-call
-allocation overhead. The original reason was to handle different graph
-sizes across stages (conv, encoder, LLM variants).
-
-**Fix:** Create the scheduler once at init with the worst-case node budget
-(the LLM prefill graph is largest). Use `ggml_backend_sched_reset()` between
-calls instead of free+recreate. The max graph size can be computed once
-during init by building the largest graph variant and measuring its node
-count.
-
-**Effort:** ~80 LOC per runtime, ~2 hours. Low risk.
-
-### P4. Cohere: upgrade self-attention KV cache from F32 to F16
-**Problem:** Cohere's self-attention KV cache uses F32 while canary and
-the speech-LLMs use F16. This wastes 2× GPU memory and bandwidth.
-
-**Fix:** Change `kv_k` and `kv_v` tensor types from `GGML_TYPE_F32` to
-`GGML_TYPE_F16` in the KV cache allocation. Update the decoder graph to
-use F16 KV reads/writes (ggml_cpy handles the F32↔F16 conversion). Flash
-attention already expects F16 K/V on the CPU backend, so this may already
-be partially wired.
-
-**Risk:** F16 KV can cause minor precision loss in long decoding sequences.
-Cohere's cross-attention KV is already F16 without issues, so self-attention
-should be fine too.
-
-**Effort:** ~30 LOC, 30 minutes. Low risk.
+Historical milestones and the per-model port plans are in `HISTORY.md`.
+Technical deep-dives (optimisation notes, RoPE lessons, benchmark tables)
+are in `LEARNINGS.md`.
 
 ---
 
-## GPU support audit (updated)
+## Near-term — `src/core/` Phase 0
 
-| Runtime | Encoder | Decoder/LLM | KV Cache | Mel/STFT | Backend sched |
-| --- | --- | --- | --- | --- | --- |
-| **parakeet** | ggml ✅ | **raw CPU** ❌ (P1) | N/A (LSTM) | raw C++ | 2-backend ✅ |
-| **cohere** | ggml ✅ | ggml ✅ | F32 self ⚠️ (P4), F16 cross ✅ | raw C++ (cblas mel) | 2-backend ✅ |
-| **canary** | ggml ✅ | ggml ✅ | F32 self, F16 cross ✅ | raw C++ | 2-backend ✅ |
-| **canary_ctc** | ggml ✅ | N/A | N/A | raw C++ | **1-backend** ❌ (P2) |
-| **qwen3_asr** | ggml ✅ | ggml ✅ | F16 ✅ | raw C++ | recreated ⚠️ (P3) |
-| **voxtral** | ggml ✅ | ggml ✅ | F16 ✅ | raw C++ | recreated ⚠️ (P3) |
-| **wav2vec2** | old ggml ❌ | N/A | N/A | N/A | no backend API |
+Extraction is ~90% done for mel + ffn + gguf_loader, and attention has a
+minimal pilot. The remaining pieces are documented below.
 
-**Universal gap:** Mel/STFT/FFT is CPU-only in all runtimes. Each has its
-own C++ FFT. This is the biggest remaining GPU opportunity but would require
-porting STFT to ggml ops (ggml has no native FFT, would need a custom op
-or pre-computed DFT matrix as a matmul).
+- **[next]** **`src/core/attention.h` — persistent-KV-cache variant.**
+  The current `core_attn::llama_self_attn` fits voxtral 3B, which rebuilds
+  Q/K/V for the full context on every forward pass. qwen3, voxtral4b, and
+  granite LLM blocks use a persistent backend-buffer KV cache: K/V are
+  written to a pre-allocated view at `n_past` and read back through a
+  contiguous view for attention. Needs a sibling helper, e.g.
+  `llama_self_attn_kv(…, kv_k, kv_v, n_past, …)`.
+  Pilot on qwen3 LLM, then voxtral4b, then granite LLM. ~100 LOC helper +
+  3 migrations, ~30-60 LOC saved per block.
 
----
+- **[next]** **`src/core/attention.h` — Q/K norm variant for qwen3.**
+  Qwen3 applies a post-projection RMSNorm to Q and K before RoPE. Add
+  `q_norm_w`, `k_norm_w` optional pointers to the helper (or a separate
+  variant) so qwen3's audio encoder + LLM can both use it.
 
-## Feature parity gaps (speech-LLMs vs whisper)
+- **[later]** **`src/core/attention.h` — voxtral audio encoder.**
+  Different flavour: Q/V biases, **no** K bias (Whisper quirk), no RoPE.
+  ~30-line sibling helper.
 
-| Feature | whisper | qwen3_asr | voxtral | canary | parakeet | cohere |
-| --- | --- | --- | --- | --- | --- | --- |
-| Temperature sampling | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Beam search | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Repetition penalty | ✅ (loop detect) | ❌ | ❌ | ❌ | ❌ | ❌ |
-| VAD segmentation | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Streaming/callback | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Custom prompt | ✅ | partial | partial | ❌ | ❌ | ❌ |
-| Multi-turn (arch) | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Quantize tool | ✅ | shared | ❌ | ❌ | ❌ | ✅ |
+- **[later]** **`src/core/attention.h` — sliding-window attention.**
+  voxtral4b audio encoder uses 750-token SWA. Needs a `sliding_window`
+  knob and the mask has to be pre-built by the caller (or constructed
+  by the helper from `sliding_window`).
 
----
+- **[later]** **`src/core/attention.h` — µP scale tricks.**
+  Granite uses `attention_multiplier` (0.0078125 = 1/128) as the attention
+  scale instead of `1/sqrt(d)` and `residual_multiplier` (0.22) on the
+  residual add. Parameterise via `Config::attn_scale` and
+  `Config::residual_scale` in the helper.
 
-## Timestamps — ✅ COMPLETE
+- **[next]** **`src/core/greedy_decode.h` — unified LLM decode loop.**
+  The voxtral/voxtral4b/qwen3/granite backends all duplicate the same
+  `greedy decode from last-token logits → embed → forward → argmax → append`
+  loop with minor variations in EOS handling and max-tokens. Should
+  replace the CLI-level `examples/cli/crispasr_llm_pipeline.h` template
+  so the decode loop lives next to the model code. ~80 LOC helper + 4
+  migrations, ~150 LOC saved across the models.
 
-All runtimes now have word-level timestamps.
+- **[next]** **`src/core/mel::Params::stacked_frames`.**
+  Granite's mel output is stacked `(160, T/2)` = 2 × 80 mels per frame.
+  Add a `stacked_frames` knob to `Params` (default 1; when 2, post-
+  process the TimeMels output by zipping consecutive frames together
+  and dropping any trailing odd frame). Last holdout on `core_mel::`
+  migration.
 
-| Runtime | Method | Accuracy |
-| --- | --- | --- |
-| parakeet | TDT duration head (native) | ~80ms |
-| cohere | Cross-attention DTW | ~360ms MAE |
-| canary | Decoder cross-attn + optional CTC re-align (-am) | ~78ms with CTC |
-| nfa-align | CTC Viterbi forced alignment | ~78ms |
-| cohere-align | char-level wav2vec2 CTC | ~30ms (English) |
-| qwen3_asr | CTC aligner second pass (-am) | ~78ms |
-| voxtral | CTC aligner second pass (-am) | ~78ms |
+- **[later]** **`cli.cpp` output writer refactor (task #4).**
+  `output_json` (282 lines) and `output_wts` (120 lines) in cli.cpp
+  still iterate a `whisper_context *` directly. Refactor to consume
+  `const std::vector<crispasr_segment> &` so the whisper backend can
+  also go through the unified writers. Unblocks the next item.
 
----
-
-## Tekken tokenizer — ✅ COMPLETE
-
-Full `voxtral_tokenize()` implemented and verified.
-
----
-
-## Performance optimizations done
-
-- [x] F16 KV cache (qwen3_asr, voxtral)
-- [x] Flash attention prefill + decode (qwen3_asr, voxtral)
-- [x] Last-token-only lm_head slice (qwen3_asr, voxtral)
-- [x] Q4_K weight quantization with Q4_0 fallback
-- [x] Baked mel filterbank (no runtime recomputation)
-- [x] GPU auto-detection via ggml_backend_init_best()
+- **[later]** **`backend-whisper.cpp` wrapper (task #15).**
+  Gated on the output writer refactor. When both land, the whisper code
+  path in cli.cpp can dispatch through the same backend factory as
+  everything else, and the `#if 0`-guarded old `whisper_params` block
+  can come out.
 
 ---
 
-## Voxtral 4B Realtime — ✅ COMPLETE
+## CLI + examples cleanup
 
-Ported, debugged, quantized, uploaded to HF.
+- **[next]** Delete the per-model `examples/*-main/` directories once
+  `crispasr --backend X` has shipped and regression-tested in CI.
+  Candidates: `parakeet-main`, `canary-main`, `cohere-main`,
+  `qwen3-asr-main`, `voxtral-main`, `voxtral4b-main`, `granite-main`,
+  `nfa-align`, `cohere-align`. Update `examples/CMakeLists.txt`.
+  Add deprecation-warning stubs under `examples/deprecation-warning/`
+  for one release cycle before full removal.
 
-| GGUF | Size | Total (11s audio, CPU) |
-| --- | --- | --- |
-| F16 | 8.3 GB | 133s |
-| Q8_0 | 4.5 GB | 79s |
-| **Q4_K** | **2.4 GB** | **49s** |
-
-English + German verified. 13 languages supported.
+- **[later]** `tests/CMakeLists.txt` uses `whisper-cli` as the test
+  target. Keep that target name (we already preserve it) but move the
+  tests over to `$<TARGET_FILE:crispasr>` once the rename has propagated.
 
 ---
 
-## Model-specific pending
+## Feature parity gaps (non-whisper backends vs whisper)
 
-### Qwen3-ASR
-- [ ] VAD segmentation for long audio
-- [ ] Temperature/sampling controls
-- [ ] Streaming support
-- [ ] Test more languages
+The whisper backend in CrispASR is the most feature-complete. The
+capability matrix in the README shows which features are missing on
+each backend. High-value gaps to close:
 
-### Voxtral 3B
-- [ ] Variable-length mel (currently pads to 3000=30s; needs encoder to handle variable T)
-- [ ] Audio understanding mode (Q&A)
-- [ ] Long audio >30s chunking
-- [ ] Temperature/sampling controls
-- [ ] Test non-English languages
+- **[later]** **Temperature / beam search** — no non-whisper backend
+  currently exposes sampling controls. `voxtral`, `voxtral4b`, `qwen3`,
+  `granite` all run pure greedy decode. Hook the sampler into the
+  shared `core/greedy_decode.h` helper when it lands.
 
-### Parakeet
-- [ ] Port LSTM decoder to ggml (P1)
-- [ ] Auto language detection accuracy on accented audio
+- **[later]** **VAD integration in LLM backends.** qwen3 and voxtral
+  currently don't chunk long audio; the dispatch layer does VAD slicing
+  but the LLM models themselves pad to a fixed 30s window. Variable-
+  length mel would let them handle >30s natively.
 
-### Canary
-- [ ] Speech translation quality validation
+- **[later]** **Streaming transcription for voxtral4b.** The model is
+  designed for realtime streaming with configurable 240ms-2.4s delay.
+  Currently we run it in batch mode like the others. Exposing a
+  streaming mode through the CLI is a bigger design question.
 
-### Voxtral 4B Realtime
-- [ ] SRT/VTT subtitle output
-- [ ] Temperature/sampling controls
-- [ ] Reduce right padding (17→10 tokens, matching voxtral.c)
+- **[later]** **Audio understanding mode for voxtral 3B.** The model
+  supports Q&A over audio content, not just transcription. Needs a
+  prompt template flag and a chat-style turn loop. Separate feature,
+  not a strict regression.
 
-### Granite Speech 1B
-- [ ] Build CLI (`granite-main` or integrate into consolidated CLI)
-- [ ] Quantize Q4_K + Q8_0
-- [ ] Upload to HF (`cstr/granite-speech-4.0-1b-GGUF`)
-- [ ] Word timestamps via CTC aligner
-- [ ] Performance tuning (encoder is slow: per-layer CPU → single ggml graph)
-- [ ] Remove dead ggml graph encoder (`granite_build_encoder`)
+---
 
-### Cohere
-- [x] F32→F16 self-attention KV ✅ (P4)
-- [ ] Upstream ffmpeg mp4 bug (UPSTREAM.md)
+## Per-model follow-ups
+
+### parakeet
+- **[later]** Port the TDT decoder (LSTM predictor + joint head) to
+  ggml graphs so it can run on GPU. Currently pure CPU float* loops.
+  Risk: per-token LSTM stepping is sequential, so GPU speedup may be
+  small. Encoder is already the dominant cost.
+
+### canary
+- **[later]** Speech translation quality validation at scale.
+  Currently regression-tested on German only.
+
+### cohere
+- **[later]** F32→F16 self-attention KV cache upgrade. Currently uses
+  F32 where other models use F16, wasting 2× GPU memory bandwidth.
+  ~30 LOC, low risk.
+
+### qwen3 / voxtral
+- **[later]** Stop recreating `ggml_backend_sched` on every compute
+  call (encoder, prefill, each decode step). Create once at init with
+  worst-case node budget; use `ggml_backend_sched_reset()` between
+  calls. ~80 LOC per runtime.
+
+### voxtral4b
+- **[later]** Reduce right padding from 17 → 10 tokens to match the
+  reference `voxtral.c` implementation.
+- **[later]** SRT/VTT subtitle output (currently only plain transcript;
+  CTC alignment already works via `-am`).
+
+### granite
+- **[later]** HF release of quantised GGUFs (`cstr/granite-speech-4.0-1b-GGUF`
+  is still pending). Need `cohere-quantize granite-speech-1b.gguf …`
+  then upload.
+- **[later]** Performance tuning (encoder Conformer is slow per-layer CPU).
+  Consider porting to a single ggml graph like canary did.
+- **[later]** Remove dead ggml graph encoder `granite_build_encoder`.
+- **[later]** Migrate mel to `core_mel::compute` once `stacked_frames`
+  lands.
+
+### canary_ctc (aligner)
+- **[later]** Fix single-backend scheduler — currently no CPU fallback
+  if the primary backend rejects an op. Match the 2-backend pattern
+  from canary.cpp / cohere.cpp. ~20 LOC.
+
+---
+
+## Markdown cleanup (this session)
+
+Consolidating ~15 historical notes into three live docs:
+
+- `TODO.md` — this file (replaces all `*-todo.md`)
+- `LEARNINGS.md` — technical insights, benchmarks, comparisons
+- `HISTORY.md` — condensed chronology of the ports
+
+Remove after consolidation: `canary-todo.md`, `parakeet-todo.md`,
+`granite-todo.md`, `voxtral-todo.md`, `voxtral-4b-todo.md`,
+`qwen3-asr-todo.md`, `TODO_COHERE_OPTIMIZATION.md`,
+`benchmark_cohere.md`, `qwen3-asr-benchmark.md`, `ggml_plans.md`,
+`voxtral-comparison.md`, `test_german.md`, `PERFORMANCE.md`.
+
+Keep: `README.md`, `TODO.md`, `LEARNINGS.md`, `HISTORY.md`, `UPSTREAM.md`,
+`README_sycl.md`, `ci/README.md`, `models/README.md`, `samples/README.md`,
+`hf_readmes/*.md`.
+
+---
+
+## Upstream dependencies
+
+Full tracking is in `UPSTREAM.md`. Short summary:
+
+- **[upstream]** whisper.cpp `examples/ffmpeg-transcode.cpp` mp4-family
+  container crash. Workaround: pre-convert with ffmpeg one-liner.
+- **[upstream]** ggml x86 AVX-VNNI / AVX512-VNNI dispatch for Q8_0 dot
+  products. Closes the 5-second gap to ONNX INT8 on x86 servers.
+- **[upstream]** NeMo Forced Aligner auxiliary CTC model standalone
+  release. Not blocking — our converter extracts it from the `.nemo` tarball.
 
 ---
 
@@ -207,43 +211,3 @@ English + German verified. 13 languages supported.
 | `cstr/voxtral-mini-3b-2507-GGUF` | ✅ shipped |
 | `cstr/voxtral-mini-4b-realtime-GGUF` | ✅ shipped (Q4_K + Q8_0) |
 | `cstr/granite-speech-4.0-1b-GGUF` | ❌ pending quantize + upload |
-
----
-
-## Porting notes
-
-**RoPE mode mapping (ggml ↔ HF):**
-- `GGML_ROPE_TYPE_NEOX` (mode=2): pairs (i, i+d/2) — used by HF `rotate_half`. **This is what almost every modern model uses** (Llama, Granite, Qwen, GPT-NeoX, etc.)
-- `GGML_ROPE_TYPE_NORMAL` (mode=0): pairs (i, i+1) adjacent — very few models use this
-- When porting any HF model with `rotate_half` RoPE, always use mode=2
-
----
-
-## Code quality (deferred until consolidated CLI)
-
-- [ ] Factor out shared mel compute (~150 LOC)
-- [ ] Factor out shared WAV reader
-- [ ] Factor out shared .npy loader
-- [ ] Voxtral Tekken vocab blob stored as F32 (wasteful)
-
----
-
-## Session history
-
-1. **Cohere Transcribe** — original port, mel norm bug, DTW timestamps
-2. **Parakeet TDT** — FastConformer + TDT decoder, free word timestamps
-3. **Canary 1B v2** — speech translation, nfa-align CTC aligner
-4. **Qwen3-ASR 0.6B** — speech-LLM port, BPE tokenizer, flash-attn, KV cache
-5. **Voxtral-Mini 3B** — speech-LLM, ported from zero in one session
-6. **Feature completion** (2026-04-09) — GPU init, timestamps, Tekken,
-   --flash, SRT/VTT, Voxtral 4B downloaded
-7. **Performance fixes** (2026-04-09) — P1-P4 GPU correctness fixes
-8. **Voxtral-Mini 4B Realtime** (2026-04-09/10) — full port from scratch,
-   7 critical bugs found via Kaggle ground truth + 3 reference implementations
-   (voxtral.c, voxmlx, voxtral-rs). Q4_K quantized: 2.4GB, 49s for 11s audio.
-   Uploaded to HF.
-9. **Granite Speech 4.0-1B** (2026-04-10) — full port: Conformer encoder
-   (Shaw RPE, depthwise conv, batch norm folding) + BLIP-2 Q-Former projector +
-   Granite LLM (μP multipliers). 6 bugs found: Hann window centering, Q-Former LN
-   target, embedding multiplier placement, CTC dim hardcoding, native GQA, and
-   **RoPE mode (NEOX vs NORMAL)** — the critical fix for correct transcription.
