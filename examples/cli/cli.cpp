@@ -1052,18 +1052,23 @@ int main(int argc, char ** argv) {
     }
 
     // crispasr backend dispatch ---------------------------------------------
-    // When --backend is set to a non-whisper backend, when the model path is
-    // "auto", or when GGUF metadata identifies a non-whisper architecture,
-    // hand off to the unified dispatch layer. The whisper code path below
-    // stays byte-identical to the historical CLI.
+    // Route through the unified dispatch layer (crispasr_run_backend) when:
+    //   1. --backend is set explicitly (including --backend whisper, which
+    //      opts into the reduced-feature unified whisper wrapper);
+    //   2. -m auto / -m default requests an auto-download;
+    //   3. GGUF metadata auto-identifies a non-whisper architecture.
+    // Otherwise (empty --backend, non-auto model, .bin file, or GGUF that
+    // says "whisper"), fall through to the historical whisper code path
+    // below so the byte-identical default stays intact — it still has
+    // access to whisper-only features like -owts, full-JSON DTW tokens,
+    // grammar, n_processors, whisper-internal VAD and stereo diarize.
     {
-        const bool explicit_non_whisper =
-            !params.backend.empty() && params.backend != "whisper";
+        const bool explicit_backend = !params.backend.empty();
         const bool model_is_auto =
             params.model == "auto" || params.model == "default";
 
         bool auto_detected_non_whisper = false;
-        if (!explicit_non_whisper && !model_is_auto && params.backend.empty()) {
+        if (!explicit_backend && !model_is_auto) {
             const std::string detected = crispasr_detect_backend_from_gguf(params.model);
             if (!detected.empty() && detected != "whisper") {
                 if (!params.no_prints) {
@@ -1075,7 +1080,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        if (explicit_non_whisper || model_is_auto || auto_detected_non_whisper) {
+        if (explicit_backend || model_is_auto || auto_detected_non_whisper) {
             return crispasr_run_backend(params);
         }
     }

@@ -16,6 +16,7 @@ set(TARGET whisper-cli)
 add_executable(${TARGET}
     cli.cpp
     crispasr_backend.cpp
+    crispasr_backend_whisper.cpp
     crispasr_backend_parakeet.cpp
     crispasr_backend_canary.cpp
     crispasr_backend_cohere.cpp

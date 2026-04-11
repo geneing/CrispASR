@@ -6,6 +6,7 @@
 // Forward declarations of per-backend constructors. Each is implemented in
 // its own crispasr_backend_X.cpp file and compiled only if the backend's
 // library is linked in.
+std::unique_ptr<CrispasrBackend> crispasr_make_whisper_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_parakeet_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_canary_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_cohere_backend();
@@ -28,6 +29,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_backend();
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string & name) {
+    if (name == "whisper")   return crispasr_make_whisper_backend();
     if (name == "parakeet")  return crispasr_make_parakeet_backend();
     if (name == "canary")    return crispasr_make_canary_backend();
     if (name == "cohere")    return crispasr_make_cohere_backend();
@@ -42,7 +44,7 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string & nam
 
 std::vector<std::string> crispasr_list_backends() {
     return {
-        "whisper",   // via the unmodified cli.cpp path
+        "whisper",
         "parakeet",
         "canary",
         "cohere",
@@ -56,16 +58,6 @@ std::vector<std::string> crispasr_list_backends() {
 // ---------------------------------------------------------------------------
 // Capability matrix for --list-backends
 // ---------------------------------------------------------------------------
-
-// Hard-coded whisper capabilities. Since the whisper backend wrapper isn't
-// implemented yet (whisper still goes through the historical cli.cpp
-// code path), we report what whisper_full() supports so users have an
-// accurate reference.
-static constexpr uint32_t kWhisperCaps =
-    CAP_TIMESTAMPS_NATIVE | CAP_WORD_TIMESTAMPS | CAP_TOKEN_CONFIDENCE |
-    CAP_LANGUAGE_DETECT | CAP_TRANSLATE | CAP_DIARIZE | CAP_GRAMMAR |
-    CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_FLASH_ATTN |
-    CAP_PARALLEL_PROCESSORS | CAP_VAD_INTERNAL;
 
 struct feature_col {
     const char * label;
@@ -110,13 +102,9 @@ void crispasr_print_backend_matrix() {
     // Each row: instantiate the backend just to read its capability bitmask.
     for (const auto & name : backends) {
         uint32_t caps = 0;
-        if (name == "whisper") {
-            caps = kWhisperCaps;
-        } else {
-            auto be = crispasr_create_backend(name);
-            if (be) caps = be->capabilities();
-            // backend destroyed when unique_ptr goes out of scope
-        }
+        auto be = crispasr_create_backend(name);
+        if (be) caps = be->capabilities();
+        // backend destroyed when unique_ptr goes out of scope
         printf("  %-*s", (int)name_w, name.c_str());
         for (const auto & f : kFeatures) {
             printf(" %-12s", (caps & f.flag) ? "   Y" : "    -");
