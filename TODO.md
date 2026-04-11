@@ -54,12 +54,13 @@ minimal pilot. The remaining pieces are documented below.
   so the decode loop lives next to the model code. ~80 LOC helper + 4
   migrations, ~150 LOC saved across the models.
 
-- **[next]** **`src/core/mel::Params::stacked_frames`.**
-  Granite's mel output is stacked `(160, T/2)` = 2 × 80 mels per frame.
-  Add a `stacked_frames` knob to `Params` (default 1; when 2, post-
-  process the TimeMels output by zipping consecutive frames together
-  and dropping any trailing odd frame). Last holdout on `core_mel::`
-  migration.
+- **[done]** ~~`src/core/mel::Params::stacked_frames`.~~ **Done
+  differently.** Granite is now on `core_mel::compute` without a new
+  Params knob: its normalization `v/4+1` turned out to be identical
+  to `GlobalClipMax` `(v+4)/4`, and the "drop-last-if-odd + stack
+  pairs into 160-mel rows" step stays in the granite wrapper as
+  ~15 lines of post-processing. `core_mel` coverage is now 8/8
+  non-whisper models.
 
 - **[later]** **`cli.cpp` output writer refactor (task #4).**
   `output_json` (282 lines) and `output_wts` (120 lines) in cli.cpp
@@ -152,11 +153,16 @@ each backend. High-value gaps to close:
 - **[later]** HF release of quantised GGUFs (`cstr/granite-speech-4.0-1b-GGUF`
   is still pending). Need `cohere-quantize granite-speech-1b.gguf …`
   then upload.
-- **[later]** Performance tuning (encoder Conformer is slow per-layer CPU).
-  Consider porting to a single ggml graph like canary did.
+- **[later]** Encoder parallelisation: granite_speech is now linked
+  against OpenMP but has no `#pragma omp` annotations yet. Adding
+  `#pragma omp parallel for` on the per-layer encoder hot loops
+  would deliver a measurable speedup on CPU but shifts the float
+  reduction order, so the change needs its own regression gate
+  (allow small float drift; transcript must stay correct). Encoder
+  Conformer is the dominant cost today (~22.5s on jfk.wav).
+- **[later]** Consider porting the per-layer CPU encoder to a single
+  ggml graph like canary did.
 - **[later]** Remove dead ggml graph encoder `granite_build_encoder`.
-- **[later]** Migrate mel to `core_mel::compute` once `stacked_frames`
-  lands.
 
 ### canary_ctc (aligner)
 - **[later]** Fix single-backend scheduler — currently no CPU fallback
