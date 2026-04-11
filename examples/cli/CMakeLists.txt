@@ -22,6 +22,7 @@ add_executable(${TARGET}
     crispasr_backend_granite.cpp
     crispasr_backend_voxtral.cpp
     crispasr_backend_voxtral4b.cpp
+    crispasr_backend_qwen3.cpp
     crispasr_vad.cpp
     crispasr_output.cpp
     crispasr_model_mgr.cpp
@@ -41,6 +42,7 @@ target_link_libraries(${TARGET} PRIVATE
     granite_speech
     voxtral
     voxtral4b
+    qwen3_asr
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
 )
