@@ -237,7 +237,7 @@ void free_weights(WeightLoad & wl) {
 // ---------------------------------------------------------------------------
 
 ggml_tensor * try_get(
-    const std::unordered_map<std::string, ggml_tensor *> & tensors,
+    const std::map<std::string, ggml_tensor *> & tensors,
     const char * name)
 {
     auto it = tensors.find(name);
@@ -245,7 +245,7 @@ ggml_tensor * try_get(
 }
 
 ggml_tensor * require(
-    const std::unordered_map<std::string, ggml_tensor *> & tensors,
+    const std::map<std::string, ggml_tensor *> & tensors,
     const char * name,
     const char * model_tag)
 {

@@ -20,7 +20,7 @@
 //   * Opens the GGUF file in two passes (metadata, then tensor alloc).
 //   * Provides scalar / string / array reader helpers with defaults.
 //   * Allocates the backend buffer and mmap-copies the weight data.
-//   * Builds the std::unordered_map<std::string, ggml_tensor *> tensor
+//   * Builds the std::map<std::string, ggml_tensor *> tensor
 //     lookup map and returns it in a WeightLoad struct.
 //   * Provides require() / try_get() tensor lookup helpers that log a
 //     sensible error message when a required tensor is missing.
@@ -53,8 +53,8 @@
 #include "gguf.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace core_gguf {
@@ -90,7 +90,7 @@ std::vector<std::string> kv_str_array(gguf_context * gctx, const char * key);
 struct WeightLoad {
     ggml_context                                    * ctx = nullptr;
     ggml_backend_buffer_t                             buf = nullptr;
-    std::unordered_map<std::string, ggml_tensor *>    tensors;
+    std::map<std::string, ggml_tensor *>    tensors;
 };
 
 // Load all tensor metadata + weights into a new ggml_context backed by
@@ -114,14 +114,14 @@ void free_weights(WeightLoad & wl);
 
 // Look up a tensor by name. Returns nullptr (silently) if missing.
 ggml_tensor * try_get(
-    const std::unordered_map<std::string, ggml_tensor *> & tensors,
+    const std::map<std::string, ggml_tensor *> & tensors,
     const char * name);
 
 // Look up a tensor by name. Prints an error to stderr if missing but
 // still returns nullptr — the caller decides whether a missing tensor
 // is fatal.
 ggml_tensor * require(
-    const std::unordered_map<std::string, ggml_tensor *> & tensors,
+    const std::map<std::string, ggml_tensor *> & tensors,
     const char * name,
     const char * model_tag);
 

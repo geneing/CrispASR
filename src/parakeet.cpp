@@ -226,25 +226,19 @@ static ggml_tensor * parakeet_rel_shift(ggml_context * ctx, ggml_tensor * a) {
 }
 
 // ===========================================================================
-// Loader helpers
+// Loader helpers — thin wrappers around core_gguf:: to preserve the
+// existing call-site syntax (try_get(model, name) / require(model, name))
+// while the underlying work lives in src/core/gguf_loader.
 // ===========================================================================
 
+#include "core/gguf_loader.h"
+
 static ggml_tensor * try_get(parakeet_model & m, const char * name) {
-    auto it = m.tensors.find(name);
-    return it != m.tensors.end() ? it->second : nullptr;
+    return core_gguf::try_get(m.tensors, name);
 }
 
 static ggml_tensor * require(parakeet_model & m, const char * name) {
-    auto t = try_get(m, name);
-    if (!t) {
-        fprintf(stderr, "parakeet: required tensor '%s' not found in GGUF\n", name);
-    }
-    return t;
-}
-
-static uint32_t kv_u32(gguf_context * gctx, const char * key, uint32_t def = 0) {
-    int ki = gguf_find_key(gctx, key);
-    return ki >= 0 ? (uint32_t)gguf_get_val_u32(gctx, ki) : def;
+    return core_gguf::require(m.tensors, name, "parakeet");
 }
 
 // ===========================================================================
@@ -257,98 +251,51 @@ static bool parakeet_load_model(parakeet_model & model,
                                 ggml_backend_t    backend) {
     // ---- pass 1: read hparams + vocab via metadata-only context ----
     {
-        ggml_init_params meta_params = {
-            /*mem_size=*/   4 * 1024 * 1024,
-            /*mem_buffer=*/ nullptr,
-            /*no_alloc=*/   true,
-        };
-        ggml_context * meta_ctx = ggml_init(meta_params);
-        gguf_init_params load_params_meta = { /*no_alloc=*/true, /*ctx=*/&meta_ctx };
-        gguf_context * gctx = gguf_init_from_file(path, load_params_meta);
-        if (!gctx) {
-            fprintf(stderr, "parakeet: failed to open '%s'\n", path);
-            if (meta_ctx) ggml_free(meta_ctx);
-            return false;
-        }
+        gguf_context * gctx = core_gguf::open_metadata(path);
+        if (!gctx) return false;
 
         auto & hp = model.hparams;
-        hp.sample_rate          = kv_u32(gctx, "parakeet.sample_rate",          hp.sample_rate);
-        hp.n_mels               = kv_u32(gctx, "parakeet.n_mels",               hp.n_mels);
-        hp.n_fft                = kv_u32(gctx, "parakeet.n_fft",                hp.n_fft);
-        hp.win_length           = kv_u32(gctx, "parakeet.win_length",           hp.win_length);
-        hp.hop_length           = kv_u32(gctx, "parakeet.hop_length",           hp.hop_length);
-        hp.d_model              = kv_u32(gctx, "parakeet.d_model",              hp.d_model);
-        hp.n_layers             = kv_u32(gctx, "parakeet.n_layers",             hp.n_layers);
-        hp.n_heads              = kv_u32(gctx, "parakeet.n_heads",              hp.n_heads);
-        hp.head_dim             = kv_u32(gctx, "parakeet.head_dim",             hp.head_dim);
-        hp.ff_dim               = kv_u32(gctx, "parakeet.ff_dim",               hp.ff_dim);
-        hp.subsampling_factor   = kv_u32(gctx, "parakeet.subsampling_factor",   hp.subsampling_factor);
-        hp.subsampling_channels = kv_u32(gctx, "parakeet.subsampling_channels", hp.subsampling_channels);
-        hp.conv_kernel          = kv_u32(gctx, "parakeet.conv_kernel",          hp.conv_kernel);
-        hp.pred_hidden          = kv_u32(gctx, "parakeet.pred_hidden",          hp.pred_hidden);
-        hp.pred_layers          = kv_u32(gctx, "parakeet.pred_layers",          hp.pred_layers);
-        hp.joint_hidden         = kv_u32(gctx, "parakeet.joint_hidden",         hp.joint_hidden);
-        hp.vocab_size           = kv_u32(gctx, "parakeet.vocab_size",           hp.vocab_size);
-        hp.blank_id             = kv_u32(gctx, "parakeet.blank_id",             hp.blank_id);
-        hp.n_tdt_durations      = kv_u32(gctx, "parakeet.n_tdt_durations",      hp.n_tdt_durations);
-        hp.frame_dur_cs         = kv_u32(gctx, "parakeet.frame_dur_cs",         hp.frame_dur_cs);
+        hp.sample_rate          = core_gguf::kv_u32(gctx, "parakeet.sample_rate",          hp.sample_rate);
+        hp.n_mels               = core_gguf::kv_u32(gctx, "parakeet.n_mels",               hp.n_mels);
+        hp.n_fft                = core_gguf::kv_u32(gctx, "parakeet.n_fft",                hp.n_fft);
+        hp.win_length           = core_gguf::kv_u32(gctx, "parakeet.win_length",           hp.win_length);
+        hp.hop_length           = core_gguf::kv_u32(gctx, "parakeet.hop_length",           hp.hop_length);
+        hp.d_model              = core_gguf::kv_u32(gctx, "parakeet.d_model",              hp.d_model);
+        hp.n_layers             = core_gguf::kv_u32(gctx, "parakeet.n_layers",             hp.n_layers);
+        hp.n_heads              = core_gguf::kv_u32(gctx, "parakeet.n_heads",              hp.n_heads);
+        hp.head_dim             = core_gguf::kv_u32(gctx, "parakeet.head_dim",             hp.head_dim);
+        hp.ff_dim               = core_gguf::kv_u32(gctx, "parakeet.ff_dim",               hp.ff_dim);
+        hp.subsampling_factor   = core_gguf::kv_u32(gctx, "parakeet.subsampling_factor",   hp.subsampling_factor);
+        hp.subsampling_channels = core_gguf::kv_u32(gctx, "parakeet.subsampling_channels", hp.subsampling_channels);
+        hp.conv_kernel          = core_gguf::kv_u32(gctx, "parakeet.conv_kernel",          hp.conv_kernel);
+        hp.pred_hidden          = core_gguf::kv_u32(gctx, "parakeet.pred_hidden",          hp.pred_hidden);
+        hp.pred_layers          = core_gguf::kv_u32(gctx, "parakeet.pred_layers",          hp.pred_layers);
+        hp.joint_hidden         = core_gguf::kv_u32(gctx, "parakeet.joint_hidden",         hp.joint_hidden);
+        hp.vocab_size           = core_gguf::kv_u32(gctx, "parakeet.vocab_size",           hp.vocab_size);
+        hp.blank_id             = core_gguf::kv_u32(gctx, "parakeet.blank_id",             hp.blank_id);
+        hp.n_tdt_durations      = core_gguf::kv_u32(gctx, "parakeet.n_tdt_durations",      hp.n_tdt_durations);
+        hp.frame_dur_cs         = core_gguf::kv_u32(gctx, "parakeet.frame_dur_cs",         hp.frame_dur_cs);
 
-        int ki = gguf_find_key(gctx, "tokenizer.ggml.tokens");
-        if (ki >= 0) {
-            int n = gguf_get_arr_n(gctx, ki);
-            vocab.id_to_token.resize(n);
-            for (int i = 0; i < n; i++) {
-                vocab.id_to_token[i] = gguf_get_arr_str(gctx, ki, i);
+        // Vocab: tokenizer.ggml.tokens is a string array.
+        auto tokens = core_gguf::kv_str_array(gctx, "tokenizer.ggml.tokens");
+        if (!tokens.empty()) {
+            vocab.id_to_token = std::move(tokens);
+            for (int i = 0; i < (int)vocab.id_to_token.size(); i++) {
                 vocab.token_to_id[vocab.id_to_token[i]] = i;
             }
         }
 
-        gguf_free(gctx);
-        ggml_free(meta_ctx);
+        core_gguf::free_metadata(gctx);
     }
 
-    // ---- pass 2: load tensor metadata + bind into a backend buffer ----
-    ggml_context * weight_ctx = nullptr;
-    {
-        gguf_init_params load_params = { /*no_alloc=*/true, /*ctx=*/&weight_ctx };
-        gguf_context * gctx = gguf_init_from_file(path, load_params);
-        if (!gctx || !weight_ctx) {
-            fprintf(stderr, "parakeet: failed to load tensor metadata\n");
-            return false;
-        }
-
-        model.buf = ggml_backend_alloc_ctx_tensors(weight_ctx, backend);
-
-        // mmap the GGUF, then ggml_backend_tensor_set into each tensor's slot
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) { fprintf(stderr, "parakeet: open failed\n"); return false; }
-        struct stat st; fstat(fd, &st);
-        size_t file_size = (size_t)st.st_size;
-        void * mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
-        close(fd);
-        if (mmap_base == MAP_FAILED) {
-            fprintf(stderr, "parakeet: mmap failed\n");
-            return false;
-        }
-
-        size_t data_offset = gguf_get_data_offset(gctx);
-
-        for (ggml_tensor * t = ggml_get_first_tensor(weight_ctx); t;
-             t = ggml_get_next_tensor(weight_ctx, t)) {
-            model.tensors[ggml_get_name(t)] = t;
-
-            int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
-            if (tid < 0) continue;
-
-            size_t off    = gguf_get_tensor_offset(gctx, tid);
-            size_t nbytes = ggml_nbytes(t);
-            ggml_backend_tensor_set(t, (const char *)mmap_base + data_offset + off, 0, nbytes);
-        }
-
-        munmap(mmap_base, file_size);
-        model.ctx = weight_ctx;
-        gguf_free(gctx);
+    // ---- pass 2: load tensor data via the shared helper ----
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, backend, "parakeet", wl)) {
+        return false;
     }
+    model.ctx     = wl.ctx;
+    model.buf     = wl.buf;
+    model.tensors = std::move(wl.tensors);
 
     // ---- bind named tensors into the per-layer structs ----
 
