@@ -90,9 +90,12 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     "voxtral":   "reference_backends.voxtral",
     "voxtral4b": "reference_backends.voxtral4b",
     "granite":   "reference_backends.granite",
-    # parakeet / canary / cohere are encoder-decoder, not speech-LLMs, so
-    # their debugging path is different (no token-level logits check) —
-    # add them if/when we port new NeMo-family models.
+    # Encoder-decoder (NeMo + Cohere) reference backends. These capture
+    # encoder activations via forward hooks and run generate() for a
+    # greedy transcript check — no per-token logits, because the decoder
+    # autoregresses with a KV cache that doesn't have a clean "per-step
+    # logits" entry point the way the speech-LLMs do.
+    "cohere":    "reference_backends.cohere",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import
@@ -277,6 +280,12 @@ def main() -> None:
     print(f"Captured {len(captures)} tensors:")
     for name in sorted(captures):
         a = captures[name]
+        if isinstance(a, str):
+            # String-typed captures (e.g. granite/cohere generated_text)
+            # move into metadata below — skip them in the tensor listing.
+            preview = a if len(a) <= 60 else a[:57] + "..."
+            print(f"  {name:28s}  str        {preview!r}")
+            continue
         print(f"  {name:28s}  {tuple(a.shape)}  {a.dtype}")
 
     # Serialize
