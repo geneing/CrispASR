@@ -102,27 +102,39 @@ if (EMSCRIPTEN)
 elseif(CMAKE_JS_VERSION)
     add_subdirectory(addon.node)
 else()
-    add_subdirectory(cli)
+    # ------------------------------------------------------------------
+    # Unified CrispASR binary + support tools
+    # ------------------------------------------------------------------
+    add_subdirectory(cli)               # the `crispasr` / `whisper-cli` binary
     add_subdirectory(bench)
     add_subdirectory(server)
     add_subdirectory(quantize)
     add_subdirectory(vad-speech-segments)
-    add_subdirectory(cohere-main)
+    add_subdirectory(crispasr-quantize) # GGUF re-quantize (was cohere-quantize)
+
+    # Standalone forced-alignment CLIs (complementary to `crispasr -am`):
+    #   cohere-align  wav2vec2 char-level CTC aligner (English only)
+    #   nfa-align     canary_ctc multilingual subword CTC aligner
     add_subdirectory(cohere-align)
-    add_subdirectory(parakeet-main)
-    add_subdirectory(canary-main)
     add_subdirectory(nfa-align)
+
+    # Differential test fixtures kept from the original per-model ports.
+    # They load pre-dumped PyTorch tensors and diff against the ggml
+    # forward pass, stage by stage. Useful for regression on future
+    # architectural changes; not a user-facing feature.
     add_subdirectory(qwen3-asr-test-conv)
     add_subdirectory(qwen3-asr-test-llm)
     add_subdirectory(qwen3-asr-test-trace)
     add_subdirectory(qwen3-asr-test-bpe)
-    add_subdirectory(qwen3-asr-main)
     add_subdirectory(voxtral-test-llm)
     add_subdirectory(voxtral-test-encoder)
     add_subdirectory(voxtral-test-e2e)
-    add_subdirectory(voxtral-main)
-    add_subdirectory(voxtral4b-main)
-    add_subdirectory(granite-main)
+
+    # NOTE: per-model user-facing CLIs (cohere-main, parakeet-main,
+    # canary-main, qwen3-asr-main, voxtral-main, voxtral4b-main,
+    # granite-main) have been consolidated into the unified `crispasr`
+    # binary under examples/cli/. Invoke via --backend NAME or let the
+    # GGUF metadata pick the backend automatically. See README.md.
     if (WHISPER_SDL2)
         add_subdirectory(stream)
         add_subdirectory(command)

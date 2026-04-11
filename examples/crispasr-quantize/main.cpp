@@ -1,3 +1,15 @@
+// crispasr-quantize — GGUF tensor re-quantization tool.
+//
+// Takes any GGUF model (whisper, parakeet, canary, cohere, voxtral, qwen3,
+// granite, wav2vec2, …) and re-quantizes all eligible tensors to the
+// target ggml_ftype, preserving metadata and non-quantizable tensors
+// (norms, positional embeddings, biases, small tables) in their
+// original types. The logic is model-agnostic — it just iterates the
+// GGUF tensor list and calls ggml_quantize_chunk on each float tensor.
+//
+// Historically lived in examples/cohere-main/cohere-quantize.cpp; moved
+// here when the per-model CLIs were consolidated into crispasr.
+
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"
@@ -12,7 +24,7 @@
 #include <thread>
 #include <cmath>
 
-static bool cohere_model_quantize(const std::string & fname_inp, const std::string & fname_out, ggml_ftype ftype) {
+static bool crispasr_model_quantize(const std::string & fname_inp, const std::string & fname_out, ggml_ftype ftype) {
     ggml_type qtype = GGML_TYPE_F32;
 
     switch (ftype) {
@@ -200,7 +212,7 @@ int main(int argc, char ** argv) {
     const std::string fname_out = argv[2];
     const ggml_ftype ftype = ggml_parse_ftype(argv[3]);
 
-    if (!cohere_model_quantize(fname_inp, fname_out, ftype)) {
+    if (!crispasr_model_quantize(fname_inp, fname_out, ftype)) {
         fprintf(stderr, "failed to quantize model\n");
         return 1;
     }
