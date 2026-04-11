@@ -11,6 +11,7 @@
 #include "crispasr_vad.h"
 #include "crispasr_output.h"
 #include "crispasr_model_mgr.h"
+#include "crispasr_aligner.h"
 #include "whisper_params.h"
 
 #include "common-whisper.h" // read_audio_data
@@ -153,12 +154,39 @@ int crispasr_run_backend(const whisper_params & params_in) {
         // Transcribe each slice.
         std::vector<std::vector<crispasr_segment>> per_slice;
         per_slice.reserve(slices.size());
-        for (const auto & sl : slices) {
+        for (size_t i = 0; i < slices.size(); i++) {
+            const auto & sl = slices[i];
             auto segs = backend->transcribe(
                 samples.data() + sl.start,
                 sl.end - sl.start,
                 sl.t0_cs,
                 params);
+
+            // Optional CTC forced alignment to attach word-level timestamps.
+            // Applies to backends that expose CAP_TIMESTAMPS_CTC and don't
+            // already have words populated. Runs per slice so absolute
+            // timestamps come out right.
+            const bool want_align =
+                !params.aligner_model.empty() &&
+                (backend->capabilities() & CAP_TIMESTAMPS_CTC);
+            if (want_align) {
+                for (auto & seg : segs) {
+                    if (!seg.words.empty()) continue; // already aligned
+                    auto words = crispasr_ctc_align(
+                        params.aligner_model,
+                        seg.text,
+                        samples.data() + sl.start,
+                        sl.end - sl.start,
+                        sl.t0_cs,
+                        params.n_threads);
+                    if (!words.empty()) {
+                        seg.t0 = words.front().t0;
+                        seg.t1 = words.back().t1;
+                        seg.words = std::move(words);
+                    }
+                }
+            }
+
             per_slice.push_back(std::move(segs));
         }
         auto all_segs = merge_segments(std::move(per_slice));

@@ -47,8 +47,7 @@ public:
     const char * name() const override { return "granite"; }
 
     uint32_t capabilities() const override {
-        // CTC alignment will be added when the shared aligner module lands.
-        return CAP_AUTO_DOWNLOAD;
+        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD;
     }
 
     bool init(const whisper_params & p) override {
