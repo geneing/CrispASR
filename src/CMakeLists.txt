@@ -215,10 +215,11 @@ endif()
 add_library(crispasr-core STATIC
             core/mel.h
             core/mel.cpp
+            core/ffn.h
             )
 target_include_directories(crispasr-core PUBLIC . ../include)
 target_compile_features   (crispasr-core PUBLIC cxx_std_17)
-target_link_libraries     (crispasr-core PUBLIC ggml-base)
+target_link_libraries     (crispasr-core PUBLIC ggml-base ggml)
 if(NOT MSVC)
     target_compile_options(crispasr-core PRIVATE -O3 -march=native)
 endif()
@@ -315,7 +316,7 @@ add_library(granite_speech
             )
 target_include_directories(granite_speech PUBLIC . ../include)
 target_compile_features   (granite_speech PUBLIC cxx_std_17)
-target_link_libraries     (granite_speech PUBLIC ggml ggml-base Threads::Threads)
+target_link_libraries     (granite_speech PUBLIC ggml ggml-base Threads::Threads crispasr-core)
 if(NOT MSVC)
     target_compile_options(granite_speech PRIVATE -O3 -march=native)
 endif()

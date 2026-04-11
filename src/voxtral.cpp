@@ -466,6 +466,7 @@ static void voxtral_fft(float * in, int N, float * out) {
 }
 
 #include "core/mel.h"
+#include "core/ffn.h"
 
 // core_mel::FftR2C expects a const-input function and passes a buffer of
 // exactly N floats. voxtral_fft() uses `in` as scratch during recursion
@@ -804,10 +805,7 @@ static ggml_cgraph * voxtral_build_graph_llm(voxtral_context * ctx, int n_tokens
         residual = cur;
         x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.ffn_norm_w);
-        ggml_tensor * gate = ggml_mul_mat(ctx0, b.ffn_gate_w, x);
-        ggml_tensor * up   = ggml_mul_mat(ctx0, b.ffn_up_w,   x);
-        ggml_tensor * mlp  = ggml_mul(ctx0, ggml_silu(ctx0, gate), up);
-        mlp = ggml_mul_mat(ctx0, b.ffn_down_w, mlp);
+        ggml_tensor * mlp = core_ffn::swiglu(ctx0, x, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
         cur = ggml_add(ctx0, residual, mlp);
     }
 
@@ -1020,10 +1018,7 @@ static ggml_cgraph * voxtral_build_graph_llm_kv(voxtral_context * ctx,
         residual = cur;
         x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.ffn_norm_w);
-        ggml_tensor * gate = ggml_mul_mat(ctx0, b.ffn_gate_w, x);
-        ggml_tensor * up   = ggml_mul_mat(ctx0, b.ffn_up_w, x);
-        ggml_tensor * mlp  = ggml_mul(ctx0, ggml_silu(ctx0, gate), up);
-        mlp = ggml_mul_mat(ctx0, b.ffn_down_w, mlp);
+        ggml_tensor * mlp = core_ffn::swiglu(ctx0, x, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
         cur = ggml_add(ctx0, residual, mlp);
     }
 

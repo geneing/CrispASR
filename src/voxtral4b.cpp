@@ -407,6 +407,7 @@ static void voxtral4b_fft(float * in, int N, float * out) {
 }
 
 #include "core/mel.h"
+#include "core/ffn.h"
 
 // Same in-place FFT quirk as voxtral 3B: voxtral4b_fft writes into its
 // input buffer during recursion, so we wrap it with a thread-local
@@ -596,17 +597,14 @@ static ggml_cgraph * voxtral4b_build_graph_encoder(voxtral4b_context * ctx, int 
         if (b.attn_out_b) attn = ggml_add(ctx0, attn, b.attn_out_b);
         cur = ggml_add(ctx0, residual, attn);
 
-        // FFN: Pre-RMSNorm + SwiGLU
+        // FFN: Pre-RMSNorm + SwiGLU (audio encoder may carry an optional
+        // down bias on some checkpoints — swiglu_down_bias() no-ops it
+        // when b.ffn_down_b is null).
         residual = cur;
         x = ggml_rms_norm(ctx0, cur, kRmsEps);
         x = ggml_mul(ctx0, x, b.ffn_norm_w);
-
-        ggml_tensor * gate = ggml_mul_mat(ctx0, b.ffn_gate_w, x);
-        gate = ggml_silu(ctx0, gate);
-        ggml_tensor * up = ggml_mul_mat(ctx0, b.ffn_up_w, x);
-        ggml_tensor * ffn = ggml_mul(ctx0, gate, up);
-        ffn = ggml_mul_mat(ctx0, b.ffn_down_w, ffn);
-        if (b.ffn_down_b) ffn = ggml_add(ctx0, ffn, b.ffn_down_b);
+        ggml_tensor * ffn = core_ffn::swiglu_down_bias(
+            ctx0, x, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w, b.ffn_down_b);
         cur = ggml_add(ctx0, residual, ffn);
     }
 
@@ -826,10 +824,10 @@ static ggml_cgraph * voxtral4b_build_graph_llm_kv(voxtral4b_context * ctx,
             cur = ggml_mul(ctx0, cur, scale);
         }
 
-        ggml_tensor * gate = ggml_silu(ctx0, ggml_mul_mat(ctx0, b.ffn_gate_w, cur));
-        ggml_tensor * up   = ggml_mul_mat(ctx0, b.ffn_up_w, cur);
-        cur = ggml_mul_mat(ctx0, b.ffn_down_w, ggml_mul(ctx0, gate, up));
-        cur = ggml_add(ctx0, residual, cur);
+        // cur here is the pre-FFN norm + ffn_norm_w scale + ada-scale.
+        ggml_tensor * ffn = core_ffn::swiglu(
+            ctx0, cur, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
+        cur = ggml_add(ctx0, residual, ffn);
     }
 
     // Final RMSNorm

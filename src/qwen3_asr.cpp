@@ -538,6 +538,7 @@ static void qwen3_asr_fft(float * in, int N, float * out) {
 // ===========================================================================
 
 #include "core/mel.h"
+#include "core/ffn.h"
 
 // qwen3_asr_fft uses its input buffer as scratch during recursion (needs
 // ~4N extra floats past the input pointer). Wrap it to match core_mel's
@@ -1049,10 +1050,7 @@ static void qwen3_asr_build_llm_body(qwen3_asr_context * ctx,
         residual = cur;
         x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.ffn_norm_w);
-        ggml_tensor * gate = ggml_mul_mat(ctx0, b.ffn_gate_w, x);
-        ggml_tensor * up   = ggml_mul_mat(ctx0, b.ffn_up_w,   x);
-        ggml_tensor * mlp  = ggml_mul(ctx0, ggml_silu(ctx0, gate), up);
-        mlp = ggml_mul_mat(ctx0, b.ffn_down_w, mlp);
+        ggml_tensor * mlp = core_ffn::swiglu(ctx0, x, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
         cur = ggml_add(ctx0, residual, mlp);
     }
 
@@ -1294,10 +1292,7 @@ static ggml_cgraph * qwen3_asr_build_graph_llm_kv(qwen3_asr_context * ctx,
         residual = cur;
         x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.ffn_norm_w);
-        ggml_tensor * gate = ggml_mul_mat(ctx0, b.ffn_gate_w, x);
-        ggml_tensor * up   = ggml_mul_mat(ctx0, b.ffn_up_w,   x);
-        ggml_tensor * mlp  = ggml_mul(ctx0, ggml_silu(ctx0, gate), up);
-        mlp = ggml_mul_mat(ctx0, b.ffn_down_w, mlp);
+        ggml_tensor * mlp = core_ffn::swiglu(ctx0, x, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
         cur = ggml_add(ctx0, residual, mlp);
     }
 

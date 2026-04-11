@@ -7,6 +7,7 @@
 
 #include "granite_speech.h"
 
+#include "core/ffn.h"
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -1745,14 +1746,12 @@ static ggml_cgraph * granite_build_llm_kv(granite_speech_context * ctx,
         // μP: residual_multiplier scales the residual addition
         cur = ggml_add(ctx0, residual, ggml_scale(ctx0, attn, hp.residual_multiplier));
 
-        // FFN: Pre-RMSNorm + SwiGLU
+        // FFN: Pre-RMSNorm + SwiGLU, with a μP residual_multiplier on the
+        // residual add (granite-4.0 scales every residual by 0.22).
         residual = cur;
         cur = ggml_rms_norm(ctx0, cur, hp.llm_rms_eps);
         cur = ggml_mul(ctx0, cur, b.ffn_norm_w);
-
-        ggml_tensor * gate = ggml_silu(ctx0, ggml_mul_mat(ctx0, b.ffn_gate_w, cur));
-        ggml_tensor * up = ggml_mul_mat(ctx0, b.ffn_up_w, cur);
-        cur = ggml_mul_mat(ctx0, b.ffn_down_w, ggml_mul(ctx0, gate, up));
+        cur = core_ffn::swiglu(ctx0, cur, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
         cur = ggml_add(ctx0, residual, ggml_scale(ctx0, cur, hp.residual_multiplier));
 
         // Debug: name select layer outputs
