@@ -140,57 +140,102 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     }
     free(audio_embeds);
 
-    // ---- KV cache + prefill ----
+    // ---- KV cache + best-of-N decode ----
     if (!Ops::kv_init(ctx, 4096)) {
         free(text_embeds);
         fprintf(stderr, "crispasr[%s]: kv_init failed\n", BE);
         return out;
     }
-    Ops::kv_reset(ctx);
 
-    int n_tokens_out = 0, vocab = 0;
-    float * logits = Ops::run_llm_kv(ctx, text_embeds, T_prompt, 0,
-                                     &n_tokens_out, &vocab);
-    free(text_embeds);
-    if (!logits) {
-        fprintf(stderr, "crispasr[%s]: prefill failed\n", BE);
-        return out;
-    }
+    // Best-of-N is only meaningful with sampling. With temperature == 0
+    // every run is deterministic, so n_runs collapses to 1 and we keep
+    // the bit-identical historical path. With temperature > 0 and
+    // params.best_of > 1, we run N independent decodes and keep the one
+    // with the highest mean per-token probability (a cheap proxy for
+    // mean log-prob ranking that doesn't need the noisy first-token
+    // step). Each candidate gets its own prefill + greedy_decode pass;
+    // the KV cache is reset between candidates so they don't share
+    // history.
+    const int  n_runs = (params.temperature > 0.0f && params.best_of > 1)
+                      ? params.best_of : 1;
 
-    // ---- First-token selection ----
-    // Pure greedy (temperature <= 0) is the historical bit-identical path.
-    // When --temperature > 0 we draw the first token too, so the whole
-    // decode run is seeded from params.temperature consistently.
     core_greedy_decode::Config dec_cfg;
     dec_cfg.max_new_tokens = params.max_new_tokens > 0 ? params.max_new_tokens : 512;
     dec_cfg.eos_id         = Ops::eos_id;
-    dec_cfg.vocab_size     = vocab;
+    dec_cfg.vocab_size     = 0;  // filled after first prefill
     dec_cfg.temperature    = params.temperature;
 
-    int   next    = 0;
-    float next_p  = 1.0f;
-    if (dec_cfg.temperature > 0.0f) {
-        std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed
-                                  : (uint64_t)std::random_device{}());
-        next = core_greedy_decode::sample_temp(
-            logits, vocab, dec_cfg.temperature, seed_rng);
-    } else {
-        next = core_greedy_decode::argmax(logits, vocab);
-    }
-    next_p = core_greedy_decode::softmax_of(logits, vocab, next, logits[next]);
-    free(logits);
+    core_greedy_decode::Result best_dec;
+    double                     best_score = -1.0;
+    int                        vocab = 0;
 
-    // ---- Greedy / temperature-sampled decode loop with per-token probs ----
-    auto dec = core_greedy_decode::run_with_probs(
-        ctx,
-        /*first_token=*/next,
-        /*first_prob=*/next_p,
-        /*initial_n_past=*/T_prompt,
-        Ops::embed_tokens,
-        Ops::run_llm_kv,
-        dec_cfg);
-    const std::vector<int32_t> & gen   = dec.tokens;
-    const std::vector<float>   & probs = dec.probs;
+    for (int run = 0; run < n_runs; run++) {
+        Ops::kv_reset(ctx);
+
+        int n_tokens_out = 0;
+        float * logits = Ops::run_llm_kv(ctx, text_embeds, T_prompt, 0,
+                                         &n_tokens_out, &vocab);
+        if (!logits) {
+            fprintf(stderr, "crispasr[%s]: prefill failed (run %d/%d)\n",
+                    BE, run + 1, n_runs);
+            free(text_embeds);
+            return out;
+        }
+        if (run == 0) dec_cfg.vocab_size = vocab;
+
+        int   next    = 0;
+        float next_p  = 1.0f;
+        if (dec_cfg.temperature > 0.0f) {
+            // Different seed per run so the N runs actually diverge.
+            // Mix in run index so they don't all collapse to the same
+            // sample sequence on a deterministic seed.
+            std::mt19937_64 seed_rng(
+                (dec_cfg.seed != 0 ? dec_cfg.seed
+                                   : (uint64_t)std::random_device{}())
+                ^ (uint64_t)(run * 0x9E3779B97F4A7C15ull));
+            next = core_greedy_decode::sample_temp(
+                logits, vocab, dec_cfg.temperature, seed_rng);
+        } else {
+            next = core_greedy_decode::argmax(logits, vocab);
+        }
+        next_p = core_greedy_decode::softmax_of(logits, vocab, next, logits[next]);
+        free(logits);
+
+        auto dec = core_greedy_decode::run_with_probs(
+            ctx,
+            /*first_token=*/next,
+            /*first_prob=*/next_p,
+            /*initial_n_past=*/T_prompt,
+            Ops::embed_tokens,
+            Ops::run_llm_kv,
+            dec_cfg);
+
+        // Score: arithmetic mean of per-token softmax probabilities,
+        // skipping the trailing EOS if present. Equivalent ranking to
+        // mean-log-prob for our purposes and avoids one log() per token.
+        double sum = 0.0;
+        int    cnt = 0;
+        for (size_t i = 0; i < dec.probs.size(); i++) {
+            if ((int32_t)dec.tokens[i] == Ops::eos_id) break;
+            sum += (double)dec.probs[i];
+            cnt++;
+        }
+        const double score = (cnt > 0) ? (sum / cnt) : 0.0;
+
+        if (run == 0 || score > best_score) {
+            best_score = score;
+            best_dec   = std::move(dec);
+        }
+    }
+    free(text_embeds);
+
+    if (!params.no_prints && n_runs > 1) {
+        fprintf(stderr, "crispasr[%s]: best-of-%d picked score=%.4f\n",
+                BE, n_runs, best_score);
+    }
+
+    const std::vector<int32_t> & gen   = best_dec.tokens;
+    const std::vector<float>   & probs = best_dec.probs;
 
     // ---- Detokenize + attach per-token confidence to the segment ----
     std::string transcript;
