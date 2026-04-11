@@ -460,7 +460,9 @@ static ggml_cgraph * voxtral4b_build_graph_encoder(voxtral4b_context * ctx, int 
     const int n_layers  = (int)hp.audio_n_layers;
     const int proj_in   = (int)hp.proj_in_dim;
     const int n_mels    = (int)hp.n_mels;
-    const int swa       = (int)hp.audio_swa;
+    // hp.audio_swa is consumed later on the CPU-side swa_mask build
+    // (line ~1020). Read it there directly rather than stashing it here,
+    // so the build stays warning-free.
     const float attn_scale = 1.0f / std::sqrt((float)head_dim);
 
     ggml_init_params ip = {

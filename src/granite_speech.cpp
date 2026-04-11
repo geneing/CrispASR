@@ -816,7 +816,10 @@ static void shaw_block_attention_cpu(
 // ===========================================================================
 
 // Apply: out = W @ x + b, where x is (d_in, T), W is (d_in, d_out), out is (d_out, T)
-static void cpu_linear(granite_speech_context * ctx, float * out,
+// ctx is kept in the signature for symmetry with the graph-building
+// helpers in this file; the body pulls W/bias via ggml_backend_tensor_get
+// which doesn't need the context.
+static void cpu_linear(granite_speech_context * /*ctx*/, float * out,
                        const float * x, ggml_tensor * W, ggml_tensor * bias,
                        int d_in, int d_out, int T) {
     // Simple CPU matmul (no ggml graph overhead for small ops)
@@ -860,6 +863,13 @@ static void cpu_linear(granite_speech_context * ctx, float * out,
 // we have ground truth to compare against.
 // ===========================================================================
 
+// NOTE: This function is the legacy "global attention" encoder path
+// retained as a reference implementation. The live granite path uses the
+// hybrid CPU-loop encoder at granite_speech_run_encoder() below with
+// Shaw-style block-local attention. This builder is currently not called
+// from any caller; it stays in tree as a simpler baseline we can diff
+// against if the CPU path ever drifts. The unused-local casts below
+// keep the file warning-free without deleting the reference.
 static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) {
     const auto & m = ctx->model;
     const auto & hp = m.hparams;
@@ -870,6 +880,7 @@ static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) 
     const int n_layers = (int)hp.enc_n_layers;
     const int input_dim = (int)hp.enc_input_dim;  // 160
     const float attn_scale = 1.0f / std::sqrt((float)hd);
+    (void)d; (void)ff;  // reserved for future use (see header comment)
 
     ggml_init_params ip = { ctx->compute_meta.size(), ctx->compute_meta.data(), true };
     ggml_context * ctx0 = ggml_init(ip);
@@ -887,6 +898,7 @@ static ggml_cgraph * granite_build_encoder(granite_speech_context * ctx, int T) 
     const int ctx_size = 200;  // context_size
     const int n_blocks_attn = (T + ctx_size - 1) / ctx_size;
     const int T_padded = n_blocks_attn * ctx_size;
+    (void)T_padded;  // reserved — the block path would clip-pad here
 
     // Block-diagonal mask: (T, T) F16
     ggml_tensor * block_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T, T);
@@ -1430,9 +1442,7 @@ static ggml_cgraph * granite_build_projector(granite_speech_context * ctx, int e
     const int d = (int)hp.proj_d_model;       // 1024
     const int n_heads = (int)hp.proj_n_heads;  // 16
     const int hd = d / n_heads;               // 64
-    const int ff = (int)hp.proj_ff_dim;       // 4096
     const int n_layers = (int)hp.proj_n_layers;
-    const int llm_d = (int)hp.llm_d_model;    // 2048
     const float attn_scale = 1.0f / std::sqrt((float)hd);
 
     // Query tokens: (1, n_query=3, 1024)
@@ -1598,7 +1608,9 @@ extern "C" float * granite_speech_run_projector(struct granite_speech_context * 
     if (ctx->params.verbosity >= 2) {
         float mn=1e30f, mx=-1e30f, s=0;
         for (size_t i = 0; i < all_proj.size(); i++) {
-            if(all_proj[i]<mn)mn=all_proj[i]; if(all_proj[i]>mx)mx=all_proj[i]; s+=all_proj[i];
+            if (all_proj[i] < mn) mn = all_proj[i];
+            if (all_proj[i] > mx) mx = all_proj[i];
+            s += all_proj[i];
         }
         fprintf(stderr, "  projector out: min=%.6f max=%.6f mean=%.6f first_4=[%.6f,%.6f,%.6f,%.6f]\n",
                 mn, mx, s/all_proj.size(), all_proj[0], all_proj[1], all_proj[2], all_proj[3]);
