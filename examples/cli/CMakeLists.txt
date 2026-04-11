@@ -31,13 +31,36 @@ add_executable(${TARGET}
 )
 
 # ---------------------------------------------------------------------------
-# crispasr-diff — ground-truth diff harness (companion to
-# tools/dump_reference.py). Separate binary so downstream users who don't
-# care about differential testing don't pay the extra link time.
+# crispasr-diff-lib — shared ground-truth diff harness (companion to
+# tools/dump_reference.py).
+#
+# Exposed as a small static library so both the `crispasr-diff` binary
+# and the older differential-test drivers under
+# examples/{qwen3,voxtral}-test-*/ can link it without re-compiling the
+# same sources. The library has no per-model dependencies — it only
+# needs core_gguf from crispasr-core and the ggml CPU backend for its
+# tensor loader.
+# ---------------------------------------------------------------------------
+add_library(crispasr-diff-lib STATIC
+    crispasr_diff.cpp
+    crispasr_diff.h
+)
+target_include_directories(crispasr-diff-lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(crispasr-diff-lib PUBLIC
+    crispasr-core
+    ggml
+)
+set_target_properties(crispasr-diff-lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ---------------------------------------------------------------------------
+# crispasr-diff — the CLI wrapper binary. Separate target so downstream
+# users who don't care about differential testing don't pay the extra
+# link time.
 # ---------------------------------------------------------------------------
 add_executable(crispasr-diff
     crispasr_diff_main.cpp
-    crispasr_diff.cpp
 )
 target_link_libraries(crispasr-diff PRIVATE
     common
@@ -49,7 +72,7 @@ target_link_libraries(crispasr-diff PRIVATE
     voxtral
     voxtral4b
     qwen3_asr
-    crispasr-core
+    crispasr-diff-lib
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
 )

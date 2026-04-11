@@ -225,14 +225,31 @@ contributor-facing path for adding backends with confidence. Status:
   standalone entry points in `parakeet` / `canary` / `cohere` C headers
   so `crispasr-diff` can do stage-by-stage comparison for them too
   (currently the encoder/decoder is entangled with the full transcribe).
-- **[later]** Migrate `examples/{qwen3,voxtral}-test-*/main.cpp`
+- **[done]** ~~Migrate `examples/{qwen3,voxtral}-test-*/main.cpp`
   drivers to load their reference data from a crispasr-diff GGUF
-  archive via `crispasr_diff::Ref` instead of the inline NPY parser.
-  Once that lands, the legacy `models/*-dump-*.py` scripts can be
-  removed entirely — they're currently kept alongside the new
-  tools/reference_backends/ modules with a LEGACY header pointing at
-  the modular path, because the test drivers still consume the .npy
-  filenames only the legacy scripts produce.
+  archive via `crispasr_diff::Ref` instead of the inline NPY parser.~~
+  Done in this batch. All six drivers (`voxtral-test-encoder`,
+  `voxtral-test-llm`, `voxtral-test-e2e`, `qwen3-asr-test-conv`,
+  `qwen3-asr-test-llm`, `qwen3-asr-test-trace`) now link
+  `crispasr-diff-lib` (the reusable static version of
+  `examples/cli/crispasr_diff.{h,cpp}`) and consume a single
+  `reference.gguf` produced by `tools/dump_reference.py`. The
+  inline `load_npy_f32` parsers are gone. `qwen3-asr-test-bpe` has
+  no reference data and stays as-is.
+- **[done]** ~~Extend `tools/reference_backends/qwen3.py` to emit
+  `trace_input_ids / trace_audio_pad_pos / trace_first_logits /
+  trace_generated_ids`~~ — needed by `qwen3-asr-test-trace` for the
+  chat-template prompt + splice + forward path, plus `llm_input_ids`
+  + full-T `llm_logits` for the `qwen3-asr-test-llm` differential
+  test. Trigger via `--stages` or leave as part of the backend's
+  `DEFAULT_STAGES` (they're in the default now).
+- **[later]** Mirror the same for `tools/reference_backends/voxtral.py`
+  so `voxtral-test-llm` stops reporting `[SKIP]`. Needs the Voxtral
+  apply_chat_template → processor → embed → splice → forward path.
+- **[later]** Once the reference-backend migration settles, delete
+  the legacy `models/qwen3-asr-*-dump-*.py` and `models/voxtral4b-*`
+  scripts (only still used by `qwen3-asr-test-bpe`, which hardcodes
+  its expectations and doesn't really need a dump).
 
 ---
 
