@@ -89,6 +89,28 @@ int         parakeet_frame_dur_cs(struct parakeet_context * ctx);  // centisecon
 int         parakeet_n_mels      (struct parakeet_context * ctx);
 int         parakeet_sample_rate (struct parakeet_context * ctx);
 
+// ---- Stage-level entry points (for crispasr-diff testing) ----
+// These let the diff harness compare intermediate activations against
+// a PyTorch reference. They are NOT needed by the normal transcribe
+// path — use parakeet_transcribe(_ex) for inference.
+//
+// Returns a malloc'd F32 buffer that the caller must free(). Shape is
+// reported via the out_* parameters. Returns nullptr on failure.
+
+// Log-mel spectrogram of raw 16 kHz mono PCM.
+// Output layout: row-major (n_mels, T_mel).
+float *     parakeet_compute_mel (struct parakeet_context * ctx,
+                                  const float * samples, int n_samples,
+                                  int * out_n_mels, int * out_T_mel);
+
+// Run just the audio encoder on a mel spectrogram. Takes the output of
+// parakeet_compute_mel() (or any externally-produced reference mel with
+// the same layout) and returns the encoder hidden state.
+// Output layout: row-major (T_enc, d_model).
+float *     parakeet_run_encoder (struct parakeet_context * ctx,
+                                  const float * mel, int n_mels, int T_mel,
+                                  int * out_T_enc, int * out_d_model);
+
 // Internal smoke test: build encoder graph on a zero mel of `T_mel` frames,
 // run it, and report the output T_enc. Returns T_enc on success or -1.
 int         parakeet_test_encoder(struct parakeet_context * ctx, int T_mel);

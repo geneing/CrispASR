@@ -94,6 +94,21 @@ int         canary_frame_dur_cs(struct canary_context * ctx);
 int         canary_n_mels      (struct canary_context * ctx);
 int         canary_sample_rate (struct canary_context * ctx);
 
+// ---- Stage-level entry points (for crispasr-diff testing) ----
+// Returns malloc'd F32 buffers the caller must free(). nullptr on failure.
+
+// Log-mel spectrogram of raw 16 kHz mono PCM, row-major (n_mels, T_mel).
+float *     canary_compute_mel (struct canary_context * ctx,
+                                const float * samples, int n_samples,
+                                int * out_n_mels, int * out_T_mel);
+
+// Run just the audio encoder on a mel spectrogram. Output layout
+// row-major (T_enc, d_model). Same output as what the internal
+// encoder pass produces before the decoder sees it.
+float *     canary_run_encoder (struct canary_context * ctx,
+                                const float * mel, int n_mels, int T_mel,
+                                int * out_T_enc, int * out_d_model);
+
 // Internal smoke test: load and report all hparams. Returns 0 on success.
 int         canary_test_load   (struct canary_context * ctx);
 

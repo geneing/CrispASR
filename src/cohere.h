@@ -82,6 +82,24 @@ struct cohere_result * cohere_transcribe_ex(
     const char  * lang,
     int64_t       t_offset_cs);
 
+// ---- Stage-level entry points (for crispasr-diff testing) ----
+// Returns malloc'd F32 buffers the caller must free(). NULL on failure.
+
+// Log-mel spectrogram of raw 16 kHz mono PCM, row-major (n_mels, T_mel).
+// Applies cohere's pre-emphasis (0.97) and NeMo-style per-feature log-mel
+// exactly as the live encoder path does.
+float *     cohere_compute_mel (struct cohere_context * ctx,
+                                const float * samples, int n_samples,
+                                int * out_n_mels, int * out_T_mel);
+
+// Run just the audio encoder on a mel spectrogram. Takes (n_mels, T_mel)
+// row-major mel as produced by cohere_compute_mel() and returns the
+// encoder hidden state in row-major (T_enc, d_model) where T_enc is the
+// mel frame count after the 8x conv subsampling.
+float *     cohere_run_encoder (struct cohere_context * ctx,
+                                const float * mel, int n_mels, int T_mel,
+                                int * out_T_enc, int * out_d_model);
+
 #ifdef __cplusplus
 }
 #endif

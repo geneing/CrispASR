@@ -2322,3 +2322,96 @@ char * cohere_transcribe(struct cohere_context * ctx,
     cohere_result_free(r);
     return text;
 }
+
+// ---- Stage-level entry points for crispasr-diff ----
+
+float * cohere_compute_mel(struct cohere_context * ctx,
+                           const float * samples, int n_samples,
+                           int * out_n_mels, int * out_T_mel) {
+    if (!ctx || !samples || n_samples <= 0) return nullptr;
+    const auto & hp = ctx->model.hparams;
+
+    // Pull the mel filterbank + STFT window out of GGUF on the CPU side
+    // (same path cohere_transcribe_ex uses inside its chunk loop).
+    auto mel_fb = ct_get_f32(ctx->model.fe_mel_fb);
+    auto window = ct_get_f32(ctx->model.fe_window);
+
+    int T_mel = 0;
+    auto mel = cohere_compute_features(hp, mel_fb.data(), window.data(),
+                                        samples, n_samples, T_mel);
+    if (mel.empty()) return nullptr;
+
+    if (out_n_mels) *out_n_mels = hp.n_mels;
+    if (out_T_mel)  *out_T_mel  = T_mel;
+
+    float * r = (float *)malloc(mel.size() * sizeof(float));
+    if (!r) return nullptr;
+    std::memcpy(r, mel.data(), mel.size() * sizeof(float));
+    return r;
+}
+
+float * cohere_run_encoder(struct cohere_context * ctx,
+                           const float * mel, int n_mels, int T_mel,
+                           int * out_T_enc, int * out_d_model) {
+    if (!ctx || !mel || T_mel <= 0) return nullptr;
+    const auto & hp = ctx->model.hparams;
+    if (n_mels != hp.n_mels) {
+        fprintf(stderr, "cohere: mel feature mismatch (%d vs %d)\n",
+                n_mels, hp.n_mels);
+        return nullptr;
+    }
+
+    // Build + allocate + run the encoder graph on the supplied mel.
+    // This mirrors the per-chunk encoder pass in cohere_transcribe_ex
+    // but strips out the performance counters, decoder cross-KV copy,
+    // and multi-chunk accumulation.
+    struct ggml_cgraph * gf_enc = cohere_build_graph_encoder(ctx, T_mel);
+    if (!gf_enc) {
+        fprintf(stderr, "cohere: failed to build encoder graph\n");
+        return nullptr;
+    }
+
+    ggml_backend_sched_reset(ctx->ggml_alloc);
+    if (!ggml_backend_sched_alloc_graph(ctx->ggml_alloc, gf_enc)) {
+        fprintf(stderr, "cohere: failed to allocate encoder graph\n");
+        return nullptr;
+    }
+
+    // Set mel input.
+    struct ggml_tensor * mel_t = ggml_graph_get_tensor(gf_enc, "mel");
+    if (!mel_t) return nullptr;
+    ggml_backend_tensor_set(mel_t, mel, 0, (size_t)n_mels * T_mel * sizeof(float));
+
+    // Positional encoding. H3 = floor((T_mel / 8)) after the three
+    // stride-2 conv layers; matches the arithmetic in
+    // cohere_transcribe_ex.
+    const int H1 = (T_mel + 2 - 3) / 2 + 1;
+    const int H2 = (H1 + 2 - 3) / 2 + 1;
+    const int H3 = (H2 + 2 - 3) / 2 + 1;
+    auto pos_enc = ct_rel_pos_enc(H3, hp.enc_d_model);
+    struct ggml_tensor * pos_enc_t = ggml_graph_get_tensor(gf_enc, "pos_enc");
+    if (!pos_enc_t) return nullptr;
+    ggml_backend_tensor_set(pos_enc_t, pos_enc.data(), 0,
+                            pos_enc.size() * sizeof(float));
+
+    if (!cohere_sched_graph_compute(ctx->ggml_alloc, gf_enc, ctx->params.n_threads)) {
+        fprintf(stderr, "cohere: failed to compute encoder graph\n");
+        return nullptr;
+    }
+
+    struct ggml_tensor * enc_out = ggml_graph_get_tensor(gf_enc, "enc_out");
+    if (!enc_out) {
+        fprintf(stderr, "cohere: enc_out tensor not found\n");
+        return nullptr;
+    }
+    const int d     = (int)enc_out->ne[0];
+    const int T_enc = (int)enc_out->ne[1];
+
+    if (out_T_enc)   *out_T_enc   = T_enc;
+    if (out_d_model) *out_d_model = d;
+
+    float * r = (float *)malloc((size_t)d * T_enc * sizeof(float));
+    if (!r) return nullptr;
+    ggml_backend_tensor_get(enc_out, r, 0, (size_t)d * T_enc * sizeof(float));
+    return r;
+}

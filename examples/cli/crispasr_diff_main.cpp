@@ -143,6 +143,96 @@ static StageResult granite_mel(granite_speech_context * ctx, const float * sampl
     return r;
 }
 
+// ---- parakeet (NeMo FastConformer + TDT) ----
+
+static StageResult parakeet_mel_r(parakeet_context * ctx, const float * samples, int n_samples) {
+    StageResult r;
+    int n_mels = 0, T_mel = 0;
+    float * mel = parakeet_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) { r.note = "parakeet_compute_mel returned null"; return r; }
+    r.shape = {n_mels, T_mel};
+    r.data.assign(mel, mel + (size_t)n_mels * T_mel);
+    free(mel);
+    r.ok = true;
+    return r;
+}
+
+static StageResult parakeet_encoder_r(parakeet_context * ctx, const float * samples, int n_samples) {
+    StageResult r;
+    int n_mels = 0, T_mel = 0;
+    float * mel = parakeet_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) { r.note = "mel failed"; return r; }
+    int T_enc = 0, d_model = 0;
+    float * enc = parakeet_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
+    free(mel);
+    if (!enc) { r.note = "parakeet_run_encoder returned null"; return r; }
+    r.shape = {T_enc, d_model};
+    r.data.assign(enc, enc + (size_t)T_enc * d_model);
+    free(enc);
+    r.ok = true;
+    return r;
+}
+
+// ---- canary (NeMo FastConformer + Transformer decoder) ----
+
+static StageResult canary_mel_r(canary_context * ctx, const float * samples, int n_samples) {
+    StageResult r;
+    int n_mels = 0, T_mel = 0;
+    float * mel = canary_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) { r.note = "canary_compute_mel returned null"; return r; }
+    r.shape = {n_mels, T_mel};
+    r.data.assign(mel, mel + (size_t)n_mels * T_mel);
+    free(mel);
+    r.ok = true;
+    return r;
+}
+
+static StageResult canary_encoder_r(canary_context * ctx, const float * samples, int n_samples) {
+    StageResult r;
+    int n_mels = 0, T_mel = 0;
+    float * mel = canary_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) { r.note = "mel failed"; return r; }
+    int T_enc = 0, d_model = 0;
+    float * enc = canary_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
+    free(mel);
+    if (!enc) { r.note = "canary_run_encoder returned null"; return r; }
+    r.shape = {T_enc, d_model};
+    r.data.assign(enc, enc + (size_t)T_enc * d_model);
+    free(enc);
+    r.ok = true;
+    return r;
+}
+
+// ---- cohere (Conformer + Transformer) ----
+
+static StageResult cohere_mel_r(cohere_context * ctx, const float * samples, int n_samples) {
+    StageResult r;
+    int n_mels = 0, T_mel = 0;
+    float * mel = cohere_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) { r.note = "cohere_compute_mel returned null"; return r; }
+    r.shape = {n_mels, T_mel};
+    r.data.assign(mel, mel + (size_t)n_mels * T_mel);
+    free(mel);
+    r.ok = true;
+    return r;
+}
+
+static StageResult cohere_encoder_r(cohere_context * ctx, const float * samples, int n_samples) {
+    StageResult r;
+    int n_mels = 0, T_mel = 0;
+    float * mel = cohere_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) { r.note = "mel failed"; return r; }
+    int T_enc = 0, d_model = 0;
+    float * enc = cohere_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
+    free(mel);
+    if (!enc) { r.note = "cohere_run_encoder returned null"; return r; }
+    r.shape = {T_enc, d_model};
+    r.data.assign(enc, enc + (size_t)T_enc * d_model);
+    free(enc);
+    r.ok = true;
+    return r;
+}
+
 } // namespace
 
 
@@ -275,11 +365,64 @@ int main(int argc, char ** argv) {
             print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
         } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
         granite_speech_free(ctx);
+    } else if (backend_name == "parakeet") {
+        auto cp = parakeet_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
+        parakeet_context * ctx = parakeet_init_from_file(model_path.c_str(), cp);
+        if (!ctx) { fprintf(stderr, "failed to load parakeet model\n"); return 4; }
+
+        auto mel_r = parakeet_mel_r(ctx, samples.data(), (int)samples.size());
+        if (mel_r.ok) {
+            auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
+            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
+        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+
+        auto enc_r = parakeet_encoder_r(ctx, samples.data(), (int)samples.size());
+        if (enc_r.ok) {
+            auto rep = ref.compare("encoder_output", enc_r.data.data(), enc_r.data.size());
+            print_row("encoder_output", rep, COS_THRESHOLD); record(rep);
+        } else { printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str()); n_fail++; }
+
+        parakeet_free(ctx);
+    } else if (backend_name == "canary") {
+        auto cp = canary_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
+        canary_context * ctx = canary_init_from_file(model_path.c_str(), cp);
+        if (!ctx) { fprintf(stderr, "failed to load canary model\n"); return 4; }
+
+        auto mel_r = canary_mel_r(ctx, samples.data(), (int)samples.size());
+        if (mel_r.ok) {
+            auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
+            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
+        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+
+        auto enc_r = canary_encoder_r(ctx, samples.data(), (int)samples.size());
+        if (enc_r.ok) {
+            auto rep = ref.compare("encoder_output", enc_r.data.data(), enc_r.data.size());
+            print_row("encoder_output", rep, COS_THRESHOLD); record(rep);
+        } else { printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str()); n_fail++; }
+
+        canary_free(ctx);
+    } else if (backend_name == "cohere") {
+        auto cp = cohere_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
+        cohere_context * ctx = cohere_init_from_file(model_path.c_str(), cp);
+        if (!ctx) { fprintf(stderr, "failed to load cohere model\n"); return 4; }
+
+        auto mel_r = cohere_mel_r(ctx, samples.data(), (int)samples.size());
+        if (mel_r.ok) {
+            auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
+            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
+        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+
+        auto enc_r = cohere_encoder_r(ctx, samples.data(), (int)samples.size());
+        if (enc_r.ok) {
+            auto rep = ref.compare("encoder_output", enc_r.data.data(), enc_r.data.size());
+            print_row("encoder_output", rep, COS_THRESHOLD); record(rep);
+        } else { printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str()); n_fail++; }
+
+        cohere_free(ctx);
     } else {
         fprintf(stderr,
-                "crispasr-diff: backend '%s' doesn't expose public stage helpers yet. "
-                "Currently supported: voxtral, voxtral4b, qwen3, granite.\n"
-                "parakeet / canary / cohere only have the all-in-one transcribe API.\n",
+                "crispasr-diff: backend '%s' is not recognised. "
+                "Supported: voxtral, voxtral4b, qwen3, granite, parakeet, canary, cohere.\n",
                 backend_name.c_str());
         return 5;
     }

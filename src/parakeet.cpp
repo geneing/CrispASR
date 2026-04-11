@@ -454,9 +454,9 @@ static void parakeet_fft_r2c(const float * in, int N, float * out) {
 
 #include "core/mel.h"
 
-static std::vector<float> parakeet_compute_mel(parakeet_context * ctx,
-                                               const float * samples, int n_samples,
-                                               int & T_out) {
+static std::vector<float> parakeet_compute_mel_impl(parakeet_context * ctx,
+                                                    const float * samples, int n_samples,
+                                                    int & T_out) {
     const auto & hp     = ctx->model.hparams;
     const int n_fft     = (int)hp.n_fft;
     const int hop       = (int)hp.hop_length;
@@ -1242,6 +1242,40 @@ extern std::vector<float> parakeet_encode_mel(parakeet_context * ctx,
                                               const float * mel, int n_mels, int T_mel,
                                               int * out_T_enc);
 
+// ---- Stage-level entry points for crispasr-diff ----
+
+extern "C" float * parakeet_compute_mel(struct parakeet_context * ctx,
+                                        const float * samples, int n_samples,
+                                        int * out_n_mels, int * out_T_mel) {
+    if (!ctx || !samples || n_samples <= 0) return nullptr;
+    int T_mel = 0;
+    auto mel = parakeet_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    if (mel.empty()) return nullptr;
+    const int n_mels = (int)ctx->model.hparams.n_mels;
+    if (out_n_mels) *out_n_mels = n_mels;
+    if (out_T_mel)  *out_T_mel  = T_mel;
+    float * r = (float *)malloc(mel.size() * sizeof(float));
+    if (!r) return nullptr;
+    std::memcpy(r, mel.data(), mel.size() * sizeof(float));
+    return r;
+}
+
+extern "C" float * parakeet_run_encoder(struct parakeet_context * ctx,
+                                        const float * mel, int n_mels, int T_mel,
+                                        int * out_T_enc, int * out_d_model) {
+    if (!ctx || !mel || T_mel <= 0) return nullptr;
+    int T_enc = 0;
+    auto enc = parakeet_encode_mel(ctx, mel, n_mels, T_mel, &T_enc);
+    if (enc.empty()) return nullptr;
+    const int d = (int)ctx->model.hparams.d_model;
+    if (out_T_enc)   *out_T_enc   = T_enc;
+    if (out_d_model) *out_d_model = d;
+    float * r = (float *)malloc(enc.size() * sizeof(float));
+    if (!r) return nullptr;
+    std::memcpy(r, enc.data(), enc.size() * sizeof(float));
+    return r;
+}
+
 extern "C" int parakeet_test_encoder(struct parakeet_context * ctx, int T_mel) {
     int n_mels = (int)ctx->model.hparams.n_mels;
     std::vector<float> mel((size_t)n_mels * T_mel, 0.0f);
@@ -1257,7 +1291,7 @@ extern "C" int parakeet_test_encoder(struct parakeet_context * ctx, int T_mel) {
 extern "C" int parakeet_test_audio(struct parakeet_context * ctx,
                                    const float * samples, int n_samples) {
     int T_mel = 0;
-    auto mel = parakeet_compute_mel(ctx, samples, n_samples, T_mel);
+    auto mel = parakeet_compute_mel_impl(ctx, samples, n_samples, T_mel);
     if (mel.empty()) return -1;
 
     fprintf(stderr,
@@ -1335,7 +1369,7 @@ extern "C" struct parakeet_result * parakeet_transcribe_ex(
 
     // 1. Mel
     int T_mel = 0;
-    auto mel = parakeet_compute_mel(ctx, samples, n_samples, T_mel);
+    auto mel = parakeet_compute_mel_impl(ctx, samples, n_samples, T_mel);
     if (mel.empty()) return nullptr;
 
     // 2. Encoder
