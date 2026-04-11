@@ -220,6 +220,8 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-am"   || arg == "--aligner-model")        { params.aligner_model   = ARGV_NEXT; }
         else if (arg == "-n"    || arg == "--max-new-tokens")       { params.max_new_tokens  = std::stoi(ARGV_NEXT); }
         else if (arg == "-ck"   || arg == "--chunk-seconds")        { params.chunk_seconds   = std::stoi(ARGV_NEXT); }
+        else if (                  arg == "--lid-backend")          { params.lid_backend     = ARGV_NEXT; }
+        else if (                  arg == "--lid-model")            { params.lid_model       = ARGV_NEXT; }
         else if (                  arg == "--list-backends")        {
             crispasr_print_backend_matrix();
             exit(0);
@@ -314,6 +316,8 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  -tl LANG,  --target-lang LANG     [%-7s] target language (canary AST)\n",                   params.target_lang.c_str());
     fprintf(stderr, "             --no-punctuation       [%-7s] disable punctuation (canary, cohere)\n",           params.punctuation ? "false" : "true");
     fprintf(stderr, "  -am FNAME, --aligner-model FNAME  [%-7s] CTC aligner GGUF (LLM backends word timestamps)\n",params.aligner_model.c_str());
+    fprintf(stderr, "  --lid-backend NAME                [%-7s] language-detect backend: whisper|silero (for non-native backends)\n", params.lid_backend.c_str());
+    fprintf(stderr, "  --lid-model FNAME                 [%-7s] optional LID model path (default ggml-tiny.bin)\n", params.lid_model.c_str());
     fprintf(stderr, "  -n N,      --max-new-tokens N     [%-7d] max new tokens for LLM backends\n",                params.max_new_tokens);
     fprintf(stderr, "  -ck N,     --chunk-seconds N      [%-7d] fallback chunk size when VAD is disabled\n",       params.chunk_seconds);
     fprintf(stderr, "             -m auto                        download a default model for the chosen backend\n");

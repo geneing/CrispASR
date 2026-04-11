@@ -246,6 +246,20 @@ contributor-facing path for adding backends with confidence. Status:
 - **[later]** Mirror the same for `tools/reference_backends/voxtral.py`
   so `voxtral-test-llm` stops reporting `[SKIP]`. Needs the Voxtral
   apply_chat_template → processor → embed → splice → forward path.
+- **[later]** Native GGUF port of Silero's language detector. Wire the
+  `--lid-backend silero` flag up to a real implementation so the LID
+  pre-step has a second provider besides whisper-tiny. Needs:
+  (1) `models/convert-silero-lid-to-gguf.py` — mirrors the existing
+      `models/convert-silero-vad-to-ggml.py` pattern: load Silero's
+      TorchScript/ONNX export, extract the classifier weights plus
+      the language-id lookup table, write a GGUF tensor archive.
+  (2) `examples/cli/crispasr_lid.cpp::detect_with_silero()` — loader
+      via `core_gguf::load_weights`, small ggml graph for the forward
+      pass, softmax + argmax on the language logits. Same pattern as
+      whisper_vad's Silero VAD forward path.
+  The flag is already accepted by the CLI today; until (1)+(2) ship
+  it returns an actionable "not yet implemented" error and points
+  users at `--lid-backend whisper` (the default).
 - **[done]** ~~Delete the legacy `models/*-dump-*.py` scripts~~ — done.
   Removed `qwen3-asr-{llm,reference,trace}-dump.py`,
   `voxtral-{encoder,llm}-dump.py`, `voxtral4b-dump-ref.py`, and

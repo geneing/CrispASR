@@ -128,4 +128,16 @@ struct whisper_params {
 
     // Fallback chunk size for long audio when VAD is not enabled.
     int32_t     chunk_seconds    = 30;
+
+    // Optional language-detection pre-step for backends that don't
+    // support auto-language natively (cohere, canary, granite, voxtral,
+    // voxtral4b). Runs before transcribe() and fills in `language` +
+    // `source_lang` from the detected code. `lid_backend` picks the
+    // implementation: "whisper" (default, uses a small ggml-*.bin LID
+    // model auto-downloaded on first use), "silero" (reserved for a
+    // future native GGUF port of Silero's language detector), or empty
+    // to disable. `lid_model` optionally overrides the default model
+    // path for the chosen backend.
+    std::string lid_backend;
+    std::string lid_model;
 };

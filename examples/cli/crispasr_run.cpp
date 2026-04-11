@@ -12,6 +12,7 @@
 #include "crispasr_output.h"
 #include "crispasr_model_mgr.h"
 #include "crispasr_aligner.h"
+#include "crispasr_lid.h"
 #include "whisper_params.h"
 
 #include "common-whisper.h" // read_audio_data
@@ -134,6 +135,38 @@ int crispasr_run_backend(const whisper_params & params_in) {
                     "crispasr: audio: %d samples (%.1f s) @ %d Hz, %d threads\n",
                     (int)samples.size(),
                     (double)samples.size() / SR, SR, params.n_threads);
+        }
+
+        // Optional language-identification pre-step. Fires only when the
+        // user asked for auto language (either --detect-language or
+        // --language auto) AND the chosen backend can't detect language
+        // natively (qwen3/whisper/parakeet already do). The detected ISO
+        // code is written into `params.language` and, if empty, into
+        // `params.source_lang` so canary can pick it up as well.
+        const bool want_auto_lang = params.detect_language ||
+                                    params.language == "auto";
+        const bool has_native_lid = (backend->capabilities() & CAP_LANGUAGE_DETECT) != 0;
+        const bool lid_disabled   = params.lid_backend == "off" ||
+                                    params.lid_backend == "none";
+        if (want_auto_lang && !has_native_lid && !lid_disabled) {
+            crispasr_lid_result lid;
+            if (crispasr_detect_language(samples.data(), (int)samples.size(),
+                                          params, lid)) {
+                params.language = lid.lang_code;
+                if (params.source_lang.empty()) {
+                    params.source_lang = lid.lang_code;
+                }
+                if (!params.no_prints) {
+                    fprintf(stderr,
+                            "crispasr: LID -> language = '%s' (%s, p=%.3f)\n",
+                            lid.lang_code.c_str(), lid.source.c_str(),
+                            lid.confidence);
+                }
+            } else if (!params.no_prints) {
+                fprintf(stderr,
+                        "crispasr: LID failed, falling back to params.language='%s'\n",
+                        params.language.c_str());
+            }
         }
 
         // Slice into chunks (VAD or fixed-window fallback).
