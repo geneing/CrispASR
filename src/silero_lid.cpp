@@ -256,10 +256,10 @@ static void self_attention(
         }
     }
 
-    // Debug: compare input + QKV with ONNX
-    // Split into Q, K, V each [T, D]
-    auto Q = qkv.data();
-    auto K = qkv.data() + D;
+    // ONNX slice order is K [0:D], Q [D:2D], V [2D:3D] (confirmed by
+    // intermediate dump: tensor 746=K, 749=Q, 752=V).
+    auto K = qkv.data();
+    auto Q = qkv.data() + D;
     auto V = qkv.data() + 2 * D;
     int stride_qkv = 3 * D;
 
@@ -428,16 +428,13 @@ extern "C" const char * silero_lid_detect(
         int S_fe   = m.frontend_stride;   // 160
         int C_fe   = m.frontend_channels; // 322
 
-        // Reflection-pad the input with K_fe samples at the front.
-        // The ONNX graph uses Pad_24 with a complex slice-based padding
-        // that mirrors the first K_fe audio samples. This ensures the
-        // Conv output at frame 0 sees real audio (not silence), producing
-        // non-zero features from the start.
-        std::vector<float> padded(K_fe + n_samples);
-        for (int i = 0; i < K_fe; i++)
-            padded[i] = (K_fe - 1 - i < n_samples) ? samples[K_fe - 1 - i] : 0.f;
-        std::memcpy(padded.data() + K_fe, samples, n_samples * sizeof(float));
-        int N_padded = (int)padded.size();
+        // Zero-pad the input with S_fe (160) samples on each side.
+        // ONNX Pad_24 uses mode=constant (zeros) with pad vector
+        // [0,0,0,160, 0,0,0,160] on the [1,1,1,N] tensor.
+        int pad_lr = S_fe;  // 160 on each side
+        int N_padded = pad_lr + n_samples + pad_lr;
+        std::vector<float> padded(N_padded, 0.f);
+        std::memcpy(padded.data() + pad_lr, samples, n_samples * sizeof(float));
 
         T = (N_padded - K_fe) / S_fe + 1;
         C = C_fe;
@@ -503,16 +500,27 @@ extern "C" const char * silero_lid_detect(
         }
 
         // Step 5: smooth with adaptive normalization filter (17-tap)
+        // ONNX uses reflection padding with pad=8 on each side of the time axis.
         if (m.adaptive_norm_filter) {
             const float * filt = (const float *)m.adaptive_norm_filter->data;
-            int K_filt = 17, pad_f = K_filt / 2;
+            int K_filt = 17, pad_f = K_filt / 2;  // pad_f = 8
+
+            // Reflection-pad frame_mean: [pad_f + T + pad_f]
+            std::vector<float> padded_fm(pad_f + T + pad_f);
+            // Left reflection: padded[i] = frame_mean[pad_f - i] for i=0..pad_f-1
+            for (int i = 0; i < pad_f; i++)
+                padded_fm[i] = frame_mean[pad_f - i];
+            // Center: copy frame_mean
+            std::memcpy(padded_fm.data() + pad_f, frame_mean.data(), T * sizeof(float));
+            // Right reflection: padded[pad_f+T+i] = frame_mean[T-2-i]
+            for (int i = 0; i < pad_f; i++)
+                padded_fm[pad_f + T + i] = frame_mean[T - 2 - i];
+
+            // Conv1d with the padded signal (no further padding needed)
             std::vector<float> smooth(T, 0.f);
             for (int t = 0; t < T; t++) {
-                for (int k = 0; k < K_filt; k++) {
-                    int ti = t + k - pad_f;
-                    if (ti >= 0 && ti < T)
-                        smooth[t] += filt[k] * frame_mean[ti];
-                }
+                for (int k = 0; k < K_filt; k++)
+                    smooth[t] += filt[k] * padded_fm[t + k];
             }
 
             // Step 6: global mean of smoothed
@@ -529,6 +537,7 @@ extern "C" const char * silero_lid_detect(
         // Replace cur with the 161-channel log-magnitude features
         cur = std::move(log_mag);
         C = C_half;  // 161
+
     }
 
     for (int si = 0; si < (int)m.stages.size(); si++) {
@@ -599,9 +608,6 @@ extern "C" const char * silero_lid_detect(
             cur = std::move(out);
             C = C_out;
 
-            if (si == 0 && bi == 11) {
-                float m = 0; for(int i=0;i<C*T;i++) m+=cur[i]; m/=(C*T);
-            }
         }
 
         // ---- Transformer block (runs BEFORE stride-2 downsample) ----
@@ -639,7 +645,9 @@ extern "C" const char * silero_lid_detect(
         // ONNX order: conv → transformer → transpose → stride-2 Conv → ReLU → next
         if (tx.conv1x1_w && si < m.n_downsample_stages) {
             int C_out = (int)tx.conv1x1_w->ne[2];
-            int T_out = T / 2;
+            // Conv1d output size: (T - kernel + 2*pad) / stride + 1
+            // For kernel=1, pad=0, stride=2: (T-1)/2 + 1
+            int T_out = (T - 1) / 2 + 1;
             std::vector<float> ds(C_out * T_out);
             const float * cw = (const float *)tx.conv1x1_w->data;
             const float * cb = tx.conv1x1_b ? (const float *)tx.conv1x1_b->data : nullptr;
@@ -657,7 +665,8 @@ extern "C" const char * silero_lid_detect(
             C = C_out;
             T = T_out;
         } else if (tx.conv1x1_w) {
-            // Stride-1 projection (192-dim stages)
+            // Stride-1 projection (192-dim stages 4-7)
+            // ONNX: Conv → ReLU (confirmed for all stages, e.g. Conv_1401 → Relu_1402)
             int C_out = (int)tx.conv1x1_w->ne[2];
             std::vector<float> proj(C_out * T);
             const float * cw = (const float *)tx.conv1x1_w->data;
@@ -670,6 +679,7 @@ extern "C" const char * silero_lid_detect(
                     proj[co * T + t] = sum;
                 }
             }
+            for (float & v : proj) v = std::max(0.f, v);  // ReLU
             cur = std::move(proj);
             C = C_out;
         }
@@ -684,7 +694,7 @@ extern "C" const char * silero_lid_detect(
         float dot = 0;
         for (int d = 0; d < D; d++)
             dot += pw[d] * cur[d * T + t];
-        frame_scores[t] = dot;
+        frame_scores[t] = tanhf(dot);  // ONNX: Tanh_1405 before Softmax
     }
     // Softmax
     float mx = *std::max_element(frame_scores.begin(), frame_scores.end());

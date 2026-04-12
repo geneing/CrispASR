@@ -421,18 +421,34 @@ static ggml_cgraph * wav2vec2_build_transformer_graph(
         K   = ggml_reshape_3d(ctx0, K,   head_dim, n_heads, T);
         V_t = ggml_reshape_3d(ctx0, V_t, head_dim, n_heads, T);
 
-        // Permute to (head_dim, T, n_heads) for flash attention
+        // Manual multi-head attention (ggml_flash_attn_ext crashes with
+        // nullptr mask on some backends — use standard mul_mat path).
+        // Q,K,V are (head_dim, n_heads, T). Permute for matmul:
+        // Q → (head_dim, T, n_heads): for Q @ K^T
+        // K → (head_dim, T, n_heads): transposed via mul_mat convention
+        // V → (head_dim, T, n_heads): for attn_weights @ V
         Q   = ggml_cont(ctx0, ggml_permute(ctx0, Q,   0, 2, 1, 3));
         K   = ggml_cont(ctx0, ggml_permute(ctx0, K,   0, 2, 1, 3));
         V_t = ggml_cont(ctx0, ggml_permute(ctx0, V_t, 0, 2, 1, 3));
 
-        // Flash attention (no mask — bidirectional encoder)
+        // scores = Q^T @ K → (T, T, n_heads)
+        // ggml_mul_mat(A, B) = A^T @ B, so mul_mat(K, Q) = K^T @ Q → (T, T, n_heads)
         float attn_scale = 1.0f / sqrtf((float)head_dim);
-        ggml_tensor * attn = ggml_flash_attn_ext(
-            ctx0, Q, K, V_t, /*mask*/nullptr,
-            attn_scale, 0.0f, 0.0f);
+        ggml_tensor * scores = ggml_mul_mat(ctx0, K, Q);
+        scores = ggml_scale(ctx0, scores, attn_scale);
+        scores = ggml_soft_max(ctx0, scores);
 
-        // Reshape back to (H, T)
+        // attn_out = scores @ V → for each head: (T,T) @ (T,head_dim) → (T,head_dim)
+        // V_t is (head_dim, T, n_heads). We need V with ne[0]=T for mul_mat.
+        // Permute V_t: (head_dim, T, n_heads) → (T, head_dim, n_heads)
+        ggml_tensor * V_for_attn = ggml_cont(ctx0, ggml_permute(ctx0, V_t, 1, 0, 2, 3));
+        // V_for_attn: ne = (T, head_dim, n_heads)
+        // mul_mat(V_for_attn, scores) = V_for_attn^T @ scores
+        //   V_for_attn^T: (head_dim, T) @ scores: (T, T) → (head_dim, T, n_heads)
+        ggml_tensor * attn = ggml_mul_mat(ctx0, V_for_attn, scores);
+
+        // attn is (head_dim, T, n_heads). Permute → (head_dim, n_heads, T) → reshape to (H, T)
+        attn = ggml_cont(ctx0, ggml_permute(ctx0, attn, 0, 2, 1, 3));
         attn = ggml_reshape_2d(ctx0, attn, H, T);
 
         // Output projection + residual
@@ -651,12 +667,10 @@ std::vector<float> wav2vec2_compute_logits(
     const float * raw_audio, int n_samples,
     int n_threads)
 {
-    // Graph path disabled pending debug of ggml_flash_attn_ext crash
-    // (likely head_dim=64 or tensor-layout issue). The ggml graph + loader
-    // migration are structurally complete — enabling requires fixing the
-    // crash in the transformer graph path.
-    // auto result = wav2vec2_compute_logits_graph(m, raw_audio, n_samples, n_threads);
-    // if (!result.empty()) return result;
+    // Try ggml graph path first (uses backend-buffer tensors + mul_mat attention).
+    // Falls back to manual C++ if the graph fails.
+    auto result = wav2vec2_compute_logits_graph(m, raw_audio, n_samples, n_threads);
+    if (!result.empty()) return result;
 
     const auto & hp = m.hparams;
 

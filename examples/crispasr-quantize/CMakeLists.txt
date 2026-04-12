@@ -19,4 +19,4 @@ include(DefaultTargetOptions)
 
 target_link_libraries(${TARGET} PRIVATE common ggml ggml-base ${CMAKE_THREAD_LIBS_INIT})
 
-install(TARGETS ${TARGET} RUNTIME)
+install(TARGETS ${TARGET} RUNTIME BUNDLE DESTINATION bin)

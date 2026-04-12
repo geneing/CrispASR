@@ -409,3 +409,47 @@ These are each preserved in `HISTORY.md` with full context. Summary form:
 7. **Q-Former layer norm target.** BLIP-2 projector LN applies to the
    query tokens, not the encoder output. Wrong tensor → garbage projector
    output → garbage LLM input → garbage transcript.
+8. **Silero LID: five compounding bugs.** The native port of Silero's
+   95-language classifier went through Swedish → Mongolian → Bashkir →
+   Khmer → Chinese → Punjabi → English on jfk.wav, each fix changing
+   the top prediction. Root causes, in order of severity:
+   (a) **Front-end padding.** ONNX uses constant zero-pad 160/side on
+       audio; we used reflection-pad 320 on the left. The padding type
+       and amount are buried in a Pad node with a dynamically-computed
+       pad vector from a chain of 15 ONNX ops.
+   (b) **Stride-2 output size.** Conv1d(T, k=1, s=2) output is
+       `(T-1)/2+1`, not `T/2`. Off-by-one cascades through 4 stride-2
+       stages (1101→551→276→138→69) — wrong value drops 1 frame per
+       stage, silently shifting the feature alignment.
+   (c) **QKV split order.** ONNX slices QKV as K[0:D], Q[D:2D],
+       V[2D:3D]. We assumed Q,K,V order. The only way to discover this
+       is to dump the Slice node inputs and compare the split boundaries.
+   (d) **Missing ReLU after stride-1 projections.** Stages 4-7 use
+       stride-1 Conv1x1→ReLU for dim change (128→192). The ReLU is
+       easy to miss since the stride-2 stages already had it.
+   (e) **Missing tanh in attention pooling.** ONNX does dot→Tanh→
+       Softmax; we did dot→Softmax. The Tanh compresses the score
+       range, which completely changes the attention distribution.
+   **Lesson:** When porting an unfamiliar ONNX model, dump intermediates
+   at every graph boundary and diff against the native code BEFORE
+   debugging individual ops. The bug is almost never where you expect.
+
+---
+
+## Quantization
+
+### Small models with conv-heavy architectures resist quantization
+
+The Silero LID model (16 MB F32, 507 tensors) was tested with Q8_0 and
+Q5_0 quantization. Both broke accuracy completely (French/Shona instead
+of English). The model's parameters are mostly small Conv1d kernels
+(dw_conv [5,1,C], pw_conv [1,C,C]) where C ∈ {128, 161, 192}. These
+tensors have very few elements per row (1-5), making block quantization
+destructive. Only the transformer QKV/out/FFN projections and classifiers
+(34 of 507 tensors) have enough elements per row to quantize safely, but
+that saves only 3-5 MB — not worth the accuracy loss.
+
+**Rule of thumb:** If a model's parameter count is dominated by Conv1d
+kernels with small spatial dimensions (k ≤ 5) and few channels (C < 256),
+ship it F32. The 16 MB F32 Silero LID model is smaller than a single
+layer of most ASR encoders — quantization is pointless.

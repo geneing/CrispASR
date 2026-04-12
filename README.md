@@ -78,10 +78,11 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 
 **Speaker diarization** is available for all backends as a post-processing step via `--diarize`:
 - `--diarize-method energy` / `xcorr` — stereo-only, no extra deps
-- `--diarize-method sherpa` / `pyannote` / `ecapa` — calls an externally-installed [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) subprocess with pyannote v3 segmentation + speaker embedding models. Needs `--sherpa-segment-model` and `--sherpa-embedding-model` pointing at the ONNX files from the sherpa-onnx release.
+- `--diarize-method pyannote` — native GGUF runtime (no Python, no sherpa-onnx). Pass `--sherpa-segment-model pyannote-v3-seg.gguf` for the pyannote v3 segmentation model. Falls back to sherpa subprocess for `.onnx` models.
+- `--diarize-method sherpa` / `ecapa` — calls an externally-installed [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) subprocess with speaker embedding models.
 - `--diarize-method vad-turns` — mono-friendly, assigns speaker labels at gap boundaries
 
-**Language identification** for backends without native LID: `--lid-backend whisper` (default, 75 MB ggml-tiny.bin) or `--lid-backend silero` (shells out to sherpa-onnx LID).
+**Language identification** for backends without native LID: `--lid-backend whisper` (default, 75 MB ggml-tiny.bin) or `--lid-backend silero` (native GGUF, 16 MB, 95 languages — pass `--lid-model silero-lid-95.gguf`).
 
 ### Which backend should I pick?
 
@@ -112,13 +113,12 @@ crispasr --backend cohere -m $TC/cohere-transcribe-q5_0.gguf \
 # crispasr: LID -> language = 'en' (whisper, p=0.977)
 ```
 
-The default provider (`--lid-backend whisper`) uses a small
-multilingual ggml-*.bin model via the whisper.cpp C API — pure C++,
-zero Python. A future commit will add `--lid-backend silero` on top
-of a native GGUF port of Silero's language classifier. The flag is
-already accepted but currently returns an actionable "not yet
-implemented" error. Pass `--lid-backend off` to skip the pre-step
-entirely.
+Two LID providers are available:
+
+- `--lid-backend whisper` (default) — uses a small multilingual ggml-*.bin model via the whisper.cpp C API. Auto-downloads ~75 MB on first use. 99 languages.
+- `--lid-backend silero --lid-model silero-lid-95.gguf` — native GGUF port of Silero's 95-language classifier. 16 MB F32, pure C++ (manual F32 forward pass, no Python). Faster and smaller than whisper-tiny but slightly less accurate on long audio (>20s).
+
+Pass `--lid-backend off` to skip the pre-step entirely.
 
 ---
 
@@ -132,7 +132,7 @@ entirely.
 - Optional: `libopenblas`/MKL/Accelerate — speeds up CPU-side matmuls for the Conformer-based encoders (parakeet, canary, cohere, granite, fastconformer-ctc). The ggml CPU backend picks up BLAS automatically when it's present at build time; no CrispASR configure flag needed.
 - Optional: CUDA/Metal/Vulkan GPU backend — enabled via ggml's standard flags (`GGML_CUDA=ON`, `GGML_METAL=ON`, etc.). On CUDA you can set `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` to allow swapping to system RAM when VRAM is exhausted.
 - `curl` or `wget` on `$PATH` if you want to use `-m auto` auto-download
-- Optional: `sherpa-onnx` binaries on `$PATH` if you want `--diarize-method sherpa` or `--lid-backend silero`
+- Optional: `sherpa-onnx` binaries on `$PATH` if you want `--diarize-method sherpa` with ONNX models
 
 No Python, PyTorch, or pip required at runtime.
 
@@ -290,7 +290,7 @@ curl -L -o parakeet.gguf \
 | Flag | Meaning |
 |---|---|
 | `-l auto`, `--detect-language` | Auto-detect the input language. Backends without native lang-detect (cohere, canary, granite, voxtral, voxtral4b) get it via the LID pre-step |
-| `--lid-backend NAME` | LID provider: `whisper` (default, ships ggml-tiny.bin), `silero` (placeholder pending native GGUF port), or `off` to disable |
+| `--lid-backend NAME` | LID provider: `whisper` (default, ships ggml-tiny.bin), `silero` (native GGUF, 95 languages, 16 MB), or `off` to disable |
 | `--lid-model FNAME` | Override the LID model path (default: auto-downloads `ggml-tiny.bin` ~75 MB on first use) |
 
 ### LLM-backend specific
@@ -696,8 +696,9 @@ Build flags: `-DGGML_CUDA=ON`, `-DGGML_METAL=ON`, `-DGGML_VULKAN=ON`.
 - **Mistral AI** — Voxtral Mini 3B and 4B Realtime
 - **IBM Granite team** — Granite Speech 3.2-8b, 3.3-2b, 3.3-8b, 4.0-1b
 - **Meta / omniASR** — omniASR-CTC wav2vec2 multilingual (WIP)
-- **[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — optional diarization + LID via subprocess
-- **[Silero](https://github.com/snakers4/silero-vad)** — VAD (native GGUF) and language detection (via sherpa)
+- **[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — optional diarization via subprocess (ONNX models)
+- **[Silero](https://github.com/snakers4/silero-vad)** — VAD (native GGUF) and language identification (native GGUF, 95 languages)
+- **[pyannote](https://github.com/pyannote/pyannote-audio)** — speaker diarization segmentation (native GGUF port)
 - **[miniaudio](https://miniaud.io/)** and **[stb_vorbis](https://github.com/nothings/stb)** — embedded audio decoders
 - **[Claude Code](https://claude.ai/claude-code)** (Anthropic) — significant portions of the crispasr integration layer, all model converters, and the FastConformer/attention/mel/FFN/BPE core helpers were co-authored with Claude
 

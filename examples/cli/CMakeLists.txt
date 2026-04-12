@@ -82,7 +82,7 @@ target_link_libraries(crispasr-diff PRIVATE
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
 )
-install(TARGETS crispasr-diff RUNTIME)
+install(TARGETS crispasr-diff RUNTIME BUNDLE DESTINATION bin)
 
 set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME crispasr)
 
@@ -106,7 +106,7 @@ target_link_libraries(${TARGET} PRIVATE
     ${CMAKE_THREAD_LIBS_INIT}
 )
 
-install(TARGETS ${TARGET} RUNTIME)
+install(TARGETS ${TARGET} RUNTIME BUNDLE DESTINATION bin)
 
 # ---------------------------------------------------------------------------
 # Backward-compat alias: `whisper-cli` binary name -> `crispasr`.

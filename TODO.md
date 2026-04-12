@@ -321,20 +321,14 @@ contributor-facing path for adding backends with confidence. Status:
   `--forced-aligner BACKEND` post-step like LID and diarize — the
   full HF pipeline is documented at
   https://github.com/QwenLM/Qwen3-ASR/blob/main/qwen_asr/inference/qwen3_forced_aligner.py
-- **[later]** Native GGUF port of Silero's language detector. Wire the
-  `--lid-backend silero` flag up to a real implementation so the LID
-  pre-step has a second provider besides whisper-tiny. Needs:
-  (1) `models/convert-silero-lid-to-gguf.py` — mirrors the existing
-      `models/convert-silero-vad-to-ggml.py` pattern: load Silero's
-      TorchScript/ONNX export, extract the classifier weights plus
-      the language-id lookup table, write a GGUF tensor archive.
-  (2) `examples/cli/crispasr_lid.cpp::detect_with_silero()` — loader
-      via `core_gguf::load_weights`, small ggml graph for the forward
-      pass, softmax + argmax on the language logits. Same pattern as
-      whisper_vad's Silero VAD forward path.
-  The flag is already accepted by the CLI today; until (1)+(2) ship
-  it returns an actionable "not yet implemented" error and points
-  users at `--lid-backend whisper` (the default).
+- **[done]** ~~Native GGUF port of Silero's language detector.~~
+  **Done.** `src/silero_lid.{h,cpp}` implements a pure-C++ forward pass
+  (no ggml graph — manual F32 loops, similar to pyannote_seg). GGUF
+  converter at `models/convert-silero-lid-to-gguf.py`. 507 tensors,
+  16.1 MB F32 / ~9 MB Q8_0. CLI wiring in `crispasr_lid.cpp`: when
+  `--lid-model *.gguf` is passed, the native path runs; falls back to
+  sherpa subprocess for `.onnx` models. Verified: English, German,
+  Latvian correctly detected across multiple test wavs.
 - **[done]** ~~Delete the legacy `models/*-dump-*.py` scripts~~ — done.
   Removed `qwen3-asr-{llm,reference,trace}-dump.py`,
   `voxtral-{encoder,llm}-dump.py`, `voxtral4b-dump-ref.py`, and
@@ -385,16 +379,18 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 | `cstr/stt-en-fastconformer-ctc-large-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
 | `cstr/stt-en-fastconformer-ctc-xlarge-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
 | `cstr/stt-en-fastconformer-ctc-xxlarge-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
+| `cstr/silero-lid-lang95-GGUF` | ✅ shipped (f32 only — 16 MB; quants break accuracy on small conv tensors) |
 
 ---
 
 ## Current session WIP (April 2026)
 
-### Silero LID native port (#56)
+### Silero LID native port (#56) — DONE ✅
 - **Files:** src/silero_lid.{h,cpp}, models/convert-silero-lid-to-gguf.py
-- **State:** Runs in 3.2s, correct architecture (front-end Conv stride-160 → magnitude → log(2^20×mag+1) → adaptive norm → 8 stage pairs with stride-2 → attention pool → classifier)
-- **Bug:** Detects Mongolian instead of English. Stage-0 conv output mean=-0.37 vs ONNX -2.17. Residual adds are present but conv blocks produce features at wrong scale.
-- **Next fix:** Per-block intermediate dump to isolate which of the 12 conv blocks in stage 0 diverges first. The dw_sep_conv1d function's weight orientation or the residual topology for the LAST block (which has a proj changing channel count 161→128) may be wrong.
+- **State:** Fully working. Detects English on jfk.wav, German on German samples, Latvian on Latvian samples. Matches ONNX reference model output.
+- **5 bugs fixed:** (1) front-end zero-pad 160/side not reflection-pad 320 left, (2) stride-2 output T=(T-1)/2+1 not T/2, (3) QKV split order K,Q,V not Q,K,V, (4) missing ReLU after stride-1 projections stages 4-7, (5) missing tanh in attention pooling.
+- **Architecture:** Learned STFT Conv1d(1→322,k=320,s=160) → magnitude → log(2^20×mag+1) → adaptive norm (17-tap reflected smooth) → 8×(12 dw-sep conv + post-norm transformer + stride-2/1 proj+ReLU) → attention pool (tanh+softmax) → 95-lang + 58-group classifiers.
+- **GGUF:** F32 16.1 MB, Q8_0 ~9 MB. Available at `cstr/silero-lid-lang95-GGUF`.
 
 ### wav2vec2 ggml rewrite (#63)
 - **Files:** src/wav2vec2-ggml.{h,cpp}
