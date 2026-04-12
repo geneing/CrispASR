@@ -48,8 +48,9 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 | **voxtral** | [`mistralai/Voxtral-Mini-3B-2507`](https://huggingface.co/mistralai/Voxtral-Mini-3B-2507) | Whisper encoder + Mistral 3B LLM, audio-token injection | 8 | Apache-2.0 |
 | **voxtral4b** | [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) | Causal RoPE+SwiGLU encoder + 3.4B LLM with adaptive RMSNorm + sliding window | 13, realtime streaming | Apache-2.0 |
 | **qwen3** | [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) | Whisper-style audio encoder + Qwen3 0.6B LLM | 30 + 22 Chinese dialects | Apache-2.0 |
+| **wav2vec2** | [`jonatasgrosman/wav2vec2-large-xlsr-53-english`](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-english) | CNN + 24-layer transformer + CTC head (any Wav2Vec2ForCTC) | per-model (en, de, multilingual available) | Apache-2.0 |
 
-All ten runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family (small through xxlarge, same architecture as the canary aligner) with greedy CTC decoding.
+All eleven runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family (small through xxlarge, same architecture as the canary aligner) with greedy CTC decoding.
 
 ## Feature matrix
 
@@ -57,22 +58,22 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 
 <!-- Generated from `crispasr --list-backends` + cross-cutting features. -->
 
-| Feature | whisper | parakeet | canary | cohere | granite | voxtral | voxtral4b | qwen3 | fc-ctc |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| Native timestamps | ✔ | ✔ | ✔ | ✔ | | | | | |
-| CTC timestamps | | | ✔ | | ✔ | ✔ | ✔ | ✔ | ✔ |
-| Word-level timing | ✔ | ✔ | ✔ | ✔ | `-am` | `-am` | `-am` | `-am` | `-am` |
-| Per-token confidence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
-| Language auto-detect | ✔ | ✔ | LID | LID | LID | LID | LID | ✔ | LID |
-| Speech translation | ✔ | | ✔ | | ✔ | ✔ | | ✔ | |
-| Speaker diarization | all | all | all | all | all | all | all | all | all |
-| Grammar (GBNF) | ✔ | | | | | | | | |
-| Temperature sampling | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
-| Beam search | ✔ | | | | | ✔ | | | |
-| Flash attention | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
-| Punctuation toggle | | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
-| Source / target language | | | ✔ | | ✔ | ✔ | | ✔ | |
-| Auto-download | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
+| Feature | whisper | parakeet | canary | cohere | granite | voxtral | voxtral4b | qwen3 | fc-ctc | wav2vec2 |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Native timestamps | ✔ | ✔ | ✔ | ✔ | | | | | | |
+| CTC timestamps | | | ✔ | | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| Word-level timing | ✔ | ✔ | ✔ | ✔ | `-am` | `-am` | `-am` | `-am` | `-am` | |
+| Per-token confidence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
+| Language auto-detect | ✔ | ✔ | LID | LID | LID | LID | LID | ✔ | LID | LID |
+| Speech translation | ✔ | | ✔ | | ✔ | ✔ | | ✔ | | |
+| Speaker diarization | all | all | all | all | all | all | all | all | all | all |
+| Grammar (GBNF) | ✔ | | | | | | | | | |
+| Temperature sampling | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
+| Beam search | ✔ | | | | | ✔ | | | | |
+| Flash attention | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
+| Punctuation toggle | | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
+| Source / target language | | | ✔ | | ✔ | ✔ | | ✔ | | |
+| Auto-download | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
 
 **Key:** ✔ = native, `-am` = via CTC forced aligner (`-am canary-ctc-aligner.gguf` or `-am qwen3-forced-aligner.gguf`), **LID** = via language identification pre-step (`-l auto`), **all** = available for every backend via `--diarize` post-step.
 
@@ -97,6 +98,7 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 | **Realtime streaming ASR** (<500 ms latency) | **voxtral4b** |
 | Highest-quality offline speech-LLM | **voxtral** |
 | Apache-licensed speech-LLM | **granite**, **voxtral**, **voxtral4b**, **qwen3** |
+| **Lightweight CTC-only** (single-language, no LLM) | **wav2vec2**, **fc-ctc** |
 
 ### Language detection for backends that don't do it natively
 
@@ -228,6 +230,30 @@ curl -L -o parakeet.gguf \
 
 ```bash
 ./build/bin/crispasr --backend qwen3 -m auto -f audio.zh.wav
+```
+
+### Wav2Vec2 (lightweight CTC, any HF Wav2Vec2ForCTC model)
+
+```bash
+# English (Q4_K quantized, 212 MB — 6x smaller than F16)
+curl -L -o wav2vec2-en-q4k.gguf \
+    https://huggingface.co/cstr/wav2vec2-large-xlsr-53-english-GGUF/resolve/main/wav2vec2-xlsr-en-q4_k.gguf
+
+./build/bin/crispasr -m wav2vec2-en-q4k.gguf -f samples/jfk.wav
+# and so my fellow americans ask not what your country can do for you ask what you can do for your country
+
+# German
+curl -L -o wav2vec2-de-q4k.gguf \
+    https://huggingface.co/cstr/wav2vec2-large-xlsr-53-german-GGUF/resolve/main/wav2vec2-xlsr-de-q4_k.gguf
+
+./build/bin/crispasr -m wav2vec2-de-q4k.gguf -f audio.de.wav
+
+# Convert any HuggingFace Wav2Vec2ForCTC model:
+python models/convert-wav2vec2-to-gguf.py \
+    --model-dir jonatasgrosman/wav2vec2-large-xlsr-53-german \
+    --output wav2vec2-de.gguf --dtype f32
+# Then optionally quantize:
+./build/bin/crispasr-quantize wav2vec2-de.gguf wav2vec2-de-q4k.gguf q4_k
 ```
 
 ---
@@ -695,7 +721,7 @@ Build flags: `-DGGML_CUDA=ON`, `-DGGML_METAL=ON`, `-DGGML_VULKAN=ON`.
 - **Qwen team (Alibaba)** — Qwen3-ASR-0.6B, Qwen3-ASR-1.7B, Qwen3-ForcedAligner-0.6B
 - **Mistral AI** — Voxtral Mini 3B and 4B Realtime
 - **IBM Granite team** — Granite Speech 3.2-8b, 3.3-2b, 3.3-8b, 4.0-1b
-- **Meta / omniASR** — omniASR-CTC wav2vec2 multilingual (WIP)
+- **Meta / wav2vec2** — wav2vec2 CTC models (XLSR-53 English, German, multilingual via any Wav2Vec2ForCTC checkpoint)
 - **[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — optional diarization via subprocess (ONNX models)
 - **[Silero](https://github.com/snakers4/silero-vad)** — VAD (native GGUF) and language identification (native GGUF, 95 languages)
 - **[pyannote](https://github.com/pyannote/pyannote-audio)** — speaker diarization segmentation (native GGUF port)
