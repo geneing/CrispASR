@@ -15,6 +15,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_voxtral_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_voxtral4b_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_fastconformer_ctc_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_wav2vec2_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -39,6 +40,7 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string & nam
     if (name == "voxtral4b")         return crispasr_make_voxtral4b_backend();
     if (name == "qwen3")             return crispasr_make_qwen3_backend();
     if (name == "fastconformer-ctc") return crispasr_make_fastconformer_ctc_backend();
+    if (name == "wav2vec2" || name == "omniasr") return crispasr_make_wav2vec2_backend();
 
     fprintf(stderr, "crispasr: error: unknown backend '%s'\n", name.c_str());
     return nullptr;
@@ -55,6 +57,7 @@ std::vector<std::string> crispasr_list_backends() {
         "voxtral4b",
         "qwen3",
         "fastconformer-ctc",
+        "wav2vec2",
     };
 }
 
@@ -158,6 +161,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string & model_path) {
     // the broader "canary" match so users who drop a NeMo standalone
     // model next to a canary aligner pick the right backend.
     if (contains_ci("fastconformer") && contains_ci("ctc")) return "fastconformer-ctc";
+    if (contains_ci("omniasr"))                          return "wav2vec2";
+    if (contains_ci("wav2vec2"))                         return "wav2vec2";
     if (contains_ci("canary"))                           return "canary";
     if (contains_ci("cohere"))                           return "cohere";
     if (contains_ci("qwen3") && contains_ci("asr"))      return "qwen3";
