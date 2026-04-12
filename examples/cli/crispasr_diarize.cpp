@@ -3,6 +3,7 @@
 
 #include "crispasr_diarize.h"
 #include "whisper_params.h"
+#include "pyannote_seg.h"
 
 #include <algorithm>
 #include <array>
@@ -381,6 +382,67 @@ bool apply_sherpa(const std::vector<float> & mono,
     return true;
 }
 
+// -----------------------------------------------------------------------
+// Method 5: native pyannote segmentation (no subprocess)
+// -----------------------------------------------------------------------
+bool apply_pyannote_native(
+    const std::vector<float> & mono,
+    int64_t slice_t0_cs,
+    std::vector<crispasr_segment> & segs,
+    const whisper_params & params)
+{
+    if (params.sherpa_segment_model.empty()) {
+        return false;  // no model path → fall through to subprocess
+    }
+
+    // Only try native if the model is a .gguf
+    const std::string & mp = params.sherpa_segment_model;
+    if (mp.size() < 5 || mp.compare(mp.size()-5, 5, ".gguf") != 0) {
+        return false;  // not GGUF → use subprocess
+    }
+
+    pyannote_seg_context * pctx = pyannote_seg_init(mp.c_str(), params.n_threads);
+    if (!pctx) return false;
+
+    int T_seg = 0;
+    float * probs = pyannote_seg_run(pctx, mono.data(), (int)mono.size(), &T_seg);
+    pyannote_seg_free(pctx);
+
+    if (!probs || T_seg <= 0) return false;
+
+    // Frame duration: sinc(stride=10) × 3 maxpools(stride=3) = 270 samples = 16.875 ms
+    const double frame_dur_s = 270.0 / 16000.0;
+
+    // 7 classes: 0=silence, 1=spk0, 2=spk1, 3=spk0+1, 4=spk2, 5=spk0+2, 6=spk1+2
+    static const int class_to_speaker[] = {-1, 0, 1, 0, 2, 0, 1};
+
+    for (auto & seg : segs) {
+        double a0 = (double)(seg.t0 - slice_t0_cs) / 100.0;
+        double a1 = (double)(seg.t1 - slice_t0_cs) / 100.0;
+        int f0 = std::max(0, (int)(a0 / frame_dur_s));
+        int f1 = std::min(T_seg, (int)(a1 / frame_dur_s) + 1);
+        if (f0 >= f1) continue;
+
+        int counts[3] = {0, 0, 0};
+        for (int f = f0; f < f1; f++) {
+            const float * lv = probs + f * 7;
+            int best = 0;
+            for (int i = 1; i < 7; i++) if (lv[i] > lv[best]) best = i;
+            int spk = class_to_speaker[best];
+            if (spk >= 0 && spk < 3) counts[spk]++;
+        }
+        int best_spk = 0;
+        for (int i = 1; i < 3; i++) if (counts[i] > counts[best_spk]) best_spk = i;
+        if (counts[best_spk] > 0)
+            seg.speaker = "(speaker " + std::to_string(best_spk) + ") ";
+    }
+    std::free(probs);
+
+    if (!params.no_prints)
+        fprintf(stderr, "crispasr[diarize]: pyannote-native → %d frames\n", T_seg);
+    return true;
+}
+
 } // namespace
 
 bool crispasr_apply_diarize(
@@ -448,6 +510,11 @@ bool crispasr_apply_diarize(
         } else {
             mono = left;
         }
+        // Try native pyannote first (if the model is a .gguf file)
+        if (apply_pyannote_native(mono, slice_t0_cs, segs, params)) {
+            return true;
+        }
+        // Fall through to sherpa subprocess
         if (apply_sherpa(mono, slice_t0_cs, segs, params)) {
             return true;
         }
