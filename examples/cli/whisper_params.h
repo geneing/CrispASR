@@ -65,6 +65,11 @@ struct whisper_params {
     bool use_gpu         = true;
     bool flash_attn      = true;
     int32_t gpu_device   = 0;
+    // Override the automatic GPU backend selection. When empty (default),
+    // ggml_backend_init_best() picks the highest-priority compiled backend
+    // (CUDA > Metal > Vulkan > CPU). Set to "vulkan", "cuda", "metal", or
+    // "cpu" to force a specific backend.
+    std::string gpu_backend;
     bool suppress_nst    = false;
     bool carry_initial_prompt = false;
 

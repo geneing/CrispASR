@@ -205,6 +205,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-ls"   || arg == "--log-score")            { params.log_score       = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")               { params.use_gpu         = false; }
         else if (arg == "-dev"  || arg == "--device")               { params.gpu_device      = std::stoi(ARGV_NEXT); }
+        else if (                  arg == "--gpu-backend")          { params.gpu_backend     = ARGV_NEXT; }
         else if (arg == "-fa"   || arg == "--flash-attn")           { params.flash_attn      = true; }
         else if (arg == "-nfa"  || arg == "--no-flash-attn")        { params.flash_attn      = false; }
         else if (arg == "-sns"  || arg == "--suppress-nst")         { params.suppress_nst    = true; }
@@ -306,6 +307,7 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  -ls,       --log-score            [%-7s] log best decoder scores of tokens\n",              params.log_score?"true":"false");
     fprintf(stderr, "  -ng,       --no-gpu               [%-7s] disable GPU\n",                                    params.use_gpu ? "false" : "true");
     fprintf(stderr, "  -dev N,    --device N             [%-7d] GPU device ID (default: 0)\n",                     params.gpu_device);
+    fprintf(stderr, "  --gpu-backend NAME                [%-7s] force GPU backend: cuda|vulkan|metal|cpu (default: auto)\n", params.gpu_backend.empty() ? "auto" : params.gpu_backend.c_str());
     fprintf(stderr, "  -fa,       --flash-attn           [%-7s] enable flash attention\n",                         params.flash_attn ? "true" : "false");
     fprintf(stderr, "  -nfa,      --no-flash-attn        [%-7s] disable flash attention\n",                        params.flash_attn ? "false" : "true");
     fprintf(stderr, "  -sns,      --suppress-nst         [%-7s] suppress non-speech tokens\n",                     params.suppress_nst ? "true" : "false");
