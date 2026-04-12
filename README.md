@@ -667,16 +667,39 @@ on what to port from the legacy `models/*-dump-*.py` scripts.
 
 ---
 
+## GPU backend selection
+
+All backends use `ggml_backend_init_best()` which automatically picks the highest-priority compiled backend: CUDA > Metal > Vulkan > CPU. To force a specific backend:
+
+```bash
+# Force Vulkan even when CUDA is available
+crispasr --gpu-backend vulkan -m model.gguf -f audio.wav
+
+# Force CPU (useful for benchmarking)
+crispasr -ng -m model.gguf -f audio.wav
+
+# CUDA unified memory (swap to RAM when VRAM exhausted)
+GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 crispasr -m model.gguf -f audio.wav
+```
+
+Build flags: `-DGGML_CUDA=ON`, `-DGGML_METAL=ON`, `-DGGML_VULKAN=ON`.
+
+---
+
 ## Credits
 
 - **[whisper.cpp](https://github.com/ggml-org/whisper.cpp)** — the ggml inference engine and the whisper runtime this fork is built on
 - **[ggml](https://github.com/ggml-org/ggml)** — the tensor library everything runs on
-- **NVIDIA NeMo** — parakeet, canary, and canary_ctc aligner
-- **Cohere** — cohere-transcribe
-- **Qwen team (Alibaba)** — Qwen3-ASR
+- **NVIDIA NeMo** — parakeet-tdt, canary-1b-v2, canary-ctc aligner, and the FastConformer-CTC family (stt_en_fastconformer_ctc_{large,xlarge,xxlarge})
+- **Cohere** — cohere-transcribe-03-2026
+- **Qwen team (Alibaba)** — Qwen3-ASR-0.6B, Qwen3-ASR-1.7B, Qwen3-ForcedAligner-0.6B
 - **Mistral AI** — Voxtral Mini 3B and 4B Realtime
-- **IBM Granite team** — Granite Speech 4.0
+- **IBM Granite team** — Granite Speech 3.2-8b, 3.3-2b, 3.3-8b, 4.0-1b
+- **Meta / omniASR** — omniASR-CTC wav2vec2 multilingual (WIP)
+- **[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — optional diarization + LID via subprocess
+- **[Silero](https://github.com/snakers4/silero-vad)** — VAD (native GGUF) and language detection (via sherpa)
 - **[miniaudio](https://miniaud.io/)** and **[stb_vorbis](https://github.com/nothings/stb)** — embedded audio decoders
+- **[Claude Code](https://claude.ai/claude-code)** (Anthropic) — significant portions of the crispasr integration layer, all model converters, and the FastConformer/attention/mel/FFN/BPE core helpers were co-authored with Claude
 
 ---
 
