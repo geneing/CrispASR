@@ -388,30 +388,31 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 
 ---
 
-## Current session pending (April 2026)
+## Current session WIP (April 2026)
 
 ### Silero LID native port (#56)
-- Converter + loader + CLI wiring: DONE (commit aea80da + 122dbb3)
-- Architecture: DONE (front-end stride-160, 4× stride-2, 8 stage pairs)
-- Forward pass runs (~55s) but detects WRONG language
-- Root cause: adaptive normalization not exact yet
-- File: src/silero_lid.{h,cpp}
-
-### omniASR wav2vec2 (#58 + #63)
-- Converter: DONE (models/convert-omniasr-ctc-to-gguf.py)
-- Backend: DONE (`--backend wav2vec2` / `omniasr`)
-- Forward pass: 2+ min on CPU, empty output
-- Blocked on: wav2vec2 ggml rewrite (manual C++ too slow + buggy)
-
-### Pyannote v3 native (#57)
-- ONNX downloaded + inspected: 50 nodes, 41 weights
-- Architecture: SincNet → MaxPool × 3 → LSTM × 4 → Linear → LogSoftmax
-- Need: converter + C++ runtime + spectral clustering
-
-### Granite speedup (#64)
-- 43s for 11s audio on CPU
-- Bottleneck: 40-layer LLM autoregressive decode
+- **Files:** src/silero_lid.{h,cpp}, models/convert-silero-lid-to-gguf.py
+- **State:** Runs in 3.2s, correct architecture (front-end Conv stride-160 → magnitude → log(2^20×mag+1) → adaptive norm → 8 stage pairs with stride-2 → attention pool → classifier)
+- **Bug:** Detects Mongolian instead of English. Stage-0 conv output mean=-0.37 vs ONNX -2.17. Residual adds are present but conv blocks produce features at wrong scale.
+- **Next fix:** Per-block intermediate dump to isolate which of the 12 conv blocks in stage 0 diverges first. The dw_sep_conv1d function's weight orientation or the residual topology for the LAST block (which has a proj changing channel count 161→128) may be wrong.
 
 ### wav2vec2 ggml rewrite (#63)
-- Current manual C++ loops are CPU-only and slow
-- Need: full ggml graph for GPU support + speed
+- **Files:** src/wav2vec2-ggml.{h,cpp}
+- **State:** Full ggml transformer graph written (wav2vec2_build_transformer_graph). Loader migrated to core_gguf::load_weights (backend-buffer tensors). Hybrid compute path: CNN+posconv manual, transformer+LM-head ggml graph.
+- **Bug:** Graph crashes during ggml_flash_attn_ext (segfault in OMP). Likely head_dim=64 or tensor-layout issue. Graph disabled (2-line uncomment to re-enable).
+- **Next fix:** Debug the flash_attn crash — try ggml_mul_mat-based manual attention instead of flash_attn_ext to isolate the issue.
+
+### Pyannote v3 native (#57) — DONE ✅
+- **Full runtime:** SincNet + 4× biLSTM + 3× Linear + LogSoftmax (440 lines C++)
+- **Wired into CLI:** `--diarize-method pyannote --sherpa-segment-model *.gguf` uses native path, falls back to subprocess for .onnx
+- **Tested:** 650 frames on jfk.wav, "(speaker 1)" assigned correctly
+
+### Granite speedup (#64) — PROFILED
+- 33s for 11s audio at q4_k, 4 threads. Bottleneck: autoregressive LLM decode (26s of 33s).
+- No quick code fix — needs GPU offload for material speedup.
+
+### iOS + Android CI (#65) — DONE ✅
+- Cross-compilation gates for arm64 iOS (Xcode) + arm64-v8a Android (NDK r26d).
+
+### v0.1.0 release — SHIPPED ✅
+- Linux 660KB, macOS 484KB, Windows 1437KB — all 3 platforms built via GitHub Actions.
