@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libopenblas-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_OPENBLAS=ON
+          cmake --build build --target whisper-cli crispasr-quantize -j $(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p release/crispasr-linux-x86_64
+          cp build/bin/crispasr release/crispasr-linux-x86_64/
+          cp build/bin/crispasr-quantize release/crispasr-linux-x86_64/
+          cd release && tar czf crispasr-linux-x86_64.tar.gz crispasr-linux-x86_64/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-linux-x86_64
+          path: release/crispasr-linux-x86_64.tar.gz
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON
+          cmake --build build --target whisper-cli crispasr-quantize -j $(sysctl -n hw.logicalcpu)
+
+      - name: Package
+        run: |
+          mkdir -p release/crispasr-macos
+          cp build/bin/crispasr release/crispasr-macos/
+          cp build/bin/crispasr-quantize release/crispasr-macos/
+          cd release && tar czf crispasr-macos.tar.gz crispasr-macos/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-macos
+          path: release/crispasr-macos.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --target whisper-cli -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force release\crispasr-windows-x86_64
+          Copy-Item build\bin\Release\crispasr.exe release\crispasr-windows-x86_64\
+          Get-ChildItem build\bin\Release\*.dll | Copy-Item -Destination release\crispasr-windows-x86_64\
+          Compress-Archive -Path release\crispasr-windows-x86_64 -DestinationPath release\crispasr-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-windows-x86_64
+          path: release/crispasr-windows-x86_64.zip
+
+  publish:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/crispasr-linux-x86_64/crispasr-linux-x86_64.tar.gz
+            artifacts/crispasr-macos/crispasr-macos.tar.gz
+            artifacts/crispasr-windows-x86_64/crispasr-windows-x86_64.zip
+          generate_release_notes: true
