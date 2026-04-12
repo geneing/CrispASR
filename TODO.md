@@ -11,25 +11,25 @@ are in `LEARNINGS.md`.
 
 ---
 
-## Near-term — `src/core/` Phase 0
+## `src/core/` shared helpers — current state
 
-Extraction is ~90% done for mel + ffn + gguf_loader, and attention has a
-minimal pilot. The remaining pieces are documented below.
+| Helper | File | Consumers | Status |
+|---|---|---|---|
+| **mel spectrogram** | `mel.{h,cpp}` | 8/8 non-whisper | ✅ done |
+| **FastConformer encoder** | `fastconformer.h` | parakeet, canary, canary_ctc, stt_en_fc_ctc | ✅ done |
+| **LLM self-attention** | `attention.h` | voxtral, qwen3 (full + KV-cached) | ✅ done |
+| **FFN (SwiGLU/SiLU)** | `ffn.h` | qwen3, voxtral, voxtral4b, granite | ✅ done |
+| **GGUF loader** | `gguf_loader.{h,cpp}` | all 8 non-whisper | ✅ done |
+| **BPE encoder** | `bpe.h` | qwen3, granite | ✅ done |
+| **Greedy decode** | `greedy_decode.h` | voxtral, voxtral4b, qwen3, granite | ✅ done |
 
-- **[next]** **`src/core/attention.h` — persistent-KV-cache variant.**
-  The current `core_attn::llama_self_attn` fits voxtral 3B, which rebuilds
-  Q/K/V for the full context on every forward pass. qwen3, voxtral4b, and
-  granite LLM blocks use a persistent backend-buffer KV cache: K/V are
-  written to a pre-allocated view at `n_past` and read back through a
-  contiguous view for attention. Needs a sibling helper, e.g.
-  `llama_self_attn_kv(…, kv_k, kv_v, n_past, …)`.
-  Pilot on qwen3 LLM, then voxtral4b, then granite LLM. ~100 LOC helper +
-  3 migrations, ~30-60 LOC saved per block.
+Remaining extraction opportunities (each saves ~30-60 LOC but has only 1-2 consumers):
 
-- **[next]** **`src/core/attention.h` — Q/K norm variant for qwen3.**
-  Qwen3 applies a post-projection RMSNorm to Q and K before RoPE. Add
-  `q_norm_w`, `k_norm_w` optional pointers to the helper (or a separate
-  variant) so qwen3's audio encoder + LLM can both use it.
+- **[later]** KV-cached attention variant for qwen3/voxtral4b/granite LLM
+- **[later]** Q/K norm variant for qwen3
+- **[later]** Whisper-style audio encoder (voxtral 3B only — single consumer)
+- **[later]** Sliding-window attention (voxtral4b encoder — single consumer)
+- **[later]** µP scale tricks for granite (attention_multiplier, residual_multiplier)
 
 - **[later]** **`src/core/attention.h` — voxtral audio encoder.**
   Different flavour: Q/V biases, **no** K bias (Whisper quirk), no RoPE.
