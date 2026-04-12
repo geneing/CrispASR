@@ -902,11 +902,10 @@ std::vector<float> wav2vec2_compute_logits_graph(
     }
 
     // ---- 4. Transformer + LN + LM head via ggml graph ----
-    // Transpose hidden [T, H] → [H, T] for ggml (ne[0]=H fastest)
-    std::vector<float> hidden_ht(H * T);
-    for (int t = 0; t < T; t++)
-        for (int h = 0; h < H; h++)
-            hidden_ht[h * T + t] = hidden[t * H + h];
+    // hidden is [T, H] row-major: data[t*H + h].
+    // ggml [H, T] stores data[h + t*H] = data[t*H + h] — SAME layout!
+    // No transpose needed.
+    std::vector<float> hidden_ht(hidden.begin(), hidden.end());
 
 
     // Build graph
@@ -914,12 +913,10 @@ std::vector<float> wav2vec2_compute_logits_graph(
     ggml_cgraph * gf = wav2vec2_build_transformer_graph(m, T, compute_meta);
     if (!gf) return {};
 
-    // Use ggml_graph_compute_with_ctx — the only method proven to correctly
-    // reference external F16 weight tensors. gallocr/sched both corrupt
-    // the weight data by reallocating over them.
-    //
-    // Memory: ~1.2 GB for 24 layers × 549 frames × 1024 hidden.
-    // This fits in the 7.6 GB machine (model weights ~500 MB + graph ~1.2 GB).
+    // Layer-by-layer ggml graph approach: build+compute one layer at a time.
+    // This uses ~80 MB per layer (reused) instead of 3+ GB for all layers.
+    // Each layer graph uses ggml_graph_compute_with_ctx which correctly
+    // references external F16 weight tensors (gallocr/sched corrupt them).
     const int L = (int)hp.num_hidden_layers;
     const int I = (int)hp.intermediate_size;
     const int V = (int)hp.vocab_size;
@@ -927,149 +924,106 @@ std::vector<float> wav2vec2_compute_logits_graph(
     const int head_dim = H / n_heads;
     const float ln_eps = hp.layer_norm_eps;
 
-    // Estimate memory for compute_with_ctx (all intermediates stay alive)
-    // Per layer: attention scores T²×heads, FFN mid I×T, ~20 intermediate tensors.
-    // compute_with_ctx keeps all intermediates alive — ~80 MB/layer for this model.
-    size_t per_layer = (size_t)H * T * 4 * 20
-                     + (size_t)T * T * n_heads * 4
-                     + (size_t)I * T * 4;
-    size_t graph_mem = ggml_tensor_overhead() * (size_t)(L * 50 + 50)
-                     + ggml_graph_overhead_custom(16384, false)
-                     + per_layer * L * 2  // 2× safety factor
-                     + (size_t)V * T * 4;
+    // Per-layer memory: ~80 MB for wav2vec2-large (T=549, H=1024, heads=16)
+    size_t layer_mem = (size_t)H * T * 4 * 30
+                     + (size_t)T * T * n_heads * 4 * 2
+                     + (size_t)I * T * 4
+                     + ggml_tensor_overhead() * 200
+                     + ggml_graph_overhead_custom(512, false)
+                     + 32 * 1024 * 1024;
 
-    fprintf(stderr, "[wav2vec2-graph] allocating %.0f MB for graph context\n",
-            graph_mem / (1024.0 * 1024.0));
-
-    std::vector<uint8_t> graph_buf;
-    try { graph_buf.resize(graph_mem); }
-    catch (...) {
-        fprintf(stderr, "[wav2vec2] OOM allocating graph buffer (%.0f MB)\n",
-                graph_mem / (1024.0 * 1024.0));
-        return {};
-    }
-
-    ggml_init_params gip = { graph_mem, graph_buf.data(), false };
-    ggml_context * gctx = ggml_init(gip);
-    ggml_cgraph * gf2 = ggml_new_graph_custom(gctx, 16384, false);
-
-    // Input: [H, T]
-    ggml_tensor * cur = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, H, T);
-    ggml_set_name(cur, "hidden_in");
-    memcpy(cur->data, hidden_ht.data(), H * T * sizeof(float));
-
-    int L_run = L;  // all layers
-    for (int il = 0; il < L_run; il++) {
+    // hidden_ht is [T, H] / ggml [H, T] layout — update in place each layer
+    for (int il = 0; il < L; il++) {
         const auto & e = m.enc[il];
+
+        std::vector<uint8_t> lbuf(layer_mem);
+        ggml_init_params lip = { layer_mem, lbuf.data(), false };
+        ggml_context * lctx = ggml_init(lip);
+        ggml_cgraph * lgf = ggml_new_graph_custom(lctx, 512, false);
+
+        // Input: copy current hidden state
+        ggml_tensor * cur = ggml_new_tensor_2d(lctx, GGML_TYPE_F32, H, T);
+        memcpy(cur->data, hidden_ht.data(), H * T * sizeof(float));
+
         ggml_tensor * residual = cur;
 
-        ggml_tensor * x = ggml_norm(gctx, cur, ln_eps);
-        x = ggml_mul(gctx, x, e.ln1_w);
-        x = ggml_add(gctx, x, e.ln1_b);
+        // Pre-attention LayerNorm
+        ggml_tensor * x = ggml_norm(lctx, cur, ln_eps);
+        x = ggml_mul(lctx, x, e.ln1_w);
+        x = ggml_add(lctx, x, e.ln1_b);
 
-        ggml_tensor * Q = ggml_add(gctx, ggml_mul_mat(gctx, e.q_w, x), e.q_b);
-        ggml_tensor * K = ggml_add(gctx, ggml_mul_mat(gctx, e.k_w, x), e.k_b);
-        ggml_tensor * Vt = ggml_add(gctx, ggml_mul_mat(gctx, e.v_w, x), e.v_b);
+        // Q/K/V projections
+        ggml_tensor * Q  = ggml_add(lctx, ggml_mul_mat(lctx, e.q_w, x), e.q_b);
+        ggml_tensor * K  = ggml_add(lctx, ggml_mul_mat(lctx, e.k_w, x), e.k_b);
+        ggml_tensor * Vt = ggml_add(lctx, ggml_mul_mat(lctx, e.v_w, x), e.v_b);
 
-        // Reshape [H, T] → [head_dim, n_heads, T]
-        Q  = ggml_reshape_3d(gctx, Q,  head_dim, n_heads, T);
-        K  = ggml_reshape_3d(gctx, K,  head_dim, n_heads, T);
-        Vt = ggml_reshape_3d(gctx, Vt, head_dim, n_heads, T);
+        // Multi-head reshape + permute
+        Q  = ggml_reshape_3d(lctx, Q,  head_dim, n_heads, T);
+        K  = ggml_reshape_3d(lctx, K,  head_dim, n_heads, T);
+        Vt = ggml_reshape_3d(lctx, Vt, head_dim, n_heads, T);
+        Q  = ggml_cont(lctx, ggml_permute(lctx, Q,  0, 2, 1, 3));
+        K  = ggml_cont(lctx, ggml_permute(lctx, K,  0, 2, 1, 3));
+        Vt = ggml_cont(lctx, ggml_permute(lctx, Vt, 0, 2, 1, 3));
 
-        // Permute to [head_dim, T, n_heads] for batched attention
-        Q  = ggml_cont(gctx, ggml_permute(gctx, Q,  0, 2, 1, 3));
-        K  = ggml_cont(gctx, ggml_permute(gctx, K,  0, 2, 1, 3));
-        Vt = ggml_cont(gctx, ggml_permute(gctx, Vt, 0, 2, 1, 3));
-
-        // Attention via ggml ops (verified bit-identical to manual path):
-        // scores = K^T @ Q → (T, T, n_heads), scaled, softmaxed
+        // Attention
         float scale = 1.0f / sqrtf((float)head_dim);
-        ggml_tensor * scores = ggml_mul_mat(gctx, K, Q);
-        scores = ggml_scale(gctx, scores, scale);
-        scores = ggml_soft_max(gctx, scores);
-        // attn = V_transposed^T @ scores → (head_dim, T, n_heads)
-        ggml_tensor * V_perm = ggml_cont(gctx, ggml_permute(gctx, Vt, 1, 0, 2, 3));
-        ggml_tensor * attn = ggml_mul_mat(gctx, V_perm, scores);
-        // Reshape back: (head_dim, T, n_heads) → (head_dim, n_heads, T) → (H, T)
-        attn = ggml_cont(gctx, ggml_permute(gctx, attn, 0, 2, 1, 3));
-        attn = ggml_reshape_2d(gctx, attn, H, T);
-        attn = ggml_add(gctx, ggml_mul_mat(gctx, e.o_w, attn), e.o_b);
-        cur = ggml_add(gctx, residual, attn);
+        ggml_tensor * scores = ggml_mul_mat(lctx, K, Q);
+        scores = ggml_scale(lctx, scores, scale);
+        scores = ggml_soft_max(lctx, scores);
+        ggml_tensor * V_perm = ggml_cont(lctx, ggml_permute(lctx, Vt, 1, 0, 2, 3));
+        ggml_tensor * attn = ggml_mul_mat(lctx, V_perm, scores);
+        attn = ggml_cont(lctx, ggml_permute(lctx, attn, 0, 2, 1, 3));
+        attn = ggml_reshape_2d(lctx, attn, H, T);
+        attn = ggml_add(lctx, ggml_mul_mat(lctx, e.o_w, attn), e.o_b);
+        cur = ggml_add(lctx, residual, attn);
 
+        // Pre-FFN LayerNorm
         residual = cur;
-        x = ggml_norm(gctx, cur, ln_eps);
-        x = ggml_mul(gctx, x, e.ln2_w);
-        x = ggml_add(gctx, x, e.ln2_b);
+        x = ggml_norm(lctx, cur, ln_eps);
+        x = ggml_mul(lctx, x, e.ln2_w);
+        x = ggml_add(lctx, x, e.ln2_b);
 
-        x = ggml_add(gctx, ggml_mul_mat(gctx, e.fc1_w, x), e.fc1_b);
-        x = ggml_gelu(gctx, x);
-        x = ggml_add(gctx, ggml_mul_mat(gctx, e.fc2_w, x), e.fc2_b);
-        cur = ggml_add(gctx, residual, x);
-    }
+        // FFN
+        x = ggml_add(lctx, ggml_mul_mat(lctx, e.fc1_w, x), e.fc1_b);
+        x = ggml_gelu(lctx, x);
+        x = ggml_add(lctx, ggml_mul_mat(lctx, e.fc2_w, x), e.fc2_b);
+        cur = ggml_add(lctx, residual, x);
 
-    cur = ggml_norm(gctx, cur, ln_eps);
-    cur = ggml_mul(gctx, cur, m.enc_ln_w);
-    cur = ggml_add(gctx, cur, m.enc_ln_b);
-    cur = ggml_mul_mat(gctx, m.lm_w, cur);
-    if (m.lm_b) cur = ggml_add(gctx, cur, m.lm_b);
+        ggml_set_name(cur, "layer_out");
+        ggml_build_forward_expand(lgf, cur);
 
-    ggml_set_name(cur, "logits");
-    ggml_build_forward_expand(gf2, cur);
-
-    size_t used = ggml_used_mem(gctx);
-    size_t total = graph_mem;
-    fprintf(stderr, "[wav2vec2-graph] context: used %.0f MB / %.0f MB (%.1f%%)\n",
-            used / (1024.0*1024.0), total / (1024.0*1024.0), 100.0 * used / total);
-
-    // Check work_size before computing
-    struct ggml_cplan cplan = ggml_graph_plan(gf2, n_threads, NULL);
-    fprintf(stderr, "[wav2vec2-graph] work_size=%.0f MB, remaining context=%.0f MB\n",
-            cplan.work_size / (1024.0*1024.0), (graph_mem - used) / (1024.0*1024.0));
-    if (cplan.work_size > 0) {
-        cplan.work_data = (uint8_t *)malloc(cplan.work_size);
-        if (!cplan.work_data) {
-            fprintf(stderr, "[wav2vec2] OOM for work buffer\n");
-            ggml_free(gctx); return {};
+        // Compute with explicit work buffer (malloc, not from context pool)
+        struct ggml_cplan cplan = ggml_graph_plan(lgf, n_threads, NULL);
+        if (cplan.work_size > 0) {
+            cplan.work_data = (uint8_t *)malloc(cplan.work_size);
         }
-    }
-    ggml_graph_compute(gf2, &cplan);
-    free(cplan.work_data);
+        ggml_graph_compute(lgf, &cplan);
+        free(cplan.work_data);
 
-    ggml_tensor * out = ggml_graph_get_tensor(gf2, "logits");
-    int V_out = (int)out->ne[0];
-    int T_out = (int)out->ne[1];
-    // Sanity check: print first frame logits
+        // Read output back into hidden_ht for the next layer
+        ggml_tensor * lout = ggml_graph_get_tensor(lgf, "layer_out");
+        memcpy(hidden_ht.data(), lout->data, H * T * sizeof(float));
+
+        ggml_free(lctx);
+    }
+
+    // Global LayerNorm + LM head — use ggml_linear_f32 helper (proven working)
+    // Global LayerNorm + LM head
     {
-        const float * ld = (const float *)out->data;
-        fprintf(stderr, "[wav2vec2-graph] logits[t=0, 0:8]:");
-        for (int v = 0; v < 8; v++) fprintf(stderr, " %.4f", ld[v]);
-        fprintf(stderr, "\n");
-        // Argmax
-        int best = 0;
-        for (int v = 1; v < V_out; v++) if (ld[v] > ld[best]) best = v;
-        fprintf(stderr, "[wav2vec2-graph] t=0 argmax=%d\n", best);
-        // Argmax for frames 100-110 (where speech should be)
-        fprintf(stderr, "[wav2vec2-graph] argmax t=100..110:");
-        for (int t = 100; t < std::min(110, T_out); t++) {
-            const float * frame = ld + t * V_out;
-            int b = 0;
-            for (int v = 1; v < V_out; v++) if (frame[v] > frame[b]) b = v;
-            fprintf(stderr, " %d", b);
-        }
-        fprintf(stderr, "\n");
+        // hidden_ht is [T, H] layout (same as ggml [H, T] data layout)
+        layer_norm(hidden_ht.data(), hidden_ht.data(),
+                   (const float *)m.enc_ln_w->data, (const float *)m.enc_ln_b->data,
+                   T, H, ln_eps);
+
+        int V_size = (int)hp.vocab_size;
+        std::vector<float> logits(T * V_size);
+        std::vector<uint8_t> scratch;
+        ggml_linear_f32(scratch, m.lm_w,
+                        m.lm_b ? (const float *)m.lm_b->data : nullptr,
+                        hidden_ht.data(), logits.data(), H, V_size, T, n_threads);
+
+        return logits;
     }
-
-    std::vector<float> logits(V_out * T_out);
-    memcpy(logits.data(), out->data, logits.size() * sizeof(float));
-
-    ggml_free(gctx);
-
-    // The graph outputs (V, T) in ggml layout: data[v + t*V].
-    // Our API expects (T, V) row-major: data[t*V + v].
-    // These are the SAME layout! Just return as-is.
-    std::vector<float> logits_tv(logits.begin(), logits.end());
-
-    return logits_tv;
 }
 
 // ===========================================================================
@@ -1224,7 +1178,6 @@ std::vector<float> wav2vec2_compute_logits(
                 hidden[t * H + h] += gelu(pos_out[h * T + t]);
     }
 
-    // wav2vec2_debug_attention(m, hidden.data(), T, H);  // disabled
 
     // ------------------------------------------------------------------
     // 4. Transformer encoder layers (pre-norm / stable layer norm)

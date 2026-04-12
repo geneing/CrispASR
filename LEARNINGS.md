@@ -524,3 +524,61 @@ you follow this process systematically.
   dump the post-reshape tensors to verify head layout.
 - **ggml_norm normalizes over ne[0].** Make sure ne[0] is the feature
   dimension, not the time dimension.
+
+---
+
+## ggml graph allocation: gallocr vs compute_with_ctx
+
+### gallocr/sched corrupt external weight tensors
+
+When a ggml graph references tensors from an external context (e.g. model
+weights loaded via `core_gguf::load_weights`), `ggml_gallocr_alloc_graph`
+and `ggml_backend_sched` reallocate buffers for these tensors, overwriting
+their data with uninitialized memory. This was confirmed by a minimal
+single-op test:
+
+- `ggml_graph_compute_with_ctx` (no allocator): **correct** — directly
+  accesses `tensor->data` pointers, which point to the loaded GGUF data.
+- `ggml_gallocr_alloc_graph` + `ggml_backend_graph_compute`: **wrong** —
+  the allocator sees the external tensors as "unallocated" despite having
+  valid `->data` and `->buffer` pointers, and allocates new buffers over
+  them.
+
+The `ggml_gallocr_is_allocated()` function at ggml-alloc.c:591 checks
+`t->data != NULL || t->buffer != NULL`, which should catch external
+tensors. But the two-phase reserve+alloc flow apparently doesn't preserve
+this across the reserve step.
+
+**Workaround:** Use `ggml_graph_compute_with_ctx` with `no_alloc=false`
+for the graph context. All intermediate tensors get memory from the
+context pool, and external weight tensors are referenced via their
+existing `->data` pointers. Downside: no memory reuse between layers —
+each intermediate stays alive for the entire graph (~80 MB/layer for
+wav2vec2-large with 549 frames).
+
+### ggml 2D tensor layout and transpose
+
+ggml stores 2D tensor `[ne[0], ne[1]]` as `data[i0 + i1 * ne[0]]`.
+A tensor with `ne[0]=V, ne[1]=T` has element `(v, t)` at `data[v + t*V]`.
+This is the SAME memory layout as a C row-major array `float arr[T][V]`
+where `arr[t][v] = data[t*V + v]`. So **no transpose needed** when
+converting between ggml `[V, T]` and C `[T, V]` row-major — they're
+the same bytes. The earlier wav2vec2 code had wrong transposes at THREE
+places (input, layer readback, LM head input) that shuffled data into
+garbage. The fix was to remove ALL transposes and use `memcpy` /
+`std::copy` directly. **When in doubt, don't transpose.**
+
+### Layer-by-layer graph execution as a gallocr workaround
+
+When `ggml_gallocr` corrupts external weight tensors, building one
+graph per transformer layer with `ggml_graph_compute_with_ctx` and
+`no_alloc=false` is a viable workaround. Each layer graph uses ~80 MB
+(for wav2vec2-large with T=549, H=1024, 16 heads) and is freed after
+use, so total RSS stays at ~800 MB instead of 3+ GB. The hidden state
+is copied in/out of each layer graph via `memcpy`. Per-layer max_diff
+vs the manual reference path is < 0.005 (float32 accumulation noise).
+
+This is slower than a single-graph approach (24 context alloc/free
+cycles + 24 graph plans) but produces correct results and uses much
+less memory. Good enough for CPU; for GPU acceleration, fixing gallocr
+to skip pre-allocated tensors is the proper solution.

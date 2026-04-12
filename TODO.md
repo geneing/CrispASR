@@ -392,11 +392,16 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 - **Architecture:** Learned STFT Conv1d(1→322,k=320,s=160) → magnitude → log(2^20×mag+1) → adaptive norm (17-tap reflected smooth) → 8×(12 dw-sep conv + post-norm transformer + stride-2/1 proj+ReLU) → attention pool (tanh+softmax) → 95-lang + 58-group classifiers.
 - **GGUF:** F32 16.1 MB, Q8_0 ~9 MB. Available at `cstr/silero-lid-lang95-GGUF`.
 
-### wav2vec2 ggml rewrite (#63)
+### wav2vec2 ggml rewrite (#63) — DONE ✅
 - **Files:** src/wav2vec2-ggml.{h,cpp}
-- **State:** Full ggml transformer graph written (wav2vec2_build_transformer_graph). Loader migrated to core_gguf::load_weights (backend-buffer tensors). Hybrid compute path: CNN+posconv manual, transformer+LM-head ggml graph.
-- **Bug:** Graph crashes during ggml_flash_attn_ext (segfault in OMP). Likely head_dim=64 or tensor-layout issue. Graph disabled (2-line uncomment to re-enable).
-- **Next fix:** Debug the flash_attn crash — try ggml_mul_mat-based manual attention instead of flash_attn_ext to isolate the issue.
+- **State:** Layer-by-layer ggml graphs (~80 MB/layer, reused). CNN+posconv stay manual. Correct output on jfk.wav.
+- **Architecture:** Per-layer graph with `ggml_graph_compute_with_ctx` (proven to correctly reference external F16 weights). LM head via `ggml_linear_f32`.
+- **Root causes found:**
+  1. `ggml_gallocr`/`ggml_backend_sched` corrupt external F16 weight tensors (reallocate over them). Workaround: use `compute_with_ctx`.
+  2. Data layout confusion: ggml `[H,T]` stores `data[h+t*H]` = C's `data[t*H+h]` — SAME layout as `[T,H]` row-major. The original code had a spurious transpose that corrupted all data.
+  3. `flash_attn_ext` crashes with `mask=nullptr`. Replaced with `mul_mat`-based attention.
+  4. Logits `[V,T]` in ggml = `[T,V]` row-major — no transpose needed.
+- **Model:** `jonatasgrosman/wav2vec2-large-xlsr-53-english` (33 vocab, 1024 hidden, 24 layers).
 
 ### Pyannote v3 native (#57) — DONE ✅
 - **Full runtime:** SincNet + 4× biLSTM + 3× Linear + LogSoftmax (440 lines C++)
