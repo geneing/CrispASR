@@ -416,6 +416,7 @@ static ggml_cgraph * wav2vec2_build_transformer_graph(
         ggml_tensor * K = ggml_add(ctx0, ggml_mul_mat(ctx0, e.k_w, x), e.k_b);
         ggml_tensor * V_t = ggml_add(ctx0, ggml_mul_mat(ctx0, e.v_w, x), e.v_b);
 
+
         // Reshape to (head_dim, n_heads, T)
         Q   = ggml_reshape_3d(ctx0, Q,   head_dim, n_heads, T);
         K   = ggml_reshape_3d(ctx0, K,   head_dim, n_heads, T);
@@ -466,6 +467,7 @@ static ggml_cgraph * wav2vec2_build_transformer_graph(
         x = ggml_gelu(ctx0, x);
         x = ggml_add(ctx0, ggml_mul_mat(ctx0, e.fc2_w, x), e.fc2_b);
         cur = ggml_add(ctx0, residual, x);
+
     }
 
     // ---- Global LayerNorm ----
@@ -610,6 +612,7 @@ std::vector<float> wav2vec2_compute_logits_graph(
         for (int h = 0; h < H; h++)
             hidden_ht[h * T + t] = hidden[t * H + h];
 
+
     // Build graph
     std::vector<uint8_t> compute_meta;
     ggml_cgraph * gf = wav2vec2_build_transformer_graph(m, T, compute_meta);
@@ -640,8 +643,14 @@ std::vector<float> wav2vec2_compute_logits_graph(
 
     // Read output
     ggml_tensor * out = ggml_graph_get_tensor(gf, "logits");
+    if (!out) {
+        fprintf(stderr, "[wav2vec2] logits tensor not found in graph\n");
+        ggml_backend_sched_free(sched);
+        return {};
+    }
     int V_out = (int)out->ne[0];
     int T_out = (int)out->ne[1];
+    fprintf(stderr, "[wav2vec2-graph] logits shape: (%d, %d)\n", V_out, T_out);
 
     std::vector<float> logits(V_out * T_out);
     ggml_backend_tensor_get(out, logits.data(), 0, logits.size() * sizeof(float));
@@ -667,10 +676,15 @@ std::vector<float> wav2vec2_compute_logits(
     const float * raw_audio, int n_samples,
     int n_threads)
 {
-    // Try ggml graph path first (uses backend-buffer tensors + mul_mat attention).
-    // Falls back to manual C++ if the graph fails.
-    auto result = wav2vec2_compute_logits_graph(m, raw_audio, n_samples, n_threads);
-    if (!result.empty()) return result;
+    // Graph path disabled — produces wrong output. The manual mul_mat attention
+    // is structurally correct but the ggml_backend_sched doesn't correctly
+    // resolve F16 weight tensors from the model's backend buffer for the
+    // full-graph path. The manual C++ path below works correctly.
+    // TODO: fix graph path by either (a) using a single ggml_backend_alloc
+    // instead of the scheduler, or (b) ensuring the model's buffer is
+    // properly registered with the scheduler.
+    // auto result = wav2vec2_compute_logits_graph(m, raw_audio, n_samples, n_threads);
+    // if (!result.empty()) return result;
 
     const auto & hp = m.hparams;
 
@@ -861,6 +875,7 @@ std::vector<float> wav2vec2_compute_logits(
 
         ggml_linear_f32(scratch, e.fc2_w, (const float *)e.fc2_b->data, ffn_mid.data(), ffn_out.data(), I, H, T, n_threads);
         for (int i = 0; i < T * H; i++) hidden[i] += ffn_out[i];
+
     }
 
     // ------------------------------------------------------------------
