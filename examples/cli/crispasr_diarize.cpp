@@ -2,6 +2,7 @@
 // See crispasr_diarize.h for the interface contract.
 
 #include "crispasr_diarize.h"
+#include "crispasr_cache.h"
 #include "whisper_params.h"
 #include "pyannote_seg.h"
 
@@ -391,12 +392,15 @@ bool apply_pyannote_native(
     std::vector<crispasr_segment> & segs,
     const whisper_params & params)
 {
-    if (params.sherpa_segment_model.empty()) {
-        return false;  // no model path → fall through to subprocess
+    // Resolve model: if empty or "auto", auto-download from HF
+    std::string mp = params.sherpa_segment_model;
+    if (mp.empty() || mp == "auto") {
+        mp = crispasr_cache::ensure_cached_file(
+            "pyannote-seg-3.0.gguf",
+            "https://huggingface.co/cstr/pyannote-v3-segmentation-GGUF/resolve/main/pyannote-seg-3.0.gguf",
+            params.no_prints, "crispasr[diarize]");
+        if (mp.empty()) return false;
     }
-
-    // Only try native if the model is a .gguf
-    const std::string & mp = params.sherpa_segment_model;
     if (mp.size() < 5 || mp.compare(mp.size()-5, 5, ".gguf") != 0) {
         return false;  // not GGUF → use subprocess
     }

@@ -237,16 +237,20 @@ bool detect_with_silero(
     const whisper_params & p,
     crispasr_lid_result & out)
 {
-    if (p.lid_model.empty()) {
-        fprintf(stderr,
-            "crispasr[lid]: --lid-backend silero needs --lid-model PATH\n"
-            "               (GGUF from convert-silero-lid-to-gguf.py, or\n"
-            "                a sherpa-onnx LID model for the subprocess fallback)\n");
-        return false;
+    // Resolve model: if empty or "auto", auto-download from HF
+    std::string model_path = p.lid_model;
+    if (model_path.empty() || model_path == "auto") {
+        model_path = crispasr_cache::ensure_cached_file(
+            "silero-lid-lang95-f32.gguf",
+            "https://huggingface.co/cstr/silero-lid-lang95-GGUF/resolve/main/silero-lid-lang95-f32.gguf",
+            p.no_prints, "crispasr[lid-silero]");
+        if (model_path.empty()) {
+            fprintf(stderr, "crispasr[lid]: failed to download Silero LID model\n");
+            return false;
+        }
     }
 
     // ---- Try native GGUF path first (if the model is a .gguf file) ----
-    const std::string & model_path = p.lid_model;
     if (model_path.size() >= 5 &&
         model_path.compare(model_path.size() - 5, 5, ".gguf") == 0)
     {
