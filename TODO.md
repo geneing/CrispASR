@@ -380,6 +380,8 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 | `cstr/stt-en-fastconformer-ctc-xlarge-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
 | `cstr/stt-en-fastconformer-ctc-xxlarge-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
 | `cstr/silero-lid-lang95-GGUF` | ✅ shipped (f32 only — 16 MB; quants break accuracy on small conv tensors) |
+| `cstr/pyannote-v3-segmentation-GGUF` | ✅ shipped (f32, 5.7 MB) |
+| `cstr/wav2vec2-large-xlsr-53-english-GGUF` | ✅ shipped (f16, 627 MB) |
 
 ---
 
