@@ -21,6 +21,7 @@
  */
 
 #include "wav2vec2-ggml.h"
+#include "core/gguf_loader.h"
 
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
@@ -105,65 +106,84 @@ bool wav2vec2_load(const char * fname, wav2vec2_model & model) {
     }
     gguf_free(gctx_meta);
 
-    // Phase 2: load with tensor allocation
-    ggml_context * wctx = nullptr;
-    gguf_init_params p_load = { /*no_alloc=*/false, /*ctx=*/&wctx };
-    gguf_context * gctx = gguf_init_from_file(fname, p_load);
-    if (!gctx || !wctx) {
-        fprintf(stderr, "[wav2vec2] failed to load tensors from: %s\n", fname);
+    // Phase 2: load tensors via core_gguf (backend-buffer-backed)
+    // This puts all weights in a ggml_backend_buffer so the graph
+    // scheduler can reference them without cross-context issues.
+    model.backend = ggml_backend_cpu_init();
+    if (!model.backend) {
+        fprintf(stderr, "[wav2vec2] failed to init CPU backend\n");
         return false;
     }
-    model.ctx = wctx;
-    gguf_free(gctx);
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(fname, model.backend, "wav2vec2", wl)) {
+        fprintf(stderr, "[wav2vec2] failed to load weights from: %s\n", fname);
+        return false;
+    }
+    model.ctx = wl.ctx;
+    model.buf = wl.buf;
+    model.tensors = std::move(wl.tensors);
+
+    auto get = [&](const char * name) -> ggml_tensor * {
+        auto it = model.tensors.find(name);
+        if (it == model.tensors.end()) {
+            fprintf(stderr, "[wav2vec2] required tensor '%s' not found\n", name);
+            return nullptr;
+        }
+        return it->second;
+    };
+    auto try_get = [&](const char * name) -> ggml_tensor * {
+        auto it = model.tensors.find(name);
+        return it != model.tensors.end() ? it->second : nullptr;
+    };
 
     model.enc.resize(hp.num_hidden_layers);
     uint32_t L = hp.num_feat_extract_layers;
 
     for (uint32_t i = 0; i < L; i++) {
         char buf[80];
-        snprintf(buf, sizeof(buf), "cnn.%u.conv.weight", i); model.cnn[i].conv_w = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "cnn.%u.conv.bias",   i); model.cnn[i].conv_b = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "cnn.%u.norm.weight", i);
-        model.cnn[i].norm_w = ggml_get_tensor(wctx, buf);
+        snprintf(buf, sizeof(buf), "cnn.%u.conv.weight", i); model.cnn[i].conv_w = get(buf);
+        snprintf(buf, sizeof(buf), "cnn.%u.conv.bias",   i); model.cnn[i].conv_b = get(buf);
+        snprintf(buf, sizeof(buf), "cnn.%u.norm.weight",  i);
+        model.cnn[i].norm_w = try_get(buf);
         if (model.cnn[i].norm_w) {
             snprintf(buf, sizeof(buf), "cnn.%u.norm.bias", i);
-            model.cnn[i].norm_b = require_tensor(wctx, buf);
+            model.cnn[i].norm_b = get(buf);
             model.cnn[i].has_norm = true;
         }
     }
 
-    model.fp_ln_w    = require_tensor(wctx, "feat_proj.ln.weight");
-    model.fp_ln_b    = require_tensor(wctx, "feat_proj.ln.bias");
-    model.fp_w       = require_tensor(wctx, "feat_proj.weight");
-    model.fp_b       = require_tensor(wctx, "feat_proj.bias");
-    model.pos_conv_w = require_tensor(wctx, "pos_conv.weight");
-    model.pos_conv_b = require_tensor(wctx, "pos_conv.bias");
-    model.enc_ln_w   = require_tensor(wctx, "enc.ln.weight");
-    model.enc_ln_b   = require_tensor(wctx, "enc.ln.bias");
+    model.fp_ln_w    = get("feat_proj.ln.weight");
+    model.fp_ln_b    = get("feat_proj.ln.bias");
+    model.fp_w       = get("feat_proj.weight");
+    model.fp_b       = get("feat_proj.bias");
+    model.pos_conv_w = get("pos_conv.weight");
+    model.pos_conv_b = get("pos_conv.bias");
+    model.enc_ln_w   = get("enc.ln.weight");
+    model.enc_ln_b   = get("enc.ln.bias");
 
     for (uint32_t i = 0; i < hp.num_hidden_layers; i++) {
         char buf[80];
         auto & e = model.enc[i];
-        snprintf(buf, sizeof(buf), "enc.%u.ln1.weight",      i); e.ln1_w = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.ln1.bias",        i); e.ln1_b = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.q.weight",   i); e.q_w   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.q.bias",     i); e.q_b   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.k.weight",   i); e.k_w   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.k.bias",     i); e.k_b   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.v.weight",   i); e.v_w   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.v.bias",     i); e.v_b   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.out.weight", i); e.o_w   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.attn.out.bias",   i); e.o_b   = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.ln2.weight",      i); e.ln2_w = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.ln2.bias",        i); e.ln2_b = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc1.weight",  i); e.fc1_w = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc1.bias",    i); e.fc1_b = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc2.weight",  i); e.fc2_w = require_tensor(wctx, buf);
-        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc2.bias",    i); e.fc2_b = require_tensor(wctx, buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ln1.weight",      i); e.ln1_w = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ln1.bias",        i); e.ln1_b = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.q.weight",   i); e.q_w   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.q.bias",     i); e.q_b   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.k.weight",   i); e.k_w   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.k.bias",     i); e.k_b   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.v.weight",   i); e.v_w   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.v.bias",     i); e.v_b   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.out.weight", i); e.o_w   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.attn.out.bias",   i); e.o_b   = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ln2.weight",      i); e.ln2_w = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ln2.bias",        i); e.ln2_b = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc1.weight",  i); e.fc1_w = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc1.bias",    i); e.fc1_b = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc2.weight",  i); e.fc2_w = get(buf);
+        snprintf(buf, sizeof(buf), "enc.%u.ffn.fc2.bias",    i); e.fc2_b = get(buf);
     }
 
-    model.lm_w = require_tensor(wctx, "lm_head.weight");
-    model.lm_b = require_tensor(wctx, "lm_head.bias");
+    model.lm_w = get("lm_head.weight");
+    model.lm_b = try_get("lm_head.bias");
 
     fprintf(stderr, "[wav2vec2] vocab=%u  hidden=%u  layers=%u  heads=%u  ffn=%u\n",
             hp.vocab_size, hp.hidden_size, hp.num_hidden_layers,
@@ -579,18 +599,15 @@ std::vector<float> wav2vec2_compute_logits_graph(
     ggml_cgraph * gf = wav2vec2_build_transformer_graph(m, T, compute_meta);
     if (!gf) return {};
 
-    // Allocate + run
-    ggml_backend_t backend = ggml_backend_cpu_init();
-    if (!backend) return {};
-    ggml_backend_cpu_set_n_threads(backend, n_threads);
+    // Allocate + run using the model's own backend (which owns the weights).
+    ggml_backend_cpu_set_n_threads(m.backend, n_threads);
 
-    ggml_backend_t backends[1] = { backend };
+    ggml_backend_t backends[1] = { m.backend };
     ggml_backend_sched_t sched = ggml_backend_sched_new(backends, nullptr, 1, 16384, false, false);
     ggml_backend_sched_reset(sched);
     if (!ggml_backend_sched_alloc_graph(sched, gf)) {
         fprintf(stderr, "[wav2vec2] graph alloc failed\n");
         ggml_backend_sched_free(sched);
-        ggml_backend_free(backend);
         return {};
     }
 
@@ -602,7 +619,6 @@ std::vector<float> wav2vec2_compute_logits_graph(
     if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "[wav2vec2] graph compute failed\n");
         ggml_backend_sched_free(sched);
-        ggml_backend_free(backend);
         return {};
     }
 
@@ -615,7 +631,6 @@ std::vector<float> wav2vec2_compute_logits_graph(
     ggml_backend_tensor_get(out, logits.data(), 0, logits.size() * sizeof(float));
 
     ggml_backend_sched_free(sched);
-    ggml_backend_free(backend);
 
     // The graph outputs (V, T) but our API expects (T, V) row-major
     // Transpose: logits_tv[t*V + v] = logits_vt[v*T + t]
@@ -636,13 +651,10 @@ std::vector<float> wav2vec2_compute_logits(
     const float * raw_audio, int n_samples,
     int n_threads)
 {
-    // The ggml graph path (wav2vec2_compute_logits_graph) is structurally
-    // complete but can't run yet because wav2vec2_load uses the legacy
-    // ggml_init_from_file loader (weights in plain ggml_context, not a
-    // backend buffer). The scheduler crashes when trying to resolve
-    // cross-context tensor references. Enabling the graph path requires
-    // migrating wav2vec2_load to core_gguf::load_weights first.
-    // TODO: refactor loader, then uncomment:
+    // Graph path disabled pending debug of ggml_flash_attn_ext crash
+    // (likely head_dim=64 or tensor-layout issue). The ggml graph + loader
+    // migration are structurally complete — enabling requires fixing the
+    // crash in the transformer graph path.
     // auto result = wav2vec2_compute_logits_graph(m, raw_audio, n_samples, n_threads);
     // if (!result.empty()) return result;
 

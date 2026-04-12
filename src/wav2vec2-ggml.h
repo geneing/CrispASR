@@ -16,9 +16,11 @@
 #pragma once
 
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "gguf.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -86,7 +88,10 @@ struct wav2vec2_model {
 
     std::vector<std::string> vocab;   // id → token string (e.g. "a", "|", "<pad>")
 
-    ggml_context            *ctx = nullptr;   // owns all weight tensors
+    ggml_context                          *ctx = nullptr;
+    ggml_backend_buffer_t                  buf = nullptr;   // backend buffer (core_gguf)
+    ggml_backend_t                     backend = nullptr;   // CPU backend that owns buf
+    std::map<std::string, ggml_tensor *> tensors;
 };
 
 // ---------------------------------------------------------------------------
