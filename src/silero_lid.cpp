@@ -426,53 +426,80 @@ extern "C" const char * silero_lid_detect(
         cur.assign(samples, samples + n_samples);
     }
 
-    // ---- Adaptive normalization ----
-    // After the front-end, apply:
-    //   1. ReduceMean over channels → subtract channel mean (per frame)
-    //   2. Conv1d with adaptive_normalization.filter_ (1, 1, 17) along time
-    //      to compute running statistics for per-frame normalization
-    //   3. Normalize frames by the running stats
-    // This is the "adaptive normalization" step that the ONNX graph applies
-    // between the front-end output and the first conv stage.
-    if (m.adaptive_norm_filter) {
-        // Step 1: subtract per-frame channel mean (InstanceNorm-like)
-        for (int t = 0; t < T; t++) {
-            float mean = 0;
-            for (int c = 0; c < C; c++) mean += cur[c * T + t];
-            mean /= C;
-            for (int c = 0; c < C; c++) cur[c * T + t] -= mean;
-        }
-
-        // Step 2: compute per-frame energy, smooth with 17-tap filter
-        std::vector<float> energy(T, 0.f);
-        for (int t = 0; t < T; t++) {
-            for (int c = 0; c < C; c++) {
-                float v = cur[c * T + t];
-                energy[t] += v * v;
+    // ---- Magnitude + log + adaptive normalization ----
+    //
+    // The 322-channel front-end output is a COMPLEX representation:
+    // channels 0..160 = real part, channels 161..321 = imaginary part.
+    // (322 = 2 × 161, matching an n_fft/2+1 = 161 spectral bins.)
+    //
+    // ONNX data flow (confirmed by graph trace):
+    //   1. Split into real/imag, each (161, T)
+    //   2. magnitude = sqrt(real² + imag²)      → (161, T)
+    //   3. log_mag = log(magnitude * scale + eps)
+    //   4. per_frame_mean = mean(log_mag, axis=channels) → (1, T)
+    //   5. smoothed = conv1d(pad(per_frame_mean), filter_17) → (1, T)
+    //   6. global_mean = mean(smoothed, axis=time) → scalar
+    //   7. normalized = log_mag - global_mean     → (161, T)
+    //   8. Feed normalized to the encoder (161 channels)
+    {
+        const int C_half = C / 2;  // 161
+        // Step 1-2: compute magnitude from real + imag channels
+        std::vector<float> mag(C_half * T);
+        for (int c = 0; c < C_half; c++) {
+            for (int t = 0; t < T; t++) {
+                float re = cur[c * T + t];
+                float im = cur[(c + C_half) * T + t];
+                mag[c * T + t] = sqrtf(re * re + im * im);
             }
-            energy[t] = sqrtf(energy[t] / C + 1e-7f);
         }
 
-        // Apply 17-tap filter along time to get smoothed energy
-        const float * filt = (const float *)m.adaptive_norm_filter->data;
-        int K_filt = 17, pad = K_filt / 2;
-        std::vector<float> smooth(T, 0.f);
+        // Step 3: log(scale * magnitude + offset)
+        // ONNX Constant_49 = 1048576.0 = 2^20 (scale), Constant_51 = 1.0 (offset).
+        const float log_scale  = 1048576.0f;
+        const float log_offset = 1.0f;
+        std::vector<float> log_mag(C_half * T);
+        for (int i = 0; i < C_half * T; i++) {
+            log_mag[i] = logf(log_scale * mag[i] + log_offset);
+        }
+
+        // Step 4: per-frame mean over channels
+        std::vector<float> frame_mean(T, 0.f);
         for (int t = 0; t < T; t++) {
-            for (int k = 0; k < K_filt; k++) {
-                int ti = t + k - pad;
-                if (ti >= 0 && ti < T)
-                    smooth[t] += filt[k] * energy[ti];
+            for (int c = 0; c < C_half; c++)
+                frame_mean[t] += log_mag[c * T + t];
+            frame_mean[t] /= C_half;
+        }
+
+        // Step 5: smooth with adaptive normalization filter (17-tap)
+        if (m.adaptive_norm_filter) {
+            const float * filt = (const float *)m.adaptive_norm_filter->data;
+            int K_filt = 17, pad_f = K_filt / 2;
+            std::vector<float> smooth(T, 0.f);
+            for (int t = 0; t < T; t++) {
+                for (int k = 0; k < K_filt; k++) {
+                    int ti = t + k - pad_f;
+                    if (ti >= 0 && ti < T)
+                        smooth[t] += filt[k] * frame_mean[ti];
+                }
             }
-            if (smooth[t] < 1e-7f) smooth[t] = 1e-7f;
+
+            // Step 6: global mean of smoothed
+            float global_mean = 0;
+            for (int t = 0; t < T; t++) global_mean += smooth[t];
+            global_mean /= T;
+
+            // Step 7: normalize = log_mag - global_mean
+            for (int i = 0; i < C_half * T; i++) {
+                log_mag[i] -= global_mean;
+            }
         }
 
-        // Step 3: normalize each frame by smoothed energy
-        for (int t = 0; t < T; t++) {
-            float inv = 1.f / smooth[t];
-            for (int c = 0; c < C; c++)
-                cur[c * T + t] *= inv;
-        }
+        // Replace cur with the 161-channel log-magnitude features
+        cur = std::move(log_mag);
+        C = C_half;  // 161
     }
+
+            C, T, cur.empty() ? 0.f : cur[0]);
 
     for (int si = 0; si < (int)m.stages.size(); si++) {
         const auto & st = m.stages[si];
