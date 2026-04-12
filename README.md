@@ -1,8 +1,8 @@
 # CrispASR
 
-**One C++ binary, eight ASR model families, zero Python dependencies.**
+**One C++ binary, ten ASR model families, zero Python dependencies.**
 
-CrispASR is a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that extends the familiar `whisper-cli` interface into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR architecture. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
+CrispASR is a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that extends the familiar `whisper-cli` interface into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR architectures. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
 
 ```console
 $ crispasr -m ggml-base.en.bin          -f samples/jfk.wav        # OpenAI Whisper
@@ -43,33 +43,41 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 | **parakeet** | [`nvidia/parakeet-tdt-0.6b-v3`](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) | FastConformer + TDT | 25 EU (auto-detect) | CC-BY-4.0 |
 | **canary** | [`nvidia/canary-1b-v2`](https://huggingface.co/nvidia/canary-1b-v2) | FastConformer + Transformer decoder | 25 EU (explicit `-sl/-tl`) | CC-BY-4.0 |
 | **cohere** | [`CohereLabs/cohere-transcribe-03-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) | Conformer + Transformer | 13 | Apache-2.0 |
-| **granite** | [`ibm-granite/granite-4.0-1b-speech`](https://huggingface.co/ibm-granite/granite-4.0-1b-speech) | Conformer + BLIP-2 Q-Former + Granite LLM (μP) | en fr de es pt ja | Apache-2.0 |
+| **granite** | [`ibm-granite/granite-speech-{3.2-8b,3.3-2b,3.3-8b,4.0-1b}`](https://huggingface.co/ibm-granite/granite-speech-3.3-2b) | Conformer + BLIP-2 Q-Former + Granite LLM (μP) | en fr de es pt ja | Apache-2.0 |
+| **fastconformer-ctc** | [`nvidia/stt_en_fastconformer_ctc_large`](https://huggingface.co/nvidia/stt_en_fastconformer_ctc_large) | FastConformer + CTC (NeMo family, all sizes) | en | CC-BY-4.0 |
 | **voxtral** | [`mistralai/Voxtral-Mini-3B-2507`](https://huggingface.co/mistralai/Voxtral-Mini-3B-2507) | Whisper encoder + Mistral 3B LLM, audio-token injection | 8 | Apache-2.0 |
 | **voxtral4b** | [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) | Causal RoPE+SwiGLU encoder + 3.4B LLM with adaptive RMSNorm + sliding window | 13, realtime streaming | Apache-2.0 |
 | **qwen3** | [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) | Whisper-style audio encoder + Qwen3 0.6B LLM | 30 + 22 Chinese dialects | Apache-2.0 |
 
-All nine runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder.
+All ten runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family (small through xxlarge, same architecture as the canary aligner) with greedy CTC decoding.
 
 ## Feature matrix
 
 Run `crispasr --list-backends` to see it live. Each backend declares capabilities at runtime; if you ask for a feature the selected backend does not support, CrispASR prints a warning and silently ignores the flag.
 
-| Feature | whisper | parakeet | canary | cohere | granite | voxtral | voxtral4b | qwen3 |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| Native timestamps | ✔ | ✔ | ✔ | ✔ | | | | |
-| CTC forced timestamps | | | ✔ | | ✔ | ✔ | ✔ | ✔ |
-| Word-level timing | ✔ | ✔ | ✔ | ✔ | via `-am` | via `-am` | via `-am` | via `-am` |
-| Per-token confidence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| Language auto-detect | ✔ | ✔ | LID | LID | LID | LID | LID | ✔ |
-| Speech translation | ✔ | | ✔ | | | | | |
-| Speaker diarization | ✔ | | | ✔ | | | | |
-| Grammar constraints (GBNF) | ✔ | | | | | | | |
-| Temperature sampling | ✔ | | | | ✔ | ✔ | ✔ | ✔ |
-| Beam search | ✔ | | | | | | | |
-| Flash attention | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| Punctuation toggle | | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| Source / target language | | | ✔ | | | | | |
-| Auto-download | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| Feature | whisper | parakeet | canary | cohere | granite | voxtral | voxtral4b | qwen3 | fc-ctc |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Native timestamps | ✔ | ✔ | ✔ | ✔ | | | | | |
+| CTC forced timestamps | | | ✔ | | ✔ | ✔ | ✔ | ✔ | ✔ |
+| Word-level timing | ✔ | ✔ | ✔ | ✔ | via `-am` | via `-am` | via `-am` | via `-am` | via `-am` |
+| Per-token confidence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
+| Language auto-detect | ✔ | ✔ | LID | LID | LID | LID | LID | ✔ | |
+| Speech translation | ✔ | | ✔ | | ✔ | ✔ | | ✔ | |
+| Speaker diarization | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| Grammar constraints (GBNF) | ✔ | | | | | | | | |
+| Temperature sampling | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
+| Beam search | ✔ | | | | | ✔ | | | |
+| Flash attention | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| Punctuation toggle | | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
+| Source / target language | | | ✔ | | ✔ | ✔ | | ✔ | |
+| Auto-download | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | |
+
+**Speaker diarization** is available for all backends as a post-processing step via `--diarize`:
+- `--diarize-method energy` / `xcorr` — stereo-only, no extra deps
+- `--diarize-method sherpa` / `pyannote` / `ecapa` — calls an externally-installed [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) subprocess with pyannote v3 segmentation + speaker embedding models. Needs `--sherpa-segment-model` and `--sherpa-embedding-model` pointing at the ONNX files from the sherpa-onnx release.
+- `--diarize-method vad-turns` — mono-friendly, assigns speaker labels at gap boundaries
+
+**Language identification** for backends without native LID: `--lid-backend whisper` (default, 75 MB ggml-tiny.bin) or `--lid-backend silero` (shells out to sherpa-onnx LID).
 
 ### Which backend should I pick?
 
@@ -117,8 +125,10 @@ entirely.
 - C++17 compiler (GCC 10+, Clang 12+, MSVC 19.30+)
 - CMake 3.14+
 - Optional: `libavformat`/`libavcodec`/`libavutil`/`libswresample` for Opus/M4A ingestion (`WHISPER_FFMPEG=ON`)
-- Optional: `libopenblas`/MKL/Accelerate for `cohere` (speeds up its Conformer encoder)
+- Optional: `libopenblas`/MKL/Accelerate — speeds up CPU-side matmuls for the Conformer-based encoders (parakeet, canary, cohere, granite, fastconformer-ctc). The ggml CPU backend picks up BLAS automatically when it's present at build time; no CrispASR configure flag needed.
+- Optional: CUDA/Metal/Vulkan GPU backend — enabled via ggml's standard flags (`GGML_CUDA=ON`, `GGML_METAL=ON`, etc.). On CUDA you can set `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` to allow swapping to system RAM when VRAM is exhausted.
 - `curl` or `wget` on `$PATH` if you want to use `-m auto` auto-download
+- Optional: `sherpa-onnx` binaries on `$PATH` if you want `--diarize-method sherpa` or `--lid-backend silero`
 
 No Python, PyTorch, or pip required at runtime.
 
