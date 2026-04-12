@@ -381,7 +381,8 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 | `cstr/stt-en-fastconformer-ctc-xxlarge-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
 | `cstr/silero-lid-lang95-GGUF` | ✅ shipped (f32 only — 16 MB; quants break accuracy on small conv tensors) |
 | `cstr/pyannote-v3-segmentation-GGUF` | ✅ shipped (f32, 5.7 MB) |
-| `cstr/wav2vec2-large-xlsr-53-english-GGUF` | ✅ shipped (f16, 627 MB) |
+| `cstr/wav2vec2-large-xlsr-53-english-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
+| `cstr/wav2vec2-large-xlsr-53-german-GGUF` | ✅ shipped (q4_k) |
 
 ---
 
@@ -410,9 +411,9 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 - **Wired into CLI:** `--diarize-method pyannote --sherpa-segment-model *.gguf` uses native path, falls back to subprocess for .onnx
 - **Tested:** 650 frames on jfk.wav, "(speaker 1)" assigned correctly
 
-### Granite speedup (#64) — PROFILED
+### Granite speedup (#64) — CLOSED (hardware-blocked)
 - 33s for 11s audio at q4_k, 4 threads. Bottleneck: autoregressive LLM decode (26s of 33s).
-- No quick code fix — needs GPU offload for material speedup.
+- `--gpu-backend` flag exists, granite uses `ggml_backend_init_best()`. No code changes needed — just add a GPU.
 
 ### iOS + Android CI (#65) — DONE ✅
 - Cross-compilation gates for arm64 iOS (Xcode) + arm64-v8a Android (NDK r26d).
