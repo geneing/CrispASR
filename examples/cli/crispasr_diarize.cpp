@@ -18,6 +18,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #define close _close
+#define popen _popen
+#define pclose _pclose
 static int mkstemps(char * t, int s) {
     (void)s; return _mktemp_s(t, strlen(t)+1) == 0 ? _open(t, _O_CREAT|_O_WRONLY, 0600) : -1;
 }
