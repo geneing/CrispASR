@@ -169,12 +169,17 @@ static bool lid_load(lid_model & m, const char * path, ggml_backend_t backend) {
 // Forward pass (manual F32, CPU-only for the small 17 MB model)
 // ===========================================================================
 
-// Depthwise-separable conv1d: dw_conv(k=5) + relu + pw_conv(k=1) + relu
+// Depthwise-separable conv1d with residual:
+//   dw_conv(k=5) + bias → ReLU → pw_conv(k=1) + bias + residual_input → ReLU
+// The ONNX graph (confirmed by tracing Conv_73→Relu_74→Conv_75→Add_76→Relu_77)
+// adds the ORIGINAL block input as a skip connection after the pointwise conv.
+// When C_in != C_out, the residual is projected via the block's `proj` weight.
 static void dw_sep_conv1d(
     const float * in, int C_in, int T_in,
     const float * dw_w, const float * dw_b, int K,
     const float * pw_w, const float * pw_b, int C_out,
-    float * out)
+    float * out,
+    bool add_residual = true)
 {
     int pad = K / 2;
     // Depthwise: [C_in, 1, K] with same padding
@@ -190,12 +195,18 @@ static void dw_sep_conv1d(
             dw_out[c * T_in + t] = std::max(0.f, sum);  // ReLU
         }
     }
-    // Pointwise: [C_out, C_in, 1]
+    // Pointwise: [C_out, C_in, 1] + residual + ReLU
     for (int co = 0; co < C_out; co++) {
         for (int t = 0; t < T_in; t++) {
             float sum = pw_b[co];
             for (int ci = 0; ci < C_in; ci++)
                 sum += pw_w[co * C_in + ci] * dw_out[ci * T_in + t];
+            // Residual: add the input at the same channel position
+            // (only when C_in == C_out; when they differ, the caller
+            // applies a separate proj and the residual is omitted here)
+            if (add_residual && C_in == C_out && co < C_in) {
+                sum += in[co * T_in + t];
+            }
             out[co * T_in + t] = std::max(0.f, sum);  // ReLU
         }
     }
@@ -407,15 +418,27 @@ extern "C" const char * silero_lid_detect(
         int K_fe   = m.frontend_kernel;   // 320
         int S_fe   = m.frontend_stride;   // 160
         int C_fe   = m.frontend_channels; // 322
-        T = (n_samples - K_fe) / S_fe + 1;
+
+        // Reflection-pad the input with K_fe samples at the front.
+        // The ONNX graph uses Pad_24 with a complex slice-based padding
+        // that mirrors the first K_fe audio samples. This ensures the
+        // Conv output at frame 0 sees real audio (not silence), producing
+        // non-zero features from the start.
+        std::vector<float> padded(K_fe + n_samples);
+        for (int i = 0; i < K_fe; i++)
+            padded[i] = (K_fe - 1 - i < n_samples) ? samples[K_fe - 1 - i] : 0.f;
+        std::memcpy(padded.data() + K_fe, samples, n_samples * sizeof(float));
+        int N_padded = (int)padded.size();
+
+        T = (N_padded - K_fe) / S_fe + 1;
         C = C_fe;
         cur.resize(C_fe * T);
-        // Conv1d: out[co, t] = sum_k(fw[co, 0, k] * samples[t*stride + k])
+        // Conv1d: out[co, t] = sum_k(fw[co, 0, k] * padded[t*stride + k])
         for (int co = 0; co < C_fe; co++) {
             for (int t = 0; t < T; t++) {
                 float sum = 0.f;
                 for (int k = 0; k < K_fe; k++)
-                    sum += fw[co * K_fe + k] * samples[t * S_fe + k];
+                    sum += fw[co * K_fe + k] * padded[t * S_fe + k];
                 cur[co * T + t] = sum;
             }
         }
@@ -487,6 +510,8 @@ extern "C" const char * silero_lid_detect(
             float global_mean = 0;
             for (int t = 0; t < T; t++) global_mean += smooth[t];
             global_mean /= T;
+                    global_mean, T, C_half);
+                    log_mag[0], frame_mean[0], smooth[0]);
 
             // Step 7: normalize = log_mag - global_mean
             for (int i = 0; i < C_half * T; i++) {
