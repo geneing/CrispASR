@@ -130,9 +130,16 @@ each backend. High-value gaps to close:
   but the LLM models themselves pad to a fixed 30s window. Variable-
   length mel would let them handle >30s natively.
 
-- **[later]** **Streaming transcription for voxtral4b.** The model is
+- **[done]** ~~**Streaming transcription.**~~ **Done.** Generic
+  `--stream` (stdin PCM), `--mic` (microphone capture via
+  arecord/sox/ffmpeg subprocess), `--live` (continuous mode), and
+  `--monitor` (unicode progress symbols) work with all 11 backends.
+  Inspired by antirez/voxtral.c. Also added `--alt` for per-token
+  confidence display.
+
+- **[later]** **Native voxtral4b streaming protocol.** The model is
   designed for realtime streaming with configurable 240ms-2.4s delay.
-  Currently we run it in batch mode like the others. Exposing a
+  Currently we run it in chunk-and-transcribe mode. Exposing a
   streaming mode through the CLI is a bigger design question.
 
 - **[later]** **Audio understanding mode for voxtral 3B.** The model

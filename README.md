@@ -74,6 +74,7 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 | Flash attention | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
 | Punctuation toggle | | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
 | Source / target language | | | ✔ | | ✔ | ✔ | | ✔ | | |
+| Streaming (`--stream/--mic/--live`) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | Auto-download (`-m auto`) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | |
 
 **Key:** ✔ = native/built-in, `-am` = via CTC forced aligner (`-am canary-ctc-aligner.gguf` or `-am qwen3-forced-aligner.gguf`), **LID** = via external language identification pre-step (`-l auto`), **all** = via `--diarize` post-step (not declared by backend but always available).
@@ -303,6 +304,28 @@ python models/convert-wav2vec2-to-gguf.py \
 # Then optionally quantize:
 ./build/bin/crispasr-quantize wav2vec2-de.gguf wav2vec2-de-q4k.gguf q4_k
 ```
+
+### Streaming & live transcription
+
+```bash
+# Pipe audio from ffmpeg, sox, or any tool that outputs raw PCM:
+ffmpeg -i audio.wav -f s16le -ar 16000 -ac 1 - | \
+    crispasr --stream -m model.gguf
+
+# Live microphone transcription (auto-detects arecord/sox/ffmpeg):
+crispasr --mic -m model.gguf
+
+# Continuous live mode (prints each chunk as a new line, never stops):
+crispasr --live -m model.gguf
+
+# With progress monitor symbols (▶ processing, ✓ got text, · silence):
+crispasr --live --monitor -m model.gguf
+
+# Per-token confidence and alternative candidates:
+crispasr -m model.gguf -f audio.wav --alt
+```
+
+Streaming works with all 11 backends. The `--stream-step` (default 3s), `--stream-length` (default 10s), and `--stream-keep` (default 200ms overlap) flags control the sliding window.
 
 ---
 
