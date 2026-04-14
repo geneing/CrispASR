@@ -125,6 +125,13 @@ int crispasr_run_server(whisper_params & params,
                 backend_name.c_str(), params.model.c_str());
     }
 
+    // Audio hash cache for encoder output reuse (same audio → skip re-encode)
+    struct AudioCache {
+        size_t hash = 0;
+        std::vector<crispasr_segment> segs;
+    };
+    AudioCache last_cache;
+
     Server svr;
 
     // POST /inference — transcribe uploaded audio
@@ -171,11 +178,28 @@ int crispasr_run_server(whisper_params & params,
         if (req.has_file("language"))
             rp.language = req.get_file_value("language").content;
 
-        // Transcribe
+        // Check audio cache (simple hash: size + first/middle/last samples)
+        size_t audio_hash = pcmf32.size();
+        if (!pcmf32.empty()) {
+            union { float f; uint32_t u; } conv;
+            conv.f = pcmf32[0]; audio_hash ^= conv.u * 2654435761u;
+            conv.f = pcmf32[pcmf32.size()/2]; audio_hash ^= conv.u * 40503u;
+            conv.f = pcmf32.back(); audio_hash ^= conv.u * 12345u;
+        }
+
+        // Transcribe (with cache check)
         std::lock_guard<std::mutex> lock(model_mutex);
         auto t0 = std::chrono::steady_clock::now();
 
-        auto segs = backend->transcribe(pcmf32.data(), (int)pcmf32.size(), 0, rp);
+        std::vector<crispasr_segment> segs;
+        if (last_cache.hash == audio_hash && !last_cache.segs.empty()) {
+            segs = last_cache.segs;
+            fprintf(stderr, "crispasr-server: cache hit — reusing previous result\n");
+        } else {
+            segs = backend->transcribe(pcmf32.data(), (int)pcmf32.size(), 0, rp);
+            last_cache.hash = audio_hash;
+            last_cache.segs = segs;
+        }
 
         auto t1 = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(t1 - t0).count();

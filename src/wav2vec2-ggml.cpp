@@ -932,11 +932,73 @@ std::vector<float> wav2vec2_compute_logits_graph(
                      + ggml_graph_overhead_custom(512, false)
                      + 32 * 1024 * 1024;
 
-    // hidden_ht is [T, H] / ggml [H, T] layout — update in place each layer
+    // Try full-graph path with ggml_backend_sched (GPU-ready)
+    // Uses the pre-built graph function + explicit weight tensor assignment
+    {
+        std::vector<uint8_t> compute_meta;
+        ggml_cgraph * gf = wav2vec2_build_transformer_graph(m, T, compute_meta);
+        if (gf) {
+            ggml_backend_cpu_set_n_threads(m.backend, n_threads);
+            ggml_backend_t backends[1] = { m.backend };
+            ggml_backend_sched_t sched = ggml_backend_sched_new(
+                backends, nullptr, 1, 16384, false, false);
+
+            // CRITICAL: assign all weight tensors to the model's backend
+            // so the scheduler doesn't reallocate them
+            auto assign = [&](ggml_tensor * t) {
+                if (t) ggml_backend_sched_set_tensor_backend(sched, t, m.backend);
+            };
+            assign(m.fp_w); assign(m.fp_b);
+            assign(m.fp_ln_w); assign(m.fp_ln_b);
+            assign(m.pos_conv_w); assign(m.pos_conv_b);
+            assign(m.enc_ln_w); assign(m.enc_ln_b);
+            assign(m.lm_w); assign(m.lm_b);
+            for (int il2 = 0; il2 < L; il2++) {
+                const auto & e2 = m.enc[il2];
+                assign(e2.ln1_w); assign(e2.ln1_b);
+                assign(e2.q_w);  assign(e2.q_b);
+                assign(e2.k_w);  assign(e2.k_b);
+                assign(e2.v_w);  assign(e2.v_b);
+                assign(e2.o_w);  assign(e2.o_b);
+                assign(e2.ln2_w); assign(e2.ln2_b);
+                assign(e2.fc1_w); assign(e2.fc1_b);
+                assign(e2.fc2_w); assign(e2.fc2_b);
+            }
+
+            ggml_backend_sched_reset(sched);
+            if (ggml_backend_sched_alloc_graph(sched, gf)) {
+                ggml_tensor * inp = ggml_graph_get_tensor(gf, "hidden_in");
+                if (inp) {
+                    ggml_backend_tensor_set(inp, hidden_ht.data(), 0,
+                                             H * T * sizeof(float));
+                    if (ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS) {
+                        ggml_tensor * out = ggml_graph_get_tensor(gf, "logits");
+                        if (out) {
+                            int V_out = (int)out->ne[0];
+                            int T_out = (int)out->ne[1];
+                            std::vector<float> logits_tv(V_out * T_out);
+                            ggml_backend_tensor_get(out, logits_tv.data(), 0,
+                                                     logits_tv.size() * sizeof(float));
+                            ggml_backend_sched_free(sched);
+                            return logits_tv;
+                        }
+                    }
+                }
+            }
+            ggml_backend_sched_free(sched);
+            // Fall through to per-layer path if sched failed
+            fprintf(stderr, "[wav2vec2] sched path failed, using per-layer fallback\n");
+        }
+    }
+
+    // Fallback: per-layer graphs with compute_with_ctx
+    // Pre-allocate layer buffer + work buffer once (reused across all layers)
+    std::vector<uint8_t> lbuf(layer_mem);
+    std::vector<uint8_t> work_buf;
+
     for (int il = 0; il < L; il++) {
         const auto & e = m.enc[il];
 
-        std::vector<uint8_t> lbuf(layer_mem);
         ggml_init_params lip = { layer_mem, lbuf.data(), false };
         ggml_context * lctx = ggml_init(lip);
         ggml_cgraph * lgf = ggml_new_graph_custom(lctx, 512, false);
@@ -992,13 +1054,14 @@ std::vector<float> wav2vec2_compute_logits_graph(
         ggml_set_name(cur, "layer_out");
         ggml_build_forward_expand(lgf, cur);
 
-        // Compute with explicit work buffer (malloc, not from context pool)
+        // Compute — reuse pre-allocated work buffer
         struct ggml_cplan cplan = ggml_graph_plan(lgf, n_threads, NULL);
         if (cplan.work_size > 0) {
-            cplan.work_data = (uint8_t *)malloc(cplan.work_size);
+            if (work_buf.size() < cplan.work_size)
+                work_buf.resize(cplan.work_size);
+            cplan.work_data = work_buf.data();
         }
         ggml_graph_compute(lgf, &cplan);
-        free(cplan.work_data);
 
         // Read output back into hidden_ht for the next layer
         ggml_tensor * lout = ggml_graph_get_tensor(lgf, "layer_out");
