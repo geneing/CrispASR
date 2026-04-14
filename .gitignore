@@ -80,3 +80,5 @@ local.properties
 .exe
 SETUP.md
 .claude/worktrees/
+__pycache__/
+*.pyc
