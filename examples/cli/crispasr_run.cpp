@@ -319,14 +319,40 @@ int crispasr_run_backend(const whisper_params & params_in) {
         const int length_samples = (params.stream_length_ms  * SR) / 1000;
         const int keep_samples   = (params.stream_keep_ms    * SR) / 1000;
 
-        fprintf(stderr, "crispasr[stream]: reading raw s16le 16kHz mono PCM from stdin\n");
-        fprintf(stderr, "crispasr[stream]: step=%dms length=%dms keep=%dms\n",
-                params.stream_step_ms, params.stream_length_ms, params.stream_keep_ms);
-        fprintf(stderr, "crispasr[stream]: pipe audio in, e.g.:\n");
-        fprintf(stderr, "  ffmpeg -i input.wav -f s16le -ar 16000 -ac 1 - | crispasr --stream -m model.gguf\n\n");
+        // If --mic, spawn a subprocess to capture audio from the default mic
+        FILE * mic_pipe = nullptr;
+        if (params.mic) {
+            fprintf(stderr, "crispasr[mic]: capturing from default microphone...\n");
+            fprintf(stderr, "crispasr[mic]: press Ctrl+C to stop\n\n");
+            // Try platform-specific mic capture commands
+#if defined(__APPLE__)
+            // macOS: use sox (most reliable), ffmpeg fallback
+            mic_pipe = popen("rec -q -t s16 -r 16000 -c 1 - 2>/dev/null || "
+                             "ffmpeg -f avfoundation -i ':default' -f s16le -ar 16000 -ac 1 - 2>/dev/null", "r");
+#elif defined(_WIN32)
+            mic_pipe = _popen("ffmpeg -f dshow -i audio=\"Microphone\" -f s16le -ar 16000 -ac 1 - 2>NUL", "rb");
+#else
+            // Linux: try arecord first, then ffmpeg with pulseaudio
+            mic_pipe = popen("arecord -q -f S16_LE -r 16000 -c 1 -t raw 2>/dev/null || "
+                             "ffmpeg -f pulse -i default -f s16le -ar 16000 -ac 1 - 2>/dev/null || "
+                             "ffmpeg -f alsa -i default -f s16le -ar 16000 -ac 1 - 2>/dev/null", "r");
+#endif
+            if (!mic_pipe) {
+                fprintf(stderr, "crispasr[mic]: failed to open microphone. Install sox, ffmpeg, or arecord.\n");
+                return 20;
+            }
+        } else {
+            fprintf(stderr, "crispasr[stream]: reading raw s16le 16kHz mono PCM from stdin\n");
+            fprintf(stderr, "crispasr[stream]: step=%dms length=%dms keep=%dms\n",
+                    params.stream_step_ms, params.stream_length_ms, params.stream_keep_ms);
+            fprintf(stderr, "crispasr[stream]: pipe audio in, e.g.:\n");
+            fprintf(stderr, "  ffmpeg -i input.wav -f s16le -ar 16000 -ac 1 - | crispasr --stream -m model.gguf\n\n");
+        }
+
+        FILE * audio_src = mic_pipe ? mic_pipe : stdin;
 
 #if defined(_WIN32)
-        _setmode(_fileno(stdin), _O_BINARY);
+        if (!mic_pipe) _setmode(_fileno(stdin), _O_BINARY);
 #endif
 
         std::vector<float> pcm_window(length_samples, 0.0f);
@@ -334,8 +360,8 @@ int crispasr_run_backend(const whisper_params & params_in) {
         std::string prev_text;
 
         while (true) {
-            // Read one step of raw s16le samples from stdin
-            size_t n_read = fread(read_buf.data(), sizeof(int16_t), step_samples, stdin);
+            // Read one step of raw s16le samples from audio source
+            size_t n_read = fread(read_buf.data(), sizeof(int16_t), step_samples, audio_src);
             if (n_read == 0) break;  // EOF
 
             // Convert s16le to float
@@ -380,6 +406,13 @@ int crispasr_run_backend(const whisper_params & params_in) {
             }
         }
         fprintf(stdout, "\n");
+        if (mic_pipe) {
+#if defined(_WIN32)
+            _pclose(mic_pipe);
+#else
+            pclose(mic_pipe);
+#endif
+        }
         return 0;
     }
 
