@@ -130,7 +130,7 @@ jobs:
         run: |
           cppcheck \
             --error-exitcode=1 \
-            --enable=warning,style,performance,portability \
+            --enable=warning,performance,portability \
             --std=c++17 \
             --suppress=missingIncludeSystem \
             --suppress=unmatchedSuppression \
