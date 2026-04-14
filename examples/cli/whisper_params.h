@@ -175,6 +175,7 @@ struct whisper_params {
     //   ffmpeg -i mic.wav -f s16le -ar 16000 -ac 1 - | crispasr --stream -m model.gguf
     bool        stream           = false;
     bool        mic              = false;  // capture from default microphone
+    bool        stream_continuous = false; // don't stop on EOS, keep transcribing
     int32_t     stream_step_ms   = 3000;  // chunk size in ms (default 3s)
     int32_t     stream_length_ms = 10000; // context window in ms (default 10s)
     int32_t     stream_keep_ms   = 200;   // overlap to keep between chunks

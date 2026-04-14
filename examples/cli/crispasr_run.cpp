@@ -397,12 +397,20 @@ int crispasr_run_backend(const whisper_params & params_in) {
             std::string text;
             for (const auto & s : segs) text += s.text;
 
-            // Simple dedup: only print if text changed
-            if (!text.empty() && text != prev_text) {
-                // Clear previous line and print new text
-                fprintf(stdout, "\33[2K\r%s", text.c_str());
-                fflush(stdout);
-                prev_text = text;
+            // Output depends on mode:
+            // Continuous: print each non-empty result as a new line
+            // Normal: overwrite current line (dedup by text content)
+            if (params.stream_continuous) {
+                if (!text.empty()) {
+                    fprintf(stdout, "%s\n", text.c_str());
+                    fflush(stdout);
+                }
+            } else {
+                if (!text.empty() && text != prev_text) {
+                    fprintf(stdout, "\33[2K\r%s", text.c_str());
+                    fflush(stdout);
+                    prev_text = text;
+                }
             }
         }
         fprintf(stdout, "\n");
