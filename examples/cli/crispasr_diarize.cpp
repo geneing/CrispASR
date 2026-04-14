@@ -22,8 +22,9 @@
 #define close _close
 #define popen _popen
 #define pclose _pclose
-static int mkstemps(char * t, int s) {
-    (void)s; return _mktemp_s(t, strlen(t)+1) == 0 ? _open(t, _O_CREAT|_O_WRONLY, 0600) : -1;
+static int mkstemps(char* t, int s) {
+    (void)s;
+    return _mktemp_s(t, strlen(t) + 1) == 0 ? _open(t, _O_CREAT | _O_WRONLY, 0600) : -1;
 }
 #else
 #include <sys/stat.h>
@@ -38,7 +39,8 @@ namespace {
 // arrays cover only [t0_cs, t1_cs), not the whole input.
 inline int64_t cs_to_sample_in_slice(int64_t cs_abs, int64_t slice_t0_cs) {
     int64_t cs_local = cs_abs - slice_t0_cs;
-    if (cs_local < 0) cs_local = 0;
+    if (cs_local < 0)
+        cs_local = 0;
     return (cs_local * 16000) / 100;
 }
 
@@ -51,27 +53,30 @@ inline int64_t cs_to_sample_in_slice(int64_t cs_abs, int64_t slice_t0_cs) {
 // on near-equal energy. Same threshold the historical whisper-cli
 // `--diarize` path uses, kept for consistency with downstream tools
 // that grep for the literal "(speaker 0)" / "(speaker 1)" prefix.
-void apply_energy(
-    const float * left, const float * right, int n_samples,
-    int64_t slice_t0_cs,
-    std::vector<crispasr_segment> & segs)
-{
-    for (auto & seg : segs) {
+void apply_energy(const float* left, const float* right, int n_samples, int64_t slice_t0_cs,
+                  std::vector<crispasr_segment>& segs) {
+    for (auto& seg : segs) {
         int64_t is0 = cs_to_sample_in_slice(seg.t0, slice_t0_cs);
         int64_t is1 = cs_to_sample_in_slice(seg.t1, slice_t0_cs);
-        if (is0 < 0) is0 = 0;
-        if (is1 > n_samples) is1 = n_samples;
-        if (is0 >= is1) continue;
+        if (is0 < 0)
+            is0 = 0;
+        if (is1 > n_samples)
+            is1 = n_samples;
+        if (is0 >= is1)
+            continue;
 
         double e_l = 0.0, e_r = 0.0;
         for (int64_t j = is0; j < is1; j++) {
-            e_l += std::fabs((double)left [j]);
+            e_l += std::fabs((double)left[j]);
             e_r += std::fabs((double)right[j]);
         }
         std::string spk;
-        if      (e_l > 1.1 * e_r) spk = "0";
-        else if (e_r > 1.1 * e_l) spk = "1";
-        else                      spk = "?";
+        if (e_l > 1.1 * e_r)
+            spk = "0";
+        else if (e_r > 1.1 * e_l)
+            spk = "1";
+        else
+            spk = "?";
         seg.speaker = "(speaker " + spk + ") ";
     }
 }
@@ -88,17 +93,16 @@ void apply_energy(
 // shifted ahead = voice arrived at R first = speaker 1; negative lag
 // = speaker 0. Falls back to energy when the peak isn't strong enough
 // (e.g. silent segment).
-void apply_xcorr(
-    const float * left, const float * right, int n_samples,
-    int64_t slice_t0_cs,
-    std::vector<crispasr_segment> & segs)
-{
+void apply_xcorr(const float* left, const float* right, int n_samples, int64_t slice_t0_cs,
+                 std::vector<crispasr_segment>& segs) {
     constexpr int MAX_LAG = 80; // ±5 ms at 16 kHz
-    for (auto & seg : segs) {
+    for (auto& seg : segs) {
         int64_t is0 = cs_to_sample_in_slice(seg.t0, slice_t0_cs);
         int64_t is1 = cs_to_sample_in_slice(seg.t1, slice_t0_cs);
-        if (is0 < 0) is0 = 0;
-        if (is1 > n_samples) is1 = n_samples;
+        if (is0 < 0)
+            is0 = 0;
+        if (is1 > n_samples)
+            is1 = n_samples;
         if (is1 - is0 < 2 * MAX_LAG) {
             // Segment is too short to estimate a lag; fall back to
             // single-frame energy comparison so we still emit something.
@@ -114,18 +118,24 @@ void apply_xcorr(
         const int64_t hi = is1 - MAX_LAG;
         const int64_t lo = is0 + MAX_LAG;
         double best = -1e30;
-        int    best_lag = 0;
+        int best_lag = 0;
         for (int lag = -MAX_LAG; lag <= MAX_LAG; lag++) {
             double sum = 0.0;
             for (int64_t j = lo; j < hi; j++) {
                 sum += (double)left[j] * (double)right[j + lag];
             }
-            if (sum > best) { best = sum; best_lag = lag; }
+            if (sum > best) {
+                best = sum;
+                best_lag = lag;
+            }
         }
         std::string spk;
-        if      (best_lag <  0) spk = "0";
-        else if (best_lag >  0) spk = "1";
-        else                    spk = "?";
+        if (best_lag < 0)
+            spk = "0";
+        else if (best_lag > 0)
+            spk = "1";
+        else
+            spk = "?";
         seg.speaker = "(speaker " + spk + ") ";
     }
 }
@@ -148,11 +158,12 @@ namespace {
 constexpr int64_t MIN_TURN_GAP_CS = 60;
 } // namespace
 
-void apply_vad_turns(std::vector<crispasr_segment> & segs) {
-    if (segs.empty()) return;
+void apply_vad_turns(std::vector<crispasr_segment>& segs) {
+    if (segs.empty())
+        return;
     int speaker = 0;
     int64_t prev_t1 = -1;
-    for (auto & seg : segs) {
+    for (auto& seg : segs) {
         if (prev_t1 >= 0 && (seg.t0 - prev_t1) > MIN_TURN_GAP_CS) {
             speaker = 1 - speaker; // alternate 0 / 1
         }
@@ -196,14 +207,16 @@ namespace {
 // sherpa-onnx-offline-speaker-diarization takes a WAV path on the cmdline,
 // so we need a file the subprocess can open. Returns the path (malloc'd,
 // caller frees via std::remove).
-std::string write_temp_mono_wav(const float * samples, int n_samples) {
+std::string write_temp_mono_wav(const float* samples, int n_samples) {
     char buf[] = "/tmp/crispasr-sherpa-XXXXXX.wav";
     int fd = mkstemps(buf, 4);
-    if (fd < 0) return {};
+    if (fd < 0)
+        return {};
     close(fd);
     std::string path = buf;
-    FILE * f = fopen(path.c_str(), "wb");
-    if (!f) return {};
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f)
+        return {};
 
     // Minimal RIFF/WAVE header for 16 kHz mono PCM int16.
     const uint32_t sr = 16000;
@@ -216,15 +229,26 @@ std::string write_temp_mono_wav(const float * samples, int n_samples) {
 
     auto w32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
     auto w16 = [&](uint16_t v) { fwrite(&v, 2, 1, f); };
-    fwrite("RIFF", 1, 4, f); w32(riff_size); fwrite("WAVE", 1, 4, f);
-    fwrite("fmt ", 1, 4, f); w32(16); w16(1); w16(ch);
-    w32(sr); w32(byte_rate); w16(block_align); w16(bps);
-    fwrite("data", 1, 4, f); w32(data_bytes);
+    fwrite("RIFF", 1, 4, f);
+    w32(riff_size);
+    fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f);
+    w32(16);
+    w16(1);
+    w16(ch);
+    w32(sr);
+    w32(byte_rate);
+    w16(block_align);
+    w16(bps);
+    fwrite("data", 1, 4, f);
+    w32(data_bytes);
     std::vector<int16_t> pcm(n_samples);
     for (int i = 0; i < n_samples; i++) {
         float v = samples[i];
-        if (v >  1.0f) v =  1.0f;
-        if (v < -1.0f) v = -1.0f;
+        if (v > 1.0f)
+            v = 1.0f;
+        if (v < -1.0f)
+            v = -1.0f;
         pcm[i] = (int16_t)(v * 32767.0f);
     }
     fwrite(pcm.data(), sizeof(int16_t), pcm.size(), f);
@@ -238,23 +262,31 @@ std::string write_temp_mono_wav(const float * samples, int n_samples) {
 // or:
 //     "0.320 3.680 0"
 // We accept both the `--` and the plain-space formats.
-struct SherpaSegment { double t0_s; double t1_s; int speaker; };
+struct SherpaSegment {
+    double t0_s;
+    double t1_s;
+    int speaker;
+};
 
-bool parse_sherpa_line(const std::string & line, SherpaSegment & out) {
+bool parse_sherpa_line(const std::string& line, SherpaSegment& out) {
     double t0 = 0, t1 = 0;
     char rest[256] = {0};
     // Try the "t0 -- t1 speaker_NN" form first.
     if (std::sscanf(line.c_str(), "%lf -- %lf %255s", &t0, &t1, rest) == 3) {
-        out.t0_s = t0; out.t1_s = t1;
+        out.t0_s = t0;
+        out.t1_s = t1;
         // speaker_NN → NN
-        const char * p = rest;
-        while (*p && !isdigit((unsigned char)*p)) p++;
+        const char* p = rest;
+        while (*p && !isdigit((unsigned char)*p))
+            p++;
         out.speaker = *p ? std::atoi(p) : 0;
         return true;
     }
     int spk = 0;
     if (std::sscanf(line.c_str(), "%lf %lf %d", &t0, &t1, &spk) == 3) {
-        out.t0_s = t0; out.t1_s = t1; out.speaker = spk;
+        out.t0_s = t0;
+        out.t1_s = t1;
+        out.speaker = spk;
         return true;
     }
     return false;
@@ -264,22 +296,23 @@ bool parse_sherpa_line(const std::string & line, SherpaSegment & out) {
 // For each ASR segment, pick the sherpa speaker whose time interval
 // overlaps the segment the most. If no sherpa segment overlaps at all we
 // leave speaker empty (the writer will just not prefix a label).
-void assign_speakers_from_sherpa(std::vector<crispasr_segment> & segs,
-                                 const std::vector<SherpaSegment> & sherpa) {
-    if (sherpa.empty()) return;
-    for (auto & seg : segs) {
+void assign_speakers_from_sherpa(std::vector<crispasr_segment>& segs, const std::vector<SherpaSegment>& sherpa) {
+    if (sherpa.empty())
+        return;
+    for (auto& seg : segs) {
         const double a0 = (double)seg.t0 / 100.0;
         const double a1 = (double)seg.t1 / 100.0;
         std::vector<double> overlap_per_speaker(32, 0.0);
         int max_spk = 0;
-        for (const auto & s : sherpa) {
+        for (const auto& s : sherpa) {
             const double lo = std::max(a0, s.t0_s);
             const double hi = std::min(a1, s.t1_s);
             if (hi > lo) {
                 if (s.speaker >= (int)overlap_per_speaker.size())
                     overlap_per_speaker.resize(s.speaker + 1, 0.0);
                 overlap_per_speaker[s.speaker] += (hi - lo);
-                if (s.speaker > max_spk) max_spk = s.speaker;
+                if (s.speaker > max_spk)
+                    max_spk = s.speaker;
             }
         }
         int best = -1;
@@ -296,21 +329,16 @@ void assign_speakers_from_sherpa(std::vector<crispasr_segment> & segs,
     }
 }
 
-bool apply_sherpa(const std::vector<float> & mono,
-                  int64_t slice_t0_cs,
-                  std::vector<crispasr_segment> & segs,
-                  const whisper_params & params) {
-    const std::string bin = params.sherpa_bin.empty()
-        ? std::string("sherpa-onnx-offline-speaker-diarization")
-        : params.sherpa_bin;
-    if (params.sherpa_segment_model.empty() ||
-        params.sherpa_embedding_model.empty()) {
-        fprintf(stderr,
-            "crispasr[diarize]: sherpa needs --sherpa-segment-model and\n"
-            "                   --sherpa-embedding-model. Download them from\n"
-            "                   https://github.com/k2-fsa/sherpa-onnx — e.g.\n"
-            "                     sherpa-pyannote-segmentation-3.0.onnx\n"
-            "                     3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx\n");
+bool apply_sherpa(const std::vector<float>& mono, int64_t slice_t0_cs, std::vector<crispasr_segment>& segs,
+                  const whisper_params& params) {
+    const std::string bin =
+        params.sherpa_bin.empty() ? std::string("sherpa-onnx-offline-speaker-diarization") : params.sherpa_bin;
+    if (params.sherpa_segment_model.empty() || params.sherpa_embedding_model.empty()) {
+        fprintf(stderr, "crispasr[diarize]: sherpa needs --sherpa-segment-model and\n"
+                        "                   --sherpa-embedding-model. Download them from\n"
+                        "                   https://github.com/k2-fsa/sherpa-onnx — e.g.\n"
+                        "                     sherpa-pyannote-segmentation-3.0.onnx\n"
+                        "                     3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx\n");
         return false;
     }
 
@@ -320,8 +348,9 @@ bool apply_sherpa(const std::vector<float> & mono,
         struct stat st;
         if (::stat(bin.c_str(), &st) != 0) {
             fprintf(stderr,
-                "crispasr[diarize]: sherpa binary '%s' not found — pass "
-                "--sherpa-bin or install k2-fsa/sherpa-onnx\n", bin.c_str());
+                    "crispasr[diarize]: sherpa binary '%s' not found — pass "
+                    "--sherpa-bin or install k2-fsa/sherpa-onnx\n",
+                    bin.c_str());
             return false;
         }
     }
@@ -333,17 +362,16 @@ bool apply_sherpa(const std::vector<float> & mono,
     }
 
     std::ostringstream cmd;
-    cmd << bin
-        << " --clustering.num-clusters=" << params.sherpa_num_clusters
-        << " --segmentation.pyannote.model='" << params.sherpa_segment_model << "'"
-        << " --embedding.model='"            << params.sherpa_embedding_model << "'"
+    cmd << bin << " --clustering.num-clusters=" << params.sherpa_num_clusters << " --segmentation.pyannote.model='"
+        << params.sherpa_segment_model << "'"
+        << " --embedding.model='" << params.sherpa_embedding_model << "'"
         << " '" << wav_path << "'";
     if (!params.no_prints) {
         fprintf(stderr, "crispasr[diarize]: %s\n", cmd.str().c_str());
     }
     cmd << " 2>/dev/null";
 
-    std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(cmd.str().c_str(), "r"), pclose);
+    std::unique_ptr<FILE, int (*)(FILE*)> pipe(popen(cmd.str().c_str(), "r"), pclose);
     if (!pipe) {
         fprintf(stderr, "crispasr[diarize]: failed to spawn sherpa subprocess\n");
         std::remove(wav_path.c_str());
@@ -354,31 +382,30 @@ bool apply_sherpa(const std::vector<float> & mono,
     char linebuf[1024];
     while (fgets(linebuf, sizeof(linebuf), pipe.get())) {
         SherpaSegment s;
-        if (parse_sherpa_line(linebuf, s)) parsed.push_back(s);
+        if (parse_sherpa_line(linebuf, s))
+            parsed.push_back(s);
     }
     std::remove(wav_path.c_str());
 
     if (parsed.empty()) {
-        fprintf(stderr,
-            "crispasr[diarize]: sherpa subprocess produced no parseable "
-            "segments — check that the two --sherpa-*-model paths are "
-            "correct and that the binary prints results on stdout.\n");
+        fprintf(stderr, "crispasr[diarize]: sherpa subprocess produced no parseable "
+                        "segments — check that the two --sherpa-*-model paths are "
+                        "correct and that the binary prints results on stdout.\n");
         return false;
     }
 
     // sherpa reports times relative to the audio it was handed (i.e.
     // the slice), so shift by slice_t0_cs before merging with our
     // absolute-cs segments.
-    for (auto & s : parsed) {
+    for (auto& s : parsed) {
         s.t0_s += (double)slice_t0_cs / 100.0;
         s.t1_s += (double)slice_t0_cs / 100.0;
     }
     assign_speakers_from_sherpa(segs, parsed);
 
     if (!params.no_prints) {
-        fprintf(stderr,
-                "crispasr[diarize]: sherpa → %zu speaker regions over %zu ASR segments\n",
-                parsed.size(), segs.size());
+        fprintf(stderr, "crispasr[diarize]: sherpa → %zu speaker regions over %zu ASR segments\n", parsed.size(),
+                segs.size());
     }
     return true;
 }
@@ -386,12 +413,8 @@ bool apply_sherpa(const std::vector<float> & mono,
 // -----------------------------------------------------------------------
 // Method 5: native pyannote segmentation (no subprocess)
 // -----------------------------------------------------------------------
-bool apply_pyannote_native(
-    const std::vector<float> & mono,
-    int64_t slice_t0_cs,
-    std::vector<crispasr_segment> & segs,
-    const whisper_params & params)
-{
+bool apply_pyannote_native(const std::vector<float>& mono, int64_t slice_t0_cs, std::vector<crispasr_segment>& segs,
+                           const whisper_params& params) {
     // Resolve model: if empty or "auto", auto-download from HF
     std::string mp = params.sherpa_segment_model;
     if (mp.empty() || mp == "auto") {
@@ -399,20 +422,23 @@ bool apply_pyannote_native(
             "pyannote-seg-3.0.gguf",
             "https://huggingface.co/cstr/pyannote-v3-segmentation-GGUF/resolve/main/pyannote-seg-3.0.gguf",
             params.no_prints, "crispasr[diarize]", params.cache_dir);
-        if (mp.empty()) return false;
+        if (mp.empty())
+            return false;
     }
-    if (mp.size() < 5 || mp.compare(mp.size()-5, 5, ".gguf") != 0) {
-        return false;  // not GGUF → use subprocess
+    if (mp.size() < 5 || mp.compare(mp.size() - 5, 5, ".gguf") != 0) {
+        return false; // not GGUF → use subprocess
     }
 
-    pyannote_seg_context * pctx = pyannote_seg_init(mp.c_str(), params.n_threads);
-    if (!pctx) return false;
+    pyannote_seg_context* pctx = pyannote_seg_init(mp.c_str(), params.n_threads);
+    if (!pctx)
+        return false;
 
     int T_seg = 0;
-    float * probs = pyannote_seg_run(pctx, mono.data(), (int)mono.size(), &T_seg);
+    float* probs = pyannote_seg_run(pctx, mono.data(), (int)mono.size(), &T_seg);
     pyannote_seg_free(pctx);
 
-    if (!probs || T_seg <= 0) return false;
+    if (!probs || T_seg <= 0)
+        return false;
 
     // Frame duration: sinc(stride=10) × 3 maxpools(stride=3) = 270 samples = 16.875 ms
     const double frame_dur_s = 270.0 / 16000.0;
@@ -420,23 +446,29 @@ bool apply_pyannote_native(
     // 7 classes: 0=silence, 1=spk0, 2=spk1, 3=spk0+1, 4=spk2, 5=spk0+2, 6=spk1+2
     static const int class_to_speaker[] = {-1, 0, 1, 0, 2, 0, 1};
 
-    for (auto & seg : segs) {
+    for (auto& seg : segs) {
         double a0 = (double)(seg.t0 - slice_t0_cs) / 100.0;
         double a1 = (double)(seg.t1 - slice_t0_cs) / 100.0;
         int f0 = std::max(0, (int)(a0 / frame_dur_s));
         int f1 = std::min(T_seg, (int)(a1 / frame_dur_s) + 1);
-        if (f0 >= f1) continue;
+        if (f0 >= f1)
+            continue;
 
         int counts[3] = {0, 0, 0};
         for (int f = f0; f < f1; f++) {
-            const float * lv = probs + f * 7;
+            const float* lv = probs + f * 7;
             int best = 0;
-            for (int i = 1; i < 7; i++) if (lv[i] > lv[best]) best = i;
+            for (int i = 1; i < 7; i++)
+                if (lv[i] > lv[best])
+                    best = i;
             int spk = class_to_speaker[best];
-            if (spk >= 0 && spk < 3) counts[spk]++;
+            if (spk >= 0 && spk < 3)
+                counts[spk]++;
         }
         int best_spk = 0;
-        for (int i = 1; i < 3; i++) if (counts[i] > counts[best_spk]) best_spk = i;
+        for (int i = 1; i < 3; i++)
+            if (counts[i] > counts[best_spk])
+                best_spk = i;
         if (counts[best_spk] > 0)
             seg.speaker = "(speaker " + std::to_string(best_spk) + ") ";
     }
@@ -449,15 +481,10 @@ bool apply_pyannote_native(
 
 } // namespace
 
-bool crispasr_apply_diarize(
-    const std::vector<float> & left,
-    const std::vector<float> & right,
-    bool                       is_stereo,
-    int64_t                    slice_t0_cs,
-    std::vector<crispasr_segment> & segs,
-    const whisper_params & params)
-{
-    if (segs.empty()) return true;
+bool crispasr_apply_diarize(const std::vector<float>& left, const std::vector<float>& right, bool is_stereo,
+                            int64_t slice_t0_cs, std::vector<crispasr_segment>& segs, const whisper_params& params) {
+    if (segs.empty())
+        return true;
 
     // Method dispatch. Default depends on whether we have stereo:
     //   stereo input  -> "energy"  (cheap, accurate per channel)
@@ -469,26 +496,22 @@ bool crispasr_apply_diarize(
 
     if (method == "energy") {
         if (!is_stereo) {
-            fprintf(stderr,
-                    "crispasr[diarize]: --diarize-method energy needs stereo input — "
-                    "falling back to vad-turns for this mono clip\n");
+            fprintf(stderr, "crispasr[diarize]: --diarize-method energy needs stereo input — "
+                            "falling back to vad-turns for this mono clip\n");
             apply_vad_turns(segs);
             return true;
         }
-        apply_energy(left.data(), right.data(), (int)left.size(),
-                     slice_t0_cs, segs);
+        apply_energy(left.data(), right.data(), (int)left.size(), slice_t0_cs, segs);
         return true;
     }
     if (method == "xcorr" || method == "cross-correlation") {
         if (!is_stereo) {
-            fprintf(stderr,
-                    "crispasr[diarize]: --diarize-method xcorr needs stereo input — "
-                    "falling back to vad-turns for this mono clip\n");
+            fprintf(stderr, "crispasr[diarize]: --diarize-method xcorr needs stereo input — "
+                            "falling back to vad-turns for this mono clip\n");
             apply_vad_turns(segs);
             return true;
         }
-        apply_xcorr(left.data(), right.data(), (int)left.size(),
-                    slice_t0_cs, segs);
+        apply_xcorr(left.data(), right.data(), (int)left.size(), slice_t0_cs, segs);
         return true;
     }
     if (method == "vad-turns" || method == "turns") {
@@ -501,9 +524,7 @@ bool crispasr_apply_diarize(
     // 3dspeaker / ecapa-tdnn) for the embedding model. The method name
     // is just a user-facing label for the same underlying pipeline, so
     // we unify them into one code path.
-    if (method == "sherpa"   || method == "sherpa-onnx" ||
-        method == "pyannote" || method == "ecapa")
-    {
+    if (method == "sherpa" || method == "sherpa-onnx" || method == "pyannote" || method == "ecapa") {
         // Build a mono view of the input. If we have stereo, mix both
         // channels. Otherwise the "left" buffer already holds mono.
         std::vector<float> mono;
@@ -524,13 +545,12 @@ bool crispasr_apply_diarize(
         }
         // sherpa failed — log already printed — fall through to a safe
         // default so the run still produces output.
-        fprintf(stderr,
-                "crispasr[diarize]: %s diarization failed — falling back to %s\n",
-                method.c_str(),
+        fprintf(stderr, "crispasr[diarize]: %s diarization failed — falling back to %s\n", method.c_str(),
                 is_stereo ? "energy" : "vad-turns");
-        if (is_stereo) apply_energy(left.data(), right.data(),
-                                    (int)left.size(), slice_t0_cs, segs);
-        else           apply_vad_turns(segs);
+        if (is_stereo)
+            apply_energy(left.data(), right.data(), (int)left.size(), slice_t0_cs, segs);
+        else
+            apply_vad_turns(segs);
         return true;
     }
 

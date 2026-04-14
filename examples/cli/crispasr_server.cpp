@@ -20,7 +20,7 @@
 #include "crispasr_vad.h"
 #include "whisper_params.h"
 
-#include "common-whisper.h"  // read_audio_data
+#include "common-whisper.h" // read_audio_data
 #include "../server/httplib.h"
 
 #include <atomic>
@@ -33,33 +33,43 @@
 #include <string>
 
 // Minimal JSON builder (avoid nlohmann dep for the server extension)
-static std::string json_escape(const std::string & s) {
+static std::string json_escape(const std::string& s) {
     std::string out;
     for (char c : s) {
         switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out += c;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            out += c;
         }
     }
     return out;
 }
 
-static std::string segments_to_json(const std::vector<crispasr_segment> & segs,
-                                     const std::string & backend_name,
-                                     double duration_s) {
+static std::string segments_to_json(const std::vector<crispasr_segment>& segs, const std::string& backend_name,
+                                    double duration_s) {
     std::ostringstream js;
     js << "{\n";
     js << "  \"backend\": \"" << json_escape(backend_name) << "\",\n";
     js << "  \"duration\": " << duration_s << ",\n";
     js << "  \"segments\": [\n";
     for (size_t i = 0; i < segs.size(); i++) {
-        const auto & s = segs[i];
+        const auto& s = segs[i];
         js << "    {\n";
-        js << "      \"t0\": " << (s.t0 * 10) << ",\n";  // ms
+        js << "      \"t0\": " << (s.t0 * 10) << ",\n"; // ms
         js << "      \"t1\": " << (s.t1 * 10) << ",\n";
         js << "      \"text\": \"" << json_escape(s.text) << "\"";
         if (!s.speaker.empty()) {
@@ -68,26 +78,32 @@ static std::string segments_to_json(const std::vector<crispasr_segment> & segs,
         if (!s.tokens.empty()) {
             js << ",\n      \"tokens\": [\n";
             for (size_t j = 0; j < s.tokens.size(); j++) {
-                const auto & t = s.tokens[j];
+                const auto& t = s.tokens[j];
                 js << "        {\"text\": \"" << json_escape(t.text) << "\"";
-                if (t.confidence >= 0) js << ", \"confidence\": " << t.confidence;
-                if (t.t0 >= 0) js << ", \"t0\": " << (t.t0 * 10);
-                if (t.t1 >= 0) js << ", \"t1\": " << (t.t1 * 10);
+                if (t.confidence >= 0)
+                    js << ", \"confidence\": " << t.confidence;
+                if (t.t0 >= 0)
+                    js << ", \"t0\": " << (t.t0 * 10);
+                if (t.t1 >= 0)
+                    js << ", \"t1\": " << (t.t1 * 10);
                 js << "}";
-                if (j + 1 < s.tokens.size()) js << ",";
+                if (j + 1 < s.tokens.size())
+                    js << ",";
                 js << "\n";
             }
             js << "      ]";
         }
         js << "\n    }";
-        if (i + 1 < segs.size()) js << ",";
+        if (i + 1 < segs.size())
+            js << ",";
         js << "\n";
     }
     js << "  ],\n";
     // Full text
     std::string full_text;
-    for (const auto & s : segs) {
-        if (!full_text.empty()) full_text += " ";
+    for (const auto& s : segs) {
+        if (!full_text.empty())
+            full_text += " ";
         full_text += s.text;
     }
     js << "  \"text\": \"" << json_escape(full_text) << "\"\n";
@@ -95,8 +111,7 @@ static std::string segments_to_json(const std::vector<crispasr_segment> & segs,
     return js.str();
 }
 
-int crispasr_run_server(whisper_params & params,
-                        const std::string & host, int port) {
+int crispasr_run_server(whisper_params& params, const std::string& host, int port) {
     using namespace httplib;
 
     std::unique_ptr<CrispasrBackend> backend;
@@ -110,19 +125,17 @@ int crispasr_run_server(whisper_params & params,
             backend_name = crispasr_detect_backend_from_gguf(params.model);
         }
         if (backend_name.empty()) {
-            fprintf(stderr, "crispasr-server: cannot detect backend from '%s'\n",
-                    params.model.c_str());
+            fprintf(stderr, "crispasr-server: cannot detect backend from '%s'\n", params.model.c_str());
             return 1;
         }
         backend = crispasr_create_backend(backend_name);
         if (!backend || !backend->init(params)) {
-            fprintf(stderr, "crispasr-server: failed to init backend '%s'\n",
-                    backend_name.c_str());
+            fprintf(stderr, "crispasr-server: failed to init backend '%s'\n", backend_name.c_str());
             return 1;
         }
         ready.store(true);
-        fprintf(stderr, "crispasr-server: backend '%s' loaded, model '%s'\n",
-                backend_name.c_str(), params.model.c_str());
+        fprintf(stderr, "crispasr-server: backend '%s' loaded, model '%s'\n", backend_name.c_str(),
+                params.model.c_str());
     }
 
     // Audio hash cache for encoder output reuse (same audio → skip re-encode)
@@ -135,7 +148,7 @@ int crispasr_run_server(whisper_params & params,
     Server svr;
 
     // POST /inference — transcribe uploaded audio
-    svr.Post("/inference", [&](const Request & req, Response & res) {
+    svr.Post("/inference", [&](const Request& req, Response& res) {
         if (!ready.load()) {
             res.status = 503;
             res.set_content("{\"error\": \"model loading\"}", "application/json");
@@ -149,12 +162,12 @@ int crispasr_run_server(whisper_params & params,
         }
 
         auto audio_file = req.get_file_value("file");
-        fprintf(stderr, "crispasr-server: received '%s' (%zu bytes)\n",
-                audio_file.filename.c_str(), audio_file.content.size());
+        fprintf(stderr, "crispasr-server: received '%s' (%zu bytes)\n", audio_file.filename.c_str(),
+                audio_file.content.size());
 
         // Write to temp file for audio loading
         std::string tmp_path = "/tmp/crispasr-server-" +
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav";
+                               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav";
         {
             std::ofstream f(tmp_path, std::ios::binary);
             f.write(audio_file.content.data(), audio_file.content.size());
@@ -181,10 +194,16 @@ int crispasr_run_server(whisper_params & params,
         // Check audio cache (simple hash: size + first/middle/last samples)
         size_t audio_hash = pcmf32.size();
         if (!pcmf32.empty()) {
-            union { float f; uint32_t u; } conv;
-            conv.f = pcmf32[0]; audio_hash ^= conv.u * 2654435761u;
-            conv.f = pcmf32[pcmf32.size()/2]; audio_hash ^= conv.u * 40503u;
-            conv.f = pcmf32.back(); audio_hash ^= conv.u * 12345u;
+            union {
+                float f;
+                uint32_t u;
+            } conv;
+            conv.f = pcmf32[0];
+            audio_hash ^= conv.u * 2654435761u;
+            conv.f = pcmf32[pcmf32.size() / 2];
+            audio_hash ^= conv.u * 40503u;
+            conv.f = pcmf32.back();
+            audio_hash ^= conv.u * 12345u;
         }
 
         // Transcribe (with cache check)
@@ -203,15 +222,15 @@ int crispasr_run_server(whisper_params & params,
 
         auto t1 = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(t1 - t0).count();
-        fprintf(stderr, "crispasr-server: transcribed %.1fs audio in %.2fs (%.1fx realtime)\n",
-                duration_s, elapsed, duration_s / elapsed);
+        fprintf(stderr, "crispasr-server: transcribed %.1fs audio in %.2fs (%.1fx realtime)\n", duration_s, elapsed,
+                duration_s / elapsed);
 
         std::string json = segments_to_json(segs, backend_name, duration_s);
         res.set_content(json, "application/json");
     });
 
     // POST /load — hot-swap model
-    svr.Post("/load", [&](const Request & req, Response & res) {
+    svr.Post("/load", [&](const Request& req, Response& res) {
         std::lock_guard<std::mutex> lock(model_mutex);
         ready.store(false);
 
@@ -238,7 +257,7 @@ int crispasr_run_server(whisper_params & params,
 
         auto nb = crispasr_create_backend(new_backend);
         if (!nb || !nb->init(np)) {
-            ready.store(true);  // keep old model
+            ready.store(true); // keep old model
             res.status = 500;
             res.set_content("{\"error\": \"failed to load new model\"}", "application/json");
             return;
@@ -249,13 +268,13 @@ int crispasr_run_server(whisper_params & params,
         params.model = new_model;
         ready.store(true);
 
-        fprintf(stderr, "crispasr-server: hot-swapped to '%s' backend, model '%s'\n",
-                new_backend.c_str(), new_model.c_str());
+        fprintf(stderr, "crispasr-server: hot-swapped to '%s' backend, model '%s'\n", new_backend.c_str(),
+                new_model.c_str());
         res.set_content("{\"status\": \"ok\", \"backend\": \"" + new_backend + "\"}", "application/json");
     });
 
     // GET /health
-    svr.Get("/health", [&](const Request &, Response & res) {
+    svr.Get("/health", [&](const Request&, Response& res) {
         if (ready.load()) {
             res.set_content("{\"status\": \"ok\", \"backend\": \"" + backend_name + "\"}", "application/json");
         } else {
@@ -265,12 +284,13 @@ int crispasr_run_server(whisper_params & params,
     });
 
     // GET /backends
-    svr.Get("/backends", [&](const Request &, Response & res) {
+    svr.Get("/backends", [&](const Request&, Response& res) {
         auto names = crispasr_list_backends();
         std::ostringstream js;
         js << "{\"backends\": [";
         for (size_t i = 0; i < names.size(); i++) {
-            if (i) js << ", ";
+            if (i)
+                js << ", ";
             js << "\"" << names[i] << "\"";
         }
         js << "], \"active\": \"" << backend_name << "\"}";

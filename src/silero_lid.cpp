@@ -33,62 +33,62 @@
 // ===========================================================================
 
 struct lid_conv_block {
-    ggml_tensor * dw_w = nullptr, * dw_b = nullptr;  // (C, 1, K)
-    ggml_tensor * pw_w = nullptr, * pw_b = nullptr;  // (Cout, Cin, 1)
-    ggml_tensor * proj_w = nullptr, * proj_b = nullptr; // optional residual proj
+    ggml_tensor *dw_w = nullptr, *dw_b = nullptr;     // (C, 1, K)
+    ggml_tensor *pw_w = nullptr, *pw_b = nullptr;     // (Cout, Cin, 1)
+    ggml_tensor *proj_w = nullptr, *proj_b = nullptr; // optional residual proj
 };
 
 struct lid_tx_block {
     // Named biases + norms
-    ggml_tensor * qkv_b  = nullptr;  // (3*dim,)
-    ggml_tensor * out_b   = nullptr;  // (dim,)
-    ggml_tensor * ff1_b   = nullptr;  // (dim,)
-    ggml_tensor * ff2_b   = nullptr;  // (dim,)
-    ggml_tensor * norm1_w = nullptr, * norm1_b = nullptr;
-    ggml_tensor * norm2_w = nullptr, * norm2_b = nullptr;
+    ggml_tensor* qkv_b = nullptr; // (3*dim,)
+    ggml_tensor* out_b = nullptr; // (dim,)
+    ggml_tensor* ff1_b = nullptr; // (dim,)
+    ggml_tensor* ff2_b = nullptr; // (dim,)
+    ggml_tensor *norm1_w = nullptr, *norm1_b = nullptr;
+    ggml_tensor *norm2_w = nullptr, *norm2_b = nullptr;
     // Numeric weights
-    ggml_tensor * qkv_w  = nullptr;  // (dim, 3*dim)
-    ggml_tensor * out_w   = nullptr;  // (dim, dim)
-    ggml_tensor * ff1_w   = nullptr;  // (dim, dim)
-    ggml_tensor * ff2_w   = nullptr;  // (dim, dim)
+    ggml_tensor* qkv_w = nullptr; // (dim, 3*dim)
+    ggml_tensor* out_w = nullptr; // (dim, dim)
+    ggml_tensor* ff1_w = nullptr; // (dim, dim)
+    ggml_tensor* ff2_w = nullptr; // (dim, dim)
     // 1×1 conv projection at stage boundary
-    ggml_tensor * conv1x1_w = nullptr, * conv1x1_b = nullptr;
+    ggml_tensor *conv1x1_w = nullptr, *conv1x1_b = nullptr;
 };
 
 struct lid_stage {
     int dim;
-    std::vector<lid_conv_block> conv_blocks;  // 12 per stage
+    std::vector<lid_conv_block> conv_blocks; // 12 per stage
     lid_tx_block tx;
 };
 
 struct lid_model {
     // Front-end: learned Conv1d(1→322, kernel=320, stride=160)
-    ggml_tensor * frontend_w = nullptr;  // (322, 1, 320)
+    ggml_tensor* frontend_w = nullptr; // (322, 1, 320)
     int frontend_stride = 160;
     int frontend_kernel = 320;
     int frontend_channels = 322;
-    int n_downsample_stages = 4;  // stride-2 after each of the first 4 stages
+    int n_downsample_stages = 4; // stride-2 after each of the first 4 stages
 
-    std::vector<lid_stage> stages;  // 8
-    ggml_tensor * adaptive_norm_filter = nullptr;  // (1, 1, 17)
-    ggml_tensor * pool_weight = nullptr;           // (192,)
-    ggml_tensor * lang_w = nullptr, * lang_b = nullptr;   // (95, 192)
-    ggml_tensor * group_w = nullptr, * group_b = nullptr;  // (58, 192)
+    std::vector<lid_stage> stages;                      // 8
+    ggml_tensor* adaptive_norm_filter = nullptr;        // (1, 1, 17)
+    ggml_tensor* pool_weight = nullptr;                 // (192,)
+    ggml_tensor *lang_w = nullptr, *lang_b = nullptr;   // (95, 192)
+    ggml_tensor *group_w = nullptr, *group_b = nullptr; // (58, 192)
 
-    ggml_context        * ctx = nullptr;
+    ggml_context* ctx = nullptr;
     ggml_backend_buffer_t buf = nullptr;
-    std::map<std::string, ggml_tensor *> tensors;
+    std::map<std::string, ggml_tensor*> tensors;
 };
 
 struct silero_lid_context {
     lid_model model;
-    std::vector<std::string> lang_strs;   // 95 entries
-    std::vector<std::string> group_strs;  // 58 entries
+    std::vector<std::string> lang_strs;  // 95 entries
+    std::vector<std::string> group_strs; // 58 entries
     int n_threads = 4;
 
-    ggml_backend_t       backend     = nullptr;
-    ggml_backend_t       backend_cpu = nullptr;
-    ggml_backend_sched_t sched       = nullptr;
+    ggml_backend_t backend = nullptr;
+    ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
     std::vector<uint8_t> compute_meta;
 };
 
@@ -96,14 +96,15 @@ struct silero_lid_context {
 // Loader
 // ===========================================================================
 
-static ggml_tensor * lid_get(lid_model & m, const std::string & name) {
+static ggml_tensor* lid_get(lid_model& m, const std::string& name) {
     auto it = m.tensors.find(name);
     return it != m.tensors.end() ? it->second : nullptr;
 }
 
-static bool lid_load(lid_model & m, const char * path, ggml_backend_t backend) {
+static bool lid_load(lid_model& m, const char* path, ggml_backend_t backend) {
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(path, backend, "silero_lid", wl)) return false;
+    if (!core_gguf::load_weights(path, backend, "silero_lid", wl))
+        return false;
     m.ctx = wl.ctx;
     m.buf = wl.buf;
     m.tensors = std::move(wl.tensors);
@@ -121,12 +122,12 @@ static bool lid_load(lid_model & m, const char * path, ggml_backend_t backend) {
     int dims[] = {128, 128, 128, 128, 192, 192, 192, 192};
     m.stages.resize(8);
     for (int si = 0; si < 8; si++) {
-        auto & st = m.stages[si];
+        auto& st = m.stages[si];
         st.dim = dims[si];
         st.conv_blocks.resize(12);
         for (int bi = 0; bi < 12; bi++) {
             char buf[128];
-            auto & cb = st.conv_blocks[bi];
+            auto& cb = st.conv_blocks[bi];
             snprintf(buf, sizeof(buf), "lid.conv.%d.%d.dw_conv.weight", si, bi);
             cb.dw_w = lid_get(m, buf);
             snprintf(buf, sizeof(buf), "lid.conv.%d.%d.dw_conv.bias", si, bi);
@@ -140,22 +141,36 @@ static bool lid_load(lid_model & m, const char * path, ggml_backend_t backend) {
             snprintf(buf, sizeof(buf), "lid.conv.%d.%d.proj.bias", si, bi);
             cb.proj_b = lid_get(m, buf);
         }
-        auto & tx = st.tx;
+        auto& tx = st.tx;
         char buf[128];
-        snprintf(buf, sizeof(buf), "lid.%d.tx.qkv.weight", si);  tx.qkv_w = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.qkv.bias", si);    tx.qkv_b = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.out.weight", si);   tx.out_w = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.out.bias", si);     tx.out_b = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.ff1.weight", si);   tx.ff1_w = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.ff1.bias", si);     tx.ff1_b = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.ff2.weight", si);   tx.ff2_w = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.ff2.bias", si);     tx.ff2_b = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.norm1.weight", si); tx.norm1_w = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.norm1.bias", si);   tx.norm1_b = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.norm2.weight", si); tx.norm2_w = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.norm2.bias", si);   tx.norm2_b = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.conv1x1.weight", si); tx.conv1x1_w = lid_get(m, buf);
-        snprintf(buf, sizeof(buf), "lid.%d.tx.conv1x1.bias", si);   tx.conv1x1_b = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.qkv.weight", si);
+        tx.qkv_w = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.qkv.bias", si);
+        tx.qkv_b = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.out.weight", si);
+        tx.out_w = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.out.bias", si);
+        tx.out_b = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.ff1.weight", si);
+        tx.ff1_w = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.ff1.bias", si);
+        tx.ff1_b = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.ff2.weight", si);
+        tx.ff2_w = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.ff2.bias", si);
+        tx.ff2_b = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.norm1.weight", si);
+        tx.norm1_w = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.norm1.bias", si);
+        tx.norm1_b = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.norm2.weight", si);
+        tx.norm2_w = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.norm2.bias", si);
+        tx.norm2_b = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.conv1x1.weight", si);
+        tx.conv1x1_w = lid_get(m, buf);
+        snprintf(buf, sizeof(buf), "lid.%d.tx.conv1x1.bias", si);
+        tx.conv1x1_b = lid_get(m, buf);
     }
 
     if (!m.lang_w || !m.pool_weight) {
@@ -174,13 +189,8 @@ static bool lid_load(lid_model & m, const char * path, ggml_backend_t backend) {
 // The ONNX graph (confirmed by tracing Conv_73→Relu_74→Conv_75→Add_76→Relu_77)
 // adds the ORIGINAL block input as a skip connection after the pointwise conv.
 // When C_in != C_out, the residual is projected via the block's `proj` weight.
-static void dw_sep_conv1d(
-    const float * in, int C_in, int T_in,
-    const float * dw_w, const float * dw_b, int K,
-    const float * pw_w, const float * pw_b, int C_out,
-    float * out,
-    bool add_residual = true)
-{
+static void dw_sep_conv1d(const float* in, int C_in, int T_in, const float* dw_w, const float* dw_b, int K,
+                          const float* pw_w, const float* pw_b, int C_out, float* out, bool add_residual = true) {
     int pad = K / 2;
     // Depthwise: [C_in, 1, K] with same padding
     std::vector<float> dw_out(C_in * T_in, 0.f);
@@ -192,7 +202,7 @@ static void dw_sep_conv1d(
                 if (ti >= 0 && ti < T_in)
                     sum += dw_w[c * K + k] * in[c * T_in + ti];
             }
-            dw_out[c * T_in + t] = std::max(0.f, sum);  // ReLU
+            dw_out[c * T_in + t] = std::max(0.f, sum); // ReLU
         }
     }
     // Pointwise: [C_out, C_in, 1] + optional residual + ReLU
@@ -212,14 +222,13 @@ static void dw_sep_conv1d(
 }
 
 // Layer norm over the channel dimension (C fastest, T slow) → [C, T]
-static void layer_norm_ct(float * data, int C, int T,
-                          const float * w, const float * b, float eps = 1e-5f)
-{
+static void layer_norm_ct(float* data, int C, int T, const float* w, const float* b, float eps = 1e-5f) {
     for (int t = 0; t < T; t++) {
         float sum = 0, sq = 0;
         for (int c = 0; c < C; c++) {
             float v = data[c * T + t];
-            sum += v; sq += v * v;
+            sum += v;
+            sq += v * v;
         }
         float mean = sum / C;
         float var = sq / C - mean * mean;
@@ -231,11 +240,8 @@ static void layer_norm_ct(float * data, int C, int T,
 }
 
 // Simple self-attention: Q/K/V from combined QKV, output projection, residual
-static void self_attention(
-    float * x, int D, int T,
-    const float * qkv_w, const float * qkv_b,
-    const float * out_w, const float * out_b)
-{
+static void self_attention(float* x, int D, int T, const float* qkv_w, const float* qkv_b, const float* out_w,
+                           const float* out_b) {
     // x is [D, T] in channel-first layout.
     // Transpose to [T, D] for matmul.
     std::vector<float> xt(T * D);
@@ -267,8 +273,8 @@ static void self_attention(
     // ONNX Div_196 scale = 8.0 = sqrt(64) → 1/scale = 1/8 = 0.125.
     // (Not 1/sqrt(D=128) = 0.088 which is what single-head would use.)
     const int n_heads = 2;
-    const int head_dim = D / n_heads;  // 64
-    float scale = 1.f / sqrtf((float)head_dim);  // 1/8 = 0.125
+    const int head_dim = D / n_heads;           // 64
+    float scale = 1.f / sqrtf((float)head_dim); // 1/8 = 0.125
 
     std::vector<float> attn(T * D, 0.f);
 
@@ -288,7 +294,8 @@ static void self_attention(
                 scores[i * T + j] = expf(scores[i * T + j] - mx);
                 sm += scores[i * T + j];
             }
-            for (int j = 0; j < T; j++) scores[i * T + j] /= sm;
+            for (int j = 0; j < T; j++)
+                scores[i * T + j] /= sm;
         }
         for (int i = 0; i < T; i++)
             for (int j = 0; j < T; j++)
@@ -315,11 +322,8 @@ static void self_attention(
 }
 
 // Simple FFN: linear1 → relu → linear2, residual
-static void ffn_residual(
-    float * x, int D, int T,
-    const float * ff1_w, const float * ff1_b,
-    const float * ff2_w, const float * ff2_b)
-{
+static void ffn_residual(float* x, int D, int T, const float* ff1_w, const float* ff1_b, const float* ff2_w,
+                         const float* ff2_b) {
     // x is [D, T]. Transpose to [T, D], run FFN, add back.
     std::vector<float> xt(T * D), mid(T * D), out(T * D);
     for (int t = 0; t < T; t++)
@@ -332,7 +336,7 @@ static void ffn_residual(
             float sum = ff1_b[d];
             for (int dd = 0; dd < D; dd++)
                 sum += xt[t * D + dd] * ff1_w[dd * D + d];
-            mid[t * D + d] = std::max(0.f, sum);  // ReLU
+            mid[t * D + d] = std::max(0.f, sum); // ReLU
         }
 
     // linear2
@@ -355,11 +359,14 @@ static void ffn_residual(
 // Public API
 // ===========================================================================
 
-extern "C" struct silero_lid_context * silero_lid_init(const char * gguf_path, int n_threads) {
-    auto * ctx = new silero_lid_context();
+extern "C" struct silero_lid_context* silero_lid_init(const char* gguf_path, int n_threads) {
+    auto* ctx = new silero_lid_context();
     ctx->n_threads = n_threads > 0 ? n_threads : 4;
-    ctx->backend = ggml_backend_cpu_init();  // 17 MB model, CPU is fine
-    if (!ctx->backend) { delete ctx; return nullptr; }
+    ctx->backend = ggml_backend_cpu_init(); // 17 MB model, CPU is fine
+    if (!ctx->backend) {
+        delete ctx;
+        return nullptr;
+    }
     ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
 
     if (!lid_load(ctx->model, gguf_path, ctx->backend)) {
@@ -369,8 +376,8 @@ extern "C" struct silero_lid_context * silero_lid_init(const char * gguf_path, i
 
     // Load language strings from GGUF metadata
     {
-        gguf_init_params mp = { true, nullptr };
-        gguf_context * g = gguf_init_from_file(gguf_path, mp);
+        gguf_init_params mp = {true, nullptr};
+        gguf_context* g = gguf_init_from_file(gguf_path, mp);
         if (g) {
             int ki = gguf_find_key(g, "silero_lid.lang_strs");
             if (ki >= 0) {
@@ -390,30 +397,32 @@ extern "C" struct silero_lid_context * silero_lid_init(const char * gguf_path, i
         }
     }
 
-    fprintf(stderr, "silero_lid: loaded %zu lang, %zu groups, %zu stages\n",
-            ctx->lang_strs.size(), ctx->group_strs.size(), ctx->model.stages.size());
+    fprintf(stderr, "silero_lid: loaded %zu lang, %zu groups, %zu stages\n", ctx->lang_strs.size(),
+            ctx->group_strs.size(), ctx->model.stages.size());
     return ctx;
 }
 
-extern "C" void silero_lid_free(struct silero_lid_context * ctx) {
-    if (!ctx) return;
-    if (ctx->model.buf) ggml_backend_buffer_free(ctx->model.buf);
-    if (ctx->model.ctx) ggml_free(ctx->model.ctx);
-    if (ctx->backend)   ggml_backend_free(ctx->backend);
+extern "C" void silero_lid_free(struct silero_lid_context* ctx) {
+    if (!ctx)
+        return;
+    if (ctx->model.buf)
+        ggml_backend_buffer_free(ctx->model.buf);
+    if (ctx->model.ctx)
+        ggml_free(ctx->model.ctx);
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
     delete ctx;
 }
 
-extern "C" int silero_lid_n_langs(struct silero_lid_context * ctx) {
+extern "C" int silero_lid_n_langs(struct silero_lid_context* ctx) {
     return ctx ? (int)ctx->lang_strs.size() : 0;
 }
 
-extern "C" const char * silero_lid_detect(
-    struct silero_lid_context * ctx,
-    const float * samples, int n_samples,
-    float * out_confidence)
-{
-    if (!ctx || !samples || n_samples <= 0) return nullptr;
-    const auto & m = ctx->model;
+extern "C" const char* silero_lid_detect(struct silero_lid_context* ctx, const float* samples, int n_samples,
+                                         float* out_confidence) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+    const auto& m = ctx->model;
 
     // ---- Front-end: learned Conv1d(1→322, k=320, stride=160) ----
     // This is the model's "learned STFT" that frames raw audio into
@@ -423,15 +432,15 @@ extern "C" const char * silero_lid_detect(
     int C;
     std::vector<float> cur;
     if (m.frontend_w) {
-        const float * fw = (const float *)m.frontend_w->data;
-        int K_fe   = m.frontend_kernel;   // 320
-        int S_fe   = m.frontend_stride;   // 160
-        int C_fe   = m.frontend_channels; // 322
+        const float* fw = (const float*)m.frontend_w->data;
+        int K_fe = m.frontend_kernel;   // 320
+        int S_fe = m.frontend_stride;   // 160
+        int C_fe = m.frontend_channels; // 322
 
         // Zero-pad the input with S_fe (160) samples on each side.
         // ONNX Pad_24 uses mode=constant (zeros) with pad vector
         // [0,0,0,160, 0,0,0,160] on the [1,1,1,N] tensor.
-        int pad_lr = S_fe;  // 160 on each side
+        int pad_lr = S_fe; // 160 on each side
         int N_padded = pad_lr + n_samples + pad_lr;
         std::vector<float> padded(N_padded, 0.f);
         std::memcpy(padded.data() + pad_lr, samples, n_samples * sizeof(float));
@@ -471,7 +480,7 @@ extern "C" const char * silero_lid_detect(
     //   7. normalized = log_mag - global_mean     → (161, T)
     //   8. Feed normalized to the encoder (161 channels)
     {
-        const int C_half = C / 2;  // 161
+        const int C_half = C / 2; // 161
         // Step 1-2: compute magnitude from real + imag channels
         std::vector<float> mag(C_half * T);
         for (int c = 0; c < C_half; c++) {
@@ -484,7 +493,7 @@ extern "C" const char * silero_lid_detect(
 
         // Step 3: log(scale * magnitude + offset)
         // ONNX Constant_49 = 1048576.0 = 2^20 (scale), Constant_51 = 1.0 (offset).
-        const float log_scale  = 1048576.0f;
+        const float log_scale = 1048576.0f;
         const float log_offset = 1.0f;
         std::vector<float> log_mag(C_half * T);
         for (int i = 0; i < C_half * T; i++) {
@@ -502,8 +511,8 @@ extern "C" const char * silero_lid_detect(
         // Step 5: smooth with adaptive normalization filter (17-tap)
         // ONNX uses reflection padding with pad=8 on each side of the time axis.
         if (m.adaptive_norm_filter) {
-            const float * filt = (const float *)m.adaptive_norm_filter->data;
-            int K_filt = 17, pad_f = K_filt / 2;  // pad_f = 8
+            const float* filt = (const float*)m.adaptive_norm_filter->data;
+            int K_filt = 17, pad_f = K_filt / 2; // pad_f = 8
 
             // Reflection-pad frame_mean: [pad_f + T + pad_f]
             std::vector<float> padded_fm(pad_f + T + pad_f);
@@ -525,7 +534,8 @@ extern "C" const char * silero_lid_detect(
 
             // Step 6: global mean of smoothed
             float global_mean = 0;
-            for (int t = 0; t < T; t++) global_mean += smooth[t];
+            for (int t = 0; t < T; t++)
+                global_mean += smooth[t];
             global_mean /= T;
 
             // Step 7: normalize = log_mag - global_mean
@@ -536,23 +546,23 @@ extern "C" const char * silero_lid_detect(
 
         // Replace cur with the 161-channel log-magnitude features
         cur = std::move(log_mag);
-        C = C_half;  // 161
-
+        C = C_half; // 161
     }
 
     for (int si = 0; si < (int)m.stages.size(); si++) {
-        const auto & st = m.stages[si];
+        const auto& st = m.stages[si];
 
         // ---- 12 conv blocks ----
         for (int bi = 0; bi < (int)st.conv_blocks.size(); bi++) {
-            const auto & cb = st.conv_blocks[bi];
-            if (!cb.dw_w || !cb.pw_w) continue;
-            int C_out = (int)cb.pw_w->ne[2];  // ne for (Cout, Cin, 1) → ne[2]=Cout
+            const auto& cb = st.conv_blocks[bi];
+            if (!cb.dw_w || !cb.pw_w)
+                continue;
+            int C_out = (int)cb.pw_w->ne[2]; // ne for (Cout, Cin, 1) → ne[2]=Cout
             // Actually: pw_w is stored as (Cout, Cin, 1) in numpy → ne=(1, Cin, Cout) in ggml
             // For F32 tensor: ne[0]=1, ne[1]=Cin, ne[2]=Cout
             // So C_out = ne[2] in ggml... but core_gguf stores tensors as-is from numpy.
             // Let me just read the shape from the raw dims.
-            C_out = (int)cb.pw_w->ne[0];  // ggml ne[0] = numpy shape[-1] reversed...
+            C_out = (int)cb.pw_w->ne[0]; // ggml ne[0] = numpy shape[-1] reversed...
             // Actually for a 3D tensor: numpy (Cout, Cin, 1) → ggml ne=(1, Cin, Cout)
             // So ne[2] = Cout. Let me check: pw_w for stage 0, block 0 should be (161, 161, 1).
             // In ggml ne-order: ne[0]=1, ne[1]=161, ne[2]=161. So C_out = ne[2].
@@ -560,18 +570,15 @@ extern "C" const char * silero_lid_detect(
             int C_in = C;
 
             std::vector<float> out(C_out * T);
-            const float * dw_w_f = (const float *)cb.dw_w->data;
-            const float * dw_b_f = (const float *)cb.dw_b->data;
-            const float * pw_w_f = (const float *)cb.pw_w->data;
-            const float * pw_b_f = (const float *)cb.pw_b->data;
+            const float* dw_w_f = (const float*)cb.dw_w->data;
+            const float* dw_b_f = (const float*)cb.dw_b->data;
+            const float* pw_w_f = (const float*)cb.pw_w->data;
+            const float* pw_b_f = (const float*)cb.pw_b->data;
 
             // For blocks with proj: skip the residual+ReLU in dw_sep_conv1d
             // (they'll be applied after the proj add below)
             bool has_proj = (cb.proj_w != nullptr);
-            dw_sep_conv1d(cur.data(), C_in, T,
-                          dw_w_f, dw_b_f, 5,
-                          pw_w_f, pw_b_f, C_out,
-                          out.data(),
+            dw_sep_conv1d(cur.data(), C_in, T, dw_w_f, dw_b_f, 5, pw_w_f, pw_b_f, C_out, out.data(),
                           /*add_residual=*/!has_proj);
 
 
@@ -583,8 +590,8 @@ extern "C" const char * silero_lid_detect(
             // just the identity: output = ReLU(pw_conv(...) + input).
             if (cb.proj_w) {
                 int C_proj = (int)cb.proj_w->ne[2];
-                const float * pj_w = (const float *)cb.proj_w->data;
-                const float * pj_b = cb.proj_b ? (const float *)cb.proj_b->data : nullptr;
+                const float* pj_w = (const float*)cb.proj_w->data;
+                const float* pj_b = cb.proj_b ? (const float*)cb.proj_b->data : nullptr;
                 // proj applies to cur (block input), NOT out (conv output)!
                 // proj: (C_proj, C_in, 1) where C_in = original channel count
                 std::vector<float> proj_res(C_proj * T);
@@ -607,38 +614,27 @@ extern "C" const char * silero_lid_detect(
 
             cur = std::move(out);
             C = C_out;
-
         }
 
         // ---- Transformer block (runs BEFORE stride-2 downsample) ----
         // ONNX order: conv stage → transformer → transpose → stride-2 → next stage
-        const auto & tx = st.tx;
+        const auto& tx = st.tx;
         int D = C;
 
         if (tx.qkv_w) {
             // POST-norm transformer (ONNX confirmed: no LN before QKV)
             // 1. Self-attention (adds residual internally)
-            self_attention(cur.data(), D, T,
-                          (const float *)tx.qkv_w->data,
-                          (const float *)tx.qkv_b->data,
-                          (const float *)tx.out_w->data,
-                          (const float *)tx.out_b->data);
+            self_attention(cur.data(), D, T, (const float*)tx.qkv_w->data, (const float*)tx.qkv_b->data,
+                           (const float*)tx.out_w->data, (const float*)tx.out_b->data);
             // 2. Post-attention LayerNorm
             if (tx.norm1_w)
-                layer_norm_ct(cur.data(), D, T,
-                             (const float *)tx.norm1_w->data,
-                             (const float *)tx.norm1_b->data);
+                layer_norm_ct(cur.data(), D, T, (const float*)tx.norm1_w->data, (const float*)tx.norm1_b->data);
             // 3. FFN (adds residual internally)
-            ffn_residual(cur.data(), D, T,
-                        (const float *)tx.ff1_w->data,
-                        (const float *)tx.ff1_b->data,
-                        (const float *)tx.ff2_w->data,
-                        (const float *)tx.ff2_b->data);
+            ffn_residual(cur.data(), D, T, (const float*)tx.ff1_w->data, (const float*)tx.ff1_b->data,
+                         (const float*)tx.ff2_w->data, (const float*)tx.ff2_b->data);
             // 4. Post-FFN LayerNorm
             if (tx.norm2_w)
-                layer_norm_ct(cur.data(), D, T,
-                             (const float *)tx.norm2_w->data,
-                             (const float *)tx.norm2_b->data);
+                layer_norm_ct(cur.data(), D, T, (const float*)tx.norm2_w->data, (const float*)tx.norm2_b->data);
         }
 
         // ---- Stride-2 temporal downsampling (AFTER transformer, first 4 stages) ----
@@ -649,8 +645,8 @@ extern "C" const char * silero_lid_detect(
             // For kernel=1, pad=0, stride=2: (T-1)/2 + 1
             int T_out = (T - 1) / 2 + 1;
             std::vector<float> ds(C_out * T_out);
-            const float * cw = (const float *)tx.conv1x1_w->data;
-            const float * cb = tx.conv1x1_b ? (const float *)tx.conv1x1_b->data : nullptr;
+            const float* cw = (const float*)tx.conv1x1_w->data;
+            const float* cb = tx.conv1x1_b ? (const float*)tx.conv1x1_b->data : nullptr;
             for (int co = 0; co < C_out; co++) {
                 for (int t = 0; t < T_out; t++) {
                     float sum = cb ? cb[co] : 0.f;
@@ -660,7 +656,8 @@ extern "C" const char * silero_lid_detect(
                     ds[co * T_out + t] = sum;
                 }
             }
-            for (float & v : ds) v = std::max(0.f, v);
+            for (float& v : ds)
+                v = std::max(0.f, v);
             cur = std::move(ds);
             C = C_out;
             T = T_out;
@@ -669,8 +666,8 @@ extern "C" const char * silero_lid_detect(
             // ONNX: Conv → ReLU (confirmed for all stages, e.g. Conv_1401 → Relu_1402)
             int C_out = (int)tx.conv1x1_w->ne[2];
             std::vector<float> proj(C_out * T);
-            const float * cw = (const float *)tx.conv1x1_w->data;
-            const float * cb = tx.conv1x1_b ? (const float *)tx.conv1x1_b->data : nullptr;
+            const float* cw = (const float*)tx.conv1x1_w->data;
+            const float* cb = tx.conv1x1_b ? (const float*)tx.conv1x1_b->data : nullptr;
             for (int co = 0; co < C_out; co++) {
                 for (int t = 0; t < T; t++) {
                     float sum = cb ? cb[co] : 0.f;
@@ -679,7 +676,8 @@ extern "C" const char * silero_lid_detect(
                     proj[co * T + t] = sum;
                 }
             }
-            for (float & v : proj) v = std::max(0.f, v);  // ReLU
+            for (float& v : proj)
+                v = std::max(0.f, v); // ReLU
             cur = std::move(proj);
             C = C_out;
         }
@@ -689,18 +687,22 @@ extern "C" const char * silero_lid_detect(
     // pool_weight is (D=192,). Compute per-frame score, softmax, weighted sum.
     int D = C;
     std::vector<float> frame_scores(T);
-    const float * pw = (const float *)m.pool_weight->data;
+    const float* pw = (const float*)m.pool_weight->data;
     for (int t = 0; t < T; t++) {
         float dot = 0;
         for (int d = 0; d < D; d++)
             dot += pw[d] * cur[d * T + t];
-        frame_scores[t] = tanhf(dot);  // ONNX: Tanh_1405 before Softmax
+        frame_scores[t] = tanhf(dot); // ONNX: Tanh_1405 before Softmax
     }
     // Softmax
     float mx = *std::max_element(frame_scores.begin(), frame_scores.end());
     float sum = 0;
-    for (int t = 0; t < T; t++) { frame_scores[t] = expf(frame_scores[t] - mx); sum += frame_scores[t]; }
-    for (int t = 0; t < T; t++) frame_scores[t] /= sum;
+    for (int t = 0; t < T; t++) {
+        frame_scores[t] = expf(frame_scores[t] - mx);
+        sum += frame_scores[t];
+    }
+    for (int t = 0; t < T; t++)
+        frame_scores[t] /= sum;
 
     // Weighted sum → [D]
     std::vector<float> pooled(D, 0.f);
@@ -711,8 +713,8 @@ extern "C" const char * silero_lid_detect(
     // ---- Language classifier: linear(D → 95) ----
     int n_langs = (int)ctx->lang_strs.size();
     std::vector<float> logits(n_langs);
-    const float * lw = (const float *)m.lang_w->data;
-    const float * lb = (const float *)m.lang_b->data;
+    const float* lw = (const float*)m.lang_w->data;
+    const float* lb = (const float*)m.lang_b->data;
     for (int i = 0; i < n_langs; i++) {
         float s = lb[i];
         for (int d = 0; d < D; d++)
@@ -723,9 +725,11 @@ extern "C" const char * silero_lid_detect(
     // Argmax
     int best = 0;
     for (int i = 1; i < n_langs; i++)
-        if (logits[i] > logits[best]) best = i;
+        if (logits[i] > logits[best])
+            best = i;
 
-    if (out_confidence) *out_confidence = logits[best];
+    if (out_confidence)
+        *out_confidence = logits[best];
 
     if (best < (int)ctx->lang_strs.size())
         return ctx->lang_strs[best].c_str();

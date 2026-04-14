@@ -25,7 +25,7 @@ std::string crispasr_to_timestamp(int64_t cs, bool comma = false);
 // Derive an output path from an audio input path by stripping a known
 // audio extension and appending the given extension (including the dot).
 // "audio.wav" + ".srt" -> "audio.srt".
-std::string crispasr_make_out_path(const std::string & audio, const std::string & ext);
+std::string crispasr_make_out_path(const std::string& audio, const std::string& ext);
 
 // ---------------------------------------------------------------------------
 // Display segments: what actually gets written to stdout and output files.
@@ -35,9 +35,9 @@ std::string crispasr_make_out_path(const std::string & audio, const std::string 
 // ---------------------------------------------------------------------------
 
 struct crispasr_disp_segment {
-    int64_t     t0, t1;        // centiseconds, absolute
+    int64_t t0, t1; // centiseconds, absolute
     std::string text;
-    std::string speaker;       // empty if none
+    std::string speaker; // empty if none
 };
 
 // Build display segments from backend segments according to max_len.
@@ -45,47 +45,36 @@ struct crispasr_disp_segment {
 //   max_len = 1 -> one display segment per word (requires words populated)
 //   max_len > 1 -> split at word boundaries when accumulated text would
 //                  exceed max_len characters
-std::vector<crispasr_disp_segment> crispasr_make_disp_segments(
-    const std::vector<crispasr_segment> & segments,
-    int                                   max_len);
+std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector<crispasr_segment>& segments,
+                                                               int max_len);
 
 // ---------------------------------------------------------------------------
 // Writers. All take a full file path; callers are expected to choose the
 // path via crispasr_make_out_path().
 // ---------------------------------------------------------------------------
 
-bool crispasr_write_txt(const std::string & path,
-                        const std::vector<crispasr_disp_segment> & segs);
+bool crispasr_write_txt(const std::string& path, const std::vector<crispasr_disp_segment>& segs);
 
-bool crispasr_write_srt(const std::string & path,
-                        const std::vector<crispasr_disp_segment> & segs);
+bool crispasr_write_srt(const std::string& path, const std::vector<crispasr_disp_segment>& segs);
 
-bool crispasr_write_vtt(const std::string & path,
-                        const std::vector<crispasr_disp_segment> & segs);
+bool crispasr_write_vtt(const std::string& path, const std::vector<crispasr_disp_segment>& segs);
 
-bool crispasr_write_csv(const std::string & path,
-                        const std::vector<crispasr_disp_segment> & segs);
+bool crispasr_write_csv(const std::string& path, const std::vector<crispasr_disp_segment>& segs);
 
-bool crispasr_write_json(const std::string & path,
-                         const std::vector<crispasr_segment> & segs,
-                         const std::string & backend_name,
-                         const std::string & model_path,
-                         const std::string & language,
+bool crispasr_write_json(const std::string& path, const std::vector<crispasr_segment>& segs,
+                         const std::string& backend_name, const std::string& model_path, const std::string& language,
                          bool full);
 
-bool crispasr_write_lrc(const std::string & path,
-                        const std::vector<crispasr_disp_segment> & segs);
+bool crispasr_write_lrc(const std::string& path, const std::vector<crispasr_disp_segment>& segs);
 
 // Print segments to stdout. If show_timestamps is true, each line is
 // "[t0 --> t1] text"; otherwise the transcript is printed as one blob per
 // segment separated by spaces.
-void crispasr_print_stdout(const std::vector<crispasr_disp_segment> & segs,
-                           bool show_timestamps);
+void crispasr_print_stdout(const std::vector<crispasr_disp_segment>& segs, bool show_timestamps);
 
 // Print per-token alternatives (--alt mode). Shows each token with its
 // confidence and top-N alternative candidates, inspired by antirez/voxtral.c.
-void crispasr_print_alternatives(const std::vector<crispasr_segment> & segs,
-                                  int n_alt);
+void crispasr_print_alternatives(const std::vector<crispasr_segment>& segs, int n_alt);
 
 // Remove punctuation from a segment in-place: from seg.text, each
 // seg.words[i].text, and each seg.tokens[i].text. Called by the
@@ -93,4 +82,4 @@ void crispasr_print_alternatives(const std::vector<crispasr_segment> & segs,
 // strip punctuation natively. Targets ASCII punctuation plus a small
 // set of common Unicode marks the LLM backends emit (smart quotes, em
 // dash, ellipsis). Idempotent — running it twice is a no-op.
-void crispasr_strip_punctuation(crispasr_segment & seg);
+void crispasr_strip_punctuation(crispasr_segment& seg);

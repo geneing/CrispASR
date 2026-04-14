@@ -30,35 +30,35 @@ struct whisper_params;
 
 struct crispasr_token_alt {
     std::string text;
-    float       prob = 0.0f;        // probability [0,1]
-    int32_t     id = -1;
+    float prob = 0.0f; // probability [0,1]
+    int32_t id = -1;
 };
 
 struct crispasr_token {
     std::string text;
-    float       confidence = -1.0f; // [0,1], -1 if unavailable
-    int64_t     t0 = -1;            // centiseconds, absolute; -1 if unavailable
-    int64_t     t1 = -1;
-    int32_t     id = -1;            // backend-specific token id, -1 if unavailable
-    int64_t     t_dtw = -1;         // whisper DTW token time, -1 if unused
-    bool        is_special = false; // whisper: token id >= eot; skipped by wts
+    float confidence = -1.0f; // [0,1], -1 if unavailable
+    int64_t t0 = -1;          // centiseconds, absolute; -1 if unavailable
+    int64_t t1 = -1;
+    int32_t id = -1;                      // backend-specific token id, -1 if unavailable
+    int64_t t_dtw = -1;                   // whisper DTW token time, -1 if unused
+    bool is_special = false;              // whisper: token id >= eot; skipped by wts
     std::vector<crispasr_token_alt> alts; // top-N alternatives (--alt mode)
 };
 
 struct crispasr_word {
     std::string text;
-    int64_t     t0 = 0;             // centiseconds, absolute
-    int64_t     t1 = 0;
+    int64_t t0 = 0; // centiseconds, absolute
+    int64_t t1 = 0;
 };
 
 struct crispasr_segment {
-    std::string                 text;
-    int64_t                     t0 = 0; // centiseconds, absolute
-    int64_t                     t1 = 0;
-    std::string                 speaker;          // empty if no diarization
-    bool                        speaker_turn_next = false; // whisper tinydiarize
-    std::vector<crispasr_word>  words;            // may be empty
-    std::vector<crispasr_token> tokens;           // may be empty
+    std::string text;
+    int64_t t0 = 0; // centiseconds, absolute
+    int64_t t1 = 0;
+    std::string speaker;                // empty if no diarization
+    bool speaker_turn_next = false;     // whisper tinydiarize
+    std::vector<crispasr_word> words;   // may be empty
+    std::vector<crispasr_token> tokens; // may be empty
 };
 
 // ---------------------------------------------------------------------------
@@ -66,22 +66,22 @@ struct crispasr_segment {
 // ---------------------------------------------------------------------------
 
 enum crispasr_capability : uint32_t {
-    CAP_TIMESTAMPS_NATIVE  = 1u << 0,  // model produces segment timestamps natively
-    CAP_TIMESTAMPS_CTC     = 1u << 1,  // can use CTC aligner for timestamps
-    CAP_WORD_TIMESTAMPS    = 1u << 2,  // word-level timestamps available
-    CAP_TOKEN_CONFIDENCE   = 1u << 3,  // per-token probability
-    CAP_LANGUAGE_DETECT    = 1u << 4,  // auto language detection
-    CAP_TRANSLATE          = 1u << 5,  // speech translation
-    CAP_DIARIZE            = 1u << 6,  // speaker diarization
-    CAP_GRAMMAR            = 1u << 7,  // GBNF grammar constraints
-    CAP_TEMPERATURE        = 1u << 8,  // temperature/sampling control
-    CAP_BEAM_SEARCH        = 1u << 9,  // beam search
-    CAP_FLASH_ATTN         = 1u << 10, // flash attention toggle
-    CAP_PUNCTUATION_TOGGLE = 1u << 11, // can enable/disable punctuation
-    CAP_SRC_TGT_LANGUAGE   = 1u << 12, // separate source/target language (canary)
-    CAP_AUTO_DOWNLOAD      = 1u << 13, // supports -m auto via HF hub
-    CAP_PARALLEL_PROCESSORS= 1u << 14, // whisper-style n_processors
-    CAP_VAD_INTERNAL       = 1u << 15, // backend handles VAD internally (whisper)
+    CAP_TIMESTAMPS_NATIVE = 1u << 0,    // model produces segment timestamps natively
+    CAP_TIMESTAMPS_CTC = 1u << 1,       // can use CTC aligner for timestamps
+    CAP_WORD_TIMESTAMPS = 1u << 2,      // word-level timestamps available
+    CAP_TOKEN_CONFIDENCE = 1u << 3,     // per-token probability
+    CAP_LANGUAGE_DETECT = 1u << 4,      // auto language detection
+    CAP_TRANSLATE = 1u << 5,            // speech translation
+    CAP_DIARIZE = 1u << 6,              // speaker diarization
+    CAP_GRAMMAR = 1u << 7,              // GBNF grammar constraints
+    CAP_TEMPERATURE = 1u << 8,          // temperature/sampling control
+    CAP_BEAM_SEARCH = 1u << 9,          // beam search
+    CAP_FLASH_ATTN = 1u << 10,          // flash attention toggle
+    CAP_PUNCTUATION_TOGGLE = 1u << 11,  // can enable/disable punctuation
+    CAP_SRC_TGT_LANGUAGE = 1u << 12,    // separate source/target language (canary)
+    CAP_AUTO_DOWNLOAD = 1u << 13,       // supports -m auto via HF hub
+    CAP_PARALLEL_PROCESSORS = 1u << 14, // whisper-style n_processors
+    CAP_VAD_INTERNAL = 1u << 15,        // backend handles VAD internally (whisper)
 };
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ public:
     virtual ~CrispasrBackend() = default;
 
     // Human-readable name ("whisper", "parakeet", "canary", ...).
-    virtual const char * name() const = 0;
+    virtual const char* name() const = 0;
 
     // Bitmask of crispasr_capability flags.
     virtual uint32_t capabilities() const = 0;
@@ -101,29 +101,23 @@ public:
     // Load the model and prepare internal state. Returns false on failure.
     // Params are passed by const-ref — backends should only read the fields
     // they care about.
-    virtual bool init(const whisper_params & params) = 0;
+    virtual bool init(const whisper_params& params) = 0;
 
     // Transcribe a single audio slice of 16 kHz mono PCM samples.
     // t_offset_cs is the absolute start of this slice in centiseconds; all
     // returned segment/word/token timestamps must be absolute (include the
     // offset).
-    virtual std::vector<crispasr_segment> transcribe(
-        const float * samples, int n_samples,
-        int64_t t_offset_cs,
-        const whisper_params & params) = 0;
+    virtual std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
+                                                     const whisper_params& params) = 0;
 
     // Optional stereo-aware overload for backends that can split stereo
     // channels for diarization (currently: whisper). Default
     // implementation falls through to mono transcribe(); override when
     // your backend can use stereo. The two channel buffers each have
     // n_samples_per_channel elements at 16 kHz.
-    virtual std::vector<crispasr_segment> transcribe_stereo(
-        const float * left_samples,
-        const float * right_samples,
-        int n_samples_per_channel,
-        int64_t t_offset_cs,
-        const whisper_params & params)
-    {
+    virtual std::vector<crispasr_segment> transcribe_stereo(const float* left_samples, const float* right_samples,
+                                                            int n_samples_per_channel, int64_t t_offset_cs,
+                                                            const whisper_params& params) {
         // Mono fallback: average L+R into a temporary buffer and dispatch
         // through the main transcribe(). Backends that don't override
         // this method get sane behaviour without any extra wiring.
@@ -144,12 +138,12 @@ public:
 
 // Create a backend by name. Returns nullptr if the name is not recognised or
 // the backend was not compiled in. Caller owns the returned pointer.
-std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string & name);
+std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name);
 
 // Detect the backend from GGUF metadata. Reads the "general.architecture"
 // key using gguf_init_from_file() and maps it to a backend name. Returns
 // an empty string if detection fails.
-std::string crispasr_detect_backend_from_gguf(const std::string & model_path);
+std::string crispasr_detect_backend_from_gguf(const std::string& model_path);
 
 // List the backend names that were compiled into this binary.
 std::vector<std::string> crispasr_list_backends();
@@ -168,4 +162,4 @@ void crispasr_print_backend_matrix();
 //
 // Invoked from cli.cpp main() when params.backend is set to a non-whisper
 // backend. The whisper path in cli.cpp is left completely untouched.
-int crispasr_run_backend(const whisper_params & params);
+int crispasr_run_backend(const whisper_params& params);

@@ -24,13 +24,13 @@ namespace crispasr_cache {
 //       - POSIX : $HOME/.cache/crispasr   (falls back to /tmp/.cache/crispasr)
 //       - Windows: %USERPROFILE%/.cache/crispasr
 //                  (%HOME% / %LOCALAPPDATA% as fallbacks if USERPROFILE unset)
-std::string dir(const std::string & cache_dir_override = "");
+std::string dir(const std::string& cache_dir_override = "");
 
 // True iff `path` exists AND is non-zero bytes. Treats 0-byte zombies
 // (left behind by an interrupted earlier download) as missing so the
 // next attempt retries the fetch instead of handing a corrupted file
 // to a model loader.
-bool file_present(const std::string & path);
+bool file_present(const std::string& path);
 
 // Download `url` into `dest`.
 //   Windows: tries WinHTTP first (built-in, handles HTTPS + redirects natively,
@@ -38,16 +38,13 @@ bool file_present(const std::string & path);
 //   POSIX  : tries curl, then wget.
 // Returns true iff the file is present and non-empty after the download.
 // `quiet=true` suppresses progress bars; failure messages always go to stderr.
-bool fetch(const std::string & url, const std::string & dest, bool quiet);
+bool fetch(const std::string& url, const std::string& dest, bool quiet);
 
 // Composite helper: if `dest` (= dir(cache_dir_override) + "/" + filename)
 // already satisfies file_present(), return its path immediately. Otherwise
 // invoke fetch() to populate it. Returns the absolute path on success or an
 // empty string on failure.
-std::string ensure_cached_file(const std::string & filename,
-                               const std::string & url,
-                               bool quiet,
-                               const char * pretty_label = "crispasr",
-                               const std::string & cache_dir_override = "");
+std::string ensure_cached_file(const std::string& filename, const std::string& url, bool quiet,
+                               const char* pretty_label = "crispasr", const std::string& cache_dir_override = "");
 
 } // namespace crispasr_cache

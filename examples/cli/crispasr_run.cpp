@@ -24,8 +24,8 @@
 #include <cstdlib>
 #include <cstring>
 #if defined(_WIN32)
-#  include <fcntl.h>
-#  include <io.h>
+#include <fcntl.h>
+#include <io.h>
 #endif
 #include <memory>
 #include <mutex>
@@ -38,14 +38,12 @@ namespace {
 // Capability-vs-request check. For each requested feature, warn on stderr
 // when the backend doesn't support it. Not fatal — the feature is silently
 // ignored. Returns the number of warnings emitted.
-int warn_unsupported(const CrispasrBackend & backend, const whisper_params & p) {
+int warn_unsupported(const CrispasrBackend& backend, const whisper_params& p) {
     const uint32_t caps = backend.capabilities();
     int warns = 0;
 
-    auto warn = [&](const char * feature) {
-        fprintf(stderr,
-                "crispasr: warning: backend '%s' does not support %s — ignoring\n",
-                backend.name(), feature);
+    auto warn = [&](const char* feature) {
+        fprintf(stderr, "crispasr: warning: backend '%s' does not support %s — ignoring\n", backend.name(), feature);
         warns++;
     };
 
@@ -55,11 +53,16 @@ int warn_unsupported(const CrispasrBackend & backend, const whisper_params & p) 
     // doesn't claim CAP_DIARIZE — the dispatcher will label the
     // segments after transcribe() returns. Tinydiarize still requires
     // backend support (whisper-only).
-    if (p.tinydiarize  && !(caps & CAP_DIARIZE))          warn("--tinydiarize");
-    if (p.translate    && !(caps & CAP_TRANSLATE))        warn("--translate");
-    if (!p.grammar.empty() && !(caps & CAP_GRAMMAR))      warn("--grammar");
-    if (p.temperature != 0.0f && !(caps & CAP_TEMPERATURE)) warn("--temperature");
-    if (!p.punctuation && !(caps & CAP_PUNCTUATION_TOGGLE)) warn("--no-punctuation");
+    if (p.tinydiarize && !(caps & CAP_DIARIZE))
+        warn("--tinydiarize");
+    if (p.translate && !(caps & CAP_TRANSLATE))
+        warn("--translate");
+    if (!p.grammar.empty() && !(caps & CAP_GRAMMAR))
+        warn("--grammar");
+    if (p.temperature != 0.0f && !(caps & CAP_TEMPERATURE))
+        warn("--temperature");
+    if (!p.punctuation && !(caps & CAP_PUNCTUATION_TOGGLE))
+        warn("--no-punctuation");
     if (!p.source_lang.empty() && !(caps & CAP_SRC_TGT_LANGUAGE))
         warn("--source-lang");
     if (!p.target_lang.empty() && !(caps & CAP_SRC_TGT_LANGUAGE))
@@ -71,15 +74,15 @@ int warn_unsupported(const CrispasrBackend & backend, const whisper_params & p) 
 }
 
 // Merge individual-slice results into a flat list preserving time order.
-std::vector<crispasr_segment> merge_segments(
-    std::vector<std::vector<crispasr_segment>> && per_slice)
-{
+std::vector<crispasr_segment> merge_segments(std::vector<std::vector<crispasr_segment>>&& per_slice) {
     std::vector<crispasr_segment> out;
     size_t total = 0;
-    for (auto & v : per_slice) total += v.size();
+    for (auto& v : per_slice)
+        total += v.size();
     out.reserve(total);
-    for (auto & v : per_slice) {
-        for (auto & s : v) out.push_back(std::move(s));
+    for (auto& v : per_slice) {
+        for (auto& s : v)
+            out.push_back(std::move(s));
     }
     return out;
 }
@@ -96,74 +99,60 @@ std::mutex g_stdout_mutex;
 // state, so multiple workers can run concurrently against pre-loaded
 // per-thread backend instances. Returns 0 on success, non-zero on
 // failure.
-int process_one_input(CrispasrBackend & backend,
-                      const std::string & fname_inp,
-                      whisper_params params)
-{
+int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, whisper_params params) {
     std::vector<float> samples;
     std::vector<std::vector<float>> stereo;
     const bool want_stereo = params.diarize;
     if (!read_audio_data(fname_inp, samples, stereo, want_stereo)) {
-        fprintf(stderr, "crispasr: error: failed to read audio '%s'\n",
-                fname_inp.c_str());
+        fprintf(stderr, "crispasr: error: failed to read audio '%s'\n", fname_inp.c_str());
         return 20;
     }
-    bool have_stereo = want_stereo &&
-        stereo.size() == 2 &&
-        !stereo[0].empty() &&
-        stereo[0].size() == stereo[1].size();
+    bool have_stereo = want_stereo && stereo.size() == 2 && !stereo[0].empty() && stereo[0].size() == stereo[1].size();
     if (have_stereo) {
         const size_t n = stereo[0].size();
         const size_t check = std::min<size_t>(n, 4096);
         bool channels_equal = true;
         for (size_t i = 0; i < check; i++) {
-            if (stereo[0][i] != stereo[1][i]) { channels_equal = false; break; }
+            if (stereo[0][i] != stereo[1][i]) {
+                channels_equal = false;
+                break;
+            }
         }
-        if (channels_equal) have_stereo = false;
+        if (channels_equal)
+            have_stereo = false;
     }
 
     constexpr int SR = 16000;
     if (!params.no_prints) {
-        fprintf(stderr,
-                "crispasr: audio: %d samples (%.1f s) @ %d Hz, %d threads\n",
-                (int)samples.size(),
+        fprintf(stderr, "crispasr: audio: %d samples (%.1f s) @ %d Hz, %d threads\n", (int)samples.size(),
                 (double)samples.size() / SR, SR, params.n_threads);
     }
 
     // Optional language-identification pre-step.
-    const bool want_auto_lang = params.detect_language ||
-                                params.language == "auto";
+    const bool want_auto_lang = params.detect_language || params.language == "auto";
     const bool has_native_lid = (backend.capabilities() & CAP_LANGUAGE_DETECT) != 0;
-    const bool lid_disabled   = params.lid_backend == "off" ||
-                                params.lid_backend == "none";
+    const bool lid_disabled = params.lid_backend == "off" || params.lid_backend == "none";
     if (want_auto_lang && !has_native_lid && !lid_disabled) {
         crispasr_lid_result lid;
-        if (crispasr_detect_language(samples.data(), (int)samples.size(),
-                                      params, lid)) {
+        if (crispasr_detect_language(samples.data(), (int)samples.size(), params, lid)) {
             params.language = lid.lang_code;
             if (params.source_lang.empty()) {
                 params.source_lang = lid.lang_code;
             }
             if (!params.no_prints) {
-                fprintf(stderr,
-                        "crispasr: LID -> language = '%s' (%s, p=%.3f)\n",
-                        lid.lang_code.c_str(), lid.source.c_str(),
-                        lid.confidence);
+                fprintf(stderr, "crispasr: LID -> language = '%s' (%s, p=%.3f)\n", lid.lang_code.c_str(),
+                        lid.source.c_str(), lid.confidence);
             }
         } else if (!params.no_prints) {
-            fprintf(stderr,
-                    "crispasr: LID failed, falling back to params.language='%s'\n",
-                    params.language.c_str());
+            fprintf(stderr, "crispasr: LID failed, falling back to params.language='%s'\n", params.language.c_str());
         }
     }
 
-    const auto slices = crispasr_compute_audio_slices(
-        samples.data(), (int)samples.size(), SR,
-        params.chunk_seconds, params);
+    const auto slices =
+        crispasr_compute_audio_slices(samples.data(), (int)samples.size(), SR, params.chunk_seconds, params);
 
     if (slices.empty()) {
-        fprintf(stderr, "crispasr: warning: no speech detected in '%s'\n",
-                fname_inp.c_str());
+        fprintf(stderr, "crispasr: warning: no speech detected in '%s'\n", fname_inp.c_str());
         return 0;
     }
 
@@ -176,44 +165,30 @@ int process_one_input(CrispasrBackend & backend,
     // Process VAD slices — parallel when multiple slices AND n_processors > 1
     std::vector<std::vector<crispasr_segment>> per_slice(slices.size());
 
-    auto process_slice = [&](size_t i, CrispasrBackend & be) {
-        const auto & sl = slices[i];
-        std::vector<crispasr_segment> segs = be.transcribe(
-            samples.data() + sl.start,
-            sl.end - sl.start,
-            sl.t0_cs,
-            params);
+    auto process_slice = [&](size_t i, CrispasrBackend& be) {
+        const auto& sl = slices[i];
+        std::vector<crispasr_segment> segs =
+            be.transcribe(samples.data() + sl.start, sl.end - sl.start, sl.t0_cs, params);
 
         if (params.diarize && !segs.empty()) {
             if (have_stereo) {
-                std::vector<float> sl_l(stereo[0].begin() + sl.start,
-                                        stereo[0].begin() + sl.end);
-                std::vector<float> sl_r(stereo[1].begin() + sl.start,
-                                        stereo[1].begin() + sl.end);
-                crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true,
-                                       sl.t0_cs, segs, params);
+                std::vector<float> sl_l(stereo[0].begin() + sl.start, stereo[0].begin() + sl.end);
+                std::vector<float> sl_r(stereo[1].begin() + sl.start, stereo[1].begin() + sl.end);
+                crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true, sl.t0_cs, segs, params);
             } else {
-                std::vector<float> mono_slice(samples.begin() + sl.start,
-                                              samples.begin() + sl.end);
+                std::vector<float> mono_slice(samples.begin() + sl.start, samples.begin() + sl.end);
                 crispasr_apply_diarize(mono_slice, mono_slice,
-                                       /*is_stereo=*/false,
-                                       sl.t0_cs, segs, params);
+                                       /*is_stereo=*/false, sl.t0_cs, segs, params);
             }
         }
 
-        const bool want_align =
-            !params.aligner_model.empty() &&
-            (backend.capabilities() & CAP_TIMESTAMPS_CTC);
+        const bool want_align = !params.aligner_model.empty() && (backend.capabilities() & CAP_TIMESTAMPS_CTC);
         if (want_align) {
-            for (auto & seg : segs) {
-                if (!seg.words.empty()) continue;
-                auto words = crispasr_ctc_align(
-                    params.aligner_model,
-                    seg.text,
-                    samples.data() + sl.start,
-                    sl.end - sl.start,
-                    sl.t0_cs,
-                    params.n_threads);
+            for (auto& seg : segs) {
+                if (!seg.words.empty())
+                    continue;
+                auto words = crispasr_ctc_align(params.aligner_model, seg.text, samples.data() + sl.start,
+                                                sl.end - sl.start, sl.t0_cs, params.n_threads);
                 if (!words.empty()) {
                     seg.t0 = words.front().t0;
                     seg.t1 = words.back().t1;
@@ -225,14 +200,12 @@ int process_one_input(CrispasrBackend & backend,
         per_slice[i] = std::move(segs);
     };
 
-    const int n_workers = std::min(params.n_processors,
-                                    (int32_t)slices.size());
+    const int n_workers = std::min(params.n_processors, (int32_t)slices.size());
 
     if (n_workers > 1 && slices.size() > 1) {
         // Parallel slice processing with separate backend instances
         if (!params.no_prints) {
-            fprintf(stderr, "crispasr: parallel processing %zu slices with %d workers\n",
-                    slices.size(), n_workers);
+            fprintf(stderr, "crispasr: parallel processing %zu slices with %d workers\n", slices.size(), n_workers);
         }
 
         // Create extra backend instances for worker threads
@@ -255,22 +228,24 @@ int process_one_input(CrispasrBackend & backend,
             std::vector<std::thread> threads;
             std::atomic<size_t> next_slice{0};
 
-            auto worker_fn = [&](CrispasrBackend & be) {
+            auto worker_fn = [&](CrispasrBackend& be) {
                 while (true) {
                     size_t idx = next_slice.fetch_add(1);
-                    if (idx >= slices.size()) break;
+                    if (idx >= slices.size())
+                        break;
                     process_slice(idx, be);
                 }
             };
 
             // Launch worker threads (workers[0..N-2] + main thread uses backend)
-            for (auto & w : workers) {
+            for (auto& w : workers) {
                 threads.emplace_back(worker_fn, std::ref(*w));
             }
             // Main thread also processes slices
             worker_fn(backend);
 
-            for (auto & t : threads) t.join();
+            for (auto& t : threads)
+                t.join();
         } else {
             // Fallback to sequential
             for (size_t i = 0; i < slices.size(); i++)
@@ -284,25 +259,22 @@ int process_one_input(CrispasrBackend & backend,
     auto all_segs = merge_segments(std::move(per_slice));
 
     if (!params.punctuation) {
-        for (auto & seg : all_segs) {
+        for (auto& seg : all_segs) {
             crispasr_strip_punctuation(seg);
         }
     }
 
     const auto disp = crispasr_make_disp_segments(all_segs, params.max_len);
 
-    const bool show_timestamps =
-        !params.no_timestamps &&
-        (params.output_srt || params.output_vtt ||
-         params.max_len > 0  || params.print_colors ||
-         params.diarize);
+    const bool show_timestamps = !params.no_timestamps && (params.output_srt || params.output_vtt ||
+                                                           params.max_len > 0 || params.print_colors || params.diarize);
     {
         auto t_end = std::chrono::steady_clock::now();
         double t_total = std::chrono::duration<double>(t_end - t_start).count();
         double audio_s = (double)samples.size() / SR;
         if (!params.no_prints) {
-            fprintf(stderr, "crispasr: transcribed %.1fs audio in %.2fs (%.1fx realtime)\n",
-                    audio_s, t_total, audio_s / std::max(t_total, 0.001));
+            fprintf(stderr, "crispasr: transcribed %.1fs audio in %.2fs (%.1fx realtime)\n", audio_s, t_total,
+                    audio_s / std::max(t_total, 0.001));
         }
 
         // Serialize stdout across parallel workers so multi-file
@@ -325,17 +297,15 @@ int process_one_input(CrispasrBackend & backend,
     if (params.output_lrc)
         crispasr_write_lrc(crispasr_make_out_path(fname_inp, ".lrc"), disp);
     if (params.output_jsn)
-        crispasr_write_json(
-            crispasr_make_out_path(fname_inp, ".json"),
-            all_segs, backend.name(), params.model, params.language,
-            params.output_jsn_full);
+        crispasr_write_json(crispasr_make_out_path(fname_inp, ".json"), all_segs, backend.name(), params.model,
+                            params.language, params.output_jsn_full);
 
     return 0;
 }
 
 } // namespace
 
-int crispasr_run_backend(const whisper_params & params_in) {
+int crispasr_run_backend(const whisper_params& params_in) {
     whisper_params params = params_in;
 
     // Resolve backend name: explicit --backend takes priority; otherwise
@@ -351,14 +321,12 @@ int crispasr_run_backend(const whisper_params & params_in) {
             return 10;
         }
         if (!params.no_prints) {
-            fprintf(stderr, "crispasr: detected backend '%s' from GGUF metadata\n",
-                    backend_name.c_str());
+            fprintf(stderr, "crispasr: detected backend '%s' from GGUF metadata\n", backend_name.c_str());
         }
     }
 
     // Resolve "-m auto" via the model registry + curl/wget download.
-    const std::string resolved = crispasr_resolve_model(
-        params.model, backend_name, params.no_prints, params.cache_dir);
+    const std::string resolved = crispasr_resolve_model(params.model, backend_name, params.no_prints, params.cache_dir);
     if (resolved.empty()) {
         return 11;
     }
@@ -367,28 +335,26 @@ int crispasr_run_backend(const whisper_params & params_in) {
     // Create and init the backend.
     std::unique_ptr<CrispasrBackend> backend = crispasr_create_backend(backend_name);
     if (!backend) {
-        fprintf(stderr, "crispasr: error: backend '%s' is not available in this build\n",
-                backend_name.c_str());
+        fprintf(stderr, "crispasr: error: backend '%s' is not available in this build\n", backend_name.c_str());
         return 12;
     }
 
     warn_unsupported(*backend, params);
 
     if (!backend->init(params)) {
-        fprintf(stderr, "crispasr: error: failed to initialise backend '%s'\n",
-                backend_name.c_str());
+        fprintf(stderr, "crispasr: error: failed to initialise backend '%s'\n", backend_name.c_str());
         return 13;
     }
 
     // ---- Streaming mode: read raw PCM from stdin, transcribe chunks ----
     if (params.stream) {
         const int SR = 16000;
-        const int step_samples   = (params.stream_step_ms   * SR) / 1000;
-        const int length_samples = (params.stream_length_ms  * SR) / 1000;
-        const int keep_samples   = (params.stream_keep_ms    * SR) / 1000;
+        const int step_samples = (params.stream_step_ms * SR) / 1000;
+        const int length_samples = (params.stream_length_ms * SR) / 1000;
+        const int keep_samples = (params.stream_keep_ms * SR) / 1000;
 
         // If --mic, spawn a subprocess to capture audio from the default mic
-        FILE * mic_pipe = nullptr;
+        FILE* mic_pipe = nullptr;
         if (params.mic) {
             fprintf(stderr, "crispasr[mic]: capturing from default microphone...\n");
             fprintf(stderr, "crispasr[mic]: press Ctrl+C to stop\n\n");
@@ -396,14 +362,16 @@ int crispasr_run_backend(const whisper_params & params_in) {
 #if defined(__APPLE__)
             // macOS: use sox (most reliable), ffmpeg fallback
             mic_pipe = popen("rec -q -t s16 -r 16000 -c 1 - 2>/dev/null || "
-                             "ffmpeg -f avfoundation -i ':default' -f s16le -ar 16000 -ac 1 - 2>/dev/null", "r");
+                             "ffmpeg -f avfoundation -i ':default' -f s16le -ar 16000 -ac 1 - 2>/dev/null",
+                             "r");
 #elif defined(_WIN32)
             mic_pipe = _popen("ffmpeg -f dshow -i audio=\"Microphone\" -f s16le -ar 16000 -ac 1 - 2>NUL", "rb");
 #else
             // Linux: try arecord first, then ffmpeg with pulseaudio
             mic_pipe = popen("arecord -q -f S16_LE -r 16000 -c 1 -t raw 2>/dev/null || "
                              "ffmpeg -f pulse -i default -f s16le -ar 16000 -ac 1 - 2>/dev/null || "
-                             "ffmpeg -f alsa -i default -f s16le -ar 16000 -ac 1 - 2>/dev/null", "r");
+                             "ffmpeg -f alsa -i default -f s16le -ar 16000 -ac 1 - 2>/dev/null",
+                             "r");
 #endif
             if (!mic_pipe) {
                 fprintf(stderr, "crispasr[mic]: failed to open microphone. Install sox, ffmpeg, or arecord.\n");
@@ -411,16 +379,17 @@ int crispasr_run_backend(const whisper_params & params_in) {
             }
         } else {
             fprintf(stderr, "crispasr[stream]: reading raw s16le 16kHz mono PCM from stdin\n");
-            fprintf(stderr, "crispasr[stream]: step=%dms length=%dms keep=%dms\n",
-                    params.stream_step_ms, params.stream_length_ms, params.stream_keep_ms);
+            fprintf(stderr, "crispasr[stream]: step=%dms length=%dms keep=%dms\n", params.stream_step_ms,
+                    params.stream_length_ms, params.stream_keep_ms);
             fprintf(stderr, "crispasr[stream]: pipe audio in, e.g.:\n");
             fprintf(stderr, "  ffmpeg -i input.wav -f s16le -ar 16000 -ac 1 - | crispasr --stream -m model.gguf\n\n");
         }
 
-        FILE * audio_src = mic_pipe ? mic_pipe : stdin;
+        FILE* audio_src = mic_pipe ? mic_pipe : stdin;
 
 #if defined(_WIN32)
-        if (!mic_pipe) _setmode(_fileno(stdin), _O_BINARY);
+        if (!mic_pipe)
+            _setmode(_fileno(stdin), _O_BINARY);
 #endif
 
         std::vector<float> pcm_window(length_samples, 0.0f);
@@ -430,7 +399,8 @@ int crispasr_run_backend(const whisper_params & params_in) {
         while (true) {
             // Read one step of raw s16le samples from audio source
             size_t n_read = fread(read_buf.data(), sizeof(int16_t), step_samples, audio_src);
-            if (n_read == 0) break;  // EOF
+            if (n_read == 0)
+                break; // EOF
 
             // Convert s16le to float
             std::vector<float> new_samples(n_read);
@@ -439,47 +409,47 @@ int crispasr_run_backend(const whisper_params & params_in) {
 
             // Shift window: keep the tail, append new samples
             int n_keep = std::min(keep_samples, (int)pcm_window.size());
-            int n_new  = (int)new_samples.size();
+            int n_new = (int)new_samples.size();
             int n_total = n_keep + n_new;
-            if (n_total > length_samples) n_total = length_samples;
+            if (n_total > length_samples)
+                n_total = length_samples;
 
             std::vector<float> next_window(n_total);
             // Copy keep portion from end of previous window
             if (n_keep > 0 && (int)pcm_window.size() >= n_keep) {
-                std::copy(pcm_window.end() - n_keep, pcm_window.end(),
-                          next_window.begin());
+                std::copy(pcm_window.end() - n_keep, pcm_window.end(), next_window.begin());
             }
             // Append new samples
             int copy_start = std::max(0, n_total - n_new);
-            std::copy(new_samples.begin(),
-                      new_samples.begin() + std::min(n_new, n_total),
+            std::copy(new_samples.begin(), new_samples.begin() + std::min(n_new, n_total),
                       next_window.begin() + copy_start);
             pcm_window = std::move(next_window);
 
             // Monitor: show progress during processing
             if (params.stream_monitor) {
-                fprintf(stderr, "\xE2\x96\xB6");  // ▶ = processing chunk
+                fprintf(stderr, "\xE2\x96\xB6"); // ▶ = processing chunk
                 fflush(stderr);
             }
 
             // Transcribe the window
-            auto segs = backend->transcribe(pcm_window.data(), (int)pcm_window.size(),
-                                             0, params);
+            auto segs = backend->transcribe(pcm_window.data(), (int)pcm_window.size(), 0, params);
 
             if (params.stream_monitor) {
                 if (segs.empty()) {
-                    fprintf(stderr, "\xC2\xB7");  // · = silence
+                    fprintf(stderr, "\xC2\xB7"); // · = silence
                 } else {
-                    fprintf(stderr, "\xE2\x9C\x93");  // ✓ = got text
+                    fprintf(stderr, "\xE2\x9C\x93"); // ✓ = got text
                 }
                 fflush(stderr);
             }
 
-            if (segs.empty()) continue;
+            if (segs.empty())
+                continue;
 
             // Build output text
             std::string text;
-            for (const auto & s : segs) text += s.text;
+            for (const auto& s : segs)
+                text += s.text;
 
             // Output depends on mode:
             // Continuous: print each non-empty result as a new line
@@ -541,9 +511,8 @@ int crispasr_run_backend(const whisper_params & params_in) {
             pool.emplace_back(std::move(extra));
         }
         if (!params.no_prints) {
-            fprintf(stderr,
-                    "crispasr: parallel mode: %d worker(s), %zu input file(s)\n",
-                    nproc, params.fname_inp.size());
+            fprintf(stderr, "crispasr: parallel mode: %d worker(s), %zu input file(s)\n", nproc,
+                    params.fname_inp.size());
         }
 
         // Shared work queue: index into params.fname_inp. std::atomic
@@ -556,25 +525,29 @@ int crispasr_run_backend(const whisper_params & params_in) {
         workers.reserve((size_t)nproc);
         for (int w = 0; w < nproc; w++) {
             workers.emplace_back([&, w]() {
-                CrispasrBackend & be = *pool[w];
+                CrispasrBackend& be = *pool[w];
                 while (true) {
                     const int idx = next_idx.fetch_add(1);
-                    if (idx >= n_files) break;
-                    const int file_rc = process_one_input(
-                        be, params.fname_inp[idx], params);
-                    if (file_rc != 0) agg_rc.store(file_rc);
+                    if (idx >= n_files)
+                        break;
+                    const int file_rc = process_one_input(be, params.fname_inp[idx], params);
+                    if (file_rc != 0)
+                        agg_rc.store(file_rc);
                 }
             });
         }
-        for (auto & t : workers) t.join();
+        for (auto& t : workers)
+            t.join();
 
-        for (auto & be : pool) be->shutdown();
+        for (auto& be : pool)
+            be->shutdown();
         return agg_rc.load();
     }
 
-    for (const auto & fname_inp : params.fname_inp) {
+    for (const auto& fname_inp : params.fname_inp) {
         const int file_rc = process_one_input(*backend, fname_inp, params);
-        if (file_rc != 0) rc = file_rc;
+        if (file_rc != 0)
+            rc = file_rc;
     }
     backend->shutdown();
     return rc;
