@@ -176,6 +176,7 @@ struct whisper_params {
     bool        stream           = false;
     bool        mic              = false;  // capture from default microphone
     bool        stream_continuous = false; // don't stop on EOS, keep transcribing
+    bool        stream_monitor   = false; // show unicode progress symbols during processing
     int32_t     stream_step_ms   = 3000;  // chunk size in ms (default 3s)
     int32_t     stream_length_ms = 10000; // context window in ms (default 10s)
     int32_t     stream_keep_ms   = 200;   // overlap to keep between chunks

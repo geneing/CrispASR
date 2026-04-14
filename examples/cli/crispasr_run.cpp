@@ -388,9 +388,25 @@ int crispasr_run_backend(const whisper_params & params_in) {
                       next_window.begin() + copy_start);
             pcm_window = std::move(next_window);
 
+            // Monitor: show progress during processing
+            if (params.stream_monitor) {
+                fprintf(stderr, "\xE2\x96\xB6");  // ▶ = processing chunk
+                fflush(stderr);
+            }
+
             // Transcribe the window
             auto segs = backend->transcribe(pcm_window.data(), (int)pcm_window.size(),
                                              0, params);
+
+            if (params.stream_monitor) {
+                if (segs.empty()) {
+                    fprintf(stderr, "\xC2\xB7");  // · = silence
+                } else {
+                    fprintf(stderr, "\xE2\x9C\x93");  // ✓ = got text
+                }
+                fflush(stderr);
+            }
+
             if (segs.empty()) continue;
 
             // Build output text

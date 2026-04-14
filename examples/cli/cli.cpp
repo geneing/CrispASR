@@ -235,6 +235,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (                  arg == "--stream")               { params.stream                 = true; }
         else if (                  arg == "--mic")                  { params.mic = true; params.stream = true; }
         else if (                  arg == "--live")                 { params.mic = true; params.stream = true; params.stream_continuous = true; }
+        else if (                  arg == "--monitor")              { params.stream_monitor = true; }
         else if (                  arg == "--stream-step")          { params.stream_step_ms         = std::stoi(ARGV_NEXT); }
         else if (                  arg == "--stream-length")        { params.stream_length_ms       = std::stoi(ARGV_NEXT); }
         else if (                  arg == "--stream-keep")          { params.stream_keep_ms         = std::stoi(ARGV_NEXT); }
@@ -347,6 +348,7 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  --stream                          [%-7s] streaming mode: read raw s16le PCM from stdin\n",    params.stream ? "true" : "false");
     fprintf(stderr, "  --mic                             [%-7s] capture from default microphone (implies --stream)\n", params.mic ? "true" : "false");
     fprintf(stderr, "  --live                            [%-7s] continuous live transcription (implies --mic --stream)\n", params.stream_continuous ? "true" : "false");
+    fprintf(stderr, "  --monitor                         [%-7s] show unicode progress symbols during streaming\n",      params.stream_monitor ? "true" : "false");
     fprintf(stderr, "  --stream-step N                   [%-7d] chunk size in ms for streaming\n",                    params.stream_step_ms);
     fprintf(stderr, "  --stream-length N                 [%-7d] context window in ms for streaming\n",                params.stream_length_ms);
     fprintf(stderr, "  --stream-keep N                   [%-7d] overlap to keep between chunks in ms\n",              params.stream_keep_ms);
