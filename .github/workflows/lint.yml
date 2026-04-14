@@ -130,5 +130,7 @@ jobs:
             --suppress=unmatchedSuppression \
             -i ggml \
             -i bindings \
+            --suppress='*:examples/server/*' \
+            --suppress='*:*httplib.h' \
             --quiet \
             src/ examples/cli/
