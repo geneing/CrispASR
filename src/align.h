@@ -26,9 +26,9 @@
 
 // Per-word timestamp produced by ctc_forced_align().
 struct ctc_word_stamp {
-    std::string word;   // original word text (not normalised)
-    float       t0;     // start time, seconds
-    float       t1;     // end time, seconds (exclusive: start of next frame)
+    std::string word; // original word text (not normalised)
+    float t0;         // start time, seconds
+    float t1;         // end time, seconds (exclusive: start of next frame)
 };
 
 /**
@@ -46,11 +46,5 @@ struct ctc_word_stamp {
  *         Returns an empty vector if the alignment fails (e.g. zero vocab overlap).
  *         Words whose characters are entirely absent from the CTC vocab get t0 == t1 == 0.
  */
-std::vector<ctc_word_stamp> ctc_forced_align(
-    const float                      * logits,
-    int                                T,
-    int                                V,
-    const std::vector<std::string>   & words,
-    const std::vector<std::string>   & vocab,
-    int                                blank_id,
-    float                              frame_dur);
+std::vector<ctc_word_stamp> ctc_forced_align(const float* logits, int T, int V, const std::vector<std::string>& words,
+                                             const std::vector<std::string>& vocab, int blank_id, float frame_dur);

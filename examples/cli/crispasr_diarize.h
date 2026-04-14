@@ -58,10 +58,5 @@ struct whisper_params; // fwd
 // and `is_stereo` is false; the dispatcher should call this anyway
 // so the mono-friendly methods (vad-turns, sherpa, pyannote) can
 // still run.
-bool crispasr_apply_diarize(
-    const std::vector<float> & left,
-    const std::vector<float> & right,
-    bool                       is_stereo,
-    int64_t                    slice_t0_cs,
-    std::vector<crispasr_segment> & segs,
-    const whisper_params & params);
+bool crispasr_apply_diarize(const std::vector<float>& left, const std::vector<float>& right, bool is_stereo,
+                            int64_t slice_t0_cs, std::vector<crispasr_segment>& segs, const whisper_params& params);

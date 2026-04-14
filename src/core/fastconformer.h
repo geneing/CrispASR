@@ -40,14 +40,10 @@ namespace core_conformer {
 // Input:  [2T-1, T, H]
 // Output: [T,   T, H]
 // ---------------------------------------------------------------------------
-static inline ggml_tensor * rel_shift(ggml_context * ctx, ggml_tensor * a) {
+static inline ggml_tensor* rel_shift(ggml_context* ctx, ggml_tensor* a) {
     const int T = (int)a->ne[1];
     const int H = (int)a->ne[2];
-    return ggml_view_3d(ctx, a,
-        T, T, H,
-        a->nb[1] - a->nb[0],
-        a->nb[2],
-        (T - 1) * a->nb[0]);
+    return ggml_view_3d(ctx, a, T, T, H, a->nb[1] - a->nb[0], a->nb[2], (T - 1) * a->nb[0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +67,7 @@ static inline std::vector<float> make_pos_enc(int d_model, int T) {
         const float pos = (float)(T - 1 - p);
         for (int i = 0; i < d_model / 2; i++) {
             const float div = expf(-logf(10000.0f) * (float)(2 * i) / (float)d_model);
-            pe[(size_t)p * d_model + 2 * i    ] = sinf(pos * div);
+            pe[(size_t)p * d_model + 2 * i] = sinf(pos * div);
             pe[(size_t)p * d_model + 2 * i + 1] = cosf(pos * div);
         }
     }
@@ -89,55 +85,49 @@ static inline std::vector<float> make_pos_enc(int d_model, int T) {
 //   flatten(freq×channel) → Linear(W3*C → d_model)
 // ---------------------------------------------------------------------------
 struct PreEncodeWeights {
-    ggml_tensor * conv0_w = nullptr, * conv0_b = nullptr;  // first strided conv
-    ggml_tensor * conv2_w = nullptr, * conv2_b = nullptr;  // dw
-    ggml_tensor * conv3_w = nullptr, * conv3_b = nullptr;  // pw
-    ggml_tensor * conv5_w = nullptr, * conv5_b = nullptr;  // dw
-    ggml_tensor * conv6_w = nullptr, * conv6_b = nullptr;  // pw
-    ggml_tensor * out_w   = nullptr, * out_b   = nullptr;  // Linear(W3*C → d_model)
+    ggml_tensor *conv0_w = nullptr, *conv0_b = nullptr; // first strided conv
+    ggml_tensor *conv2_w = nullptr, *conv2_b = nullptr; // dw
+    ggml_tensor *conv3_w = nullptr, *conv3_b = nullptr; // pw
+    ggml_tensor *conv5_w = nullptr, *conv5_b = nullptr; // dw
+    ggml_tensor *conv6_w = nullptr, *conv6_b = nullptr; // pw
+    ggml_tensor *out_w = nullptr, *out_b = nullptr;     // Linear(W3*C → d_model)
 };
 
 // Build the dw_striding pre-encoder. Input `mel` has shape (n_mels, T_mel).
 // Returns a (d_model, T_enc) tensor where T_enc is read off the intermediate
 // conv output via the caller (write it back through `out_T_enc`).
-static inline ggml_tensor * build_pre_encode(
-    ggml_context          * ctx0,
-    ggml_tensor           * mel,
-    const PreEncodeWeights & w,
-    int                     subsampling_channels,
-    int                   * out_T_enc)
-{
-    auto bias_4d = [&](ggml_tensor * b) {
-        return ggml_cast(ctx0,
-            ggml_reshape_4d(ctx0, b, 1, 1, b->ne[0], 1),
-            GGML_TYPE_F32);
+static inline ggml_tensor* build_pre_encode(ggml_context* ctx0, ggml_tensor* mel, const PreEncodeWeights& w,
+                                            int subsampling_channels, int* out_T_enc) {
+    auto bias_4d = [&](ggml_tensor* b) {
+        return ggml_cast(ctx0, ggml_reshape_4d(ctx0, b, 1, 1, b->ne[0], 1), GGML_TYPE_F32);
     };
 
-    ggml_tensor * cur = ggml_conv_2d(ctx0, w.conv0_w, mel, 2, 2, 1, 1, 1, 1);
+    ggml_tensor* cur = ggml_conv_2d(ctx0, w.conv0_w, mel, 2, 2, 1, 1, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv0_b));
     cur = ggml_relu(ctx0, cur);
 
     cur = ggml_conv_2d_dw(ctx0, w.conv2_w, cur, 2, 2, 1, 1, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv2_b));
-    cur = ggml_conv_2d   (ctx0, w.conv3_w, cur, 1, 1, 0, 0, 1, 1);
+    cur = ggml_conv_2d(ctx0, w.conv3_w, cur, 1, 1, 0, 0, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv3_b));
     cur = ggml_relu(ctx0, cur);
 
     cur = ggml_conv_2d_dw(ctx0, w.conv5_w, cur, 2, 2, 1, 1, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv5_b));
-    cur = ggml_conv_2d   (ctx0, w.conv6_w, cur, 1, 1, 0, 0, 1, 1);
+    cur = ggml_conv_2d(ctx0, w.conv6_w, cur, 1, 1, 0, 0, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv6_b));
     cur = ggml_relu(ctx0, cur);
 
     const int H3 = (int)cur->ne[1];
     const int W3 = (int)cur->ne[0];
-    const int C  = subsampling_channels;
+    const int C = subsampling_channels;
     cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3));
     cur = ggml_reshape_2d(ctx0, cur, W3 * C, H3);
 
     cur = ggml_add(ctx0, ggml_mul_mat(ctx0, w.out_w, cur), w.out_b);
 
-    if (out_T_enc) *out_T_enc = H3;
+    if (out_T_enc)
+        *out_T_enc = H3;
     return cur;
 }
 
@@ -155,69 +145,63 @@ static inline ggml_tensor * build_pre_encode(
 // ---------------------------------------------------------------------------
 struct BlockWeights {
     // ---- FFN1 (macaron) ----
-    ggml_tensor * norm_ff1_w = nullptr, * norm_ff1_b = nullptr;
-    ggml_tensor * ff1_l1_w   = nullptr, * ff1_l1_b   = nullptr;
-    ggml_tensor * ff1_l2_w   = nullptr, * ff1_l2_b   = nullptr;
+    ggml_tensor *norm_ff1_w = nullptr, *norm_ff1_b = nullptr;
+    ggml_tensor *ff1_l1_w = nullptr, *ff1_l1_b = nullptr;
+    ggml_tensor *ff1_l2_w = nullptr, *ff1_l2_b = nullptr;
 
     // ---- Self-attention (rel-pos with untied u/v biases) ----
-    ggml_tensor * norm_attn_w = nullptr, * norm_attn_b = nullptr;
-    ggml_tensor * attn_q_w    = nullptr, * attn_q_b    = nullptr;
-    ggml_tensor * attn_k_w    = nullptr, * attn_k_b    = nullptr;
-    ggml_tensor * attn_v_w    = nullptr, * attn_v_b    = nullptr;
-    ggml_tensor * attn_out_w  = nullptr, * attn_out_b  = nullptr;
-    ggml_tensor * attn_pos_w  = nullptr;  // no bias on rel-pos projection
-    ggml_tensor * pos_bias_u  = nullptr;
-    ggml_tensor * pos_bias_v  = nullptr;
+    ggml_tensor *norm_attn_w = nullptr, *norm_attn_b = nullptr;
+    ggml_tensor *attn_q_w = nullptr, *attn_q_b = nullptr;
+    ggml_tensor *attn_k_w = nullptr, *attn_k_b = nullptr;
+    ggml_tensor *attn_v_w = nullptr, *attn_v_b = nullptr;
+    ggml_tensor *attn_out_w = nullptr, *attn_out_b = nullptr;
+    ggml_tensor* attn_pos_w = nullptr; // no bias on rel-pos projection
+    ggml_tensor* pos_bias_u = nullptr;
+    ggml_tensor* pos_bias_v = nullptr;
 
     // ---- Conformer convolution module ----
-    ggml_tensor * norm_conv_w = nullptr, * norm_conv_b = nullptr;
-    ggml_tensor * conv_pw1_w  = nullptr, * conv_pw1_b  = nullptr;  // (2d, d)
-    ggml_tensor * conv_dw_w   = nullptr, * conv_dw_b   = nullptr;  // (d, 1, K)
-    ggml_tensor * conv_pw2_w  = nullptr, * conv_pw2_b  = nullptr;  // (d, d)
+    ggml_tensor *norm_conv_w = nullptr, *norm_conv_b = nullptr;
+    ggml_tensor *conv_pw1_w = nullptr, *conv_pw1_b = nullptr; // (2d, d)
+    ggml_tensor *conv_dw_w = nullptr, *conv_dw_b = nullptr;   // (d, 1, K)
+    ggml_tensor *conv_pw2_w = nullptr, *conv_pw2_b = nullptr; // (d, d)
 
     // ---- FFN2 (macaron) ----
-    ggml_tensor * norm_ff2_w = nullptr, * norm_ff2_b = nullptr;
-    ggml_tensor * ff2_l1_w   = nullptr, * ff2_l1_b   = nullptr;
-    ggml_tensor * ff2_l2_w   = nullptr, * ff2_l2_b   = nullptr;
+    ggml_tensor *norm_ff2_w = nullptr, *norm_ff2_b = nullptr;
+    ggml_tensor *ff2_l1_w = nullptr, *ff2_l1_b = nullptr;
+    ggml_tensor *ff2_l2_w = nullptr, *ff2_l2_b = nullptr;
 
     // ---- Block final LN ----
-    ggml_tensor * norm_out_w = nullptr, * norm_out_b = nullptr;
+    ggml_tensor *norm_out_w = nullptr, *norm_out_b = nullptr;
 };
 
 struct BlockParams {
-    int   d;          // d_model
-    int   n_heads;
-    int   head_dim;   // d / n_heads
-    int   K;          // conv_kernel (usually 9)
-    float ln_eps;     // LayerNorm epsilon
+    int d; // d_model
+    int n_heads;
+    int head_dim; // d / n_heads
+    int K;        // conv_kernel (usually 9)
+    float ln_eps; // LayerNorm epsilon
 };
 
 // Build one Conformer block. `cur` must be (d, T). `pos_enc` is the shared
 // sinusoidal rel-pos table (d, 2T-1). Returns the post-block (d, T) output.
-static inline ggml_tensor * build_block(
-    ggml_context       * ctx0,
-    ggml_tensor        * cur,
-    ggml_tensor        * pos_enc,
-    int                  T,
-    const BlockWeights & e,
-    const BlockParams  & p)
-{
-    const int d        = p.d;
-    const int n_heads  = p.n_heads;
+static inline ggml_tensor* build_block(ggml_context* ctx0, ggml_tensor* cur, ggml_tensor* pos_enc, int T,
+                                       const BlockWeights& e, const BlockParams& p) {
+    const int d = p.d;
+    const int n_heads = p.n_heads;
     const int head_dim = p.head_dim;
-    const int K        = p.K;
-    const float eps    = p.ln_eps;
+    const int K = p.K;
+    const float eps = p.ln_eps;
 
     // Tiny helper: mul_mat + optional bias add.
-    auto mm_bias = [&](ggml_tensor * w, ggml_tensor * x, ggml_tensor * b) {
-        ggml_tensor * y = ggml_mul_mat(ctx0, w, x);
+    auto mm_bias = [&](ggml_tensor* w, ggml_tensor* x, ggml_tensor* b) {
+        ggml_tensor* y = ggml_mul_mat(ctx0, w, x);
         return b ? ggml_add(ctx0, y, b) : y;
     };
 
-    ggml_tensor * inpL = cur;
+    ggml_tensor* inpL = cur;
 
     // ---- FFN1 (macaron half) ----
-    ggml_tensor * x = ggml_norm(ctx0, cur, eps);
+    ggml_tensor* x = ggml_norm(ctx0, cur, eps);
     x = ggml_mul(ctx0, x, e.norm_ff1_w);
     x = ggml_add(ctx0, x, e.norm_ff1_b);
     x = mm_bias(e.ff1_l1_w, x, e.ff1_l1_b);
@@ -225,60 +209,58 @@ static inline ggml_tensor * build_block(
     x = mm_bias(e.ff1_l2_w, x, e.ff1_l2_b);
     cur = ggml_add(ctx0, inpL, ggml_scale(ctx0, x, 0.5f));
 
-    ggml_tensor * inpAttn = cur;
+    ggml_tensor* inpAttn = cur;
 
     // ---- Self-Attention (rel_pos with untied biases) ----
     x = ggml_norm(ctx0, cur, eps);
     x = ggml_mul(ctx0, x, e.norm_attn_w);
     x = ggml_add(ctx0, x, e.norm_attn_b);
 
-    ggml_tensor * Q  = mm_bias(e.attn_q_w, x, e.attn_q_b);
-    ggml_tensor * K_ = mm_bias(e.attn_k_w, x, e.attn_k_b);
-    ggml_tensor * V  = mm_bias(e.attn_v_w, x, e.attn_v_b);
-    ggml_tensor * R  = ggml_mul_mat(ctx0, e.attn_pos_w, pos_enc);  // no bias
+    ggml_tensor* Q = mm_bias(e.attn_q_w, x, e.attn_q_b);
+    ggml_tensor* K_ = mm_bias(e.attn_k_w, x, e.attn_k_b);
+    ggml_tensor* V = mm_bias(e.attn_v_w, x, e.attn_v_b);
+    ggml_tensor* R = ggml_mul_mat(ctx0, e.attn_pos_w, pos_enc); // no bias
 
-    ggml_tensor * Q_u = ggml_add(ctx0, Q, ggml_reshape_1d(ctx0, e.pos_bias_u, d));
-    ggml_tensor * Q_v = ggml_add(ctx0, Q, ggml_reshape_1d(ctx0, e.pos_bias_v, d));
+    ggml_tensor* Q_u = ggml_add(ctx0, Q, ggml_reshape_1d(ctx0, e.pos_bias_u, d));
+    ggml_tensor* Q_v = ggml_add(ctx0, Q, ggml_reshape_1d(ctx0, e.pos_bias_v, d));
 
     Q_u = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q_u, head_dim, n_heads, T), 0, 2, 1, 3);
     Q_v = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q_v, head_dim, n_heads, T), 0, 2, 1, 3);
-    K_  = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K_,  head_dim, n_heads, T), 0, 2, 1, 3);
-    R   = ggml_permute(ctx0, ggml_reshape_3d(ctx0, R,   head_dim, n_heads, 2 * T - 1), 0, 2, 1, 3);
+    K_ = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K_, head_dim, n_heads, T), 0, 2, 1, 3);
+    R = ggml_permute(ctx0, ggml_reshape_3d(ctx0, R, head_dim, n_heads, 2 * T - 1), 0, 2, 1, 3);
 
-    ggml_tensor * AC = ggml_mul_mat(ctx0, ggml_cont(ctx0, K_), Q_u);
-    ggml_tensor * BD_raw = ggml_mul_mat(ctx0, ggml_cont(ctx0, R), Q_v);
-    ggml_tensor * BD = rel_shift(ctx0, BD_raw);
+    ggml_tensor* AC = ggml_mul_mat(ctx0, ggml_cont(ctx0, K_), Q_u);
+    ggml_tensor* BD_raw = ggml_mul_mat(ctx0, ggml_cont(ctx0, R), Q_v);
+    ggml_tensor* BD = rel_shift(ctx0, BD_raw);
 
-    ggml_tensor * scores = ggml_add(ctx0, AC, BD);
+    ggml_tensor* scores = ggml_add(ctx0, AC, BD);
     scores = ggml_scale(ctx0, scores, 1.0f / sqrtf((float)head_dim));
     scores = ggml_soft_max(ctx0, scores);
 
-    ggml_tensor * V3  = ggml_reshape_3d(ctx0, V, head_dim, n_heads, T);
-    ggml_tensor * V_t = ggml_permute(ctx0, V3, 1, 2, 0, 3);
-    ggml_tensor * attn_out = ggml_mul_mat(ctx0, ggml_cont(ctx0, V_t), scores);
+    ggml_tensor* V3 = ggml_reshape_3d(ctx0, V, head_dim, n_heads, T);
+    ggml_tensor* V_t = ggml_permute(ctx0, V3, 1, 2, 0, 3);
+    ggml_tensor* attn_out = ggml_mul_mat(ctx0, ggml_cont(ctx0, V_t), scores);
     attn_out = ggml_reshape_2d(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, attn_out, 0, 2, 1, 3)), d, T);
 
     attn_out = mm_bias(e.attn_out_w, attn_out, e.attn_out_b);
     cur = ggml_add(ctx0, inpAttn, attn_out);
 
     // ---- Conformer convolution module ----
-    ggml_tensor * inpConv = cur;
+    ggml_tensor* inpConv = cur;
     x = ggml_norm(ctx0, cur, eps);
     x = ggml_mul(ctx0, x, e.norm_conv_w);
     x = ggml_add(ctx0, x, e.norm_conv_b);
 
     // pw1: (d → 2d), then GLU
-    ggml_tensor * pw1_w = ggml_reshape_2d(ctx0, e.conv_pw1_w, d, 2 * d);
-    ggml_tensor * cnv = mm_bias(pw1_w, x, e.conv_pw1_b);
-    ggml_tensor * cnv_gate = ggml_view_2d(ctx0, cnv, d, T, cnv->nb[1], d * sizeof(float));
-    cnv = ggml_mul(ctx0,
-        ggml_view_2d(ctx0, cnv, d, T, cnv->nb[1], 0),
-        ggml_sigmoid(ctx0, cnv_gate));
+    ggml_tensor* pw1_w = ggml_reshape_2d(ctx0, e.conv_pw1_w, d, 2 * d);
+    ggml_tensor* cnv = mm_bias(pw1_w, x, e.conv_pw1_b);
+    ggml_tensor* cnv_gate = ggml_view_2d(ctx0, cnv, d, T, cnv->nb[1], d * sizeof(float));
+    cnv = ggml_mul(ctx0, ggml_view_2d(ctx0, cnv, d, T, cnv->nb[1], 0), ggml_sigmoid(ctx0, cnv_gate));
 
     // dw conv (kernel K, padding K/2). BN was folded into conv_dw_w/b at load.
-    ggml_tensor * dw_w_f32 = ggml_cast(ctx0, e.conv_dw_w, GGML_TYPE_F32);
-    ggml_tensor * dw_w_4d  = ggml_reshape_4d(ctx0, dw_w_f32, K, 1, 1, d);
-    cnv = ggml_cont(ctx0, ggml_transpose(ctx0, cnv));    // (d, T) → (T, d)
+    ggml_tensor* dw_w_f32 = ggml_cast(ctx0, e.conv_dw_w, GGML_TYPE_F32);
+    ggml_tensor* dw_w_4d = ggml_reshape_4d(ctx0, dw_w_f32, K, 1, 1, d);
+    cnv = ggml_cont(ctx0, ggml_transpose(ctx0, cnv)); // (d, T) → (T, d)
     cnv = ggml_reshape_4d(ctx0, cnv, T, 1, d, 1);
     cnv = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, cnv, 1, 1, (K - 1) / 2, 0, 1, 1);
     cnv = ggml_cont(ctx0, ggml_permute(ctx0, cnv, 1, 2, 0, 3));
@@ -288,12 +270,12 @@ static inline ggml_tensor * build_block(
     cnv = ggml_silu(ctx0, cnv);
 
     // pw2: (d → d)
-    ggml_tensor * pw2_w = ggml_reshape_2d(ctx0, e.conv_pw2_w, d, d);
+    ggml_tensor* pw2_w = ggml_reshape_2d(ctx0, e.conv_pw2_w, d, d);
     cnv = mm_bias(pw2_w, cnv, e.conv_pw2_b);
     cur = ggml_add(ctx0, inpConv, cnv);
 
     // ---- FFN2 (macaron half) ----
-    ggml_tensor * inpFF2 = cur;
+    ggml_tensor* inpFF2 = cur;
     x = ggml_norm(ctx0, cur, eps);
     x = ggml_mul(ctx0, x, e.norm_ff2_w);
     x = ggml_add(ctx0, x, e.norm_ff2_b);

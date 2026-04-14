@@ -54,18 +54,13 @@ jobs:
       - name: Check formatting
         # --dry-run: report diffs without touching files.
         # --Werror:  exit non-zero if any file would change.
-        # Only check files changed in this push (not the entire codebase,
-        # since many pre-existing files don't conform yet).
+        # Scope: project-owned C++ only — skip ggml/ and bindings/ (third-party).
         run: |
-          CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'src/*.cpp' 'src/*.h' 'src/*.c' \
-                    'src/core/*.cpp' 'src/core/*.h' \
-                    'examples/cli/*.cpp' 'examples/cli/*.h' 2>/dev/null || true)
-          if [ -z "$CHANGED" ]; then
-            echo "No C++ files changed in this commit — skipping"
-            exit 0
-          fi
-          echo "Checking: $CHANGED"
-          echo "$CHANGED" | xargs clang-format --dry-run --Werror
+          find src examples/cli \
+               \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \) \
+               ! -name 'httplib.h' \
+               -print0 \
+          | xargs -0 clang-format --dry-run --Werror
 
   # ---------------------------------------------------------------------------
   # clang-tidy: lint + type-checking + security (ruff-lint + mypy + bandit)

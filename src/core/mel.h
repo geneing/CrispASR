@@ -33,7 +33,7 @@ namespace core_mel {
 // Real-to-complex FFT callback signature. N is always a power of two.
 // Output layout: interleaved (re, im) pairs, length 2*N floats.
 // Each model passes its own FFT so we don't disturb numerical paths.
-using FftR2C = void (*)(const float * in, int N, float * out);
+using FftR2C = void (*)(const float* in, int N, float* out);
 
 enum class LogBase { Ln, Log10 };
 
@@ -91,17 +91,17 @@ enum class FbLayout {
 };
 
 struct Params {
-    int n_fft       = 400;  // power-of-two FFT size
-    int hop_length  = 160;  // frame stride in samples
-    int win_length  = 400;  // window length, must be <= n_fft
-    int n_mels      = 128;
+    int n_fft = 400;      // power-of-two FFT size
+    int hop_length = 160; // frame stride in samples
+    int win_length = 400; // window length, must be <= n_fft
+    int n_mels = 128;
 
-    LogBase         log_base   = LogBase::Log10;
-    LogGuard        log_guard  = LogGuard::AddEpsilon;
-    Normalization   norm       = Normalization::GlobalClipMax;
-    Layout          layout     = Layout::MelsTime;
-    FbLayout        fb_layout  = FbLayout::MelsFreqs;
-    MatmulPrecision matmul     = MatmulPrecision::Float;
+    LogBase log_base = LogBase::Log10;
+    LogGuard log_guard = LogGuard::AddEpsilon;
+    Normalization norm = Normalization::GlobalClipMax;
+    Layout layout = Layout::MelsTime;
+    FbLayout fb_layout = FbLayout::MelsFreqs;
+    MatmulPrecision matmul = MatmulPrecision::Float;
 
     // Small positive constant used in the log guard:
     //   AddEpsilon -> log(x + log_eps)
@@ -164,14 +164,10 @@ struct Params {
 //   T_out [out]  : number of output frames
 //
 // Returns the flat log-mel buffer in the layout specified by params.layout.
-std::vector<float> compute(
-    const float * samples, int n_samples,
-    const float * window,     // length win_length (we center-pad inside to n_fft)
-    int           win_length,
-    const float * mel_fb,     // [n_mels, n_freqs]
-    int           n_freqs,
-    FftR2C        fft,
-    const Params & params,
-    int         & T_out);
+std::vector<float> compute(const float* samples, int n_samples,
+                           const float* window, // length win_length (we center-pad inside to n_fft)
+                           int win_length,
+                           const float* mel_fb, // [n_mels, n_freqs]
+                           int n_freqs, FftR2C fft, const Params& params, int& T_out);
 
 } // namespace core_mel

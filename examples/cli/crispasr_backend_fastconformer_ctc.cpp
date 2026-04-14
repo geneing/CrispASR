@@ -34,7 +34,7 @@ public:
     FastConformerCtcBackend() = default;
     ~FastConformerCtcBackend() override { FastConformerCtcBackend::shutdown(); }
 
-    const char * name() const override { return "fastconformer-ctc"; }
+    const char* name() const override { return "fastconformer-ctc"; }
 
     uint32_t capabilities() const override {
         // The NeMo FastConformer-CTC releases we target (stt_en_*_large and
@@ -44,39 +44,35 @@ public:
         return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS;
     }
 
-    bool init(const whisper_params & p) override {
+    bool init(const whisper_params& p) override {
         canary_ctc_context_params cp = canary_ctc_context_default_params();
         cp.n_threads = p.n_threads;
         cp.verbosity = p.no_prints ? 0 : 1;
         ctx_ = canary_ctc_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
-            fprintf(stderr, "crispasr[fastconformer-ctc]: failed to load model '%s'\n",
-                    p.model.c_str());
+            fprintf(stderr, "crispasr[fastconformer-ctc]: failed to load model '%s'\n", p.model.c_str());
             return false;
         }
         return true;
     }
 
-    std::vector<crispasr_segment> transcribe(
-        const float * samples, int n_samples,
-        int64_t t_offset_cs,
-        const whisper_params & /*params*/) override
-    {
+    std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
+                                             const whisper_params& /*params*/) override {
         std::vector<crispasr_segment> out;
-        if (!ctx_) return out;
+        if (!ctx_)
+            return out;
 
         // Stage 1: encoder + CTC head → raw frame logits.
-        float * logits = nullptr;
+        float* logits = nullptr;
         int T_enc = 0, V = 0;
-        int rc = canary_ctc_compute_logits(ctx_, samples, n_samples,
-                                            &logits, &T_enc, &V);
+        int rc = canary_ctc_compute_logits(ctx_, samples, n_samples, &logits, &T_enc, &V);
         if (rc != 0 || !logits) {
             fprintf(stderr, "crispasr[fastconformer-ctc]: compute_logits failed (%d)\n", rc);
             return out;
         }
 
         // Stage 2: greedy CTC collapse → SentencePiece-detokenized text.
-        char * text = canary_ctc_greedy_decode(ctx_, logits, T_enc, V);
+        char* text = canary_ctc_greedy_decode(ctx_, logits, T_enc, V);
         std::free(logits);
         if (!text) {
             fprintf(stderr, "crispasr[fastconformer-ctc]: greedy_decode failed\n");
@@ -100,7 +96,7 @@ public:
     }
 
 private:
-    canary_ctc_context * ctx_ = nullptr;
+    canary_ctc_context* ctx_ = nullptr;
 };
 
 } // namespace

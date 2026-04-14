@@ -58,23 +58,23 @@
 // ===========================================================================
 
 struct canary_hparams {
-    uint32_t sample_rate          = 16000;
-    uint32_t n_mels               = 128;
-    uint32_t n_fft                = 512;
-    uint32_t win_length           = 400;
-    uint32_t hop_length           = 160;
-    uint32_t d_model              = 1024;
-    uint32_t enc_n_layers         = 32;
-    uint32_t dec_n_layers         = 8;
-    uint32_t n_heads              = 8;
-    uint32_t head_dim             = 128;
-    uint32_t ff_dim               = 4096;
-    uint32_t subsampling_factor   = 8;
+    uint32_t sample_rate = 16000;
+    uint32_t n_mels = 128;
+    uint32_t n_fft = 512;
+    uint32_t win_length = 400;
+    uint32_t hop_length = 160;
+    uint32_t d_model = 1024;
+    uint32_t enc_n_layers = 32;
+    uint32_t dec_n_layers = 8;
+    uint32_t n_heads = 8;
+    uint32_t head_dim = 128;
+    uint32_t ff_dim = 4096;
+    uint32_t subsampling_factor = 8;
     uint32_t subsampling_channels = 256;
-    uint32_t conv_kernel          = 9;
-    uint32_t vocab_size           = 16384;
-    uint32_t max_dec_ctx          = 1024;
-    uint32_t frame_dur_cs         = 8;
+    uint32_t conv_kernel = 9;
+    uint32_t vocab_size = 16384;
+    uint32_t max_dec_ctx = 1024;
+    uint32_t frame_dur_cs = 8;
 };
 
 // ===========================================================================
@@ -88,8 +88,8 @@ using canary_pre_encode = core_conformer::PreEncodeWeights;
 // (all biases populated for canary) and adds the BN tensors used only at
 // load time (BN folding).
 struct canary_enc_layer : core_conformer::BlockWeights {
-    ggml_tensor * conv_bn_w  = nullptr, * conv_bn_b  = nullptr;
-    ggml_tensor * conv_bn_rm = nullptr, * conv_bn_rv = nullptr;
+    ggml_tensor *conv_bn_w = nullptr, *conv_bn_b = nullptr;
+    ggml_tensor *conv_bn_rm = nullptr, *conv_bn_rv = nullptr;
 };
 
 struct canary_dec_layer {
@@ -97,21 +97,21 @@ struct canary_dec_layer {
     //   x = x + sa_out @ SA(norm_sa(x))
     //   x = x + ca_out @ CA(norm_ca(x), enc_kv)
     //   x = x + ff_out @ activation(ff_in @ norm_ff(x))
-    ggml_tensor * norm_sa_w = nullptr, * norm_sa_b = nullptr;
-    ggml_tensor * sa_q_w    = nullptr, * sa_q_b    = nullptr;
-    ggml_tensor * sa_k_w    = nullptr, * sa_k_b    = nullptr;
-    ggml_tensor * sa_v_w    = nullptr, * sa_v_b    = nullptr;
-    ggml_tensor * sa_out_w  = nullptr, * sa_out_b  = nullptr;
+    ggml_tensor *norm_sa_w = nullptr, *norm_sa_b = nullptr;
+    ggml_tensor *sa_q_w = nullptr, *sa_q_b = nullptr;
+    ggml_tensor *sa_k_w = nullptr, *sa_k_b = nullptr;
+    ggml_tensor *sa_v_w = nullptr, *sa_v_b = nullptr;
+    ggml_tensor *sa_out_w = nullptr, *sa_out_b = nullptr;
 
-    ggml_tensor * norm_ca_w = nullptr, * norm_ca_b = nullptr;
-    ggml_tensor * ca_q_w    = nullptr, * ca_q_b    = nullptr;
-    ggml_tensor * ca_k_w    = nullptr, * ca_k_b    = nullptr;
-    ggml_tensor * ca_v_w    = nullptr, * ca_v_b    = nullptr;
-    ggml_tensor * ca_out_w  = nullptr, * ca_out_b  = nullptr;
+    ggml_tensor *norm_ca_w = nullptr, *norm_ca_b = nullptr;
+    ggml_tensor *ca_q_w = nullptr, *ca_q_b = nullptr;
+    ggml_tensor *ca_k_w = nullptr, *ca_k_b = nullptr;
+    ggml_tensor *ca_v_w = nullptr, *ca_v_b = nullptr;
+    ggml_tensor *ca_out_w = nullptr, *ca_out_b = nullptr;
 
-    ggml_tensor * norm_ff_w = nullptr, * norm_ff_b = nullptr;
-    ggml_tensor * ff_in_w   = nullptr, * ff_in_b   = nullptr;
-    ggml_tensor * ff_out_w  = nullptr, * ff_out_b  = nullptr;
+    ggml_tensor *norm_ff_w = nullptr, *norm_ff_b = nullptr;
+    ggml_tensor *ff_in_w = nullptr, *ff_in_b = nullptr;
+    ggml_tensor *ff_out_w = nullptr, *ff_out_b = nullptr;
 };
 
 // ===========================================================================
@@ -121,32 +121,32 @@ struct canary_dec_layer {
 struct canary_model {
     canary_hparams hparams;
 
-    ggml_tensor * mel_fb     = nullptr;
-    ggml_tensor * mel_window = nullptr;
+    ggml_tensor* mel_fb = nullptr;
+    ggml_tensor* mel_window = nullptr;
 
-    canary_pre_encode               pre_encode;
-    std::vector<canary_enc_layer>   enc;
-    std::vector<canary_dec_layer>   dec;
+    canary_pre_encode pre_encode;
+    std::vector<canary_enc_layer> enc;
+    std::vector<canary_dec_layer> dec;
 
     // Decoder embeddings + final norm + output head
-    ggml_tensor * dec_embed_w     = nullptr;   // (vocab, d_model)
-    ggml_tensor * dec_pos_enc     = nullptr;   // (max_ctx, d_model) — learned
-    ggml_tensor * dec_embed_ln_w  = nullptr;
-    ggml_tensor * dec_embed_ln_b  = nullptr;
-    ggml_tensor * dec_final_ln_w  = nullptr;
-    ggml_tensor * dec_final_ln_b  = nullptr;
-    ggml_tensor * dec_head_w      = nullptr;   // (vocab, d_model)
-    ggml_tensor * dec_head_b      = nullptr;
+    ggml_tensor* dec_embed_w = nullptr; // (vocab, d_model)
+    ggml_tensor* dec_pos_enc = nullptr; // (max_ctx, d_model) — learned
+    ggml_tensor* dec_embed_ln_w = nullptr;
+    ggml_tensor* dec_embed_ln_b = nullptr;
+    ggml_tensor* dec_final_ln_w = nullptr;
+    ggml_tensor* dec_final_ln_b = nullptr;
+    ggml_tensor* dec_head_w = nullptr; // (vocab, d_model)
+    ggml_tensor* dec_head_b = nullptr;
 
-    ggml_context        * ctx = nullptr;
+    ggml_context* ctx = nullptr;
     ggml_backend_buffer_t buf = nullptr;
 
-    std::map<std::string, ggml_tensor *> tensors;
+    std::map<std::string, ggml_tensor*> tensors;
 };
 
 struct canary_vocab {
-    std::vector<std::string>            id_to_token;
-    std::unordered_map<std::string,int> token_to_id;
+    std::vector<std::string> id_to_token;
+    std::unordered_map<std::string, int> token_to_id;
 };
 
 struct canary_context {
@@ -155,32 +155,32 @@ struct canary_context {
     canary_model model;
     canary_vocab vocab;
 
-    ggml_backend_t       backend     = nullptr;
-    ggml_backend_t       backend_cpu = nullptr;
-    ggml_backend_sched_t sched       = nullptr;
+    ggml_backend_t backend = nullptr;
+    ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
     std::vector<uint8_t> compute_meta;
 
     // Self-attention KV cache for the decoder
     // shape: [head_dim, max_ctx, n_heads, dec_n_layers]
-    ggml_context        * kv_ctx = nullptr;
+    ggml_context* kv_ctx = nullptr;
     ggml_backend_buffer_t kv_buf = nullptr;
-    ggml_tensor         * kv_k   = nullptr;
-    ggml_tensor         * kv_v   = nullptr;
+    ggml_tensor* kv_k = nullptr;
+    ggml_tensor* kv_v = nullptr;
 
     // Cross-attention K/V — pre-computed once per slice from encoder output.
     // One tensor per decoder layer, shape [head_dim, T_enc, n_heads].
-    ggml_context        * cross_ctx = nullptr;
+    ggml_context* cross_ctx = nullptr;
     ggml_backend_buffer_t cross_buf = nullptr;
-    std::vector<ggml_tensor *> cross_k;
-    std::vector<ggml_tensor *> cross_v;
+    std::vector<ggml_tensor*> cross_k;
+    std::vector<ggml_tensor*> cross_v;
 
     // Per-step cross-attention weights from the last decoder layer, captured
     // when collect_attn=true and n_tokens==1. Used for DTW timestamp alignment.
     // step_attn[step_idx] has T_enc * n_heads floats (head h occupies the
     // contiguous slice [h*T_enc, h*T_enc + T_enc)).
     bool collect_attn = false;
-    int  attn_T_enc   = 0;
-    int  attn_n_heads = 0;
+    int attn_T_enc = 0;
+    int attn_n_heads = 0;
     std::vector<std::vector<float>> step_attn;
 
     int n_threads = 4;
@@ -188,8 +188,8 @@ struct canary_context {
     // Sticky decode-time sampling controls. temperature == 0 keeps the
     // bit-identical greedy path; > 0 switches to numerically-stable
     // softmax sampling. Set via canary_set_temperature().
-    float    decode_temperature = 0.0f;
-    uint64_t decode_seed        = 0;
+    float decode_temperature = 0.0f;
+    uint64_t decode_seed = 0;
 };
 
 // ===========================================================================
@@ -201,11 +201,11 @@ struct canary_context {
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-static ggml_tensor * try_get(canary_model & m, const char * name) {
+static ggml_tensor* try_get(canary_model& m, const char* name) {
     return core_gguf::try_get(m.tensors, name);
 }
 
-static ggml_tensor * require(canary_model & m, const char * name) {
+static ggml_tensor* require(canary_model& m, const char* name) {
     return core_gguf::require(m.tensors, name, "canary");
 }
 
@@ -213,33 +213,31 @@ static ggml_tensor * require(canary_model & m, const char * name) {
 // Model loading
 // ===========================================================================
 
-static bool canary_load_model(canary_model & model,
-                              canary_vocab  & vocab,
-                              const char    * path,
-                              ggml_backend_t  backend) {
+static bool canary_load_model(canary_model& model, canary_vocab& vocab, const char* path, ggml_backend_t backend) {
     // ---- pass 1: hparams + vocab ----
     {
-        gguf_context * gctx = core_gguf::open_metadata(path);
-        if (!gctx) return false;
+        gguf_context* gctx = core_gguf::open_metadata(path);
+        if (!gctx)
+            return false;
 
-        auto & hp = model.hparams;
-        hp.sample_rate          = core_gguf::kv_u32(gctx, "canary.sample_rate",          hp.sample_rate);
-        hp.n_mels               = core_gguf::kv_u32(gctx, "canary.n_mels",               hp.n_mels);
-        hp.n_fft                = core_gguf::kv_u32(gctx, "canary.n_fft",                hp.n_fft);
-        hp.win_length           = core_gguf::kv_u32(gctx, "canary.win_length",           hp.win_length);
-        hp.hop_length           = core_gguf::kv_u32(gctx, "canary.hop_length",           hp.hop_length);
-        hp.d_model              = core_gguf::kv_u32(gctx, "canary.d_model",              hp.d_model);
-        hp.enc_n_layers         = core_gguf::kv_u32(gctx, "canary.enc_n_layers",         hp.enc_n_layers);
-        hp.dec_n_layers         = core_gguf::kv_u32(gctx, "canary.dec_n_layers",         hp.dec_n_layers);
-        hp.n_heads              = core_gguf::kv_u32(gctx, "canary.n_heads",              hp.n_heads);
-        hp.head_dim             = core_gguf::kv_u32(gctx, "canary.head_dim",             hp.head_dim);
-        hp.ff_dim               = core_gguf::kv_u32(gctx, "canary.ff_dim",               hp.ff_dim);
-        hp.subsampling_factor   = core_gguf::kv_u32(gctx, "canary.subsampling_factor",   hp.subsampling_factor);
+        auto& hp = model.hparams;
+        hp.sample_rate = core_gguf::kv_u32(gctx, "canary.sample_rate", hp.sample_rate);
+        hp.n_mels = core_gguf::kv_u32(gctx, "canary.n_mels", hp.n_mels);
+        hp.n_fft = core_gguf::kv_u32(gctx, "canary.n_fft", hp.n_fft);
+        hp.win_length = core_gguf::kv_u32(gctx, "canary.win_length", hp.win_length);
+        hp.hop_length = core_gguf::kv_u32(gctx, "canary.hop_length", hp.hop_length);
+        hp.d_model = core_gguf::kv_u32(gctx, "canary.d_model", hp.d_model);
+        hp.enc_n_layers = core_gguf::kv_u32(gctx, "canary.enc_n_layers", hp.enc_n_layers);
+        hp.dec_n_layers = core_gguf::kv_u32(gctx, "canary.dec_n_layers", hp.dec_n_layers);
+        hp.n_heads = core_gguf::kv_u32(gctx, "canary.n_heads", hp.n_heads);
+        hp.head_dim = core_gguf::kv_u32(gctx, "canary.head_dim", hp.head_dim);
+        hp.ff_dim = core_gguf::kv_u32(gctx, "canary.ff_dim", hp.ff_dim);
+        hp.subsampling_factor = core_gguf::kv_u32(gctx, "canary.subsampling_factor", hp.subsampling_factor);
         hp.subsampling_channels = core_gguf::kv_u32(gctx, "canary.subsampling_channels", hp.subsampling_channels);
-        hp.conv_kernel          = core_gguf::kv_u32(gctx, "canary.conv_kernel",          hp.conv_kernel);
-        hp.vocab_size           = core_gguf::kv_u32(gctx, "canary.vocab_size",           hp.vocab_size);
-        hp.max_dec_ctx          = core_gguf::kv_u32(gctx, "canary.max_dec_ctx",          hp.max_dec_ctx);
-        hp.frame_dur_cs         = core_gguf::kv_u32(gctx, "canary.frame_dur_cs",         hp.frame_dur_cs);
+        hp.conv_kernel = core_gguf::kv_u32(gctx, "canary.conv_kernel", hp.conv_kernel);
+        hp.vocab_size = core_gguf::kv_u32(gctx, "canary.vocab_size", hp.vocab_size);
+        hp.max_dec_ctx = core_gguf::kv_u32(gctx, "canary.max_dec_ctx", hp.max_dec_ctx);
+        hp.frame_dur_cs = core_gguf::kv_u32(gctx, "canary.frame_dur_cs", hp.frame_dur_cs);
 
         auto tokens = core_gguf::kv_str_array(gctx, "tokenizer.ggml.tokens");
         if (!tokens.empty()) {
@@ -257,14 +255,14 @@ static bool canary_load_model(canary_model & model,
     if (!core_gguf::load_weights(path, backend, "canary", wl)) {
         return false;
     }
-    model.ctx     = wl.ctx;
-    model.buf     = wl.buf;
+    model.ctx = wl.ctx;
+    model.buf = wl.buf;
     model.tensors = std::move(wl.tensors);
 
     // ---- bind named tensors ----
 
     // Mel preprocessor
-    model.mel_fb     = try_get(model, "preprocessor.fb");
+    model.mel_fb = try_get(model, "preprocessor.fb");
     model.mel_window = try_get(model, "preprocessor.window");
 
     // Pre-encode
@@ -278,89 +276,117 @@ static bool canary_load_model(canary_model & model,
     model.pre_encode.conv5_b = require(model, "encoder.pre.conv.5.bias");
     model.pre_encode.conv6_w = require(model, "encoder.pre.conv.6.weight");
     model.pre_encode.conv6_b = require(model, "encoder.pre.conv.6.bias");
-    model.pre_encode.out_w   = require(model, "encoder.pre.out.weight");
-    model.pre_encode.out_b   = require(model, "encoder.pre.out.bias");
+    model.pre_encode.out_w = require(model, "encoder.pre.out.weight");
+    model.pre_encode.out_b = require(model, "encoder.pre.out.bias");
 
     // Encoder layers
     model.enc.resize(model.hparams.enc_n_layers);
     for (uint32_t i = 0; i < model.hparams.enc_n_layers; i++) {
         char buf[128];
-        auto & e = model.enc[i];
-        auto get = [&](const char * suf) {
+        auto& e = model.enc[i];
+        auto get = [&](const char* suf) {
             snprintf(buf, sizeof(buf), "encoder.layers.%u.%s", i, suf);
             return require(model, buf);
         };
 
-        e.norm_ff1_w = get("norm_ff1.weight"); e.norm_ff1_b = get("norm_ff1.bias");
-        e.ff1_l1_w   = get("ff1.linear1.weight"); e.ff1_l1_b = get("ff1.linear1.bias");
-        e.ff1_l2_w   = get("ff1.linear2.weight"); e.ff1_l2_b = get("ff1.linear2.bias");
+        e.norm_ff1_w = get("norm_ff1.weight");
+        e.norm_ff1_b = get("norm_ff1.bias");
+        e.ff1_l1_w = get("ff1.linear1.weight");
+        e.ff1_l1_b = get("ff1.linear1.bias");
+        e.ff1_l2_w = get("ff1.linear2.weight");
+        e.ff1_l2_b = get("ff1.linear2.bias");
 
-        e.norm_attn_w = get("norm_attn.weight"); e.norm_attn_b = get("norm_attn.bias");
-        e.attn_q_w    = get("attn.q.weight");    e.attn_q_b    = get("attn.q.bias");
-        e.attn_k_w    = get("attn.k.weight");    e.attn_k_b    = get("attn.k.bias");
-        e.attn_v_w    = get("attn.v.weight");    e.attn_v_b    = get("attn.v.bias");
-        e.attn_out_w  = get("attn.out.weight");  e.attn_out_b  = get("attn.out.bias");
-        e.attn_pos_w  = get("attn.pos.weight");
-        e.pos_bias_u  = get("attn.pos_bias_u");
-        e.pos_bias_v  = get("attn.pos_bias_v");
+        e.norm_attn_w = get("norm_attn.weight");
+        e.norm_attn_b = get("norm_attn.bias");
+        e.attn_q_w = get("attn.q.weight");
+        e.attn_q_b = get("attn.q.bias");
+        e.attn_k_w = get("attn.k.weight");
+        e.attn_k_b = get("attn.k.bias");
+        e.attn_v_w = get("attn.v.weight");
+        e.attn_v_b = get("attn.v.bias");
+        e.attn_out_w = get("attn.out.weight");
+        e.attn_out_b = get("attn.out.bias");
+        e.attn_pos_w = get("attn.pos.weight");
+        e.pos_bias_u = get("attn.pos_bias_u");
+        e.pos_bias_v = get("attn.pos_bias_v");
 
-        e.norm_conv_w = get("norm_conv.weight"); e.norm_conv_b = get("norm_conv.bias");
-        e.conv_pw1_w  = get("conv.pw1.weight");  e.conv_pw1_b  = get("conv.pw1.bias");
-        e.conv_dw_w   = get("conv.dw.weight");   e.conv_dw_b   = get("conv.dw.bias");
-        e.conv_pw2_w  = get("conv.pw2.weight");  e.conv_pw2_b  = get("conv.pw2.bias");
-        e.conv_bn_w   = get("conv.bn.weight");   e.conv_bn_b   = get("conv.bn.bias");
-        e.conv_bn_rm  = get("conv.bn.running_mean");
-        e.conv_bn_rv  = get("conv.bn.running_var");
+        e.norm_conv_w = get("norm_conv.weight");
+        e.norm_conv_b = get("norm_conv.bias");
+        e.conv_pw1_w = get("conv.pw1.weight");
+        e.conv_pw1_b = get("conv.pw1.bias");
+        e.conv_dw_w = get("conv.dw.weight");
+        e.conv_dw_b = get("conv.dw.bias");
+        e.conv_pw2_w = get("conv.pw2.weight");
+        e.conv_pw2_b = get("conv.pw2.bias");
+        e.conv_bn_w = get("conv.bn.weight");
+        e.conv_bn_b = get("conv.bn.bias");
+        e.conv_bn_rm = get("conv.bn.running_mean");
+        e.conv_bn_rv = get("conv.bn.running_var");
 
-        e.norm_ff2_w = get("norm_ff2.weight"); e.norm_ff2_b = get("norm_ff2.bias");
-        e.ff2_l1_w   = get("ff2.linear1.weight"); e.ff2_l1_b = get("ff2.linear1.bias");
-        e.ff2_l2_w   = get("ff2.linear2.weight"); e.ff2_l2_b = get("ff2.linear2.bias");
+        e.norm_ff2_w = get("norm_ff2.weight");
+        e.norm_ff2_b = get("norm_ff2.bias");
+        e.ff2_l1_w = get("ff2.linear1.weight");
+        e.ff2_l1_b = get("ff2.linear1.bias");
+        e.ff2_l2_w = get("ff2.linear2.weight");
+        e.ff2_l2_b = get("ff2.linear2.bias");
 
-        e.norm_out_w = get("norm_out.weight"); e.norm_out_b = get("norm_out.bias");
+        e.norm_out_w = get("norm_out.weight");
+        e.norm_out_b = get("norm_out.bias");
     }
 
     // Decoder
     model.dec.resize(model.hparams.dec_n_layers);
     for (uint32_t i = 0; i < model.hparams.dec_n_layers; i++) {
         char buf[128];
-        auto & d = model.dec[i];
-        auto get = [&](const char * suf) {
+        auto& d = model.dec[i];
+        auto get = [&](const char* suf) {
             snprintf(buf, sizeof(buf), "decoder.layers.%u.%s", i, suf);
             return require(model, buf);
         };
 
-        d.norm_sa_w = get("norm_sa.weight"); d.norm_sa_b = get("norm_sa.bias");
-        d.sa_q_w    = get("sa_q.weight");    d.sa_q_b    = get("sa_q.bias");
-        d.sa_k_w    = get("sa_k.weight");    d.sa_k_b    = get("sa_k.bias");
-        d.sa_v_w    = get("sa_v.weight");    d.sa_v_b    = get("sa_v.bias");
-        d.sa_out_w  = get("sa_out.weight");  d.sa_out_b  = get("sa_out.bias");
+        d.norm_sa_w = get("norm_sa.weight");
+        d.norm_sa_b = get("norm_sa.bias");
+        d.sa_q_w = get("sa_q.weight");
+        d.sa_q_b = get("sa_q.bias");
+        d.sa_k_w = get("sa_k.weight");
+        d.sa_k_b = get("sa_k.bias");
+        d.sa_v_w = get("sa_v.weight");
+        d.sa_v_b = get("sa_v.bias");
+        d.sa_out_w = get("sa_out.weight");
+        d.sa_out_b = get("sa_out.bias");
 
-        d.norm_ca_w = get("norm_ca.weight"); d.norm_ca_b = get("norm_ca.bias");
-        d.ca_q_w    = get("ca_q.weight");    d.ca_q_b    = get("ca_q.bias");
-        d.ca_k_w    = get("ca_k.weight");    d.ca_k_b    = get("ca_k.bias");
-        d.ca_v_w    = get("ca_v.weight");    d.ca_v_b    = get("ca_v.bias");
-        d.ca_out_w  = get("ca_out.weight");  d.ca_out_b  = get("ca_out.bias");
+        d.norm_ca_w = get("norm_ca.weight");
+        d.norm_ca_b = get("norm_ca.bias");
+        d.ca_q_w = get("ca_q.weight");
+        d.ca_q_b = get("ca_q.bias");
+        d.ca_k_w = get("ca_k.weight");
+        d.ca_k_b = get("ca_k.bias");
+        d.ca_v_w = get("ca_v.weight");
+        d.ca_v_b = get("ca_v.bias");
+        d.ca_out_w = get("ca_out.weight");
+        d.ca_out_b = get("ca_out.bias");
 
-        d.norm_ff_w = get("norm_ff.weight"); d.norm_ff_b = get("norm_ff.bias");
-        d.ff_in_w   = get("ff_in.weight");   d.ff_in_b   = get("ff_in.bias");
-        d.ff_out_w  = get("ff_out.weight");  d.ff_out_b  = get("ff_out.bias");
+        d.norm_ff_w = get("norm_ff.weight");
+        d.norm_ff_b = get("norm_ff.bias");
+        d.ff_in_w = get("ff_in.weight");
+        d.ff_in_b = get("ff_in.bias");
+        d.ff_out_w = get("ff_out.weight");
+        d.ff_out_b = get("ff_out.bias");
     }
 
     // Decoder embeddings + output head
-    model.dec_embed_w    = require(model, "decoder.embed.weight");
-    model.dec_pos_enc    = require(model, "decoder.pos_enc");
+    model.dec_embed_w = require(model, "decoder.embed.weight");
+    model.dec_pos_enc = require(model, "decoder.pos_enc");
     model.dec_embed_ln_w = require(model, "decoder.embed_ln.weight");
     model.dec_embed_ln_b = require(model, "decoder.embed_ln.bias");
     model.dec_final_ln_w = require(model, "decoder.final_norm.weight");
     model.dec_final_ln_b = require(model, "decoder.final_norm.bias");
-    model.dec_head_w     = require(model, "decoder.head.weight");
-    model.dec_head_b     = require(model, "decoder.head.bias");
+    model.dec_head_w = require(model, "decoder.head.weight");
+    model.dec_head_b = require(model, "decoder.head.bias");
 
-    fprintf(stderr,
-        "canary: vocab=%u  d_model=%u  enc_layers=%u  dec_layers=%u  heads=%u  ff=%u  max_ctx=%u\n",
-        model.hparams.vocab_size, model.hparams.d_model,
-        model.hparams.enc_n_layers, model.hparams.dec_n_layers,
-        model.hparams.n_heads, model.hparams.ff_dim, model.hparams.max_dec_ctx);
+    fprintf(stderr, "canary: vocab=%u  d_model=%u  enc_layers=%u  dec_layers=%u  heads=%u  ff=%u  max_ctx=%u\n",
+            model.hparams.vocab_size, model.hparams.d_model, model.hparams.enc_n_layers, model.hparams.dec_n_layers,
+            model.hparams.n_heads, model.hparams.ff_dim, model.hparams.max_dec_ctx);
     return true;
 }
 
@@ -368,14 +394,16 @@ static bool canary_load_model(canary_model & model,
 // FFT (iterative Cooley-Tukey, real-input, N must be a power of 2)
 // ===========================================================================
 
-static void canary_fft_r2c(const float * in, int N, float * out) {
+static void canary_fft_r2c(const float* in, int N, float* out) {
     int bits = 0;
-    for (int n = N; n > 1; n >>= 1) bits++;
+    for (int n = N; n > 1; n >>= 1)
+        bits++;
     for (int i = 0; i < N; i++) {
         int rev = 0;
-        for (int b = 0; b < bits; b++) rev = (rev << 1) | ((i >> b) & 1);
-        out[2*rev]   = in[i];
-        out[2*rev+1] = 0.0f;
+        for (int b = 0; b < bits; b++)
+            rev = (rev << 1) | ((i >> b) & 1);
+        out[2 * rev] = in[i];
+        out[2 * rev + 1] = 0.0f;
     }
     for (int len = 2; len <= N; len <<= 1) {
         float ang = -2.0f * (float)M_PI / (float)len;
@@ -384,13 +412,15 @@ static void canary_fft_r2c(const float * in, int N, float * out) {
             float ure = 1.0f, uim = 0.0f;
             for (int j = 0; j < len / 2; j++) {
                 int a = i + j, b = i + j + len / 2;
-                float are = out[2*a], aim = out[2*a+1];
-                float bre = out[2*b], bim = out[2*b+1];
-                float tre = ure*bre - uim*bim, tim = ure*bim + uim*bre;
-                out[2*a]   = are + tre; out[2*a+1] = aim + tim;
-                out[2*b]   = are - tre; out[2*b+1] = aim - tim;
-                float new_ure = ure*wre - uim*wim;
-                uim = ure*wim + uim*wre;
+                float are = out[2 * a], aim = out[2 * a + 1];
+                float bre = out[2 * b], bim = out[2 * b + 1];
+                float tre = ure * bre - uim * bim, tim = ure * bim + uim * bre;
+                out[2 * a] = are + tre;
+                out[2 * a + 1] = aim + tim;
+                out[2 * b] = are - tre;
+                out[2 * b + 1] = aim - tim;
+                float new_ure = ure * wre - uim * wim;
+                uim = ure * wim + uim * wre;
                 ure = new_ure;
             }
         }
@@ -405,15 +435,14 @@ static void canary_fft_r2c(const float * in, int N, float * out) {
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-static std::vector<float> canary_compute_mel_impl(canary_context * ctx,
-                                                   const float * samples, int n_samples,
-                                                   int & T_out) {
-    const auto & hp = ctx->model.hparams;
-    const int n_fft   = (int)hp.n_fft;
-    const int hop     = (int)hp.hop_length;
-    const int win     = (int)hp.win_length;
+static std::vector<float> canary_compute_mel_impl(canary_context* ctx, const float* samples, int n_samples,
+                                                  int& T_out) {
+    const auto& hp = ctx->model.hparams;
+    const int n_fft = (int)hp.n_fft;
+    const int hop = (int)hp.hop_length;
+    const int win = (int)hp.win_length;
     const int n_freqs = n_fft / 2 + 1;
-    const int n_mels  = (int)hp.n_mels;
+    const int n_mels = (int)hp.n_mels;
 
     if (!ctx->model.mel_fb || !ctx->model.mel_window) {
         fprintf(stderr, "canary: missing preprocessor.fb / window\n");
@@ -427,23 +456,18 @@ static std::vector<float> canary_compute_mel_impl(canary_context * ctx,
     ggml_backend_tensor_get(ctx->model.mel_fb, mel_fb.data(), 0, mel_fb.size() * sizeof(float));
 
     core_mel::Params p;
-    p.n_fft      = n_fft;
+    p.n_fft = n_fft;
     p.hop_length = hop;
     p.win_length = win;
-    p.n_mels     = n_mels;
-    p.log_base   = core_mel::LogBase::Ln;
-    p.norm       = core_mel::Normalization::PerFeatureZ;
-    p.layout     = core_mel::Layout::TimeMels;
-    p.log_eps    = (float)(1.0 / (1 << 24));
+    p.n_mels = n_mels;
+    p.log_base = core_mel::LogBase::Ln;
+    p.norm = core_mel::Normalization::PerFeatureZ;
+    p.layout = core_mel::Layout::TimeMels;
+    p.log_eps = (float)(1.0 / (1 << 24));
     p.center_pad = true;
 
-    return core_mel::compute(
-        samples, n_samples,
-        window_raw.data(), win,
-        mel_fb.data(), n_freqs,
-        canary_fft_r2c,
-        p,
-        T_out);
+    return core_mel::compute(samples, n_samples, window_raw.data(), win, mel_fb.data(), n_freqs, canary_fft_r2c, p,
+                             T_out);
 }
 
 // ===========================================================================
@@ -462,38 +486,36 @@ static std::vector<float> canary_compute_mel_impl(canary_context * ctx,
 
 static const float kLayerNormEps = 1e-5f;
 
-static ggml_cgraph * canary_build_graph_encoder(canary_context * ctx, int T_mel) {
-    const auto & m  = ctx->model;
-    const auto & hp = m.hparams;
+static ggml_cgraph* canary_build_graph_encoder(canary_context* ctx, int T_mel) {
+    const auto& m = ctx->model;
+    const auto& hp = m.hparams;
     const int n_mels = (int)hp.n_mels;
 
     ggml_init_params ip = {
-        /*mem_size=*/   ctx->compute_meta.size(),
-        /*mem_buffer=*/ ctx->compute_meta.data(),
-        /*no_alloc=*/   true,
+        /*mem_size=*/ctx->compute_meta.size(),
+        /*mem_buffer=*/ctx->compute_meta.data(),
+        /*no_alloc=*/true,
     };
-    ggml_context * ctx0 = ggml_init(ip);
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 16384, false);
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
 
     // ----- Inputs -----
-    ggml_tensor * mel = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_mels, T_mel);
+    ggml_tensor* mel = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_mels, T_mel);
     ggml_set_name(mel, "mel");
     ggml_set_input(mel);
 
     // ----- Pre-encode (dw_striding 8×) -----
     int T = 0;
-    ggml_tensor * cur = core_conformer::build_pre_encode(
-        ctx0, mel, m.pre_encode, (int)hp.subsampling_channels, &T);
+    ggml_tensor* cur = core_conformer::build_pre_encode(ctx0, mel, m.pre_encode, (int)hp.subsampling_channels, &T);
 
     // ----- Sinusoidal rel-pos table -----
-    ggml_tensor * pos_enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, (int)hp.d_model, 2 * T - 1);
+    ggml_tensor* pos_enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, (int)hp.d_model, 2 * T - 1);
     ggml_set_name(pos_enc, "pos_enc");
     ggml_set_input(pos_enc);
 
     // ----- 32× FastConformer block (with biases) -----
     core_conformer::BlockParams bp = {
-        (int)hp.d_model, (int)hp.n_heads, (int)hp.head_dim,
-        (int)hp.conv_kernel, kLayerNormEps,
+        (int)hp.d_model, (int)hp.n_heads, (int)hp.head_dim, (int)hp.conv_kernel, kLayerNormEps,
     };
     for (uint32_t il = 0; il < hp.enc_n_layers; il++) {
         cur = core_conformer::build_block(ctx0, cur, pos_enc, T, m.enc[il], bp);
@@ -506,26 +528,23 @@ static ggml_cgraph * canary_build_graph_encoder(canary_context * ctx, int T_mel)
 }
 
 // Run the encoder once. Returns enc_out as a flat row-major [T_enc * d_model].
-static std::vector<float> canary_encode_mel(canary_context * ctx,
-                                            const float * mel, int n_mels, int T_mel,
-                                            int * out_T_enc) {
+static std::vector<float> canary_encode_mel(canary_context* ctx, const float* mel, int n_mels, int T_mel,
+                                            int* out_T_enc) {
     if (n_mels != (int)ctx->model.hparams.n_mels) {
-        fprintf(stderr, "canary: mel feature mismatch (%d vs %d)\n",
-                n_mels, (int)ctx->model.hparams.n_mels);
+        fprintf(stderr, "canary: mel feature mismatch (%d vs %d)\n", n_mels, (int)ctx->model.hparams.n_mels);
         return {};
     }
 
     if (!ctx->sched) {
-        ggml_backend_t backends[2] = { ctx->backend, ctx->backend_cpu };
+        ggml_backend_t backends[2] = {ctx->backend, ctx->backend_cpu};
         int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
         ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
     }
     if (ctx->compute_meta.empty()) {
-        ctx->compute_meta.resize(
-            ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
+        ctx->compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
     }
 
-    ggml_cgraph * gf = canary_build_graph_encoder(ctx, T_mel);
+    ggml_cgraph* gf = canary_build_graph_encoder(ctx, T_mel);
 
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
@@ -533,10 +552,10 @@ static std::vector<float> canary_encode_mel(canary_context * ctx,
         return {};
     }
 
-    ggml_tensor * mel_in = ggml_graph_get_tensor(gf, "mel");
+    ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "mel");
     ggml_backend_tensor_set(mel_in, mel, 0, (size_t)n_mels * T_mel * sizeof(float));
 
-    ggml_tensor * pos_in = ggml_graph_get_tensor(gf, "pos_enc");
+    ggml_tensor* pos_in = ggml_graph_get_tensor(gf, "pos_enc");
     int T_enc = (int)pos_in->ne[1];
     T_enc = (T_enc + 1) / 2;
     auto pe = core_conformer::make_pos_enc((int)ctx->model.hparams.d_model, T_enc);
@@ -547,11 +566,13 @@ static std::vector<float> canary_encode_mel(canary_context * ctx,
         return {};
     }
 
-    ggml_tensor * out = ggml_graph_get_tensor(gf, "enc_out");
-    if (!out) return {};
-    const int d  = (int)out->ne[0];
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "enc_out");
+    if (!out)
+        return {};
+    const int d = (int)out->ne[0];
     const int Te = (int)out->ne[1];
-    if (out_T_enc) *out_T_enc = Te;
+    if (out_T_enc)
+        *out_T_enc = Te;
 
     std::vector<float> result((size_t)d * Te);
     ggml_backend_tensor_get(out, result.data(), 0, result.size() * sizeof(float));
@@ -562,25 +583,24 @@ static std::vector<float> canary_encode_mel(canary_context * ctx,
 // Decoder KV cache + cross-KV allocation
 // ===========================================================================
 
-static void canary_alloc_kv(canary_context * ctx) {
-    if (ctx->kv_buf) return;
-    const auto & hp = ctx->model.hparams;
+static void canary_alloc_kv(canary_context* ctx) {
+    if (ctx->kv_buf)
+        return;
+    const auto& hp = ctx->model.hparams;
     const int head_dim = (int)hp.head_dim;
-    const int n_heads  = (int)hp.n_heads;
-    const int max_ctx  = (int)hp.max_dec_ctx;
+    const int n_heads = (int)hp.n_heads;
+    const int max_ctx = (int)hp.max_dec_ctx;
     const int n_layers = (int)hp.dec_n_layers;
 
     ggml_init_params p = {
-        /*mem_size=*/   ggml_tensor_overhead() * 4,
-        /*mem_buffer=*/ nullptr,
-        /*no_alloc=*/   true,
+        /*mem_size=*/ggml_tensor_overhead() * 4,
+        /*mem_buffer=*/nullptr,
+        /*no_alloc=*/true,
     };
     ctx->kv_ctx = ggml_init(p);
 
-    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32,
-                                   head_dim, max_ctx, n_heads, n_layers);
-    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32,
-                                   head_dim, max_ctx, n_heads, n_layers);
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, head_dim, max_ctx, n_heads, n_layers);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, head_dim, max_ctx, n_heads, n_layers);
     ggml_set_name(ctx->kv_k, "kv_k");
     ggml_set_name(ctx->kv_v, "kv_v");
 
@@ -589,13 +609,12 @@ static void canary_alloc_kv(canary_context * ctx) {
 
 // Build the cross-K/V tensors from encoder output. Called once per slice.
 // enc: flat [T_enc * d_model] (row-major, ne[0]=d_model fastest)
-static void canary_build_cross_kv(canary_context * ctx,
-                                  const float * enc_data, int T_enc) {
-    const auto & m  = ctx->model;
-    const auto & hp = m.hparams;
-    const int d        = (int)hp.d_model;
+static void canary_build_cross_kv(canary_context* ctx, const float* enc_data, int T_enc) {
+    const auto& m = ctx->model;
+    const auto& hp = m.hparams;
+    const int d = (int)hp.d_model;
     const int head_dim = (int)hp.head_dim;
-    const int n_heads  = (int)hp.n_heads;
+    const int n_heads = (int)hp.n_heads;
     const int n_layers = (int)hp.dec_n_layers;
 
     // Allocate cross_kv tensors on a CPU buffer (small, ~1 MB per layer for T_enc≈100)
@@ -609,9 +628,9 @@ static void canary_build_cross_kv(canary_context * ctx,
     }
 
     ggml_init_params p = {
-        /*mem_size=*/   ggml_tensor_overhead() * (n_layers * 2 + 8),
-        /*mem_buffer=*/ nullptr,
-        /*no_alloc=*/   true,
+        /*mem_size=*/ggml_tensor_overhead() * (n_layers * 2 + 8),
+        /*mem_buffer=*/nullptr,
+        /*no_alloc=*/true,
     };
     ctx->cross_ctx = ggml_init(p);
     ctx->cross_k.resize(n_layers);
@@ -631,29 +650,27 @@ static void canary_build_cross_kv(canary_context * ctx,
 
     // Compute K/V projections per layer using a tiny graph
     for (int il = 0; il < n_layers; il++) {
-        const auto & dl = m.dec[il];
+        const auto& dl = m.dec[il];
 
         ggml_init_params gp = {
-            /*mem_size=*/   ctx->compute_meta.size(),
-            /*mem_buffer=*/ ctx->compute_meta.data(),
-            /*no_alloc=*/   true,
+            /*mem_size=*/ctx->compute_meta.size(),
+            /*mem_buffer=*/ctx->compute_meta.data(),
+            /*no_alloc=*/true,
         };
-        ggml_context * gctx = ggml_init(gp);
-        ggml_cgraph * gf = ggml_new_graph_custom(gctx, 64, false);
+        ggml_context* gctx = ggml_init(gp);
+        ggml_cgraph* gf = ggml_new_graph_custom(gctx, 64, false);
 
-        ggml_tensor * enc = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d, T_enc);
+        ggml_tensor* enc = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d, T_enc);
         ggml_set_name(enc, "enc_in");
         ggml_set_input(enc);
 
         // CK: linear(enc) → bias → reshape [hd, n_heads, T_enc] → permute [hd, T_enc, n_heads]
-        ggml_tensor * CK = ggml_add(gctx, ggml_mul_mat(gctx, dl.ca_k_w, enc), dl.ca_k_b);
-        CK = ggml_cont(gctx, ggml_permute(gctx,
-            ggml_reshape_3d(gctx, CK, head_dim, n_heads, T_enc), 0, 2, 1, 3));
+        ggml_tensor* CK = ggml_add(gctx, ggml_mul_mat(gctx, dl.ca_k_w, enc), dl.ca_k_b);
+        CK = ggml_cont(gctx, ggml_permute(gctx, ggml_reshape_3d(gctx, CK, head_dim, n_heads, T_enc), 0, 2, 1, 3));
         ggml_set_name(CK, "CK");
 
-        ggml_tensor * CV = ggml_add(gctx, ggml_mul_mat(gctx, dl.ca_v_w, enc), dl.ca_v_b);
-        CV = ggml_cont(gctx, ggml_permute(gctx,
-            ggml_reshape_3d(gctx, CV, head_dim, n_heads, T_enc), 0, 2, 1, 3));
+        ggml_tensor* CV = ggml_add(gctx, ggml_mul_mat(gctx, dl.ca_v_w, enc), dl.ca_v_b);
+        CV = ggml_cont(gctx, ggml_permute(gctx, ggml_reshape_3d(gctx, CV, head_dim, n_heads, T_enc), 0, 2, 1, 3));
         ggml_set_name(CV, "CV");
 
         ggml_build_forward_expand(gf, CK);
@@ -666,13 +683,13 @@ static void canary_build_cross_kv(canary_context * ctx,
             return;
         }
 
-        ggml_tensor * enc_in = ggml_graph_get_tensor(gf, "enc_in");
+        ggml_tensor* enc_in = ggml_graph_get_tensor(gf, "enc_in");
         ggml_backend_tensor_set(enc_in, enc_data, 0, (size_t)d * T_enc * sizeof(float));
 
         ggml_backend_sched_graph_compute(ctx->sched, gf);
 
-        ggml_tensor * CK_out = ggml_graph_get_tensor(gf, "CK");
-        ggml_tensor * CV_out = ggml_graph_get_tensor(gf, "CV");
+        ggml_tensor* CK_out = ggml_graph_get_tensor(gf, "CK");
+        ggml_tensor* CV_out = ggml_graph_get_tensor(gf, "CV");
         std::vector<float> kbuf((size_t)head_dim * T_enc * n_heads);
         std::vector<float> vbuf((size_t)head_dim * T_enc * n_heads);
         ggml_backend_tensor_get(CK_out, kbuf.data(), 0, kbuf.size() * sizeof(float));
@@ -694,35 +711,32 @@ static void canary_build_cross_kv(canary_context * ctx,
 // Decoder per-step graph (autoregressive, with self-attn KV cache + pre-built cross-KV)
 // ===========================================================================
 
-static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
-                                                int n_tokens, int offset)
-{
-    const auto & m  = ctx->model;
-    const auto & hp = m.hparams;
-    const int d        = (int)hp.d_model;
-    const int n_heads  = (int)hp.n_heads;
+static ggml_cgraph* canary_build_graph_decoder(canary_context* ctx, int n_tokens, int offset) {
+    const auto& m = ctx->model;
+    const auto& hp = m.hparams;
+    const int d = (int)hp.d_model;
+    const int n_heads = (int)hp.n_heads;
     const int head_dim = (int)hp.head_dim;
 
     ggml_init_params ip = {
-        /*mem_size=*/   ctx->compute_meta.size(),
-        /*mem_buffer=*/ ctx->compute_meta.data(),
-        /*no_alloc=*/   true,
+        /*mem_size=*/ctx->compute_meta.size(),
+        /*mem_buffer=*/ctx->compute_meta.data(),
+        /*no_alloc=*/true,
     };
-    ggml_context * ctx0 = ggml_init(ip);
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 4096, false);
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 4096, false);
 
-    ggml_tensor * embd = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+    ggml_tensor* embd = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
     ggml_set_name(embd, "embd");
     ggml_set_input(embd);
 
-    ggml_tensor * position = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+    ggml_tensor* position = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
     ggml_set_name(position, "position");
     ggml_set_input(position);
 
     // Token embed + positional embed (learned)
-    ggml_tensor * cur = ggml_add(ctx0,
-        ggml_get_rows(ctx0, m.dec_embed_w, embd),
-        ggml_get_rows(ctx0, m.dec_pos_enc, position));
+    ggml_tensor* cur =
+        ggml_add(ctx0, ggml_get_rows(ctx0, m.dec_embed_w, embd), ggml_get_rows(ctx0, m.dec_pos_enc, position));
 
     // Embedding LayerNorm
     cur = ggml_norm(ctx0, cur, kLayerNormEps);
@@ -730,8 +744,8 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
     cur = ggml_add(ctx0, cur, m.dec_embed_ln_b);
 
     for (uint32_t il = 0; il < hp.dec_n_layers; il++) {
-        const auto & dl = m.dec[il];
-        ggml_tensor * inpL = cur;
+        const auto& dl = m.dec[il];
+        ggml_tensor* inpL = cur;
 
         // ---- Self-attention (PRE-LN: x = x + SA(LN1(x)), causal, with KV cache) ----
         // Confirmed via NeMo source (transformer_decoders.py forward_preln):
@@ -744,77 +758,69 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
         cur = ggml_mul(ctx0, cur, dl.norm_sa_w);
         cur = ggml_add(ctx0, cur, dl.norm_sa_b);
 
-        ggml_tensor * Qcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_q_w, cur), dl.sa_q_b);
-        ggml_tensor * Kcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_k_w, cur), dl.sa_k_b);
-        ggml_tensor * Vcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_v_w, cur), dl.sa_v_b);
+        ggml_tensor* Qcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_q_w, cur), dl.sa_q_b);
+        ggml_tensor* Kcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_k_w, cur), dl.sa_k_b);
+        ggml_tensor* Vcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_v_w, cur), dl.sa_v_b);
 
         // Store K, V into cache slot at [il, offset .. offset+n_tokens]
         {
-            ggml_tensor * k_view = ggml_view_4d(ctx0, ctx->kv_k,
-                head_dim, n_tokens, n_heads, 1,
-                ctx->kv_k->nb[1], ctx->kv_k->nb[2], ctx->kv_k->nb[3],
-                il * ctx->kv_k->nb[3] + offset * ctx->kv_k->nb[1]);
-            ggml_tensor * v_view = ggml_view_4d(ctx0, ctx->kv_v,
-                head_dim, n_tokens, n_heads, 1,
-                ctx->kv_v->nb[1], ctx->kv_v->nb[2], ctx->kv_v->nb[3],
-                il * ctx->kv_v->nb[3] + offset * ctx->kv_v->nb[1]);
+            ggml_tensor* k_view =
+                ggml_view_4d(ctx0, ctx->kv_k, head_dim, n_tokens, n_heads, 1, ctx->kv_k->nb[1], ctx->kv_k->nb[2],
+                             ctx->kv_k->nb[3], il * ctx->kv_k->nb[3] + offset * ctx->kv_k->nb[1]);
+            ggml_tensor* v_view =
+                ggml_view_4d(ctx0, ctx->kv_v, head_dim, n_tokens, n_heads, 1, ctx->kv_v->nb[1], ctx->kv_v->nb[2],
+                             ctx->kv_v->nb[3], il * ctx->kv_v->nb[3] + offset * ctx->kv_v->nb[1]);
 
-            ggml_tensor * K_perm = ggml_permute(ctx0,
-                ggml_reshape_3d(ctx0, Kcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
-            ggml_tensor * V_perm = ggml_permute(ctx0,
-                ggml_reshape_3d(ctx0, Vcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
+            ggml_tensor* K_perm =
+                ggml_permute(ctx0, ggml_reshape_3d(ctx0, Kcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
+            ggml_tensor* V_perm =
+                ggml_permute(ctx0, ggml_reshape_3d(ctx0, Vcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
 
             ggml_build_forward_expand(gf, ggml_cpy(ctx0, K_perm, k_view));
             ggml_build_forward_expand(gf, ggml_cpy(ctx0, V_perm, v_view));
         }
 
         // Q/K/V attention
-        ggml_tensor * Q = ggml_permute(ctx0,
-            ggml_reshape_3d(ctx0, Qcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
+        ggml_tensor* Q = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Qcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
 
         const int L = offset + n_tokens;
-        ggml_tensor * K_full = ggml_view_3d(ctx0, ctx->kv_k,
-            head_dim, L, n_heads,
-            ctx->kv_k->nb[1], ctx->kv_k->nb[2],
-            il * ctx->kv_k->nb[3]);
+        ggml_tensor* K_full = ggml_view_3d(ctx0, ctx->kv_k, head_dim, L, n_heads, ctx->kv_k->nb[1], ctx->kv_k->nb[2],
+                                           il * ctx->kv_k->nb[3]);
         K_full = ggml_cont(ctx0, K_full);
 
-        ggml_tensor * KQ = ggml_mul_mat(ctx0, K_full, Q);
+        ggml_tensor* KQ = ggml_mul_mat(ctx0, K_full, Q);
         KQ = ggml_scale(ctx0, KQ, 1.0f / sqrtf((float)head_dim));
         if (n_tokens > 1) {
             KQ = ggml_diag_mask_inf(ctx0, KQ, offset);
         }
         KQ = ggml_soft_max(ctx0, KQ);
 
-        ggml_tensor * V_full = ggml_view_3d(ctx0, ctx->kv_v,
-            head_dim, L, n_heads,
-            ctx->kv_v->nb[1], ctx->kv_v->nb[2],
-            il * ctx->kv_v->nb[3]);
-        ggml_tensor * V_trans = ggml_cont(ctx0, ggml_permute(ctx0, V_full, 1, 0, 2, 3));
-        ggml_tensor * sa_out = ggml_mul_mat(ctx0, V_trans, KQ);
+        ggml_tensor* V_full = ggml_view_3d(ctx0, ctx->kv_v, head_dim, L, n_heads, ctx->kv_v->nb[1], ctx->kv_v->nb[2],
+                                           il * ctx->kv_v->nb[3]);
+        ggml_tensor* V_trans = ggml_cont(ctx0, ggml_permute(ctx0, V_full, 1, 0, 2, 3));
+        ggml_tensor* sa_out = ggml_mul_mat(ctx0, V_trans, KQ);
 
         sa_out = ggml_permute(ctx0, sa_out, 0, 2, 1, 3);
         sa_out = ggml_cont(ctx0, sa_out);
-        cur    = ggml_reshape_2d(ctx0, sa_out, d, n_tokens);
+        cur = ggml_reshape_2d(ctx0, sa_out, d, n_tokens);
 
         cur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_out_w, cur), dl.sa_out_b);
         cur = ggml_add(ctx0, cur, inpL);
 
         // ---- Cross-attention (PRE-LN: x = x + CA(LN2(x)), no causal mask) ----
-        ggml_tensor * inpCA = cur;
+        ggml_tensor* inpCA = cur;
         cur = ggml_norm(ctx0, cur, kLayerNormEps);
         cur = ggml_mul(ctx0, cur, dl.norm_ca_w);
         cur = ggml_add(ctx0, cur, dl.norm_ca_b);
 
-        ggml_tensor * CQ = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.ca_q_w, cur), dl.ca_q_b);
+        ggml_tensor* CQ = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.ca_q_w, cur), dl.ca_q_b);
         CQ = ggml_reshape_3d(ctx0, CQ, head_dim, n_heads, n_tokens);
         CQ = ggml_permute(ctx0, CQ, 0, 2, 1, 3);
 
-        ggml_tensor * CK = ctx->cross_k[il];
-        ggml_tensor * CV = ctx->cross_v[il];
+        ggml_tensor* CK = ctx->cross_k[il];
+        ggml_tensor* CV = ctx->cross_v[il];
 
-        ggml_tensor * ca_out = ggml_flash_attn_ext(ctx0, CQ, CK, CV, nullptr,
-                                                    1.0f / sqrtf((float)head_dim), 0.0f, 0.0f);
+        ggml_tensor* ca_out = ggml_flash_attn_ext(ctx0, CQ, CK, CV, nullptr, 1.0f / sqrtf((float)head_dim), 0.0f, 0.0f);
 
         // Capture cross-attention weights for the last decoder layer in
         // single-token generation mode. Used by the DTW timestamp pass.
@@ -822,7 +828,7 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
         // CQ shape: [head_dim, n_tokens=1, n_heads]
         // ca_w = softmax( CK^T @ CQ / sqrt(head_dim) ) → [T_enc, 1, n_heads]
         if (ctx->collect_attn && (int)il == (int)hp.dec_n_layers - 1 && n_tokens == 1) {
-            ggml_tensor * ca_w = ggml_mul_mat(ctx0, CK, CQ);   // [T_enc, 1, n_heads]
+            ggml_tensor* ca_w = ggml_mul_mat(ctx0, CK, CQ); // [T_enc, 1, n_heads]
             ca_w = ggml_scale(ctx0, ca_w, 1.0f / sqrtf((float)head_dim));
             ca_w = ggml_soft_max(ctx0, ca_w);
             ggml_set_name(ca_w, "ca_attn_w");
@@ -835,7 +841,7 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
         cur = ggml_add(ctx0, cur, inpCA);
 
         // ---- FFN (PRE-LN: x = x + FFN(LN3(x)), ReLU activation) ----
-        ggml_tensor * inpFF = cur;
+        ggml_tensor* inpFF = cur;
         cur = ggml_norm(ctx0, cur, kLayerNormEps);
         cur = ggml_mul(ctx0, cur, dl.norm_ff_w);
         cur = ggml_add(ctx0, cur, dl.norm_ff_b);
@@ -860,11 +866,9 @@ static ggml_cgraph * canary_build_graph_decoder(canary_context * ctx,
 }
 
 // Run one decoder step (or batch). Returns logits for the LAST token.
-static std::vector<float> canary_decode_step(canary_context * ctx,
-                                             const int * tokens, int n_tokens, int offset)
-{
+static std::vector<float> canary_decode_step(canary_context* ctx, const int* tokens, int n_tokens, int offset) {
     canary_alloc_kv(ctx);
-    ggml_cgraph * gf = canary_build_graph_decoder(ctx, n_tokens, offset);
+    ggml_cgraph* gf = canary_build_graph_decoder(ctx, n_tokens, offset);
 
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
@@ -872,12 +876,13 @@ static std::vector<float> canary_decode_step(canary_context * ctx,
         return {};
     }
 
-    ggml_tensor * embd = ggml_graph_get_tensor(gf, "embd");
+    ggml_tensor* embd = ggml_graph_get_tensor(gf, "embd");
     ggml_backend_tensor_set(embd, tokens, 0, n_tokens * sizeof(int));
 
     std::vector<int> pos(n_tokens);
-    for (int i = 0; i < n_tokens; i++) pos[i] = offset + i;
-    ggml_tensor * pos_in = ggml_graph_get_tensor(gf, "position");
+    for (int i = 0; i < n_tokens; i++)
+        pos[i] = offset + i;
+    ggml_tensor* pos_in = ggml_graph_get_tensor(gf, "position");
     ggml_backend_tensor_set(pos_in, pos.data(), 0, n_tokens * sizeof(int));
 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
@@ -887,11 +892,11 @@ static std::vector<float> canary_decode_step(canary_context * ctx,
 
     // Capture cross-attention for DTW (only on single-token generation steps).
     if (ctx->collect_attn && n_tokens == 1) {
-        ggml_tensor * ca_w_t = ggml_graph_get_tensor(gf, "ca_attn_w");
+        ggml_tensor* ca_w_t = ggml_graph_get_tensor(gf, "ca_attn_w");
         if (ca_w_t) {
-            const int T_enc   = (int)ca_w_t->ne[0];
+            const int T_enc = (int)ca_w_t->ne[0];
             const int n_heads = (int)ca_w_t->ne[2];
-            ctx->attn_T_enc   = T_enc;
+            ctx->attn_T_enc = T_enc;
             ctx->attn_n_heads = n_heads;
             std::vector<float> w((size_t)T_enc * n_heads);
             ggml_backend_tensor_get(ca_w_t, w.data(), 0, w.size() * sizeof(float));
@@ -899,7 +904,7 @@ static std::vector<float> canary_decode_step(canary_context * ctx,
         }
     }
 
-    ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
+    ggml_tensor* logits = ggml_graph_get_tensor(gf, "logits");
     const int V = (int)logits->ne[0];
     std::vector<float> all((size_t)V * n_tokens);
     ggml_backend_tensor_get(logits, all.data(), 0, all.size() * sizeof(float));
@@ -912,12 +917,9 @@ static std::vector<float> canary_decode_step(canary_context * ctx,
 // Greedy decode: build prompt, run encoder, run decoder steps until EOS
 // ===========================================================================
 
-static std::vector<int> canary_build_prompt(canary_context * ctx,
-                                            const std::string & src,
-                                            const std::string & tgt,
-                                            bool punctuation)
-{
-    auto tok = [&](const char * s) { return canary_str_to_token(ctx, s); };
+static std::vector<int> canary_build_prompt(canary_context* ctx, const std::string& src, const std::string& tgt,
+                                            bool punctuation) {
+    auto tok = [&](const char* s) { return canary_str_to_token(ctx, s); };
     std::string src_tok = "<|" + src + "|>";
     std::string tgt_tok = "<|" + tgt + "|>";
 
@@ -949,12 +951,12 @@ static std::vector<int> canary_build_prompt(canary_context * ctx,
     return p;
 }
 
-static std::string spiece_to_text(const std::string & piece) {
-    if (piece.empty()) return "";
-    if (piece.size() >= 2 && piece[0] == '<' && piece.back() == '>') return "";
-    if (piece.size() >= 3 &&
-        (unsigned char)piece[0] == 0xE2 &&
-        (unsigned char)piece[1] == 0x96 &&
+static std::string spiece_to_text(const std::string& piece) {
+    if (piece.empty())
+        return "";
+    if (piece.size() >= 2 && piece[0] == '<' && piece.back() == '>')
+        return "";
+    if (piece.size() >= 3 && (unsigned char)piece[0] == 0xE2 && (unsigned char)piece[1] == 0x96 &&
         (unsigned char)piece[2] == 0x81) {
         return std::string(" ") + piece.substr(3);
     }
@@ -965,34 +967,37 @@ static std::string spiece_to_text(const std::string & piece) {
 // BatchNorm folding (load-time, once) — same trick as parakeet/cohere
 // ===========================================================================
 
-static void canary_fold_batchnorm(canary_model & model) {
-    const int d   = (int)model.hparams.d_model;
-    const int K   = (int)model.hparams.conv_kernel;
+static void canary_fold_batchnorm(canary_model& model) {
+    const int d = (int)model.hparams.d_model;
+    const int K = (int)model.hparams.conv_kernel;
     const float eps = 1e-5f;
 
     for (uint32_t il = 0; il < model.hparams.enc_n_layers; il++) {
-        auto & e = model.enc[il];
-        if (!e.conv_dw_w || !e.conv_dw_b ||
-            !e.conv_bn_w || !e.conv_bn_b || !e.conv_bn_rm || !e.conv_bn_rv) continue;
+        auto& e = model.enc[il];
+        if (!e.conv_dw_w || !e.conv_dw_b || !e.conv_bn_w || !e.conv_bn_b || !e.conv_bn_rm || !e.conv_bn_rv)
+            continue;
 
         std::vector<float> bn_mean(d), bn_var(d), bn_w(d), bn_b(d), dw_b(d);
         ggml_backend_tensor_get(e.conv_bn_rm, bn_mean.data(), 0, d * sizeof(float));
-        ggml_backend_tensor_get(e.conv_bn_rv, bn_var .data(), 0, d * sizeof(float));
-        ggml_backend_tensor_get(e.conv_bn_w,  bn_w   .data(), 0, d * sizeof(float));
-        ggml_backend_tensor_get(e.conv_bn_b,  bn_b   .data(), 0, d * sizeof(float));
-        ggml_backend_tensor_get(e.conv_dw_b,  dw_b   .data(), 0, d * sizeof(float));
+        ggml_backend_tensor_get(e.conv_bn_rv, bn_var.data(), 0, d * sizeof(float));
+        ggml_backend_tensor_get(e.conv_bn_w, bn_w.data(), 0, d * sizeof(float));
+        ggml_backend_tensor_get(e.conv_bn_b, bn_b.data(), 0, d * sizeof(float));
+        ggml_backend_tensor_get(e.conv_dw_b, dw_b.data(), 0, d * sizeof(float));
 
         std::vector<float> s(d);
-        for (int c = 0; c < d; c++) s[c] = bn_w[c] / sqrtf(bn_var[c] + eps);
+        for (int c = 0; c < d; c++)
+            s[c] = bn_w[c] / sqrtf(bn_var[c] + eps);
 
         std::vector<ggml_fp16_t> w_f16((size_t)K * d);
         ggml_backend_tensor_get(e.conv_dw_w, w_f16.data(), 0, w_f16.size() * sizeof(ggml_fp16_t));
         std::vector<float> w_f32((size_t)K * d);
-        for (size_t i = 0; i < w_f16.size(); i++) w_f32[i] = ggml_fp16_to_fp32(w_f16[i]);
+        for (size_t i = 0; i < w_f16.size(); i++)
+            w_f32[i] = ggml_fp16_to_fp32(w_f16[i]);
         for (int c = 0; c < d; c++)
             for (int ki = 0; ki < K; ki++)
                 w_f32[ki + c * K] *= s[c];
-        for (size_t i = 0; i < w_f16.size(); i++) w_f16[i] = ggml_fp32_to_fp16(w_f32[i]);
+        for (size_t i = 0; i < w_f16.size(); i++)
+            w_f16[i] = ggml_fp32_to_fp16(w_f32[i]);
         ggml_backend_tensor_set(e.conv_dw_w, w_f16.data(), 0, w_f16.size() * sizeof(ggml_fp16_t));
 
         // Fold into existing dw_b: b'[c] = (dw_b[c] - mean[c]) * s[c] + bn_b[c]
@@ -1001,8 +1006,7 @@ static void canary_fold_batchnorm(canary_model & model) {
         ggml_backend_tensor_set(e.conv_dw_b, dw_b.data(), 0, d * sizeof(float));
     }
 
-    fprintf(stderr, "canary: BN folded into conv_dw weights for %u layers\n",
-            model.hparams.enc_n_layers);
+    fprintf(stderr, "canary: BN folded into conv_dw weights for %u layers\n", model.hparams.enc_n_layers);
 }
 
 // ===========================================================================
@@ -1024,34 +1028,42 @@ static ggml_backend_t pick_backend() {
 
 // ---- Stage-level entry points for crispasr-diff ----
 
-extern "C" float * canary_compute_mel(struct canary_context * ctx,
-                                      const float * samples, int n_samples,
-                                      int * out_n_mels, int * out_T_mel) {
-    if (!ctx || !samples || n_samples <= 0) return nullptr;
+extern "C" float* canary_compute_mel(struct canary_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                                     int* out_T_mel) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
     int T_mel = 0;
     auto mel = canary_compute_mel_impl(ctx, samples, n_samples, T_mel);
-    if (mel.empty()) return nullptr;
+    if (mel.empty())
+        return nullptr;
     const int n_mels = (int)ctx->model.hparams.n_mels;
-    if (out_n_mels) *out_n_mels = n_mels;
-    if (out_T_mel)  *out_T_mel  = T_mel;
-    float * r = (float *)malloc(mel.size() * sizeof(float));
-    if (!r) return nullptr;
+    if (out_n_mels)
+        *out_n_mels = n_mels;
+    if (out_T_mel)
+        *out_T_mel = T_mel;
+    float* r = (float*)malloc(mel.size() * sizeof(float));
+    if (!r)
+        return nullptr;
     std::memcpy(r, mel.data(), mel.size() * sizeof(float));
     return r;
 }
 
-extern "C" float * canary_run_encoder(struct canary_context * ctx,
-                                      const float * mel, int n_mels, int T_mel,
-                                      int * out_T_enc, int * out_d_model) {
-    if (!ctx || !mel || T_mel <= 0) return nullptr;
+extern "C" float* canary_run_encoder(struct canary_context* ctx, const float* mel, int n_mels, int T_mel,
+                                     int* out_T_enc, int* out_d_model) {
+    if (!ctx || !mel || T_mel <= 0)
+        return nullptr;
     int T_enc = 0;
     auto enc = canary_encode_mel(ctx, mel, n_mels, T_mel, &T_enc);
-    if (enc.empty()) return nullptr;
+    if (enc.empty())
+        return nullptr;
     const int d = (int)ctx->model.hparams.d_model;
-    if (out_T_enc)   *out_T_enc   = T_enc;
-    if (out_d_model) *out_d_model = d;
-    float * r = (float *)malloc(enc.size() * sizeof(float));
-    if (!r) return nullptr;
+    if (out_T_enc)
+        *out_T_enc = T_enc;
+    if (out_d_model)
+        *out_d_model = d;
+    float* r = (float*)malloc(enc.size() * sizeof(float));
+    if (!r)
+        return nullptr;
     std::memcpy(r, enc.data(), enc.size() * sizeof(float));
     return r;
 }
@@ -1064,16 +1076,15 @@ extern "C" struct canary_context_params canary_context_default_params(void) {
     return p;
 }
 
-extern "C" struct canary_context * canary_init_from_file(
-    const char * path_model, struct canary_context_params params)
-{
-    auto * ctx = new canary_context();
-    ctx->params    = params;
+extern "C" struct canary_context* canary_init_from_file(const char* path_model, struct canary_context_params params) {
+    auto* ctx = new canary_context();
+    ctx->params = params;
     ctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
 
-    ctx->backend     = pick_backend();
+    ctx->backend = pick_backend();
     ctx->backend_cpu = ggml_backend_cpu_init();
-    if (!ctx->backend) ctx->backend = ctx->backend_cpu;
+    if (!ctx->backend)
+        ctx->backend = ctx->backend_cpu;
 
     if (!canary_load_model(ctx->model, ctx->vocab, path_model, ctx->backend)) {
         canary_free(ctx);
@@ -1083,125 +1094,138 @@ extern "C" struct canary_context * canary_init_from_file(
     return ctx;
 }
 
-extern "C" void canary_free(struct canary_context * ctx) {
-    if (!ctx) return;
-    if (ctx->cross_buf)         ggml_backend_buffer_free(ctx->cross_buf);
-    if (ctx->cross_ctx)         ggml_free(ctx->cross_ctx);
-    if (ctx->kv_buf)            ggml_backend_buffer_free(ctx->kv_buf);
-    if (ctx->kv_ctx)            ggml_free(ctx->kv_ctx);
-    if (ctx->sched)             ggml_backend_sched_free(ctx->sched);
-    if (ctx->model.buf)         ggml_backend_buffer_free(ctx->model.buf);
-    if (ctx->model.ctx)         ggml_free(ctx->model.ctx);
+extern "C" void canary_free(struct canary_context* ctx) {
+    if (!ctx)
+        return;
+    if (ctx->cross_buf)
+        ggml_backend_buffer_free(ctx->cross_buf);
+    if (ctx->cross_ctx)
+        ggml_free(ctx->cross_ctx);
+    if (ctx->kv_buf)
+        ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
+    if (ctx->model.buf)
+        ggml_backend_buffer_free(ctx->model.buf);
+    if (ctx->model.ctx)
+        ggml_free(ctx->model.ctx);
     if (ctx->backend && ctx->backend != ctx->backend_cpu)
         ggml_backend_free(ctx->backend);
-    if (ctx->backend_cpu)       ggml_backend_free(ctx->backend_cpu);
+    if (ctx->backend_cpu)
+        ggml_backend_free(ctx->backend_cpu);
     delete ctx;
 }
 
-extern "C" void canary_result_free(struct canary_result * r) {
-    if (!r) return;
+extern "C" void canary_result_free(struct canary_result* r) {
+    if (!r)
+        return;
     free(r->text);
     free(r->tokens);
     free(r->words);
     free(r);
 }
 
-extern "C" void canary_set_temperature(struct canary_context * ctx,
-                                       float temperature, uint64_t seed) {
-    if (!ctx) return;
+extern "C" void canary_set_temperature(struct canary_context* ctx, float temperature, uint64_t seed) {
+    if (!ctx)
+        return;
     ctx->decode_temperature = temperature;
-    ctx->decode_seed        = seed;
+    ctx->decode_seed = seed;
 }
 
-extern "C" int canary_n_vocab    (struct canary_context * ctx) { return (int)ctx->model.hparams.vocab_size; }
-extern "C" int canary_n_mels     (struct canary_context * ctx) { return (int)ctx->model.hparams.n_mels; }
-extern "C" int canary_sample_rate(struct canary_context * ctx) { return (int)ctx->model.hparams.sample_rate; }
-extern "C" int canary_frame_dur_cs(struct canary_context * ctx){ return (int)ctx->model.hparams.frame_dur_cs; }
+extern "C" int canary_n_vocab(struct canary_context* ctx) {
+    return (int)ctx->model.hparams.vocab_size;
+}
+extern "C" int canary_n_mels(struct canary_context* ctx) {
+    return (int)ctx->model.hparams.n_mels;
+}
+extern "C" int canary_sample_rate(struct canary_context* ctx) {
+    return (int)ctx->model.hparams.sample_rate;
+}
+extern "C" int canary_frame_dur_cs(struct canary_context* ctx) {
+    return (int)ctx->model.hparams.frame_dur_cs;
+}
 
-extern "C" const char * canary_token_to_str(struct canary_context * ctx, int id) {
-    if (id < 0 || id >= (int)ctx->vocab.id_to_token.size()) return "";
+extern "C" const char* canary_token_to_str(struct canary_context* ctx, int id) {
+    if (id < 0 || id >= (int)ctx->vocab.id_to_token.size())
+        return "";
     return ctx->vocab.id_to_token[id].c_str();
 }
 
-extern "C" int canary_str_to_token(struct canary_context * ctx, const char * str) {
+extern "C" int canary_str_to_token(struct canary_context* ctx, const char* str) {
     auto it = ctx->vocab.token_to_id.find(str);
     return it != ctx->vocab.token_to_id.end() ? it->second : -1;
 }
 
-extern "C" int canary_test_load(struct canary_context * ctx) {
+extern "C" int canary_test_load(struct canary_context* ctx) {
     fprintf(stderr,
-        "canary: load test OK\n"
-        "  vocab_size  = %d\n"
-        "  d_model     = %d\n"
-        "  enc_layers  = %d\n"
-        "  dec_layers  = %d\n"
-        "  n_heads     = %d\n"
-        "  head_dim    = %d\n"
-        "  ff_dim      = %d\n"
-        "  max_dec_ctx = %d\n"
-        "  n_mels      = %d\n"
-        "  sample_rate = %d\n"
-        "  frame_dur_cs= %d\n",
-        (int)ctx->model.hparams.vocab_size,
-        (int)ctx->model.hparams.d_model,
-        (int)ctx->model.hparams.enc_n_layers,
-        (int)ctx->model.hparams.dec_n_layers,
-        (int)ctx->model.hparams.n_heads,
-        (int)ctx->model.hparams.head_dim,
-        (int)ctx->model.hparams.ff_dim,
-        (int)ctx->model.hparams.max_dec_ctx,
-        (int)ctx->model.hparams.n_mels,
-        (int)ctx->model.hparams.sample_rate,
-        (int)ctx->model.hparams.frame_dur_cs);
+            "canary: load test OK\n"
+            "  vocab_size  = %d\n"
+            "  d_model     = %d\n"
+            "  enc_layers  = %d\n"
+            "  dec_layers  = %d\n"
+            "  n_heads     = %d\n"
+            "  head_dim    = %d\n"
+            "  ff_dim      = %d\n"
+            "  max_dec_ctx = %d\n"
+            "  n_mels      = %d\n"
+            "  sample_rate = %d\n"
+            "  frame_dur_cs= %d\n",
+            (int)ctx->model.hparams.vocab_size, (int)ctx->model.hparams.d_model, (int)ctx->model.hparams.enc_n_layers,
+            (int)ctx->model.hparams.dec_n_layers, (int)ctx->model.hparams.n_heads, (int)ctx->model.hparams.head_dim,
+            (int)ctx->model.hparams.ff_dim, (int)ctx->model.hparams.max_dec_ctx, (int)ctx->model.hparams.n_mels,
+            (int)ctx->model.hparams.sample_rate, (int)ctx->model.hparams.frame_dur_cs);
 
     // Confirm a few special tokens resolve
-    const char * specials[] = {
-        "<|startoftranscript|>", "<|endoftext|>", "<|en|>", "<|de|>",
-        "<|fr|>", "<|es|>", "<|nopnc|>", "<|notimestamp|>", "<|nodiarize|>",
+    const char* specials[] = {
+        "<|startoftranscript|>", "<|endoftext|>", "<|en|>", "<|de|>", "<|fr|>", "<|es|>", "<|nopnc|>",
+        "<|notimestamp|>",       "<|nodiarize|>",
     };
-    for (const char * s : specials) {
+    for (const char* s : specials) {
         int id = canary_str_to_token(ctx, s);
         fprintf(stderr, "  token %-22s = %d\n", s, id);
     }
     return 0;
 }
 
-extern "C" int canary_test_encoder(struct canary_context * ctx, int T_mel) {
+extern "C" int canary_test_encoder(struct canary_context* ctx, int T_mel) {
     int n_mels = (int)ctx->model.hparams.n_mels;
     std::vector<float> mel((size_t)n_mels * T_mel, 0.0f);
     int T_enc = 0;
     auto out = canary_encode_mel(ctx, mel.data(), n_mels, T_mel, &T_enc);
-    if (out.empty()) return -1;
-    fprintf(stderr,
-        "canary: encoder OK — T_mel=%d → T_enc=%d  d=%d  out[0..3]=%g %g %g %g\n",
-        T_mel, T_enc, (int)ctx->model.hparams.d_model,
-        (double)out[0], (double)out[1], (double)out[2], (double)out[3]);
+    if (out.empty())
+        return -1;
+    fprintf(stderr, "canary: encoder OK — T_mel=%d → T_enc=%d  d=%d  out[0..3]=%g %g %g %g\n", T_mel, T_enc,
+            (int)ctx->model.hparams.d_model, (double)out[0], (double)out[1], (double)out[2], (double)out[3]);
     return T_enc;
 }
 
-extern "C" struct canary_result * canary_transcribe_ex(
-    struct canary_context * ctx, const float * samples, int n_samples,
-    const char * source_lang, const char * target_lang, bool punctuation,
-    int64_t t_offset_cs)
-{
-    if (!ctx || !samples || n_samples <= 0 || !source_lang || !target_lang) return nullptr;
+extern "C" struct canary_result* canary_transcribe_ex(struct canary_context* ctx, const float* samples, int n_samples,
+                                                      const char* source_lang, const char* target_lang,
+                                                      bool punctuation, int64_t t_offset_cs) {
+    if (!ctx || !samples || n_samples <= 0 || !source_lang || !target_lang)
+        return nullptr;
 
     // 1. Mel
     int T_mel = 0;
     auto mel = canary_compute_mel_impl(ctx, samples, n_samples, T_mel);
-    if (mel.empty()) return nullptr;
+    if (mel.empty())
+        return nullptr;
 
     // 2. Encoder
     int T_enc = 0;
     auto enc = canary_encode_mel(ctx, mel.data(), (int)ctx->model.hparams.n_mels, T_mel, &T_enc);
-    if (enc.empty()) return nullptr;
+    if (enc.empty())
+        return nullptr;
 
     // 3. Pre-compute cross-attention K/V
     canary_build_cross_kv(ctx, enc.data(), T_enc);
 
     // 4. Build prompt
     std::vector<int> prompt = canary_build_prompt(ctx, source_lang, target_lang, punctuation);
-    if (prompt.empty()) return nullptr;
+    if (prompt.empty())
+        return nullptr;
 
     // Reset DTW state and enable cross-attn capture for the upcoming greedy loop.
     // Each per-step decode call will append one entry to ctx->step_attn (one
@@ -1212,26 +1236,27 @@ extern "C" struct canary_result * canary_transcribe_ex(
     // 5. Greedy decode
     const int eos = canary_str_to_token(ctx, "<|endoftext|>");
     const int max_steps = 256;
-    const int max_ctx   = (int)ctx->model.hparams.max_dec_ctx;
+    const int max_ctx = (int)ctx->model.hparams.max_dec_ctx;
 
-    std::vector<int>   generated = prompt;
-    std::vector<float> emitted_p;               // softmax prob per generated non-prompt token
+    std::vector<int> generated = prompt;
+    std::vector<float> emitted_p; // softmax prob per generated non-prompt token
 
     const bool sampling = ctx->decode_temperature > 0.0f;
-    std::mt19937_64 rng(ctx->decode_seed != 0 ? ctx->decode_seed
-                        : (uint64_t)std::random_device{}());
+    std::mt19937_64 rng(ctx->decode_seed != 0 ? ctx->decode_seed : (uint64_t)std::random_device{}());
     int offset = 0;
 
     if (ctx->params.verbosity >= 2) {
         fprintf(stderr, "canary: prompt =");
-        for (int t : prompt) fprintf(stderr, " %d(%s)", t, ctx->vocab.id_to_token[t].c_str());
+        for (int t : prompt)
+            fprintf(stderr, " %d(%s)", t, ctx->vocab.id_to_token[t].c_str());
         fprintf(stderr, "\n");
     }
 
 
     // First call: feed the entire prompt at once
     auto logits = canary_decode_step(ctx, prompt.data(), (int)prompt.size(), 0);
-    if (logits.empty()) return nullptr;
+    if (logits.empty())
+        return nullptr;
     offset = (int)prompt.size();
 
     for (int step = 0; step < max_steps && offset < max_ctx - 1; step++) {
@@ -1239,7 +1264,10 @@ extern "C" struct canary_result * canary_transcribe_ex(
         int best = 0;
         float best_lp = logits[0];
         for (int v = 1; v < (int)logits.size(); v++) {
-            if (logits[v] > best_lp) { best_lp = logits[v]; best = v; }
+            if (logits[v] > best_lp) {
+                best_lp = logits[v];
+                best = v;
+            }
         }
         if (sampling) {
             const int V = (int)logits.size();
@@ -1257,17 +1285,21 @@ extern "C" struct canary_result * canary_transcribe_ex(
                 double acc = 0.0;
                 for (int v = 0; v < V; v++) {
                     acc += pr[(size_t)v];
-                    if (rr <= acc) { best = v; break; }
+                    if (rr <= acc) {
+                        best = v;
+                        break;
+                    }
                 }
                 best_lp = logits[best];
             }
         }
         if (ctx->params.verbosity >= 2 && step < 30) {
-            const char * pc = (best >= 0 && best < (int)ctx->vocab.id_to_token.size())
-                ? ctx->vocab.id_to_token[best].c_str() : "?";
+            const char* pc =
+                (best >= 0 && best < (int)ctx->vocab.id_to_token.size()) ? ctx->vocab.id_to_token[best].c_str() : "?";
             fprintf(stderr, "  step %3d  tok=%5d  '%s'  logp=%.3f\n", step, best, pc, (double)best_lp);
         }
-        if (best == eos) break;
+        if (best == eos)
+            break;
 
         // Softmax probability of the picked token. Numerically stable:
         // subtract the max log-prob before exponentiating.
@@ -1286,15 +1318,16 @@ extern "C" struct canary_result * canary_transcribe_ex(
         // Decode next step with the new token
         int tok = best;
         logits = canary_decode_step(ctx, &tok, 1, offset);
-        if (logits.empty()) break;
+        if (logits.empty())
+            break;
         offset++;
     }
 
     // 6. Build result (skip the prompt prefix)
-    auto * r = (canary_result *)calloc(1, sizeof(canary_result));
+    auto* r = (canary_result*)calloc(1, sizeof(canary_result));
     int n_emitted = (int)generated.size() - (int)prompt.size();
     r->n_tokens = n_emitted;
-    r->tokens = (canary_token_data *)calloc(n_emitted > 0 ? n_emitted : 1, sizeof(canary_token_data));
+    r->tokens = (canary_token_data*)calloc(n_emitted > 0 ? n_emitted : 1, sizeof(canary_token_data));
 
     // ----- Per-token timestamps via cross-attention DTW -----
     //
@@ -1315,15 +1348,12 @@ extern "C" struct canary_result * canary_transcribe_ex(
     const int64_t seg_end_cs = t_offset_cs + total_cs;
 
     const bool have_attn =
-        n_emitted > 0 &&
-        ctx->step_attn.size() == (size_t)n_emitted &&
-        ctx->attn_T_enc > 0 &&
-        ctx->attn_n_heads > 0;
+        n_emitted > 0 && ctx->step_attn.size() == (size_t)n_emitted && ctx->attn_T_enc > 0 && ctx->attn_n_heads > 0;
 
     std::vector<int> path;
     if (have_attn) {
-        const int T_e   = ctx->attn_T_enc;
-        const int n_h   = ctx->attn_n_heads;
+        const int T_e = ctx->attn_T_enc;
+        const int n_h = ctx->attn_n_heads;
 
         // Step 1 + temporal offset correction (same trick as cohere): use
         // step_attn[i-1] for token i because the attention is collected while
@@ -1331,12 +1361,13 @@ extern "C" struct canary_result * canary_transcribe_ex(
         std::vector<float> A((size_t)n_emitted * T_e, 0.0f);
         for (int i = 0; i < n_emitted; i++) {
             int src = (i > 0) ? i - 1 : 0;
-            const float * w = ctx->step_attn[src].data();
-            float * Ai = A.data() + (size_t)i * T_e;
+            const float* w = ctx->step_attn[src].data();
+            float* Ai = A.data() + (size_t)i * T_e;
             for (int h = 0; h < n_h; h++)
                 for (int t = 0; t < T_e; t++)
                     Ai[t] += w[h * T_e + t];
-            for (int t = 0; t < T_e; t++) Ai[t] /= n_h;
+            for (int t = 0; t < T_e; t++)
+                Ai[t] /= n_h;
         }
 
         // Step 2: column normalisation
@@ -1345,7 +1376,8 @@ extern "C" struct canary_result * canary_transcribe_ex(
             for (int i = 0; i < n_emitted; i++)
                 for (int t = 0; t < T_e; t++)
                     col_mean[t] += A[(size_t)i * T_e + t];
-            for (int t = 0; t < T_e; t++) col_mean[t] /= n_emitted;
+            for (int t = 0; t < T_e; t++)
+                col_mean[t] /= n_emitted;
             for (int i = 0; i < n_emitted; i++)
                 for (int t = 0; t < T_e; t++)
                     A[(size_t)i * T_e + t] -= col_mean[t];
@@ -1353,16 +1385,21 @@ extern "C" struct canary_result * canary_transcribe_ex(
 
         // Step 3: forward DP with prefix-max predecessors
         std::vector<float> D((size_t)n_emitted * T_e);
-        std::vector<int>   P((size_t)n_emitted * T_e);
-        for (int j = 0; j < T_e; j++) D[j] = A[j];
+        std::vector<int> P((size_t)n_emitted * T_e);
+        for (int j = 0; j < T_e; j++)
+            D[j] = A[j];
         for (int i = 1; i < n_emitted; i++) {
-            const float * Di_1 = D.data() + (size_t)(i-1) * T_e;
-            const float * Ai   = A.data() + (size_t)i     * T_e;
-            float       * Di   = D.data() + (size_t)i     * T_e;
-            int         * Pi   = P.data() + (size_t)i     * T_e;
-            float pm_val = Di_1[0]; int pm_idx = 0;
+            const float* Di_1 = D.data() + (size_t)(i - 1) * T_e;
+            const float* Ai = A.data() + (size_t)i * T_e;
+            float* Di = D.data() + (size_t)i * T_e;
+            int* Pi = P.data() + (size_t)i * T_e;
+            float pm_val = Di_1[0];
+            int pm_idx = 0;
             for (int j = 0; j < T_e; j++) {
-                if (Di_1[j] > pm_val) { pm_val = Di_1[j]; pm_idx = j; }
+                if (Di_1[j] > pm_val) {
+                    pm_val = Di_1[j];
+                    pm_idx = j;
+                }
                 Di[j] = Ai[j] + pm_val;
                 Pi[j] = pm_idx;
             }
@@ -1370,36 +1407,36 @@ extern "C" struct canary_result * canary_transcribe_ex(
 
         // Step 4: traceback
         path.resize(n_emitted);
-        const float * Dlast = D.data() + (size_t)(n_emitted-1) * T_e;
-        path[n_emitted-1] = (int)(std::max_element(Dlast, Dlast + T_e) - Dlast);
-        for (int i = n_emitted-2; i >= 0; i--)
-            path[i] = P[(size_t)(i+1) * T_e + path[i+1]];
+        const float* Dlast = D.data() + (size_t)(n_emitted - 1) * T_e;
+        path[n_emitted - 1] = (int)(std::max_element(Dlast, Dlast + T_e) - Dlast);
+        for (int i = n_emitted - 2; i >= 0; i--)
+            path[i] = P[(size_t)(i + 1) * T_e + path[i + 1]];
     }
 
     std::string text;
     for (int i = 0; i < n_emitted; i++) {
         int tid = generated[(int)prompt.size() + i];
-        const std::string & piece = (tid >= 0 && tid < (int)ctx->vocab.id_to_token.size())
-            ? ctx->vocab.id_to_token[tid] : std::string("");
+        const std::string& piece =
+            (tid >= 0 && tid < (int)ctx->vocab.id_to_token.size()) ? ctx->vocab.id_to_token[tid] : std::string("");
         std::string vis = spiece_to_text(piece);
 
-        canary_token_data & td = r->tokens[i];
-        td.id  = tid;
-        td.p   = (i < (int)emitted_p.size()) ? emitted_p[i] : -1.0f;
+        canary_token_data& td = r->tokens[i];
+        td.id = tid;
+        td.p = (i < (int)emitted_p.size()) ? emitted_p[i] : -1.0f;
         if (have_attn) {
             int64_t a = t_offset_cs + (int64_t)path[i] * frame_dur_cs;
-            int64_t b = (i+1 < n_emitted)
-                ? (t_offset_cs + (int64_t)path[i+1] * frame_dur_cs)
-                : seg_end_cs;
+            int64_t b = (i + 1 < n_emitted) ? (t_offset_cs + (int64_t)path[i + 1] * frame_dur_cs) : seg_end_cs;
             // Guarantee at least one frame of duration so adjacent tokens that
             // collapse to the same DTW frame still have a non-zero span.
-            if (b <= a) b = a + frame_dur_cs;
-            if (b > seg_end_cs) b = seg_end_cs;
+            if (b <= a)
+                b = a + frame_dur_cs;
+            if (b > seg_end_cs)
+                b = seg_end_cs;
             td.t0 = a;
             td.t1 = b;
         } else {
             // Fallback: linear interpolation
-            td.t0 = t_offset_cs + (int64_t)((double)i       / std::max(1, n_emitted) * total_cs);
+            td.t0 = t_offset_cs + (int64_t)((double)i / std::max(1, n_emitted) * total_cs);
             td.t1 = t_offset_cs + (int64_t)((double)(i + 1) / std::max(1, n_emitted) * total_cs);
         }
         size_t n = std::min(vis.size(), sizeof(td.text) - 1);
@@ -1407,7 +1444,8 @@ extern "C" struct canary_result * canary_transcribe_ex(
         td.text[n] = '\0';
         text += vis;
     }
-    if (!text.empty() && text[0] == ' ') text = text.substr(1);
+    if (!text.empty() && text[0] == ' ')
+        text = text.substr(1);
     r->text = strdup(text.c_str());
 
     // Disable attn collection so the next call starts fresh
@@ -1418,49 +1456,59 @@ extern "C" struct canary_result * canary_transcribe_ex(
         std::vector<canary_word_data> words;
         canary_word_data cur = {};
         bool have_cur = false;
-        auto is_punct = [](const char * s) {
-            if (!s || !*s) return false;
-            for (const char * p = s; *p; p++) {
+        auto is_punct = [](const char* s) {
+            if (!s || !*s)
+                return false;
+            for (const char* p = s; *p; p++) {
                 unsigned char c = (unsigned char)*p;
-                if (!(c == '.' || c == ',' || c == '?' || c == '!' || c == ';' || c == ':' ||
-                      c == '\'' || c == '"' || c == '(' || c == ')' || c == '-')) return false;
+                if (!(c == '.' || c == ',' || c == '?' || c == '!' || c == ';' || c == ':' || c == '\'' || c == '"' ||
+                      c == '(' || c == ')' || c == '-'))
+                    return false;
             }
             return true;
         };
         for (int i = 0; i < r->n_tokens; i++) {
-            const auto & td = r->tokens[i];
-            if (!td.text[0]) continue;
+            const auto& td = r->tokens[i];
+            if (!td.text[0])
+                continue;
             const bool is_word_start = (td.text[0] == ' ');
             const bool is_p = is_punct(td.text);
-            if (is_word_start && !is_p && have_cur) { words.push_back(cur); cur = {}; have_cur = false; }
-            if (!have_cur) { cur.t0 = td.t0; have_cur = true; }
+            if (is_word_start && !is_p && have_cur) {
+                words.push_back(cur);
+                cur = {};
+                have_cur = false;
+            }
+            if (!have_cur) {
+                cur.t0 = td.t0;
+                have_cur = true;
+            }
             cur.t1 = td.t1;
-            const char * src = td.text + (is_word_start ? 1 : 0);
+            const char* src = td.text + (is_word_start ? 1 : 0);
             size_t cl = strlen(cur.text);
             size_t cap = sizeof(cur.text) - cl - 1;
             size_t add = strlen(src);
-            if (add > cap) add = cap;
+            if (add > cap)
+                add = cap;
             memcpy(cur.text + cl, src, add);
             cur.text[cl + add] = '\0';
         }
-        if (have_cur) words.push_back(cur);
+        if (have_cur)
+            words.push_back(cur);
         r->n_words = (int)words.size();
-        r->words = (canary_word_data *)calloc(r->n_words > 0 ? r->n_words : 1, sizeof(canary_word_data));
-        for (int i = 0; i < r->n_words; i++) r->words[i] = words[i];
+        r->words = (canary_word_data*)calloc(r->n_words > 0 ? r->n_words : 1, sizeof(canary_word_data));
+        for (int i = 0; i < r->n_words; i++)
+            r->words[i] = words[i];
     }
 
     return r;
 }
 
-extern "C" char * canary_transcribe(struct canary_context * ctx,
-                                    const float * samples, int n_samples,
-                                    const char * source_lang,
-                                    const char * target_lang,
-                                    bool          punctuation) {
-    canary_result * r = canary_transcribe_ex(ctx, samples, n_samples,
-                                             source_lang, target_lang, punctuation, 0);
-    if (!r) return nullptr;
-    char * out = strdup(r->text ? r->text : "");
+extern "C" char* canary_transcribe(struct canary_context* ctx, const float* samples, int n_samples,
+                                   const char* source_lang, const char* target_lang, bool punctuation) {
+    canary_result* r = canary_transcribe_ex(ctx, samples, n_samples, source_lang, target_lang, punctuation, 0);
+    if (!r)
+        return nullptr;
+    char* out = strdup(r->text ? r->text : "");
     canary_result_free(r);
     return out;
 }

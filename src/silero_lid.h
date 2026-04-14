@@ -15,20 +15,19 @@ extern "C" {
 
 struct silero_lid_context;
 
-struct silero_lid_context * silero_lid_init(const char * gguf_path, int n_threads);
-void silero_lid_free(struct silero_lid_context * ctx);
+struct silero_lid_context* silero_lid_init(const char* gguf_path, int n_threads);
+void silero_lid_free(struct silero_lid_context* ctx);
 
 // Detect the language of raw 16 kHz mono PCM audio.
 // Returns the ISO-style language string (e.g. "en, English") on success,
 // or NULL on failure. Caller does NOT free the returned string (it points
 // into the context's language table).
 // `out_confidence` receives the log-probability of the top language.
-const char * silero_lid_detect(struct silero_lid_context * ctx,
-                               const float * samples, int n_samples,
-                               float * out_confidence);
+const char* silero_lid_detect(struct silero_lid_context* ctx, const float* samples, int n_samples,
+                              float* out_confidence);
 
 // Number of supported languages.
-int silero_lid_n_langs(struct silero_lid_context * ctx);
+int silero_lid_n_langs(struct silero_lid_context* ctx);
 
 #ifdef __cplusplus
 }

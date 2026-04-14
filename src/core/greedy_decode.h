@@ -66,25 +66,28 @@
 namespace core_greedy_decode {
 
 struct Config {
-    int   max_new_tokens = 512;    // hard cap on generated tokens
-    int   eos_id         = 2;      // stop as soon as this token is produced
-    int   vocab_size     = 0;      // required — use the value from prefill
+    int max_new_tokens = 512; // hard cap on generated tokens
+    int eos_id = 2;           // stop as soon as this token is produced
+    int vocab_size = 0;       // required — use the value from prefill
 
     // Sampling knobs. temperature <= 0 gives pure argmax (the historical
     // greedy path). temperature > 0 draws from softmax(logits / temperature);
     // callers should pass whisper_params.temperature through. seed controls
     // the RNG; pass 0 for "non-deterministic" (time-based) or any non-zero
     // value for reproducibility.
-    float temperature    = 0.0f;
-    uint64_t seed        = 0;
+    float temperature = 0.0f;
+    uint64_t seed = 0;
 };
 
 // Greedy argmax over a vocab-sized float logit vector.
-static inline int argmax(const float * logits, int vocab) {
+static inline int argmax(const float* logits, int vocab) {
     int best = 0;
     float mx = logits[0];
     for (int k = 1; k < vocab; k++) {
-        if (logits[k] > mx) { mx = logits[k]; best = k; }
+        if (logits[k] > mx) {
+            mx = logits[k];
+            best = k;
+        }
     }
     return best;
 }
@@ -93,9 +96,8 @@ static inline int argmax(const float * logits, int vocab) {
 // Uses the same numerically-stable trick as sample_temp (subtract
 // the argmax logit before exp) but without the temperature division.
 // Caller passes `best` == the argmax to avoid computing it twice.
-static inline float softmax_of(const float * logits, int vocab,
-                               int best, float best_lp) {
-    (void)best;  // computed by caller; keeps the interface symmetric
+static inline float softmax_of(const float* logits, int vocab, int best, float best_lp) {
+    (void)best; // computed by caller; keeps the interface symmetric
     double sum = 0.0;
     for (int k = 0; k < vocab; k++) {
         sum += std::exp((double)(logits[k] - best_lp));
@@ -106,13 +108,13 @@ static inline float softmax_of(const float * logits, int vocab,
 // Temperature sampling over a vocab-sized float logit vector. Computes the
 // numerically stable softmax of logits/temperature and draws one token via
 // std::discrete_distribution. Caller owns the rng state.
-static inline int sample_temp(const float * logits, int vocab,
-                              float temperature, std::mt19937_64 & rng) {
+static inline int sample_temp(const float* logits, int vocab, float temperature, std::mt19937_64& rng) {
     const float inv_t = 1.0f / temperature;
     float mx = logits[0] * inv_t;
     for (int k = 1; k < vocab; k++) {
         const float s = logits[k] * inv_t;
-        if (s > mx) mx = s;
+        if (s > mx)
+            mx = s;
     }
     std::vector<double> probs((size_t)vocab);
     double sum = 0.0;
@@ -121,7 +123,8 @@ static inline int sample_temp(const float * logits, int vocab,
         probs[(size_t)k] = e;
         sum += e;
     }
-    if (sum <= 0.0) return argmax(logits, vocab);
+    if (sum <= 0.0)
+        return argmax(logits, vocab);
     // Inverse-CDF sampling — faster than discrete_distribution when vocab
     // is large because we avoid an extra normalize step inside the STL impl.
     std::uniform_real_distribution<double> unif(0.0, sum);
@@ -129,7 +132,8 @@ static inline int sample_temp(const float * logits, int vocab,
     double acc = 0.0;
     for (int k = 0; k < vocab; k++) {
         acc += probs[(size_t)k];
-        if (r <= acc) return k;
+        if (r <= acc)
+            return k;
     }
     return vocab - 1;
 }
@@ -137,15 +141,15 @@ static inline int sample_temp(const float * logits, int vocab,
 // Default "no-op" pre-forward hook. The compiler inlines and prunes
 // the body at call sites that don't need a hook.
 struct NoHook {
-    inline bool operator()(int /*step*/, float * /*embed*/) const { return true; }
+    inline bool operator()(int /*step*/, float* /*embed*/) const { return true; }
 };
 
 // Optional per-token confidence output, aligned with the returned token
 // vector. Callers that don't need confidences can pass nullptr and the
 // helper skips the extra softmax pass entirely.
 struct Result {
-    std::vector<int32_t> tokens;   // generated token ids (incl. first, incl. eos if hit)
-    std::vector<float>   probs;    // softmax prob per token in [0,1]; empty when skipped
+    std::vector<int32_t> tokens; // generated token ids (incl. first, incl. eos if hit)
+    std::vector<float> probs;    // softmax prob per token in [0,1]; empty when skipped
 };
 
 // Run the greedy decode loop.
@@ -169,36 +173,30 @@ struct Result {
 // the convention of the existing backends). The caller is responsible
 // for filtering out non-printable / control tokens before detokenising.
 template <typename Ctx, typename EmbedFn, typename ForwardFn, typename PreHook>
-std::vector<int32_t> run(
-    Ctx        * ctx,
-    int32_t      first_token,
-    int          initial_n_past,
-    EmbedFn      embed_fn,
-    ForwardFn    forward_fn,
-    PreHook      pre_hook,
-    const Config & cfg)
-{
+std::vector<int32_t> run(Ctx* ctx, int32_t first_token, int initial_n_past, EmbedFn embed_fn, ForwardFn forward_fn,
+                         PreHook pre_hook, const Config& cfg) {
     std::vector<int32_t> gen;
     gen.reserve((size_t)cfg.max_new_tokens);
     gen.push_back(first_token);
 
     // Early-exit when the prefill already predicted EOS.
-    if (first_token == cfg.eos_id) return gen;
+    if (first_token == cfg.eos_id)
+        return gen;
 
     // RNG state is only touched on the sampling path. Seeding is cheap
     // compared to a single vocab-sized softmax, so we always seed even
     // when we won't sample.
-    std::mt19937_64 rng(cfg.seed != 0 ? cfg.seed
-                        : (uint64_t)std::random_device{}());
+    std::mt19937_64 rng(cfg.seed != 0 ? cfg.seed : (uint64_t)std::random_device{}());
     const bool sampling = cfg.temperature > 0.0f;
 
     int n_past = initial_n_past;
     while ((int)gen.size() < cfg.max_new_tokens && gen.back() != cfg.eos_id) {
-        const int step = (int)gen.size() - 1;     // 0 = first decoded step
+        const int step = (int)gen.size() - 1; // 0 = first decoded step
         int32_t last = gen.back();
 
-        float * emb = embed_fn(ctx, &last, 1);
-        if (!emb) break;
+        float* emb = embed_fn(ctx, &last, 1);
+        if (!emb)
+            break;
 
         // Let the caller mutate the embedding (e.g. add adapter frame)
         // and/or terminate the loop early (e.g. audio exhausted).
@@ -207,14 +205,13 @@ std::vector<int32_t> run(
             break;
         }
 
-        float * lg = forward_fn(ctx, emb, 1, n_past, nullptr, nullptr);
+        float* lg = forward_fn(ctx, emb, 1, n_past, nullptr, nullptr);
         std::free(emb);
-        if (!lg) break;
+        if (!lg)
+            break;
         n_past++;
 
-        const int nx = sampling
-            ? sample_temp(lg, cfg.vocab_size, cfg.temperature, rng)
-            : argmax(lg, cfg.vocab_size);
+        const int nx = sampling ? sample_temp(lg, cfg.vocab_size, cfg.temperature, rng) : argmax(lg, cfg.vocab_size);
         std::free(lg);
         gen.push_back(nx);
     }
@@ -224,16 +221,9 @@ std::vector<int32_t> run(
 
 // Convenience overload: no pre-forward hook (the common case).
 template <typename Ctx, typename EmbedFn, typename ForwardFn>
-inline std::vector<int32_t> run(
-    Ctx        * ctx,
-    int32_t      first_token,
-    int          initial_n_past,
-    EmbedFn      embed_fn,
-    ForwardFn    forward_fn,
-    const Config & cfg)
-{
-    return run(ctx, first_token, initial_n_past,
-               embed_fn, forward_fn, NoHook{}, cfg);
+inline std::vector<int32_t> run(Ctx* ctx, int32_t first_token, int initial_n_past, EmbedFn embed_fn,
+                                ForwardFn forward_fn, const Config& cfg) {
+    return run(ctx, first_token, initial_n_past, embed_fn, forward_fn, NoHook{}, cfg);
 }
 
 // --- run_with_probs: same loop as run() but also records the softmax
@@ -243,37 +233,31 @@ inline std::vector<int32_t> run(
 // under the prefill logits — the caller already computed it when
 // picking first_token so we don't redo the softmax here.
 template <typename Ctx, typename EmbedFn, typename ForwardFn>
-inline Result run_with_probs(
-    Ctx        * ctx,
-    int32_t      first_token,
-    float        first_prob,
-    int          initial_n_past,
-    EmbedFn      embed_fn,
-    ForwardFn    forward_fn,
-    const Config & cfg)
-{
+inline Result run_with_probs(Ctx* ctx, int32_t first_token, float first_prob, int initial_n_past, EmbedFn embed_fn,
+                             ForwardFn forward_fn, const Config& cfg) {
     Result r;
     r.tokens.reserve((size_t)cfg.max_new_tokens);
     r.probs.reserve((size_t)cfg.max_new_tokens);
     r.tokens.push_back(first_token);
     r.probs.push_back(first_prob);
 
-    if (first_token == cfg.eos_id) return r;
+    if (first_token == cfg.eos_id)
+        return r;
 
-    std::mt19937_64 rng(cfg.seed != 0 ? cfg.seed
-                        : (uint64_t)std::random_device{}());
+    std::mt19937_64 rng(cfg.seed != 0 ? cfg.seed : (uint64_t)std::random_device{}());
     const bool sampling = cfg.temperature > 0.0f;
 
     int n_past = initial_n_past;
-    while ((int)r.tokens.size() < cfg.max_new_tokens &&
-           r.tokens.back() != cfg.eos_id) {
+    while ((int)r.tokens.size() < cfg.max_new_tokens && r.tokens.back() != cfg.eos_id) {
         int32_t last = r.tokens.back();
-        float * emb = embed_fn(ctx, &last, 1);
-        if (!emb) break;
+        float* emb = embed_fn(ctx, &last, 1);
+        if (!emb)
+            break;
 
-        float * lg = forward_fn(ctx, emb, 1, n_past, nullptr, nullptr);
+        float* lg = forward_fn(ctx, emb, 1, n_past, nullptr, nullptr);
         std::free(emb);
-        if (!lg) break;
+        if (!lg)
+            break;
         n_past++;
 
         // Pick next token + compute its softmax probability.

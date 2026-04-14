@@ -35,9 +35,5 @@
 // The aligner model is loaded and freed inside each call. For batch use
 // we may want to cache the context later, but for typical "one file at
 // a time" CLI usage the load cost is negligible compared to LLM decode.
-std::vector<crispasr_word> crispasr_ctc_align(
-    const std::string & aligner_model,
-    const std::string & transcript,
-    const float * samples, int n_samples,
-    int64_t t_offset_cs,
-    int n_threads);
+std::vector<crispasr_word> crispasr_ctc_align(const std::string& aligner_model, const std::string& transcript,
+                                              const float* samples, int n_samples, int64_t t_offset_cs, int n_threads);

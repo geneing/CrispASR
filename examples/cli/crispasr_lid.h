@@ -34,16 +34,14 @@
 struct whisper_params; // fwd
 
 struct crispasr_lid_result {
-    std::string lang_code;   // ISO 639-1 (e.g. "en", "de"). Empty on failure.
-    float       confidence = -1.0f; // [0, 1], -1 if unknown
-    std::string source;      // "whisper" | "silero" | ""
+    std::string lang_code;    // ISO 639-1 (e.g. "en", "de"). Empty on failure.
+    float confidence = -1.0f; // [0, 1], -1 if unknown
+    std::string source;       // "whisper" | "silero" | ""
 };
 
 // Run language detection on a 16 kHz mono PCM buffer. `params.lid_backend`
 // picks the implementation; `params.lid_model` optionally overrides the
 // model path (empty = sensible default). Returns true on success, false
 // on any failure (reason printed to stderr unless params.no_prints).
-bool crispasr_detect_language(
-    const float * samples, int n_samples,
-    const whisper_params & params,
-    crispasr_lid_result & out);
+bool crispasr_detect_language(const float* samples, int n_samples, const whisper_params& params,
+                              crispasr_lid_result& out);

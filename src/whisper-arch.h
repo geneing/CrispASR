@@ -33,13 +33,9 @@ enum asr_tensor {
     ASR_TENSOR_ATTN_OUT_BIAS,
 };
 
-enum asr_system {
-    ASR_SYSTEM_ENCODER,
-    ASR_SYSTEM_DECODER,
-    ASR_SYSTEM_CROSS
-};
+enum asr_system { ASR_SYSTEM_ENCODER, ASR_SYSTEM_DECODER, ASR_SYSTEM_CROSS };
 
-static const std::map<asr_system, std::map<asr_tensor, const char *>> ASR_TENSOR_NAMES = {
+static const std::map<asr_system, std::map<asr_tensor, const char*>> ASR_TENSOR_NAMES = {
     {
         ASR_SYSTEM_ENCODER,
         {
@@ -109,35 +105,35 @@ static const std::map<asr_system, std::map<asr_tensor, const char *>> ASR_TENSOR
 };
 
 static const std::map<asr_tensor, ggml_op> ASR_TENSOR_INFO = {
-    {ASR_TENSOR_ENC_POS_EMBD,          GGML_OP_ADD},
-    {ASR_TENSOR_DEC_POS_EMBD,          GGML_OP_GET_ROWS},
+    {ASR_TENSOR_ENC_POS_EMBD, GGML_OP_ADD},
+    {ASR_TENSOR_DEC_POS_EMBD, GGML_OP_GET_ROWS},
     // Note: ASR_TENSOR_DEC_TOKEN_EMBD_WEIGHT is also used by GGML_OP_MAT_MUL. Need to figure out a way how to handle
     // weight tensors that are used by multiple different operators when extra_buffer_type implementations accelerate
     // more than just GGML_OP_MUL_MAT.
     {ASR_TENSOR_DEC_TOKEN_EMBD_WEIGHT, GGML_OP_GET_ROWS},
-    {ASR_TENSOR_LN_WEIGHT,             GGML_OP_MUL},
-    {ASR_TENSOR_LN_BIAS,               GGML_OP_ADD},
-    {ASR_TENSOR_CONV1_WEIGHT,          GGML_OP_IM2COL},
-    {ASR_TENSOR_CONV1_BIAS,            GGML_OP_ADD},
-    {ASR_TENSOR_CONV2_WEIGHT,          GGML_OP_IM2COL},
-    {ASR_TENSOR_CONV2_BIAS,            GGML_OP_ADD},
-    {ASR_TENSOR_LN_POST_WEIGHT,        GGML_OP_MUL},
-    {ASR_TENSOR_LN_POST_BIAS,          GGML_OP_ADD},
-    {ASR_TENSOR_MLP_LN_WEIGHT,         GGML_OP_MUL},
-    {ASR_TENSOR_MLP_LN_BIAS,           GGML_OP_ADD},
-    {ASR_TENSOR_MLP_0_WEIGHT,          GGML_OP_MUL_MAT},
-    {ASR_TENSOR_MLP_0_BIAS,            GGML_OP_ADD},
-    {ASR_TENSOR_MLP_2_WEIGHT,          GGML_OP_MUL_MAT},
-    {ASR_TENSOR_MLP_2_BIAS,            GGML_OP_ADD},
-    {ASR_TENSOR_ATTN_LN_WEIGHT,        GGML_OP_MUL},
-    {ASR_TENSOR_ATTN_LN_BIAS,          GGML_OP_ADD},
-    {ASR_TENSOR_ATTN_QUERY_WEIGHT,     GGML_OP_MUL_MAT},
-    {ASR_TENSOR_ATTN_QUERY_BIAS,       GGML_OP_ADD},
-    {ASR_TENSOR_ATTN_KEY_WEIGHT,       GGML_OP_MUL_MAT},
-    {ASR_TENSOR_ATTN_VALUE_WEIGHT,     GGML_OP_MUL_MAT},
-    {ASR_TENSOR_ATTN_VALUE_BIAS,       GGML_OP_ADD},
-    {ASR_TENSOR_ATTN_OUT_WEIGHT,       GGML_OP_MUL_MAT},
-    {ASR_TENSOR_ATTN_OUT_BIAS,         GGML_OP_ADD},
+    {ASR_TENSOR_LN_WEIGHT, GGML_OP_MUL},
+    {ASR_TENSOR_LN_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_CONV1_WEIGHT, GGML_OP_IM2COL},
+    {ASR_TENSOR_CONV1_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_CONV2_WEIGHT, GGML_OP_IM2COL},
+    {ASR_TENSOR_CONV2_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_LN_POST_WEIGHT, GGML_OP_MUL},
+    {ASR_TENSOR_LN_POST_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_MLP_LN_WEIGHT, GGML_OP_MUL},
+    {ASR_TENSOR_MLP_LN_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_MLP_0_WEIGHT, GGML_OP_MUL_MAT},
+    {ASR_TENSOR_MLP_0_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_MLP_2_WEIGHT, GGML_OP_MUL_MAT},
+    {ASR_TENSOR_MLP_2_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_ATTN_LN_WEIGHT, GGML_OP_MUL},
+    {ASR_TENSOR_ATTN_LN_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_ATTN_QUERY_WEIGHT, GGML_OP_MUL_MAT},
+    {ASR_TENSOR_ATTN_QUERY_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_ATTN_KEY_WEIGHT, GGML_OP_MUL_MAT},
+    {ASR_TENSOR_ATTN_VALUE_WEIGHT, GGML_OP_MUL_MAT},
+    {ASR_TENSOR_ATTN_VALUE_BIAS, GGML_OP_ADD},
+    {ASR_TENSOR_ATTN_OUT_WEIGHT, GGML_OP_MUL_MAT},
+    {ASR_TENSOR_ATTN_OUT_BIAS, GGML_OP_ADD},
 };
 
 enum vad_tensor {
@@ -159,39 +155,30 @@ enum vad_tensor {
 };
 
 static const std::map<vad_tensor, ggml_op> VAD_TENSOR_OPS = {
-    {VAD_TENSOR_STFT_BASIS,          GGML_OP_IM2COL},
-    {VAD_TENSOR_ENC_0_WEIGHT,        GGML_OP_IM2COL},
-    {VAD_TENSOR_ENC_0_BIAS,          GGML_OP_ADD},
-    {VAD_TENSOR_ENC_1_WEIGHT,        GGML_OP_IM2COL},
-    {VAD_TENSOR_ENC_1_BIAS,          GGML_OP_ADD},
-    {VAD_TENSOR_ENC_2_WEIGHT,        GGML_OP_IM2COL},
-    {VAD_TENSOR_ENC_2_BIAS,          GGML_OP_ADD},
-    {VAD_TENSOR_ENC_3_WEIGHT,        GGML_OP_IM2COL},
-    {VAD_TENSOR_ENC_3_BIAS,          GGML_OP_ADD},
+    {VAD_TENSOR_STFT_BASIS, GGML_OP_IM2COL},        {VAD_TENSOR_ENC_0_WEIGHT, GGML_OP_IM2COL},
+    {VAD_TENSOR_ENC_0_BIAS, GGML_OP_ADD},           {VAD_TENSOR_ENC_1_WEIGHT, GGML_OP_IM2COL},
+    {VAD_TENSOR_ENC_1_BIAS, GGML_OP_ADD},           {VAD_TENSOR_ENC_2_WEIGHT, GGML_OP_IM2COL},
+    {VAD_TENSOR_ENC_2_BIAS, GGML_OP_ADD},           {VAD_TENSOR_ENC_3_WEIGHT, GGML_OP_IM2COL},
+    {VAD_TENSOR_ENC_3_BIAS, GGML_OP_ADD},
 
-    {VAD_TENSOR_LSTM_WEIGHT_IH,      GGML_OP_MUL_MAT},
-    {VAD_TENSOR_LSTM_WEIGHT_HH,      GGML_OP_MUL_MAT},
-    {VAD_TENSOR_LSTM_BIAS_IH,        GGML_OP_ADD},
-    {VAD_TENSOR_LSTM_BIAS_HH,        GGML_OP_ADD},
+    {VAD_TENSOR_LSTM_WEIGHT_IH, GGML_OP_MUL_MAT},   {VAD_TENSOR_LSTM_WEIGHT_HH, GGML_OP_MUL_MAT},
+    {VAD_TENSOR_LSTM_BIAS_IH, GGML_OP_ADD},         {VAD_TENSOR_LSTM_BIAS_HH, GGML_OP_ADD},
 
-    {VAD_TENSOR_FINAL_CONV_WEIGHT,   GGML_OP_IM2COL},
-    {VAD_TENSOR_FINAL_CONV_BIAS,     GGML_OP_ADD}
-};
+    {VAD_TENSOR_FINAL_CONV_WEIGHT, GGML_OP_IM2COL}, {VAD_TENSOR_FINAL_CONV_BIAS, GGML_OP_ADD}};
 
-static const std::map<vad_tensor, const char *> VAD_TENSOR_NAMES = {
-    {VAD_TENSOR_STFT_BASIS,          "_model.stft.forward_basis_buffer"},
-    {VAD_TENSOR_ENC_0_WEIGHT,        "_model.encoder.0.reparam_conv.weight"},
-    {VAD_TENSOR_ENC_0_BIAS,          "_model.encoder.0.reparam_conv.bias"},
-    {VAD_TENSOR_ENC_1_WEIGHT,        "_model.encoder.1.reparam_conv.weight"},
-    {VAD_TENSOR_ENC_1_BIAS,          "_model.encoder.1.reparam_conv.bias"},
-    {VAD_TENSOR_ENC_2_WEIGHT,        "_model.encoder.2.reparam_conv.weight"},
-    {VAD_TENSOR_ENC_2_BIAS,          "_model.encoder.2.reparam_conv.bias"},
-    {VAD_TENSOR_ENC_3_WEIGHT,        "_model.encoder.3.reparam_conv.weight"},
-    {VAD_TENSOR_ENC_3_BIAS,          "_model.encoder.3.reparam_conv.bias"},
-    {VAD_TENSOR_LSTM_WEIGHT_IH,      "_model.decoder.rnn.weight_ih"},
-    {VAD_TENSOR_LSTM_WEIGHT_HH,      "_model.decoder.rnn.weight_hh"},
-    {VAD_TENSOR_LSTM_BIAS_IH,        "_model.decoder.rnn.bias_ih"},
-    {VAD_TENSOR_LSTM_BIAS_HH,        "_model.decoder.rnn.bias_hh"},
-    {VAD_TENSOR_FINAL_CONV_WEIGHT,   "_model.decoder.decoder.2.weight"},
-    {VAD_TENSOR_FINAL_CONV_BIAS,     "_model.decoder.decoder.2.bias"}
-};
+static const std::map<vad_tensor, const char*> VAD_TENSOR_NAMES = {
+    {VAD_TENSOR_STFT_BASIS, "_model.stft.forward_basis_buffer"},
+    {VAD_TENSOR_ENC_0_WEIGHT, "_model.encoder.0.reparam_conv.weight"},
+    {VAD_TENSOR_ENC_0_BIAS, "_model.encoder.0.reparam_conv.bias"},
+    {VAD_TENSOR_ENC_1_WEIGHT, "_model.encoder.1.reparam_conv.weight"},
+    {VAD_TENSOR_ENC_1_BIAS, "_model.encoder.1.reparam_conv.bias"},
+    {VAD_TENSOR_ENC_2_WEIGHT, "_model.encoder.2.reparam_conv.weight"},
+    {VAD_TENSOR_ENC_2_BIAS, "_model.encoder.2.reparam_conv.bias"},
+    {VAD_TENSOR_ENC_3_WEIGHT, "_model.encoder.3.reparam_conv.weight"},
+    {VAD_TENSOR_ENC_3_BIAS, "_model.encoder.3.reparam_conv.bias"},
+    {VAD_TENSOR_LSTM_WEIGHT_IH, "_model.decoder.rnn.weight_ih"},
+    {VAD_TENSOR_LSTM_WEIGHT_HH, "_model.decoder.rnn.weight_hh"},
+    {VAD_TENSOR_LSTM_BIAS_IH, "_model.decoder.rnn.bias_ih"},
+    {VAD_TENSOR_LSTM_BIAS_HH, "_model.decoder.rnn.bias_hh"},
+    {VAD_TENSOR_FINAL_CONV_WEIGHT, "_model.decoder.decoder.2.weight"},
+    {VAD_TENSOR_FINAL_CONV_BIAS, "_model.decoder.decoder.2.bias"}};

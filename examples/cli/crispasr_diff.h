@@ -38,20 +38,18 @@ namespace crispasr_diff {
 // intersection of the two tensors (truncated to min element count if
 // shapes differ — the caller usually validates shapes separately).
 struct Report {
-    bool   found            = false;   // the name existed in the archive
-    size_t n_elem           = 0;       // number of elements compared
-    float  max_abs          = 0.0f;    // max |cpp[i] - ref[i]|
-    float  mean_abs         = 0.0f;    // mean |cpp[i] - ref[i]|
-    float  rms              = 0.0f;    // sqrt(mean((cpp-ref)^2))
-    float  cos_min          = 1.0f;    // worst per-row cosine similarity (-1 .. 1)
-    float  cos_mean         = 1.0f;    // average per-row cosine similarity
-    int    top1_match       = 0;       // logits only: tokens matching ref argmax
-    int    top1_total       = 0;       // logits only: total tokens compared
-    std::vector<int64_t> shape;        // shape of the ref tensor
+    bool found = false;         // the name existed in the archive
+    size_t n_elem = 0;          // number of elements compared
+    float max_abs = 0.0f;       // max |cpp[i] - ref[i]|
+    float mean_abs = 0.0f;      // mean |cpp[i] - ref[i]|
+    float rms = 0.0f;           // sqrt(mean((cpp-ref)^2))
+    float cos_min = 1.0f;       // worst per-row cosine similarity (-1 .. 1)
+    float cos_mean = 1.0f;      // average per-row cosine similarity
+    int top1_match = 0;         // logits only: tokens matching ref argmax
+    int top1_total = 0;         // logits only: total tokens compared
+    std::vector<int64_t> shape; // shape of the ref tensor
 
-    bool is_pass(float cos_threshold = 0.999f) const {
-        return found && cos_min >= cos_threshold;
-    }
+    bool is_pass(float cos_threshold = 0.999f) const { return found && cos_min >= cos_threshold; }
 };
 
 // Ground-truth archive loaded from a crispasr reference GGUF.
@@ -60,28 +58,28 @@ struct Report {
 // Destructor releases them. Copy is disabled; move is allowed.
 class Ref {
 public:
-    Ref()  = default;
+    Ref() = default;
     ~Ref();
 
-    Ref(const Ref&)            = delete;
+    Ref(const Ref&) = delete;
     Ref& operator=(const Ref&) = delete;
-    Ref(Ref&&)                 = default;
-    Ref& operator=(Ref&&)      = default;
+    Ref(Ref&&) = default;
+    Ref& operator=(Ref&&) = default;
 
     // Load the GGUF archive. Returns false with stderr on failure.
-    bool load(const std::string & path);
+    bool load(const std::string& path);
 
     // Has a tensor with this name been loaded?
-    bool has(const std::string & name) const;
+    bool has(const std::string& name) const;
 
     // Retrieve the raw reference data as float. Returns a pointer owned
     // by the Ref object (valid until it's destructed) and the element
     // count. Returns {nullptr, 0} if the name is missing.
-    std::pair<const float *, size_t> get_f32(const std::string & name) const;
+    std::pair<const float*, size_t> get_f32(const std::string& name) const;
 
     // Shape of a reference tensor as GGUF stored it. Empty vector if
     // the name is missing.
-    std::vector<int64_t> shape(const std::string & name) const;
+    std::vector<int64_t> shape(const std::string& name) const;
 
     // Compare a raw float buffer against the named reference tensor.
     // The caller is responsible for providing data in the same logical
@@ -94,22 +92,17 @@ public:
     // similarity. When cmp_type == L2, rows aren't used and cos_* are
     // left at their defaults.
     enum CompareMode { COS_LAST_DIM, L2_ONLY };
-    Report compare(const std::string & name,
-                   const float       * data,
-                   size_t              n_elem,
-                   CompareMode         mode = COS_LAST_DIM) const;
+    Report compare(const std::string& name, const float* data, size_t n_elem, CompareMode mode = COS_LAST_DIM) const;
 
     // Convenience: compare the argmax-over-last-dim of `data` against
     // the argmax-over-last-dim of the named reference. Used for LLM
     // logits ("does the C++ path produce the same greedy token as the
     // PyTorch reference?"). Populates report.top1_match / top1_total.
-    Report compare_argmax(const std::string & name,
-                          const float       * data,
-                          size_t              n_elem) const;
+    Report compare_argmax(const std::string& name, const float* data, size_t n_elem) const;
 
     // Metadata keys from the Python side (backend name, model path,
     // audio path, generated text). Empty string if missing.
-    std::string meta(const std::string & key) const;
+    std::string meta(const std::string& key) const;
 
     // List the tensor names in the archive.
     std::vector<std::string> tensor_names() const;
@@ -120,7 +113,7 @@ public:
     struct Impl;
 
 private:
-    Impl * impl_ = nullptr;
+    Impl* impl_ = nullptr;
 };
 
 } // namespace crispasr_diff

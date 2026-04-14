@@ -28,40 +28,32 @@ struct voxtral4b_context;
 
 struct voxtral4b_context_params {
     int n_threads;
-    int verbosity;     // 0=silent 1=normal 2=verbose
+    int verbosity; // 0=silent 1=normal 2=verbose
 };
 
 struct voxtral4b_context_params voxtral4b_context_default_params(void);
 
-struct voxtral4b_context * voxtral4b_init_from_file(const char * path_model,
-                                                    struct voxtral4b_context_params params);
+struct voxtral4b_context* voxtral4b_init_from_file(const char* path_model, struct voxtral4b_context_params params);
 
-void voxtral4b_free(struct voxtral4b_context * ctx);
+void voxtral4b_free(struct voxtral4b_context* ctx);
 
-const uint8_t * voxtral4b_token_text(struct voxtral4b_context * ctx, int id, int * out_len);
+const uint8_t* voxtral4b_token_text(struct voxtral4b_context* ctx, int id, int* out_len);
 
-int32_t * voxtral4b_tokenize(struct voxtral4b_context * ctx,
-                             const char * text, int * out_n_tokens);
+int32_t* voxtral4b_tokenize(struct voxtral4b_context* ctx, const char* text, int* out_n_tokens);
 
-float * voxtral4b_compute_mel(struct voxtral4b_context * ctx,
-                              const float * samples, int n_samples,
-                              int * out_n_mels, int * out_T_mel);
+float* voxtral4b_compute_mel(struct voxtral4b_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                             int* out_T_mel);
 
-float * voxtral4b_run_encoder(struct voxtral4b_context * ctx,
-                              const float * mel_features,
-                              int n_mels, int T_mel,
-                              int * out_N, int * out_dim);
+float* voxtral4b_run_encoder(struct voxtral4b_context* ctx, const float* mel_features, int n_mels, int T_mel,
+                             int* out_N, int* out_dim);
 
-float * voxtral4b_embed_tokens(struct voxtral4b_context * ctx,
-                               const int32_t * input_ids, int n_tokens);
+float* voxtral4b_embed_tokens(struct voxtral4b_context* ctx, const int32_t* input_ids, int n_tokens);
 
-bool voxtral4b_kv_init(struct voxtral4b_context * ctx, int max_ctx);
-void voxtral4b_kv_reset(struct voxtral4b_context * ctx);
+bool voxtral4b_kv_init(struct voxtral4b_context* ctx, int max_ctx);
+void voxtral4b_kv_reset(struct voxtral4b_context* ctx);
 
-float * voxtral4b_run_llm_kv(struct voxtral4b_context * ctx,
-                             const float * inputs_embeds,
-                             int n_tokens, int n_past,
-                             int * out_n_tokens, int * out_vocab_size);
+float* voxtral4b_run_llm_kv(struct voxtral4b_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
+                            int* out_n_tokens, int* out_vocab_size);
 
 #ifdef __cplusplus
 }

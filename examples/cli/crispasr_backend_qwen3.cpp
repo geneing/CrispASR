@@ -31,41 +31,73 @@ namespace {
 // raw bytes 0..255. This is the standard GPT-2 tokenizer byte decoder and
 // is shared by several BPE-based models (qwen3, parakeet, canary, whisper).
 // It will move to src/core/bpe.{h,cpp} as part of the DRY refactor.
-std::vector<int> & byte_decoder() {
+std::vector<int>& byte_decoder() {
     static std::vector<int> dec(0x200, -1);
     static bool initialized = false;
-    if (initialized) return dec;
+    if (initialized)
+        return dec;
     std::vector<int> bs, cs;
-    for (int b = 0x21; b <= 0x7e; b++) { bs.push_back(b); cs.push_back(b); }
-    for (int b = 0xa1; b <= 0xac; b++) { bs.push_back(b); cs.push_back(b); }
-    for (int b = 0xae; b <= 0xff; b++) { bs.push_back(b); cs.push_back(b); }
+    for (int b = 0x21; b <= 0x7e; b++) {
+        bs.push_back(b);
+        cs.push_back(b);
+    }
+    for (int b = 0xa1; b <= 0xac; b++) {
+        bs.push_back(b);
+        cs.push_back(b);
+    }
+    for (int b = 0xae; b <= 0xff; b++) {
+        bs.push_back(b);
+        cs.push_back(b);
+    }
     int n = 0;
     for (int b = 0; b < 256; b++) {
         bool present = false;
-        for (int x : bs) if (x == b) { present = true; break; }
-        if (!present) { bs.push_back(b); cs.push_back(256 + n); n++; }
+        for (int x : bs)
+            if (x == b) {
+                present = true;
+                break;
+            }
+        if (!present) {
+            bs.push_back(b);
+            cs.push_back(256 + n);
+            n++;
+        }
     }
     for (size_t i = 0; i < bs.size(); i++) {
-        if ((size_t)cs[i] < dec.size()) dec[cs[i]] = bs[i];
+        if ((size_t)cs[i] < dec.size())
+            dec[cs[i]] = bs[i];
     }
     initialized = true;
     return dec;
 }
 
-std::string decode_token(const std::string & s) {
-    auto & dec = byte_decoder();
+std::string decode_token(const std::string& s) {
+    auto& dec = byte_decoder();
     std::string out;
     size_t i = 0;
     while (i < s.size()) {
         unsigned char c = s[i];
         int cp = 0, len = 1;
-        if      (c < 0x80)           { cp = c;        len = 1; }
-        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
-        else { i++; continue; }
-        if (i + len > s.size()) break;
-        for (int k = 1; k < len; k++) cp = (cp << 6) | (s[i + k] & 0x3F);
+        if (c < 0x80) {
+            cp = c;
+            len = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            cp = c & 0x1F;
+            len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            cp = c & 0x0F;
+            len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            cp = c & 0x07;
+            len = 4;
+        } else {
+            i++;
+            continue;
+        }
+        if (i + len > s.size())
+            break;
+        for (int k = 1; k < len; k++)
+            cp = (cp << 6) | (s[i + k] & 0x3F);
         i += len;
         if (cp >= 0 && cp < (int)dec.size() && dec[cp] >= 0) {
             out.push_back((char)dec[cp]);
@@ -79,44 +111,43 @@ public:
     Qwen3Backend() = default;
     ~Qwen3Backend() override { Qwen3Backend::shutdown(); }
 
-    const char * name() const override { return "qwen3"; }
+    const char* name() const override { return "qwen3"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_LANGUAGE_DETECT | CAP_AUTO_DOWNLOAD
-             | CAP_TEMPERATURE | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN
-             | CAP_TOKEN_CONFIDENCE | CAP_TRANSLATE | CAP_SRC_TGT_LANGUAGE
-             | CAP_DIARIZE | CAP_PARALLEL_PROCESSORS;
+        return CAP_TIMESTAMPS_CTC | CAP_LANGUAGE_DETECT | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_PUNCTUATION_TOGGLE |
+               CAP_FLASH_ATTN | CAP_TOKEN_CONFIDENCE | CAP_TRANSLATE | CAP_SRC_TGT_LANGUAGE | CAP_DIARIZE |
+               CAP_PARALLEL_PROCESSORS;
     }
 
-    bool init(const whisper_params & p) override {
+    bool init(const whisper_params& p) override {
         auto cp = qwen3_asr_context_default_params();
         cp.n_threads = p.n_threads;
         cp.verbosity = p.no_prints ? 0 : 1;
         ctx_ = qwen3_asr_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
-            fprintf(stderr, "crispasr[qwen3]: failed to load model '%s'\n",
-                    p.model.c_str());
+            fprintf(stderr, "crispasr[qwen3]: failed to load model '%s'\n", p.model.c_str());
             return false;
         }
         return true;
     }
 
-    std::vector<crispasr_segment> transcribe(
-        const float * samples, int n_samples,
-        int64_t t_offset_cs,
-        const whisper_params & params) override
-    {
+    std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
+                                             const whisper_params& params) override {
         std::vector<crispasr_segment> out;
-        if (!ctx_) return out;
+        if (!ctx_)
+            return out;
 
         // ---- Mel ----
         int n_mels = 0, T_mel = 0;
-        float * mel = qwen3_asr_compute_mel(ctx_, samples, n_samples, &n_mels, &T_mel);
-        if (!mel) { fprintf(stderr, "crispasr[qwen3]: mel failed\n"); return out; }
+        float* mel = qwen3_asr_compute_mel(ctx_, samples, n_samples, &n_mels, &T_mel);
+        if (!mel) {
+            fprintf(stderr, "crispasr[qwen3]: mel failed\n");
+            return out;
+        }
 
         // ---- Encoder ----
         int N_enc = 0, pdim = 0;
-        float * audio_embeds = qwen3_asr_run_encoder(ctx_, mel, n_mels, T_mel, &N_enc, &pdim);
+        float* audio_embeds = qwen3_asr_run_encoder(ctx_, mel, n_mels, T_mel, &N_enc, &pdim);
         free(mel);
         if (!audio_embeds) {
             fprintf(stderr, "crispasr[qwen3]: encoder failed\n");
@@ -138,22 +169,37 @@ public:
         // reads the system-prompt instruction literally and "Translate
         // to de" gets interpreted as Spanish ("de" = "of"). Sending the
         // full English name keeps the model on the right target.
-        auto iso_to_english = [](const std::string & code) -> std::string {
-            if (code == "en") return "English";
-            if (code == "de") return "German";
-            if (code == "fr") return "French";
-            if (code == "es") return "Spanish";
-            if (code == "it") return "Italian";
-            if (code == "pt") return "Portuguese";
-            if (code == "ru") return "Russian";
-            if (code == "ja") return "Japanese";
-            if (code == "ko") return "Korean";
-            if (code == "zh") return "Chinese";
-            if (code == "nl") return "Dutch";
-            if (code == "pl") return "Polish";
-            if (code == "tr") return "Turkish";
-            if (code == "ar") return "Arabic";
-            if (code == "hi") return "Hindi";
+        auto iso_to_english = [](const std::string& code) -> std::string {
+            if (code == "en")
+                return "English";
+            if (code == "de")
+                return "German";
+            if (code == "fr")
+                return "French";
+            if (code == "es")
+                return "Spanish";
+            if (code == "it")
+                return "Italian";
+            if (code == "pt")
+                return "Portuguese";
+            if (code == "ru")
+                return "Russian";
+            if (code == "ja")
+                return "Japanese";
+            if (code == "ko")
+                return "Korean";
+            if (code == "zh")
+                return "Chinese";
+            if (code == "nl")
+                return "Dutch";
+            if (code == "pl")
+                return "Polish";
+            if (code == "tr")
+                return "Turkish";
+            if (code == "ar")
+                return "Arabic";
+            if (code == "hi")
+                return "Hindi";
             // For unrecognised codes (or already-spelled-out names),
             // pass the input through verbatim — the model will get a
             // best-effort hint.
@@ -162,24 +208,23 @@ public:
 
         std::string sys_instruction;
         if (params.translate) {
-            const std::string tgt = params.target_lang.empty()
-                                  ? std::string("English")
-                                  : iso_to_english(params.target_lang);
+            const std::string tgt =
+                params.target_lang.empty() ? std::string("English") : iso_to_english(params.target_lang);
             sys_instruction = "Translate the speech to " + tgt + ".";
         }
 
-        std::string text =
-            "<|im_start|>system\n" + sys_instruction + "<|im_end|>\n"
-            "<|im_start|>user\n"
-            "<|audio_start|>";
+        std::string text = "<|im_start|>system\n" + sys_instruction +
+                           "<|im_end|>\n"
+                           "<|im_start|>user\n"
+                           "<|audio_start|>";
         text.reserve(text.size() + (size_t)N_enc * 13 + 64);
-        for (int i = 0; i < N_enc; i++) text += "<|audio_pad|>";
-        text +=
-            "<|audio_end|><|im_end|>\n"
-            "<|im_start|>assistant\n";
+        for (int i = 0; i < N_enc; i++)
+            text += "<|audio_pad|>";
+        text += "<|audio_end|><|im_end|>\n"
+                "<|im_start|>assistant\n";
 
         int n_prompt = 0;
-        int32_t * raw_ids = qwen3_asr_tokenize(ctx_, text.c_str(), &n_prompt);
+        int32_t* raw_ids = qwen3_asr_tokenize(ctx_, text.c_str(), &n_prompt);
         if (!raw_ids) {
             fprintf(stderr, "crispasr[qwen3]: tokenize failed\n");
             free(audio_embeds);
@@ -190,9 +235,10 @@ public:
 
         // Look up the audio_pad token id by tokenizing just the special token.
         int n_pad_id = 0;
-        int32_t * pad_id_arr = qwen3_asr_tokenize(ctx_, "<|audio_pad|>", &n_pad_id);
+        int32_t* pad_id_arr = qwen3_asr_tokenize(ctx_, "<|audio_pad|>", &n_pad_id);
         int audio_pad_id = -1;
-        if (pad_id_arr && n_pad_id >= 1) audio_pad_id = pad_id_arr[0];
+        if (pad_id_arr && n_pad_id >= 1)
+            audio_pad_id = pad_id_arr[0];
         free(pad_id_arr);
         if (audio_pad_id < 0) {
             fprintf(stderr, "crispasr[qwen3]: could not resolve <|audio_pad|> id\n");
@@ -201,7 +247,7 @@ public:
         }
 
         // ---- Embed + splice ----
-        float * text_embeds = qwen3_asr_embed_tokens(ctx_, ids.data(), (int)ids.size());
+        float* text_embeds = qwen3_asr_embed_tokens(ctx_, ids.data(), (int)ids.size());
         if (!text_embeds) {
             fprintf(stderr, "crispasr[qwen3]: embed failed\n");
             free(audio_embeds);
@@ -210,9 +256,7 @@ public:
         int spliced = 0;
         for (size_t i = 0; i < ids.size() && spliced < N_enc; i++) {
             if (ids[i] == audio_pad_id) {
-                std::memcpy(text_embeds + i * pdim,
-                            audio_embeds + (size_t)spliced * pdim,
-                            pdim * sizeof(float));
+                std::memcpy(text_embeds + i * pdim, audio_embeds + (size_t)spliced * pdim, pdim * sizeof(float));
                 spliced++;
             }
         }
@@ -227,7 +271,7 @@ public:
         qwen3_asr_kv_reset(ctx_);
 
         int n_t = 0, vocab = 0;
-        float * logits = qwen3_asr_run_llm_kv(ctx_, text_embeds, (int)ids.size(), 0, &n_t, &vocab);
+        float* logits = qwen3_asr_run_llm_kv(ctx_, text_embeds, (int)ids.size(), 0, &n_t, &vocab);
         free(text_embeds);
         if (!logits) {
             fprintf(stderr, "crispasr[qwen3]: prefill failed\n");
@@ -238,41 +282,36 @@ public:
         // Qwen3 EOS tokens: <|im_end|> (id unknown — look up via tokenize).
         int eos_id = -1;
         int n_eos = 0;
-        int32_t * eos_arr = qwen3_asr_tokenize(ctx_, "<|im_end|>", &n_eos);
-        if (eos_arr && n_eos >= 1) eos_id = eos_arr[0];
+        int32_t* eos_arr = qwen3_asr_tokenize(ctx_, "<|im_end|>", &n_eos);
+        if (eos_arr && n_eos >= 1)
+            eos_id = eos_arr[0];
         free(eos_arr);
 
         core_greedy_decode::Config dec_cfg;
         dec_cfg.max_new_tokens = params.max_new_tokens > 0 ? params.max_new_tokens : 256;
-        dec_cfg.eos_id         = eos_id;
-        dec_cfg.vocab_size     = vocab;
-        dec_cfg.temperature    = params.temperature;
+        dec_cfg.eos_id = eos_id;
+        dec_cfg.vocab_size = vocab;
+        dec_cfg.temperature = params.temperature;
 
         const int last_off = (n_t - 1) * vocab;
-        int   next   = 0;
+        int next = 0;
         float next_p = 1.0f;
         if (dec_cfg.temperature > 0.0f) {
-            std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed
-                                       : (uint64_t)std::random_device{}());
-            next = core_greedy_decode::sample_temp(
-                logits + last_off, vocab, dec_cfg.temperature, seed_rng);
+            std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed : (uint64_t)std::random_device{}());
+            next = core_greedy_decode::sample_temp(logits + last_off, vocab, dec_cfg.temperature, seed_rng);
         } else {
             next = core_greedy_decode::argmax(logits + last_off, vocab);
         }
-        next_p = core_greedy_decode::softmax_of(
-            logits + last_off, vocab, next, logits[last_off + next]);
+        next_p = core_greedy_decode::softmax_of(logits + last_off, vocab, next, logits[last_off + next]);
         free(logits);
 
-        auto dec = core_greedy_decode::run_with_probs(
-            ctx_,
-            /*first_token=*/next,
-            /*first_prob=*/next_p,
-            /*initial_n_past=*/(int)ids.size(),
-            qwen3_asr_embed_tokens,
-            qwen3_asr_run_llm_kv,
-            dec_cfg);
-        const std::vector<int32_t> & gen   = dec.tokens;
-        const std::vector<float>   & probs = dec.probs;
+        auto dec = core_greedy_decode::run_with_probs(ctx_,
+                                                      /*first_token=*/next,
+                                                      /*first_prob=*/next_p,
+                                                      /*initial_n_past=*/(int)ids.size(), qwen3_asr_embed_tokens,
+                                                      qwen3_asr_run_llm_kv, dec_cfg);
+        const std::vector<int32_t>& gen = dec.tokens;
+        const std::vector<float>& probs = dec.probs;
 
         // ---- Detokenize via GPT-2 byte decoder ----
         // Qwen3-ASR emits structured metadata tokens before the transcript:
@@ -286,23 +325,32 @@ public:
         out_tokens.reserve(gen.size());
         for (size_t i = 0; i < gen.size(); i++) {
             const int32_t id = gen[i];
-            if (id == eos_id) break;
-            const char * raw_piece = qwen3_asr_token_text(ctx_, id);
-            if (!raw_piece || !*raw_piece) continue;
+            if (id == eos_id)
+                break;
+            const char* raw_piece = qwen3_asr_token_text(ctx_, id);
+            if (!raw_piece || !*raw_piece)
+                continue;
             std::string raw = raw_piece;
 
             // Skip Qwen3 special tokens: <|im_start|>, <|audio_pad|>, ...
-            if (raw.size() >= 2 && raw[0] == '<' && raw[1] == '|') continue;
+            if (raw.size() >= 2 && raw[0] == '<' && raw[1] == '|')
+                continue;
             // Skip structured tags like <asr_text>, <punc>, ...
-            if (raw.size() >= 2 && raw[0] == '<' && raw.back() == '>') continue;
+            if (raw.size() >= 2 && raw[0] == '<' && raw.back() == '>')
+                continue;
             // Skip [PAD...] style placeholders if any leaked through.
-            if (raw.size() >= 5 && raw[0] == '[' && raw[1] == 'P' && raw[2] == 'A' && raw[3] == 'D') continue;
+            if (raw.size() >= 5 && raw[0] == '[' && raw[1] == 'P' && raw[2] == 'A' && raw[3] == 'D')
+                continue;
 
             std::string txt = decode_token(raw);
-            if (txt == "language") { capture_language = true; continue; }
+            if (txt == "language") {
+                capture_language = true;
+                continue;
+            }
             if (capture_language) {
                 size_t s = 0;
-                while (s < txt.size() && (txt[s] == ' ' || txt[s] == '\t')) s++;
+                while (s < txt.size() && (txt[s] == ' ' || txt[s] == '\t'))
+                    s++;
                 detected_language = txt.substr(s);
                 capture_language = false;
                 continue;
@@ -310,21 +358,19 @@ public:
             transcript += txt;
 
             crispasr_token ct;
-            ct.id         = id;
-            ct.text       = std::move(txt);
+            ct.id = id;
+            ct.text = std::move(txt);
             ct.confidence = (i < probs.size()) ? probs[i] : -1.0f;
             out_tokens.push_back(std::move(ct));
         }
 
         // Trim leading whitespace left over from the prompt template.
-        while (!transcript.empty() &&
-               (transcript.front() == ' ' || transcript.front() == '\n')) {
+        while (!transcript.empty() && (transcript.front() == ' ' || transcript.front() == '\n')) {
             transcript.erase(transcript.begin());
         }
 
         if (!params.no_prints && !detected_language.empty()) {
-            fprintf(stderr, "crispasr[qwen3]: detected language: %s\n",
-                    detected_language.c_str());
+            fprintf(stderr, "crispasr[qwen3]: detected language: %s\n", detected_language.c_str());
         }
 
         crispasr_segment seg;
@@ -344,7 +390,7 @@ public:
     }
 
 private:
-    qwen3_asr_context * ctx_ = nullptr;
+    qwen3_asr_context* ctx_ = nullptr;
 };
 
 } // namespace

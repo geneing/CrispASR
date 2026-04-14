@@ -66,31 +66,31 @@ namespace core_gguf {
 // Open the GGUF for metadata-only reading. Returns a gguf_context owned
 // by the caller — free with free_metadata() when done reading keys.
 // Returns nullptr and prints an error to stderr on failure.
-gguf_context * open_metadata(const char * path);
+gguf_context* open_metadata(const char* path);
 
 // Free a gguf_context obtained from open_metadata().
-void free_metadata(gguf_context * gctx);
+void free_metadata(gguf_context* gctx);
 
 // Scalar key readers with defaults. All return the default value when
 // the key is absent or the type doesn't match.
-uint32_t    kv_u32  (gguf_context * gctx, const char * key, uint32_t default_val);
-int32_t     kv_i32  (gguf_context * gctx, const char * key, int32_t  default_val);
-float       kv_f32  (gguf_context * gctx, const char * key, float    default_val);
-bool        kv_bool (gguf_context * gctx, const char * key, bool     default_val);
-std::string kv_str  (gguf_context * gctx, const char * key, const char * default_val);
+uint32_t kv_u32(gguf_context* gctx, const char* key, uint32_t default_val);
+int32_t kv_i32(gguf_context* gctx, const char* key, int32_t default_val);
+float kv_f32(gguf_context* gctx, const char* key, float default_val);
+bool kv_bool(gguf_context* gctx, const char* key, bool default_val);
+std::string kv_str(gguf_context* gctx, const char* key, const char* default_val);
 
 // Read a string array (e.g. tokenizer.ggml.tokens). Returns an empty
 // vector when the key is missing or has the wrong type.
-std::vector<std::string> kv_str_array(gguf_context * gctx, const char * key);
+std::vector<std::string> kv_str_array(gguf_context* gctx, const char* key);
 
 // ---------------------------------------------------------------------------
 // Pass 2: tensor allocation + weight data copy.
 // ---------------------------------------------------------------------------
 
 struct WeightLoad {
-    ggml_context                                    * ctx = nullptr;
-    ggml_backend_buffer_t                             buf = nullptr;
-    std::map<std::string, ggml_tensor *>    tensors;
+    ggml_context* ctx = nullptr;
+    ggml_backend_buffer_t buf = nullptr;
+    std::map<std::string, ggml_tensor*> tensors;
 };
 
 // Load all tensor metadata + weights into a new ggml_context backed by
@@ -99,36 +99,28 @@ struct WeightLoad {
 // them into the model struct).
 //
 // model_tag is used only in error messages ("parakeet: ...").
-bool load_weights(const char  * path,
-                  ggml_backend_t backend,
-                  const char  * model_tag,
-                  WeightLoad  & out);
+bool load_weights(const char* path, ggml_backend_t backend, const char* model_tag, WeightLoad& out);
 
 // Free a WeightLoad's resources. Call when the model is being destroyed
 // and the buffer/context are not held elsewhere.
-void free_weights(WeightLoad & wl);
+void free_weights(WeightLoad& wl);
 
 // ---------------------------------------------------------------------------
 // Tensor lookup helpers
 // ---------------------------------------------------------------------------
 
 // Look up a tensor by name. Returns nullptr (silently) if missing.
-ggml_tensor * try_get(
-    const std::map<std::string, ggml_tensor *> & tensors,
-    const char * name);
+ggml_tensor* try_get(const std::map<std::string, ggml_tensor*>& tensors, const char* name);
 
 // Look up a tensor by name. Prints an error to stderr if missing but
 // still returns nullptr — the caller decides whether a missing tensor
 // is fatal.
-ggml_tensor * require(
-    const std::map<std::string, ggml_tensor *> & tensors,
-    const char * name,
-    const char * model_tag);
+ggml_tensor* require(const std::map<std::string, ggml_tensor*>& tensors, const char* name, const char* model_tag);
 
 // Build a shell command that produces the formatted tensor name for a
 // per-layer lookup. Avoids the snprintf(buf, sizeof(buf), "...", i) line
 // that every loader repeats.
-std::string format_layer_name(const char * fmt, int i);
-std::string format_layer_name(const char * fmt, int i, int j);
+std::string format_layer_name(const char* fmt, int i);
+std::string format_layer_name(const char* fmt, int i, int j);
 
 } // namespace core_gguf

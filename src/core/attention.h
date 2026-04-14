@@ -40,13 +40,13 @@ namespace core_attn {
 // value type so the compiler can inline the caller's constants into the
 // helper's ggml_* op chain.
 struct LlamaSelfAttnParams {
-    int   n_heads;        // query heads (== n_kv_heads for MHA)
-    int   n_kv_heads;     // key/value heads; with GQA, n_heads / n_kv_heads > 1
-    int   head_dim;       // per-head dimension
-    int   n_kv_grp;       // == n_heads / n_kv_heads (caller precomputes)
-    int   n_ctx_orig;     // rope n_ctx_orig (usually llm_max_pos)
+    int n_heads;    // query heads (== n_kv_heads for MHA)
+    int n_kv_heads; // key/value heads; with GQA, n_heads / n_kv_heads > 1
+    int head_dim;   // per-head dimension
+    int n_kv_grp;   // == n_heads / n_kv_heads (caller precomputes)
+    int n_ctx_orig; // rope n_ctx_orig (usually llm_max_pos)
     float rope_theta;
-    float attn_scale;     // usually 1 / sqrt(head_dim); pass explicitly
+    float attn_scale; // usually 1 / sqrt(head_dim); pass explicitly
 };
 
 // Llama / Mistral-style self-attention with optional GQA, NEOX RoPE, and
@@ -65,54 +65,44 @@ struct LlamaSelfAttnParams {
 // Output:
 //   attn           [d_model, T]  — post-output-projection tensor. The
 //                                   caller adds it to the residual.
-static inline ggml_tensor * llama_self_attn(
-    ggml_context * ctx,
-    ggml_tensor  * x,
-    ggml_tensor  * q_w,
-    ggml_tensor  * k_w,
-    ggml_tensor  * v_w,
-    ggml_tensor  * o_w,
-    ggml_tensor  * positions,
-    ggml_tensor  * mask,
-    const LlamaSelfAttnParams & p)
-{
-    const int hd      = p.head_dim;
-    const int n_q     = p.n_heads;
-    const int n_kv    = p.n_kv_heads;
-    const int n_ctx   = p.n_ctx_orig;
-    const int grp     = p.n_kv_grp;
+static inline ggml_tensor* llama_self_attn(ggml_context* ctx, ggml_tensor* x, ggml_tensor* q_w, ggml_tensor* k_w,
+                                           ggml_tensor* v_w, ggml_tensor* o_w, ggml_tensor* positions,
+                                           ggml_tensor* mask, const LlamaSelfAttnParams& p) {
+    const int hd = p.head_dim;
+    const int n_q = p.n_heads;
+    const int n_kv = p.n_kv_heads;
+    const int n_ctx = p.n_ctx_orig;
+    const int grp = p.n_kv_grp;
 
     // Q/K/V projections (no biases for the Llama case).
-    ggml_tensor * Q = ggml_mul_mat(ctx, q_w, x);
-    ggml_tensor * K = ggml_mul_mat(ctx, k_w, x);
-    ggml_tensor * V = ggml_mul_mat(ctx, v_w, x);
+    ggml_tensor* Q = ggml_mul_mat(ctx, q_w, x);
+    ggml_tensor* K = ggml_mul_mat(ctx, k_w, x);
+    ggml_tensor* V = ggml_mul_mat(ctx, v_w, x);
 
     // T is the time dim of x; ggml stores [d_model, T] as ne = [d_model, T].
     const int T = (int)x->ne[1];
 
-    Q = ggml_reshape_3d(ctx, Q, hd, n_q,  T);
+    Q = ggml_reshape_3d(ctx, Q, hd, n_q, T);
     K = ggml_reshape_3d(ctx, K, hd, n_kv, T);
     V = ggml_reshape_3d(ctx, V, hd, n_kv, T);
 
     // NEOX RoPE on Q and K. Same args as the original inline code in
     // voxtral / voxtral4b / qwen3 / granite LLM blocks.
-    Q = ggml_rope_ext(ctx, Q, positions, /*freq_factors*/nullptr,
-                      hd, GGML_ROPE_TYPE_NEOX, n_ctx,
-                      p.rope_theta, /*freq_scale*/1.0f, /*ext_factor*/0.0f,
-                      /*attn_factor*/1.0f, /*beta_fast*/32.0f, /*beta_slow*/1.0f);
-    K = ggml_rope_ext(ctx, K, positions, nullptr,
-                      hd, GGML_ROPE_TYPE_NEOX, n_ctx,
-                      p.rope_theta, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    Q = ggml_rope_ext(ctx, Q, positions, /*freq_factors*/ nullptr, hd, GGML_ROPE_TYPE_NEOX, n_ctx, p.rope_theta,
+                      /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f,
+                      /*attn_factor*/ 1.0f, /*beta_fast*/ 32.0f, /*beta_slow*/ 1.0f);
+    K = ggml_rope_ext(ctx, K, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX, n_ctx, p.rope_theta, 1.0f, 0.0f, 1.0f, 32.0f,
+                      1.0f);
 
     // GQA expansion: replicate each KV head `grp` times along a new dim so
     // K/V have n_heads rows instead of n_kv_heads, then flatten back.
     if (grp > 1) {
-        ggml_tensor * K4 = ggml_reshape_4d(ctx, K, hd, 1, n_kv, T);
-        ggml_tensor * V4 = ggml_reshape_4d(ctx, V, hd, 1, n_kv, T);
+        ggml_tensor* K4 = ggml_reshape_4d(ctx, K, hd, 1, n_kv, T);
+        ggml_tensor* V4 = ggml_reshape_4d(ctx, V, hd, 1, n_kv, T);
         K4 = ggml_repeat_4d(ctx, K4, hd, grp, n_kv, T);
         V4 = ggml_repeat_4d(ctx, V4, hd, grp, n_kv, T);
-        K  = ggml_cont(ctx, ggml_reshape_3d(ctx, K4, hd, n_q, T));
-        V  = ggml_cont(ctx, ggml_reshape_3d(ctx, V4, hd, n_q, T));
+        K = ggml_cont(ctx, ggml_reshape_3d(ctx, K4, hd, n_q, T));
+        V = ggml_cont(ctx, ggml_reshape_3d(ctx, V4, hd, n_q, T));
     }
 
     // Permute to flash-attention layout: (head_dim, T, n_heads).
@@ -121,9 +111,8 @@ static inline ggml_tensor * llama_self_attn(
     V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
 
     // Flash attention. Output shape = (head_dim, n_heads, T, 1).
-    ggml_tensor * attn = ggml_flash_attn_ext(
-        ctx, Q, K, V, mask,
-        p.attn_scale, /*max_bias*/0.0f, /*logit_softcap*/0.0f);
+    ggml_tensor* attn =
+        ggml_flash_attn_ext(ctx, Q, K, V, mask, p.attn_scale, /*max_bias*/ 0.0f, /*logit_softcap*/ 0.0f);
 
     // Back to (d_model, T).
     attn = ggml_reshape_2d(ctx, attn, hd * n_q, T);
@@ -160,23 +149,23 @@ static inline ggml_tensor * llama_self_attn(
 // Each mode produces slightly different graph ops. Picking the wrong one
 // breaks bit-identity on the regression sweep, so this is an explicit knob.
 enum GqaMode {
-    GQA_MANUAL_CONT   = 0, // reshape_4d / repeat_4d / reshape_3d + ggml_cont
+    GQA_MANUAL_CONT = 0,   // reshape_4d / repeat_4d / reshape_3d + ggml_cont
     GQA_MANUAL_NOCONT = 1, // reshape_4d / repeat_4d / reshape_3d, no final cont
-    GQA_NATIVE        = 2, // no expansion; flash_attn_ext handles GQA itself
+    GQA_NATIVE = 2,        // no expansion; flash_attn_ext handles GQA itself
 };
 
 struct KvSelfAttnParams {
-    int      n_heads;        // query heads
-    int      n_kv_heads;     // key/value heads (== n_heads for MHA)
-    int      head_dim;       // per-head dimension
-    int      n_kv_grp;       // n_heads / n_kv_heads (caller precomputes)
-    int      n_ctx_orig;     // RoPE n_ctx_orig (some models 0, some llm_max_pos)
-    float    rope_theta;
-    float    rope_beta_fast; // RoPE extrapolation beta_fast (qwen3/voxtral: 32, others: 0)
-    float    rope_beta_slow; // RoPE extrapolation beta_slow (qwen3/voxtral: 1,  others: 0)
-    float    attn_scale;     // usually 1/sqrt(head_dim); granite uses µP scale
-    float    qk_norm_eps;    // RMSNorm epsilon for optional Q/K norm (qwen3); unused otherwise
-    GqaMode  gqa_mode;
+    int n_heads;    // query heads
+    int n_kv_heads; // key/value heads (== n_heads for MHA)
+    int head_dim;   // per-head dimension
+    int n_kv_grp;   // n_heads / n_kv_heads (caller precomputes)
+    int n_ctx_orig; // RoPE n_ctx_orig (some models 0, some llm_max_pos)
+    float rope_theta;
+    float rope_beta_fast; // RoPE extrapolation beta_fast (qwen3/voxtral: 32, others: 0)
+    float rope_beta_slow; // RoPE extrapolation beta_slow (qwen3/voxtral: 1,  others: 0)
+    float attn_scale;     // usually 1/sqrt(head_dim); granite uses µP scale
+    float qk_norm_eps;    // RMSNorm epsilon for optional Q/K norm (qwen3); unused otherwise
+    GqaMode gqa_mode;
 };
 
 // KV-cached self-attention. Writes the new K/V into the persistent cache
@@ -198,33 +187,24 @@ struct KvSelfAttnParams {
 // Output:
 //   attn         [d_model, T] — post-output-projection tensor. Caller adds
 //                                it to the residual.
-static inline ggml_tensor * kv_self_attn(
-    ggml_context * ctx0,
-    ggml_cgraph  * gf,
-    ggml_tensor  * x,
-    ggml_tensor  * q_w, ggml_tensor * k_w, ggml_tensor * v_w,
-    ggml_tensor  * o_w,
-    ggml_tensor  * q_norm_w, ggml_tensor * k_norm_w,
-    ggml_tensor  * positions,
-    ggml_tensor  * causal_mask,
-    ggml_tensor  * kv_k, ggml_tensor * kv_v,
-    int            il,
-    int            n_past,
-    const KvSelfAttnParams & p)
-{
-    const int hd    = p.head_dim;
-    const int n_q   = p.n_heads;
-    const int n_kv  = p.n_kv_heads;
-    const int grp   = p.n_kv_grp;
-    const int T     = (int)x->ne[1];
-    const int Lk    = n_past + T;
+static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggml_tensor* x, ggml_tensor* q_w,
+                                        ggml_tensor* k_w, ggml_tensor* v_w, ggml_tensor* o_w, ggml_tensor* q_norm_w,
+                                        ggml_tensor* k_norm_w, ggml_tensor* positions, ggml_tensor* causal_mask,
+                                        ggml_tensor* kv_k, ggml_tensor* kv_v, int il, int n_past,
+                                        const KvSelfAttnParams& p) {
+    const int hd = p.head_dim;
+    const int n_q = p.n_heads;
+    const int n_kv = p.n_kv_heads;
+    const int grp = p.n_kv_grp;
+    const int T = (int)x->ne[1];
+    const int Lk = n_past + T;
 
     // ---- Q/K/V projections ----
-    ggml_tensor * Q = ggml_mul_mat(ctx0, q_w, x);
-    ggml_tensor * K = ggml_mul_mat(ctx0, k_w, x);
-    ggml_tensor * V = ggml_mul_mat(ctx0, v_w, x);
+    ggml_tensor* Q = ggml_mul_mat(ctx0, q_w, x);
+    ggml_tensor* K = ggml_mul_mat(ctx0, k_w, x);
+    ggml_tensor* V = ggml_mul_mat(ctx0, v_w, x);
 
-    Q = ggml_reshape_3d(ctx0, Q, hd, n_q,  T);
+    Q = ggml_reshape_3d(ctx0, Q, hd, n_q, T);
     K = ggml_reshape_3d(ctx0, K, hd, n_kv, T);
     V = ggml_reshape_3d(ctx0, V, hd, n_kv, T);
 
@@ -239,42 +219,34 @@ static inline ggml_tensor * kv_self_attn(
     }
 
     // ---- NEOX RoPE ----
-    Q = ggml_rope_ext(ctx0, Q, positions, nullptr,
-                      hd, GGML_ROPE_TYPE_NEOX, p.n_ctx_orig,
-                      p.rope_theta, /*freq_scale*/1.0f, /*ext_factor*/0.0f,
-                      /*attn_factor*/1.0f,
-                      p.rope_beta_fast, p.rope_beta_slow);
-    K = ggml_rope_ext(ctx0, K, positions, nullptr,
-                      hd, GGML_ROPE_TYPE_NEOX, p.n_ctx_orig,
-                      p.rope_theta, 1.0f, 0.0f, 1.0f,
-                      p.rope_beta_fast, p.rope_beta_slow);
+    Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX, p.n_ctx_orig, p.rope_theta,
+                      /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f,
+                      /*attn_factor*/ 1.0f, p.rope_beta_fast, p.rope_beta_slow);
+    K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX, p.n_ctx_orig, p.rope_theta, 1.0f, 0.0f,
+                      1.0f, p.rope_beta_fast, p.rope_beta_slow);
 
     // ---- Permute new K/V to (hd, T, n_kv) for cache write ----
-    ggml_tensor * K_new_perm = ggml_permute(ctx0, K, 0, 2, 1, 3);
-    ggml_tensor * V_new_perm = ggml_permute(ctx0, V, 0, 2, 1, 3);
+    ggml_tensor* K_new_perm = ggml_permute(ctx0, K, 0, 2, 1, 3);
+    ggml_tensor* V_new_perm = ggml_permute(ctx0, V, 0, 2, 1, 3);
 
     // ---- Write into the persistent KV cache at [n_past, n_past+T) ----
-    ggml_tensor * k_view = ggml_view_4d(ctx0, kv_k, hd, T, n_kv, 1,
-        kv_k->nb[1], kv_k->nb[2], kv_k->nb[3],
-        (size_t)il * kv_k->nb[3] + (size_t)n_past * kv_k->nb[1]);
-    ggml_tensor * v_view = ggml_view_4d(ctx0, kv_v, hd, T, n_kv, 1,
-        kv_v->nb[1], kv_v->nb[2], kv_v->nb[3],
-        (size_t)il * kv_v->nb[3] + (size_t)n_past * kv_v->nb[1]);
+    ggml_tensor* k_view = ggml_view_4d(ctx0, kv_k, hd, T, n_kv, 1, kv_k->nb[1], kv_k->nb[2], kv_k->nb[3],
+                                       (size_t)il * kv_k->nb[3] + (size_t)n_past * kv_k->nb[1]);
+    ggml_tensor* v_view = ggml_view_4d(ctx0, kv_v, hd, T, n_kv, 1, kv_v->nb[1], kv_v->nb[2], kv_v->nb[3],
+                                       (size_t)il * kv_v->nb[3] + (size_t)n_past * kv_v->nb[1]);
     ggml_build_forward_expand(gf, ggml_cpy(ctx0, K_new_perm, k_view));
     ggml_build_forward_expand(gf, ggml_cpy(ctx0, V_new_perm, v_view));
 
     // ---- Read full K/V history from cache ----
-    ggml_tensor * Kfull = ggml_cont(ctx0, ggml_view_3d(ctx0, kv_k,
-        hd, Lk, n_kv,
-        kv_k->nb[1], kv_k->nb[2], (size_t)il * kv_k->nb[3]));
-    ggml_tensor * Vfull = ggml_cont(ctx0, ggml_view_3d(ctx0, kv_v,
-        hd, Lk, n_kv,
-        kv_v->nb[1], kv_v->nb[2], (size_t)il * kv_v->nb[3]));
+    ggml_tensor* Kfull =
+        ggml_cont(ctx0, ggml_view_3d(ctx0, kv_k, hd, Lk, n_kv, kv_k->nb[1], kv_k->nb[2], (size_t)il * kv_k->nb[3]));
+    ggml_tensor* Vfull =
+        ggml_cont(ctx0, ggml_view_3d(ctx0, kv_v, hd, Lk, n_kv, kv_v->nb[1], kv_v->nb[2], (size_t)il * kv_v->nb[3]));
 
     // ---- GQA expansion ----
     if (p.gqa_mode != GQA_NATIVE && grp > 1) {
-        ggml_tensor * K4 = ggml_reshape_4d(ctx0, Kfull, hd, Lk, 1, n_kv);
-        ggml_tensor * V4 = ggml_reshape_4d(ctx0, Vfull, hd, Lk, 1, n_kv);
+        ggml_tensor* K4 = ggml_reshape_4d(ctx0, Kfull, hd, Lk, 1, n_kv);
+        ggml_tensor* V4 = ggml_reshape_4d(ctx0, Vfull, hd, Lk, 1, n_kv);
         K4 = ggml_repeat_4d(ctx0, K4, hd, Lk, grp, n_kv);
         V4 = ggml_repeat_4d(ctx0, V4, hd, Lk, grp, n_kv);
         if (p.gqa_mode == GQA_MANUAL_CONT) {
@@ -290,9 +262,8 @@ static inline ggml_tensor * kv_self_attn(
     Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
 
     // ---- Flash attention + reshape + output projection ----
-    ggml_tensor * attn = ggml_flash_attn_ext(
-        ctx0, Q, Kfull, Vfull, causal_mask,
-        p.attn_scale, /*max_bias*/0.0f, /*logit_softcap*/0.0f);
+    ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, causal_mask, p.attn_scale, /*max_bias*/ 0.0f,
+                                            /*logit_softcap*/ 0.0f);
     attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
 
     return ggml_mul_mat(ctx0, o_w, attn);

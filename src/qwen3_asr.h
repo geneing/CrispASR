@@ -21,21 +21,19 @@ extern "C" {
 struct qwen3_asr_context;
 
 struct qwen3_asr_context_params {
-    int  n_threads;
-    int  verbosity;     // 0=silent 1=normal 2=verbose
+    int n_threads;
+    int verbosity; // 0=silent 1=normal 2=verbose
 };
 
 struct qwen3_asr_context_params qwen3_asr_context_default_params(void);
 
 // Load model from GGUF.
-struct qwen3_asr_context * qwen3_asr_init_from_file(const char * path_model,
-                                                    struct qwen3_asr_context_params params);
+struct qwen3_asr_context* qwen3_asr_init_from_file(const char* path_model, struct qwen3_asr_context_params params);
 
-void qwen3_asr_free(struct qwen3_asr_context * ctx);
+void qwen3_asr_free(struct qwen3_asr_context* ctx);
 
 // Transcribe raw 16 kHz mono PCM. Returns malloc'd UTF-8 string (caller owns).
-char * qwen3_asr_transcribe(struct qwen3_asr_context * ctx,
-                            const float * samples, int n_samples);
+char* qwen3_asr_transcribe(struct qwen3_asr_context* ctx, const float* samples, int n_samples);
 
 // ---- Stage-1 helpers exposed for differential testing ----------------------
 //
@@ -48,46 +46,36 @@ char * qwen3_asr_transcribe(struct qwen3_asr_context * ctx,
 // Output is a malloc'd float buffer of shape (num_chunks, T_chunk_out, 896)
 // in row-major order. *out_n_chunks / *out_T_chunk_out / *out_d filled in.
 // Caller frees with free().
-float * qwen3_asr_run_conv(struct qwen3_asr_context * ctx,
-                           const float * mel_features,  // F32, shape (n_mels, T_mel)
-                           int n_mels, int T_mel,
-                           int * out_n_chunks,
-                           int * out_T_chunk_out,
-                           int * out_d);
+float* qwen3_asr_run_conv(struct qwen3_asr_context* ctx,
+                          const float* mel_features, // F32, shape (n_mels, T_mel)
+                          int n_mels, int T_mel, int* out_n_chunks, int* out_T_chunk_out, int* out_d);
 
 // Run the full audio encoder (conv front-end + pos embed + 18 encoder layers
 // + ln_post + proj1/GELU/proj2) on a (n_mels, T_mel) mel spectrogram.
 // Output: malloc'd float buffer of shape (N_total, audio_proj_dim=1024) in
 // row-major order. N_total = sum of valid post-CNN frames across all chunks.
 // Caller frees with free().
-float * qwen3_asr_run_encoder(struct qwen3_asr_context * ctx,
-                              const float * mel_features,
-                              int n_mels, int T_mel,
-                              int * out_N_total,
-                              int * out_proj_dim);
+float* qwen3_asr_run_encoder(struct qwen3_asr_context* ctx, const float* mel_features, int n_mels, int T_mel,
+                             int* out_N_total, int* out_proj_dim);
 
 // Run the Qwen3 0.6B LLM forward (text-only, no audio injection, no KV cache).
 // Useful for differential testing the LLM forward in isolation against the
 // HF reference. Returns malloc'd float buffer of shape (n_tokens, vocab_size)
 // row-major. Caller frees with free().
-float * qwen3_asr_run_llm(struct qwen3_asr_context * ctx,
-                          const int32_t * input_ids,
-                          int n_tokens,
-                          int * out_n_tokens,
-                          int * out_vocab_size);
+float* qwen3_asr_run_llm(struct qwen3_asr_context* ctx, const int32_t* input_ids, int n_tokens, int* out_n_tokens,
+                         int* out_vocab_size);
 
 // Get the vocab string for a token ID. Returns "" if id is out of range.
 // The string is in GPT-2 byte-encoded form (apply byte_decoder to recover
 // raw UTF-8 bytes).
-const char * qwen3_asr_token_text(struct qwen3_asr_context * ctx, int id);
+const char* qwen3_asr_token_text(struct qwen3_asr_context* ctx, int id);
 
 // Tokenize a UTF-8 text string with the model's GPT-2 byte-level BPE.
 // Handles Qwen3 special tokens (`<|im_start|>`, `<|audio_pad|>`, etc.) by
 // looking them up in the vocab table directly before BPE-merging the
 // surrounding plain text. Returns a malloc'd int32 array of token IDs;
 // caller must free() the returned pointer. *out_n_tokens set on return.
-int32_t * qwen3_asr_tokenize(struct qwen3_asr_context * ctx,
-                             const char * text, int * out_n_tokens);
+int32_t* qwen3_asr_tokenize(struct qwen3_asr_context* ctx, const char* text, int* out_n_tokens);
 
 // Compute the log-mel spectrogram for raw 16 kHz mono PCM samples, matching
 // HuggingFace WhisperFeatureExtractor (n_fft=400, hop=160, 128 mel bins,
@@ -95,25 +83,20 @@ int32_t * qwen3_asr_tokenize(struct qwen3_asr_context * ctx,
 // GGUF includes audio.mel_filters + audio.mel_window (added by the latest
 // converter). Returns a malloc'd float buffer of shape (n_mels=128, T_mel)
 // row-major. *out_T_mel set on return. Caller frees with free().
-float * qwen3_asr_compute_mel(struct qwen3_asr_context * ctx,
-                              const float * samples, int n_samples,
-                              int * out_n_mels, int * out_T_mel);
+float* qwen3_asr_compute_mel(struct qwen3_asr_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                             int* out_T_mel);
 
 // Look up token embeddings via the model's token_embd table. Returns a
 // malloc'd float buffer of shape (n_tokens, d_model=1024) row-major. Caller
 // frees with free().
-float * qwen3_asr_embed_tokens(struct qwen3_asr_context * ctx,
-                               const int32_t * input_ids, int n_tokens);
+float* qwen3_asr_embed_tokens(struct qwen3_asr_context* ctx, const int32_t* input_ids, int n_tokens);
 
 // Run the Qwen3 0.6B LLM forward starting from precomputed inputs_embeds
 // instead of input_ids. Used by the audio-injection path: caller computes
 // text embeddings via qwen3_asr_embed_tokens(), splices in audio frames at
 // the audio_pad positions, then calls this. Returns logits (n_tokens, vocab).
-float * qwen3_asr_run_llm_from_embeds(struct qwen3_asr_context * ctx,
-                                      const float * inputs_embeds,
-                                      int n_tokens,
-                                      int * out_n_tokens,
-                                      int * out_vocab_size);
+float* qwen3_asr_run_llm_from_embeds(struct qwen3_asr_context* ctx, const float* inputs_embeds, int n_tokens,
+                                     int* out_n_tokens, int* out_vocab_size);
 
 // ---- KV-cache LLM API (Stage 5) ---------------------------------------------
 //
@@ -139,19 +122,15 @@ float * qwen3_asr_run_llm_from_embeds(struct qwen3_asr_context * ctx,
 // Returns logits (n_tokens, vocab) row-major. Caller frees with free().
 
 // Allocate the KV cache. Call once per context, before the first kv call.
-bool qwen3_asr_kv_init(struct qwen3_asr_context * ctx, int max_ctx);
+bool qwen3_asr_kv_init(struct qwen3_asr_context* ctx, int max_ctx);
 
 // Reset the cache pointer to 0 (does NOT zero memory). Call at the start of
 // each new utterance.
-void qwen3_asr_kv_reset(struct qwen3_asr_context * ctx);
+void qwen3_asr_kv_reset(struct qwen3_asr_context* ctx);
 
 // Run the LLM forward writing into the persistent KV cache.
-float * qwen3_asr_run_llm_kv(struct qwen3_asr_context * ctx,
-                             const float * inputs_embeds,
-                             int n_tokens,
-                             int n_past,
-                             int * out_n_tokens,
-                             int * out_vocab_size);
+float* qwen3_asr_run_llm_kv(struct qwen3_asr_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
+                            int* out_n_tokens, int* out_vocab_size);
 
 // ---- Forced-alignment API (Qwen3-ForcedAligner-0.6B) ----------------------
 //
@@ -178,18 +157,15 @@ float * qwen3_asr_run_llm_kv(struct qwen3_asr_context * ctx,
 // Returns the loaded model's lm_head output dimension. For Qwen3-ASR-*B
 // this equals the token vocab size (151936 / 152064). For
 // Qwen3-ForcedAligner-0.6B this is 5000 (timestamp classes).
-int qwen3_asr_lm_head_dim(struct qwen3_asr_context * ctx);
+int qwen3_asr_lm_head_dim(struct qwen3_asr_context* ctx);
 
 // Run a single full-T forward pass through the LLM body (NOT autoregressive,
 // no KV cache) starting from already-embedded inputs. Returns the lm_head
 // logits at every position (not just last-token), shape
 // (lm_head_dim, n_tokens) row-major. *out_lm_head_dim and *out_n_tokens
 // filled in. Caller frees the returned buffer with free().
-float * qwen3_asr_run_aligner(struct qwen3_asr_context * ctx,
-                              const float * inputs_embeds,
-                              int n_tokens,
-                              int * out_n_tokens,
-                              int * out_lm_head_dim);
+float* qwen3_asr_run_aligner(struct qwen3_asr_context* ctx, const float* inputs_embeds, int n_tokens, int* out_n_tokens,
+                             int* out_lm_head_dim);
 
 // High-level forced-alignment entry point. Runs the whole pipeline:
 //   1. compute mel from raw 16 kHz mono PCM
@@ -210,11 +186,8 @@ float * qwen3_asr_run_aligner(struct qwen3_asr_context * ctx,
 // the per-word timestamps in milliseconds. The caller must allocate
 // these arrays with at least `n_words` int64_t entries each. Returns
 // 0 on success, non-zero on failure.
-int qwen3_asr_align_words(struct qwen3_asr_context * ctx,
-                          const float * samples, int n_samples,
-                          const char ** words, int n_words,
-                          int64_t * out_start_ms,
-                          int64_t * out_end_ms);
+int qwen3_asr_align_words(struct qwen3_asr_context* ctx, const float* samples, int n_samples, const char** words,
+                          int n_words, int64_t* out_start_ms, int64_t* out_end_ms);
 
 #ifdef __cplusplus
 }

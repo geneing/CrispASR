@@ -40,26 +40,24 @@ struct voxtral_context;
 
 struct voxtral_context_params {
     int n_threads;
-    int verbosity;     // 0=silent 1=normal 2=verbose
+    int verbosity; // 0=silent 1=normal 2=verbose
 };
 
 struct voxtral_context_params voxtral_context_default_params(void);
 
 // Load model from GGUF.
-struct voxtral_context * voxtral_init_from_file(const char * path_model,
-                                                struct voxtral_context_params params);
+struct voxtral_context* voxtral_init_from_file(const char* path_model, struct voxtral_context_params params);
 
-void voxtral_free(struct voxtral_context * ctx);
+void voxtral_free(struct voxtral_context* ctx);
 
 // Get the (raw bytes) text for a token ID. Tekken vocab entries are raw
 // byte sequences, not byte-encoded unicode like GPT-2 BPE. Returns the
 // length in *out_len. The pointer is owned by the context — do NOT free.
-const uint8_t * voxtral_token_text(struct voxtral_context * ctx, int id, int * out_len);
+const uint8_t* voxtral_token_text(struct voxtral_context* ctx, int id, int* out_len);
 
 // Tokenize a UTF-8 text string with the embedded Tekken tokenizer.
 // Returns a malloc'd int32 array of token IDs; caller frees with free().
-int32_t * voxtral_tokenize(struct voxtral_context * ctx,
-                           const char * text, int * out_n_tokens);
+int32_t* voxtral_tokenize(struct voxtral_context* ctx, const char* text, int* out_n_tokens);
 
 // ---- Stage-1 helpers exposed for differential testing ----------------------
 //
@@ -69,42 +67,35 @@ int32_t * voxtral_tokenize(struct voxtral_context * ctx,
 // Run the audio encoder + projector on a (128, 3000) mel spectrogram (padded
 // to 30s). Returns malloc'd float buffer of shape (375, 3072) row-major.
 // Caller frees with free(). *out_N set to 375, *out_dim set to 3072.
-float * voxtral_run_encoder(struct voxtral_context * ctx,
-                            const float * mel_features,
-                            int n_mels, int T_mel,
-                            int * out_N, int * out_dim);
+float* voxtral_run_encoder(struct voxtral_context* ctx, const float* mel_features, int n_mels, int T_mel, int* out_N,
+                           int* out_dim);
 
 // Compute the log-mel spectrogram for raw 16 kHz mono PCM samples, matching
 // WhisperFeatureExtractor (n_fft=400, hop=160, 128 mels). The output is
 // zero-padded to exactly 3000 frames (30s) as required by the encoder.
 // Returns malloc'd (128, 3000) F32 row-major. Caller frees.
-float * voxtral_compute_mel(struct voxtral_context * ctx,
-                            const float * samples, int n_samples,
-                            int * out_n_mels, int * out_T_mel);
+float* voxtral_compute_mel(struct voxtral_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                           int* out_T_mel);
 
 // Embed token IDs via the LLM's token_embd table.
 // Returns malloc'd (n_tokens, d_model=3072) F32 row-major. Caller frees.
-float * voxtral_embed_tokens(struct voxtral_context * ctx,
-                             const int32_t * input_ids, int n_tokens);
+float* voxtral_embed_tokens(struct voxtral_context* ctx, const int32_t* input_ids, int n_tokens);
 
 // KV cache lifecycle (same pattern as qwen3_asr).
-bool voxtral_kv_init(struct voxtral_context * ctx, int max_ctx);
-void voxtral_kv_reset(struct voxtral_context * ctx);
+bool voxtral_kv_init(struct voxtral_context* ctx, int max_ctx);
+void voxtral_kv_reset(struct voxtral_context* ctx);
 
 // Run the LLM forward writing into the persistent KV cache.
 // Returns last-token logits (vocab,) F32. Caller frees with free().
-float * voxtral_run_llm_kv(struct voxtral_context * ctx,
-                           const float * inputs_embeds,
-                           int n_tokens, int n_past,
-                           int * out_n_tokens, int * out_vocab_size);
+float* voxtral_run_llm_kv(struct voxtral_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
+                          int* out_n_tokens, int* out_vocab_size);
 
 // Run the Llama 3 LLM forward (text-only, no audio injection, no KV cache).
 // Used for the LLM smoke test against models/voxtral-llm-dump.py.
 // Returns a malloc'd float buffer of shape (n_tokens, vocab_size=131072)
 // row-major. Caller frees with free().
-float * voxtral_run_llm(struct voxtral_context * ctx,
-                        const int32_t * input_ids, int n_tokens,
-                        int * out_n_tokens, int * out_vocab_size);
+float* voxtral_run_llm(struct voxtral_context* ctx, const int32_t* input_ids, int n_tokens, int* out_n_tokens,
+                       int* out_vocab_size);
 
 #ifdef __cplusplus
 }

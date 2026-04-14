@@ -70,20 +70,18 @@
 // Returns a vector with exactly one crispasr_segment (text + offset times)
 // on success, empty on failure. Prints errors to stderr.
 template <typename Ops>
-std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
-    typename Ops::CtxT * ctx,
-    const float * samples, int n_samples,
-    int64_t t_offset_cs,
-    const whisper_params & params)
-{
+std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(typename Ops::CtxT* ctx, const float* samples,
+                                                                  int n_samples, int64_t t_offset_cs,
+                                                                  const whisper_params& params) {
     std::vector<crispasr_segment> out;
-    if (!ctx) return out;
+    if (!ctx)
+        return out;
 
-    const char * BE = Ops::name();
+    const char* BE = Ops::name();
 
     // ---- Mel spectrogram ----
     int n_mels = 0, T_mel = 0;
-    float * mel = Ops::compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    float* mel = Ops::compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
     if (!mel) {
         fprintf(stderr, "crispasr[%s]: mel failed\n", BE);
         return out;
@@ -91,7 +89,7 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
 
     // ---- Audio encoder (+ projector) ----
     int N_enc = 0, pdim = 0;
-    float * audio_embeds = Ops::run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
+    float* audio_embeds = Ops::run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
     free(mel);
     if (!audio_embeds) {
         fprintf(stderr, "crispasr[%s]: encoder failed\n", BE);
@@ -103,18 +101,21 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     const std::string suffix = Ops::build_suffix(params);
 
     int n_prefix = 0, n_suffix = 0;
-    int32_t * pid = Ops::tokenize(ctx, prefix.c_str(), &n_prefix);
-    int32_t * sid = Ops::tokenize(ctx, suffix.c_str(), &n_suffix);
+    int32_t* pid = Ops::tokenize(ctx, prefix.c_str(), &n_prefix);
+    int32_t* sid = Ops::tokenize(ctx, suffix.c_str(), &n_suffix);
     if (!pid || !sid) {
         fprintf(stderr, "crispasr[%s]: tokenize failed\n", BE);
-        free(pid); free(sid); free(audio_embeds);
+        free(pid);
+        free(sid);
+        free(audio_embeds);
         return out;
     }
 
     std::vector<int32_t> ids;
     ids.reserve((size_t)n_prefix + N_enc + n_suffix);
     ids.insert(ids.end(), pid, pid + n_prefix);
-    for (int i = 0; i < N_enc; i++) ids.push_back(Ops::audio_pad_id);
+    for (int i = 0; i < N_enc; i++)
+        ids.push_back(Ops::audio_pad_id);
     ids.insert(ids.end(), sid, sid + n_suffix);
     free(pid);
     free(sid);
@@ -122,7 +123,7 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     const int T_prompt = (int)ids.size();
 
     // ---- Embed and splice audio frames into audio_pad positions ----
-    float * text_embeds = Ops::embed_tokens(ctx, ids.data(), T_prompt);
+    float* text_embeds = Ops::embed_tokens(ctx, ids.data(), T_prompt);
     if (!text_embeds) {
         fprintf(stderr, "crispasr[%s]: embed failed\n", BE);
         free(audio_embeds);
@@ -132,9 +133,7 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     int spliced = 0;
     for (int i = 0; i < T_prompt && spliced < N_enc; i++) {
         if (ids[i] == Ops::audio_pad_id) {
-            std::memcpy(text_embeds + (size_t)i * pdim,
-                        audio_embeds + (size_t)spliced * pdim,
-                        pdim * sizeof(float));
+            std::memcpy(text_embeds + (size_t)i * pdim, audio_embeds + (size_t)spliced * pdim, pdim * sizeof(float));
             spliced++;
         }
     }
@@ -156,67 +155,60 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     // step). Each candidate gets its own prefill + greedy_decode pass;
     // the KV cache is reset between candidates so they don't share
     // history.
-    const int  n_runs = (params.temperature > 0.0f && params.best_of > 1)
-                      ? params.best_of : 1;
+    const int n_runs = (params.temperature > 0.0f && params.best_of > 1) ? params.best_of : 1;
 
     core_greedy_decode::Config dec_cfg;
     dec_cfg.max_new_tokens = params.max_new_tokens > 0 ? params.max_new_tokens : 512;
-    dec_cfg.eos_id         = Ops::eos_id;
-    dec_cfg.vocab_size     = 0;  // filled after first prefill
-    dec_cfg.temperature    = params.temperature;
+    dec_cfg.eos_id = Ops::eos_id;
+    dec_cfg.vocab_size = 0; // filled after first prefill
+    dec_cfg.temperature = params.temperature;
 
     core_greedy_decode::Result best_dec;
-    double                     best_score = -1.0;
-    int                        vocab = 0;
+    double best_score = -1.0;
+    int vocab = 0;
 
     for (int run = 0; run < n_runs; run++) {
         Ops::kv_reset(ctx);
 
         int n_tokens_out = 0;
-        float * logits = Ops::run_llm_kv(ctx, text_embeds, T_prompt, 0,
-                                         &n_tokens_out, &vocab);
+        float* logits = Ops::run_llm_kv(ctx, text_embeds, T_prompt, 0, &n_tokens_out, &vocab);
         if (!logits) {
-            fprintf(stderr, "crispasr[%s]: prefill failed (run %d/%d)\n",
-                    BE, run + 1, n_runs);
+            fprintf(stderr, "crispasr[%s]: prefill failed (run %d/%d)\n", BE, run + 1, n_runs);
             free(text_embeds);
             return out;
         }
-        if (run == 0) dec_cfg.vocab_size = vocab;
+        if (run == 0)
+            dec_cfg.vocab_size = vocab;
 
-        int   next    = 0;
-        float next_p  = 1.0f;
+        int next = 0;
+        float next_p = 1.0f;
         if (dec_cfg.temperature > 0.0f) {
             // Different seed per run so the N runs actually diverge.
             // Mix in run index so they don't all collapse to the same
             // sample sequence on a deterministic seed.
-            std::mt19937_64 seed_rng(
-                (dec_cfg.seed != 0 ? dec_cfg.seed
-                                   : (uint64_t)std::random_device{}())
-                ^ (uint64_t)(run * 0x9E3779B97F4A7C15ull));
-            next = core_greedy_decode::sample_temp(
-                logits, vocab, dec_cfg.temperature, seed_rng);
+            std::mt19937_64 seed_rng((dec_cfg.seed != 0 ? dec_cfg.seed : (uint64_t)std::random_device{}()) ^
+                                     (uint64_t)(run * 0x9E3779B97F4A7C15ull));
+            next = core_greedy_decode::sample_temp(logits, vocab, dec_cfg.temperature, seed_rng);
         } else {
             next = core_greedy_decode::argmax(logits, vocab);
         }
         next_p = core_greedy_decode::softmax_of(logits, vocab, next, logits[next]);
         free(logits);
 
-        auto dec = core_greedy_decode::run_with_probs(
-            ctx,
-            /*first_token=*/next,
-            /*first_prob=*/next_p,
-            /*initial_n_past=*/T_prompt,
-            Ops::embed_tokens,
-            Ops::run_llm_kv,
-            dec_cfg);
+        auto dec = core_greedy_decode::run_with_probs(ctx,
+                                                      /*first_token=*/next,
+                                                      /*first_prob=*/next_p,
+                                                      /*initial_n_past=*/T_prompt, Ops::embed_tokens, Ops::run_llm_kv,
+                                                      dec_cfg);
 
         // Score: arithmetic mean of per-token softmax probabilities,
         // skipping the trailing EOS if present. Equivalent ranking to
         // mean-log-prob for our purposes and avoids one log() per token.
         double sum = 0.0;
-        int    cnt = 0;
+        int cnt = 0;
         for (size_t i = 0; i < dec.probs.size(); i++) {
-            if ((int32_t)dec.tokens[i] == Ops::eos_id) break;
+            if ((int32_t)dec.tokens[i] == Ops::eos_id)
+                break;
             sum += (double)dec.probs[i];
             cnt++;
         }
@@ -224,18 +216,17 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
 
         if (run == 0 || score > best_score) {
             best_score = score;
-            best_dec   = std::move(dec);
+            best_dec = std::move(dec);
         }
     }
     free(text_embeds);
 
     if (!params.no_prints && n_runs > 1) {
-        fprintf(stderr, "crispasr[%s]: best-of-%d picked score=%.4f\n",
-                BE, n_runs, best_score);
+        fprintf(stderr, "crispasr[%s]: best-of-%d picked score=%.4f\n", BE, n_runs, best_score);
     }
 
-    const std::vector<int32_t> & gen   = best_dec.tokens;
-    const std::vector<float>   & probs = best_dec.probs;
+    const std::vector<int32_t>& gen = best_dec.tokens;
+    const std::vector<float>& probs = best_dec.probs;
 
     // ---- Detokenize + attach per-token confidence to the segment ----
     std::string transcript;
@@ -243,15 +234,16 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     seg.tokens.reserve(gen.size());
     for (size_t i = 0; i < gen.size(); i++) {
         const int32_t id = gen[i];
-        if (id == Ops::eos_id) break;
+        if (id == Ops::eos_id)
+            break;
         int len = 0;
-        const uint8_t * bytes = Ops::token_text(ctx, id, &len);
+        const uint8_t* bytes = Ops::token_text(ctx, id, &len);
         crispasr_token ct;
-        ct.id         = id;
+        ct.id = id;
         ct.confidence = (i < probs.size()) ? probs[i] : -1.0f;
         if (bytes && len > 0) {
-            ct.text.assign((const char *)bytes, (size_t)len);
-            transcript.append((const char *)bytes, (size_t)len);
+            ct.text.assign((const char*)bytes, (size_t)len);
+            transcript.append((const char*)bytes, (size_t)len);
         }
         seg.tokens.push_back(std::move(ct));
     }
@@ -261,8 +253,7 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline(
     seg.text = transcript;
 
     // Trim leading whitespace if the prompt template bled one in.
-    while (!seg.text.empty() &&
-           (seg.text.front() == ' ' || seg.text.front() == '\n')) {
+    while (!seg.text.empty() && (seg.text.front() == ' ' || seg.text.front() == '\n')) {
         seg.text.erase(seg.text.begin());
     }
 

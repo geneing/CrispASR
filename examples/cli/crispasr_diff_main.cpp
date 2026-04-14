@@ -65,19 +65,22 @@
 namespace {
 
 struct StageResult {
-    bool                 ok   = false;
-    std::vector<float>   data;
-    std::vector<int>     shape;   // canonical order: outer..inner
-    std::string          note;    // filled when ok=false to explain skip
+    bool ok = false;
+    std::vector<float> data;
+    std::vector<int> shape; // canonical order: outer..inner
+    std::string note;       // filled when ok=false to explain skip
 };
 
 // ---- voxtral 3B ----
 
-static StageResult voxtral_mel(voxtral_context * ctx, const float * samples, int n_samples) {
+static StageResult voxtral_mel(voxtral_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = voxtral_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "voxtral_compute_mel returned null"; return r; }
+    float* mel = voxtral_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "voxtral_compute_mel returned null";
+        return r;
+    }
     r.shape = {n_mels, T_mel};
     r.data.assign(mel, mel + (size_t)n_mels * T_mel);
     free(mel);
@@ -85,15 +88,21 @@ static StageResult voxtral_mel(voxtral_context * ctx, const float * samples, int
     return r;
 }
 
-static StageResult voxtral_encoder(voxtral_context * ctx, const float * samples, int n_samples) {
+static StageResult voxtral_encoder(voxtral_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = voxtral_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "mel failed"; return r; }
+    float* mel = voxtral_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "mel failed";
+        return r;
+    }
     int N_enc = 0, pdim = 0;
-    float * enc = voxtral_run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
+    float* enc = voxtral_run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
     free(mel);
-    if (!enc) { r.note = "voxtral_run_encoder returned null"; return r; }
+    if (!enc) {
+        r.note = "voxtral_run_encoder returned null";
+        return r;
+    }
     r.shape = {N_enc, pdim};
     r.data.assign(enc, enc + (size_t)N_enc * pdim);
     free(enc);
@@ -103,11 +112,14 @@ static StageResult voxtral_encoder(voxtral_context * ctx, const float * samples,
 
 // ---- voxtral4b ----
 
-static StageResult voxtral4b_mel(voxtral4b_context * ctx, const float * samples, int n_samples) {
+static StageResult voxtral4b_mel(voxtral4b_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = voxtral4b_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "voxtral4b_compute_mel returned null"; return r; }
+    float* mel = voxtral4b_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "voxtral4b_compute_mel returned null";
+        return r;
+    }
     r.shape = {n_mels, T_mel};
     r.data.assign(mel, mel + (size_t)n_mels * T_mel);
     free(mel);
@@ -117,11 +129,14 @@ static StageResult voxtral4b_mel(voxtral4b_context * ctx, const float * samples,
 
 // ---- qwen3 ----
 
-static StageResult qwen3_mel(qwen3_asr_context * ctx, const float * samples, int n_samples) {
+static StageResult qwen3_mel(qwen3_asr_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = qwen3_asr_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "qwen3_asr_compute_mel returned null"; return r; }
+    float* mel = qwen3_asr_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "qwen3_asr_compute_mel returned null";
+        return r;
+    }
     r.shape = {n_mels, T_mel};
     r.data.assign(mel, mel + (size_t)n_mels * T_mel);
     free(mel);
@@ -131,11 +146,14 @@ static StageResult qwen3_mel(qwen3_asr_context * ctx, const float * samples, int
 
 // ---- granite ----
 
-static StageResult granite_mel(granite_speech_context * ctx, const float * samples, int n_samples) {
+static StageResult granite_mel(granite_speech_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = granite_speech_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "granite_speech_compute_mel returned null"; return r; }
+    float* mel = granite_speech_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "granite_speech_compute_mel returned null";
+        return r;
+    }
     r.shape = {n_mels, T_mel};
     r.data.assign(mel, mel + (size_t)n_mels * T_mel);
     free(mel);
@@ -145,11 +163,14 @@ static StageResult granite_mel(granite_speech_context * ctx, const float * sampl
 
 // ---- parakeet (NeMo FastConformer + TDT) ----
 
-static StageResult parakeet_mel_r(parakeet_context * ctx, const float * samples, int n_samples) {
+static StageResult parakeet_mel_r(parakeet_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = parakeet_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "parakeet_compute_mel returned null"; return r; }
+    float* mel = parakeet_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "parakeet_compute_mel returned null";
+        return r;
+    }
     r.shape = {n_mels, T_mel};
     r.data.assign(mel, mel + (size_t)n_mels * T_mel);
     free(mel);
@@ -157,15 +178,21 @@ static StageResult parakeet_mel_r(parakeet_context * ctx, const float * samples,
     return r;
 }
 
-static StageResult parakeet_encoder_r(parakeet_context * ctx, const float * samples, int n_samples) {
+static StageResult parakeet_encoder_r(parakeet_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = parakeet_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "mel failed"; return r; }
+    float* mel = parakeet_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "mel failed";
+        return r;
+    }
     int T_enc = 0, d_model = 0;
-    float * enc = parakeet_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
+    float* enc = parakeet_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
     free(mel);
-    if (!enc) { r.note = "parakeet_run_encoder returned null"; return r; }
+    if (!enc) {
+        r.note = "parakeet_run_encoder returned null";
+        return r;
+    }
     r.shape = {T_enc, d_model};
     r.data.assign(enc, enc + (size_t)T_enc * d_model);
     free(enc);
@@ -175,11 +202,14 @@ static StageResult parakeet_encoder_r(parakeet_context * ctx, const float * samp
 
 // ---- canary (NeMo FastConformer + Transformer decoder) ----
 
-static StageResult canary_mel_r(canary_context * ctx, const float * samples, int n_samples) {
+static StageResult canary_mel_r(canary_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = canary_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "canary_compute_mel returned null"; return r; }
+    float* mel = canary_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "canary_compute_mel returned null";
+        return r;
+    }
     r.shape = {n_mels, T_mel};
     r.data.assign(mel, mel + (size_t)n_mels * T_mel);
     free(mel);
@@ -187,15 +217,21 @@ static StageResult canary_mel_r(canary_context * ctx, const float * samples, int
     return r;
 }
 
-static StageResult canary_encoder_r(canary_context * ctx, const float * samples, int n_samples) {
+static StageResult canary_encoder_r(canary_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = canary_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "mel failed"; return r; }
+    float* mel = canary_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "mel failed";
+        return r;
+    }
     int T_enc = 0, d_model = 0;
-    float * enc = canary_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
+    float* enc = canary_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
     free(mel);
-    if (!enc) { r.note = "canary_run_encoder returned null"; return r; }
+    if (!enc) {
+        r.note = "canary_run_encoder returned null";
+        return r;
+    }
     r.shape = {T_enc, d_model};
     r.data.assign(enc, enc + (size_t)T_enc * d_model);
     free(enc);
@@ -205,11 +241,14 @@ static StageResult canary_encoder_r(canary_context * ctx, const float * samples,
 
 // ---- cohere (Conformer + Transformer) ----
 
-static StageResult cohere_mel_r(cohere_context * ctx, const float * samples, int n_samples) {
+static StageResult cohere_mel_r(cohere_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = cohere_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "cohere_compute_mel returned null"; return r; }
+    float* mel = cohere_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "cohere_compute_mel returned null";
+        return r;
+    }
     r.shape = {n_mels, T_mel};
     r.data.assign(mel, mel + (size_t)n_mels * T_mel);
     free(mel);
@@ -217,15 +256,21 @@ static StageResult cohere_mel_r(cohere_context * ctx, const float * samples, int
     return r;
 }
 
-static StageResult cohere_encoder_r(cohere_context * ctx, const float * samples, int n_samples) {
+static StageResult cohere_encoder_r(cohere_context* ctx, const float* samples, int n_samples) {
     StageResult r;
     int n_mels = 0, T_mel = 0;
-    float * mel = cohere_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
-    if (!mel) { r.note = "mel failed"; return r; }
+    float* mel = cohere_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        r.note = "mel failed";
+        return r;
+    }
     int T_enc = 0, d_model = 0;
-    float * enc = cohere_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
+    float* enc = cohere_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_model);
     free(mel);
-    if (!enc) { r.note = "cohere_run_encoder returned null"; return r; }
+    if (!enc) {
+        r.note = "cohere_run_encoder returned null";
+        return r;
+    }
     r.shape = {T_enc, d_model};
     r.data.assign(enc, enc + (size_t)T_enc * d_model);
     free(enc);
@@ -236,29 +281,26 @@ static StageResult cohere_encoder_r(cohere_context * ctx, const float * samples,
 } // namespace
 
 
-static void print_row(const char * name, const crispasr_diff::Report & r,
-                      float cos_threshold, const char * extra = "") {
-    const char * tag = r.found ? (r.is_pass(cos_threshold) ? "[PASS]" : "[FAIL]") : "[SKIP]";
+static void print_row(const char* name, const crispasr_diff::Report& r, float cos_threshold, const char* extra = "") {
+    const char* tag = r.found ? (r.is_pass(cos_threshold) ? "[PASS]" : "[FAIL]") : "[SKIP]";
     std::string shape_str = "[";
     for (size_t i = 0; i < r.shape.size(); i++) {
         shape_str += std::to_string(r.shape[i]);
-        if (i + 1 < r.shape.size()) shape_str += ",";
+        if (i + 1 < r.shape.size())
+            shape_str += ",";
     }
     shape_str += "]";
     if (!r.found) {
-        printf("%s %-22s %s  (reference not in archive)%s%s\n",
-               tag, name, shape_str.c_str(),
-               *extra ? "  " : "", extra);
+        printf("%s %-22s %s  (reference not in archive)%s%s\n", tag, name, shape_str.c_str(), *extra ? "  " : "",
+               extra);
         return;
     }
-    printf("%s %-22s shape=%-16s cos_min=%.6f  cos_mean=%.6f  max_abs=%.2e  rms=%.2e%s%s\n",
-           tag, name, shape_str.c_str(),
-           r.cos_min, r.cos_mean, r.max_abs, r.rms,
-           *extra ? "  " : "", extra);
+    printf("%s %-22s shape=%-16s cos_min=%.6f  cos_mean=%.6f  max_abs=%.2e  rms=%.2e%s%s\n", tag, name,
+           shape_str.c_str(), r.cos_min, r.cos_mean, r.max_abs, r.rms, *extra ? "  " : "", extra);
 }
 
 
-int main(int argc, char ** argv) {
+int main(int argc, char** argv) {
     if (argc < 5) {
         fprintf(stderr,
                 "usage: %s <backend> <model.gguf> <reference.gguf> <audio.wav>\n"
@@ -271,9 +313,9 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const std::string backend_name = argv[1];
-    const std::string model_path   = argv[2];
-    const std::string ref_path     = argv[3];
-    const std::string audio_path   = argv[4];
+    const std::string model_path = argv[2];
+    const std::string ref_path = argv[3];
+    const std::string audio_path = argv[4];
 
     // Load the reference archive.
     crispasr_diff::Ref ref;
@@ -295,29 +337,40 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "crispasr-diff: failed to read audio '%s'\n", audio_path.c_str());
         return 3;
     }
-    printf("crispasr-diff: audio %zu samples (%.2fs), reference %s, backend %s\n",
-           samples.size(), samples.size()/16000.0,
-           ref_path.c_str(), backend_name.c_str());
+    printf("crispasr-diff: audio %zu samples (%.2fs), reference %s, backend %s\n", samples.size(),
+           samples.size() / 16000.0, ref_path.c_str(), backend_name.c_str());
 
     const float COS_THRESHOLD = 0.999f;
     int n_pass = 0, n_fail = 0, n_skip = 0;
 
-    auto record = [&](const crispasr_diff::Report & r) {
-        if (!r.found)                        { n_skip++; return; }
-        if (r.is_pass(COS_THRESHOLD))        { n_pass++; return; }
+    auto record = [&](const crispasr_diff::Report& r) {
+        if (!r.found) {
+            n_skip++;
+            return;
+        }
+        if (r.is_pass(COS_THRESHOLD)) {
+            n_pass++;
+            return;
+        }
         n_fail++;
     };
 
     // -------- Dispatch to the right backend runner --------
     if (backend_name == "voxtral") {
-        auto cp = voxtral_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
-        voxtral_context * ctx = voxtral_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load voxtral model\n"); return 4; }
+        auto cp = voxtral_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        voxtral_context* ctx = voxtral_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load voxtral model\n");
+            return 4;
+        }
 
         auto mel_r = voxtral_mel(ctx, samples.data(), (int)samples.size());
         if (mel_r.ok) {
             auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
-            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
+            print_row("mel_spectrogram", rep, COS_THRESHOLD);
+            record(rep);
         } else {
             printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str());
             n_fail++;
@@ -328,7 +381,8 @@ int main(int argc, char ** argv) {
             // voxtral's run_encoder returns the projector output directly,
             // so compare it against projector_output in the reference.
             auto rep = ref.compare("projector_output", enc_r.data.data(), enc_r.data.size());
-            print_row("projector_output", rep, COS_THRESHOLD); record(rep);
+            print_row("projector_output", rep, COS_THRESHOLD);
+            record(rep);
         } else {
             printf("[ERR ] projector_output        %s\n", enc_r.note.c_str());
             n_fail++;
@@ -336,87 +390,153 @@ int main(int argc, char ** argv) {
 
         voxtral_free(ctx);
     } else if (backend_name == "voxtral4b") {
-        auto cp = voxtral4b_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
-        voxtral4b_context * ctx = voxtral4b_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load voxtral4b model\n"); return 4; }
+        auto cp = voxtral4b_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        voxtral4b_context* ctx = voxtral4b_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load voxtral4b model\n");
+            return 4;
+        }
         auto mel_r = voxtral4b_mel(ctx, samples.data(), (int)samples.size());
         if (mel_r.ok) {
             auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
-            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+            print_row("mel_spectrogram", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str());
+            n_fail++;
+        }
         voxtral4b_free(ctx);
     } else if (backend_name == "qwen3") {
-        auto cp = qwen3_asr_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
-        qwen3_asr_context * ctx = qwen3_asr_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load qwen3 model\n"); return 4; }
+        auto cp = qwen3_asr_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        qwen3_asr_context* ctx = qwen3_asr_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load qwen3 model\n");
+            return 4;
+        }
         auto mel_r = qwen3_mel(ctx, samples.data(), (int)samples.size());
         if (mel_r.ok) {
             auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
-            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+            print_row("mel_spectrogram", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str());
+            n_fail++;
+        }
         qwen3_asr_free(ctx);
     } else if (backend_name == "granite") {
-        auto cp = granite_speech_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
-        granite_speech_context * ctx = granite_speech_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load granite model\n"); return 4; }
+        auto cp = granite_speech_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        granite_speech_context* ctx = granite_speech_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load granite model\n");
+            return 4;
+        }
         auto mel_r = granite_mel(ctx, samples.data(), (int)samples.size());
         if (mel_r.ok) {
             auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
-            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+            print_row("mel_spectrogram", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str());
+            n_fail++;
+        }
         granite_speech_free(ctx);
     } else if (backend_name == "parakeet") {
-        auto cp = parakeet_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
-        parakeet_context * ctx = parakeet_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load parakeet model\n"); return 4; }
+        auto cp = parakeet_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        parakeet_context* ctx = parakeet_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load parakeet model\n");
+            return 4;
+        }
 
         auto mel_r = parakeet_mel_r(ctx, samples.data(), (int)samples.size());
         if (mel_r.ok) {
             auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
-            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+            print_row("mel_spectrogram", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str());
+            n_fail++;
+        }
 
         auto enc_r = parakeet_encoder_r(ctx, samples.data(), (int)samples.size());
         if (enc_r.ok) {
             auto rep = ref.compare("encoder_output", enc_r.data.data(), enc_r.data.size());
-            print_row("encoder_output", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str()); n_fail++; }
+            print_row("encoder_output", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str());
+            n_fail++;
+        }
 
         parakeet_free(ctx);
     } else if (backend_name == "canary") {
-        auto cp = canary_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
-        canary_context * ctx = canary_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load canary model\n"); return 4; }
+        auto cp = canary_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        canary_context* ctx = canary_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load canary model\n");
+            return 4;
+        }
 
         auto mel_r = canary_mel_r(ctx, samples.data(), (int)samples.size());
         if (mel_r.ok) {
             auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
-            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+            print_row("mel_spectrogram", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str());
+            n_fail++;
+        }
 
         auto enc_r = canary_encoder_r(ctx, samples.data(), (int)samples.size());
         if (enc_r.ok) {
             auto rep = ref.compare("encoder_output", enc_r.data.data(), enc_r.data.size());
-            print_row("encoder_output", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str()); n_fail++; }
+            print_row("encoder_output", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str());
+            n_fail++;
+        }
 
         canary_free(ctx);
     } else if (backend_name == "cohere") {
-        auto cp = cohere_context_default_params(); cp.n_threads = 4; cp.verbosity = 0;
-        cohere_context * ctx = cohere_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load cohere model\n"); return 4; }
+        auto cp = cohere_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        cohere_context* ctx = cohere_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load cohere model\n");
+            return 4;
+        }
 
         auto mel_r = cohere_mel_r(ctx, samples.data(), (int)samples.size());
         if (mel_r.ok) {
             auto rep = ref.compare("mel_spectrogram", mel_r.data.data(), mel_r.data.size());
-            print_row("mel_spectrogram", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str()); n_fail++; }
+            print_row("mel_spectrogram", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] mel_spectrogram         %s\n", mel_r.note.c_str());
+            n_fail++;
+        }
 
         auto enc_r = cohere_encoder_r(ctx, samples.data(), (int)samples.size());
         if (enc_r.ok) {
             auto rep = ref.compare("encoder_output", enc_r.data.data(), enc_r.data.size());
-            print_row("encoder_output", rep, COS_THRESHOLD); record(rep);
-        } else { printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str()); n_fail++; }
+            print_row("encoder_output", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str());
+            n_fail++;
+        }
 
         cohere_free(ctx);
     } else {
@@ -427,7 +547,6 @@ int main(int argc, char ** argv) {
         return 5;
     }
 
-    printf("\nsummary: %d pass, %d fail, %d skip (cos threshold %.3f)\n",
-           n_pass, n_fail, n_skip, COS_THRESHOLD);
+    printf("\nsummary: %d pass, %d fail, %d skip (cos threshold %.3f)\n", n_pass, n_fail, n_skip, COS_THRESHOLD);
     return n_fail == 0 ? 0 : 6;
 }

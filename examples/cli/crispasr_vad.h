@@ -16,8 +16,8 @@
 struct whisper_params; // fwd decl
 
 struct crispasr_audio_slice {
-    int     start, end;        // sample indices into the full PCM buffer
-    int64_t t0_cs, t1_cs;      // centiseconds, absolute start/end of the slice
+    int start, end;       // sample indices into the full PCM buffer
+    int64_t t0_cs, t1_cs; // centiseconds, absolute start/end of the slice
 };
 
 // Build the list of audio slices to transcribe.
@@ -31,9 +31,5 @@ struct crispasr_audio_slice {
 // chunk_seconds is the fallback window size for the no-VAD path.
 //
 // Returns an empty vector if VAD was requested but detected no speech.
-std::vector<crispasr_audio_slice> crispasr_compute_audio_slices(
-    const float * samples,
-    int           n_samples,
-    int           sample_rate,
-    int           chunk_seconds,
-    const whisper_params & params);
+std::vector<crispasr_audio_slice> crispasr_compute_audio_slices(const float* samples, int n_samples, int sample_rate,
+                                                                int chunk_seconds, const whisper_params& params);

@@ -37,60 +37,53 @@ namespace {
 // merges-table conversion still work unchanged (they fall through to
 // the hardcoded kPrefix4/kSuffix4 arrays), while granite-3.x / any
 // future release dispatches through the tokenizer path.
-constexpr int32_t kPrefix4[]   = { 6584, 25, 220 };                       // "USER: "
-constexpr int     kNumPrefix4  = 3;
-constexpr int32_t kSuffix4[]   = {                                        // "can you transcribe..."
-    4919, 499, 1380, 3191, 279, 8982, 1139, 264, 5439, 3645, 30, 198,
-    36660, 3931, 2891, 25
-};
-constexpr int     kNumSuffix4  = 16;
+constexpr int32_t kPrefix4[] = {6584, 25, 220}; // "USER: "
+constexpr int kNumPrefix4 = 3;
+constexpr int32_t kSuffix4[] = { // "can you transcribe..."
+    4919, 499, 1380, 3191, 279, 8982, 1139, 264, 5439, 3645, 30, 198, 36660, 3931, 2891, 25};
+constexpr int kNumSuffix4 = 16;
 
 // Legacy token ids for granite-4.0-1b. Only used when the GGUF doesn't
 // export granite_speech.llm.audio_token_index / eos_token_id (i.e. it
 // was produced before that key landed). Both accessors below fall back
 // to these when the runtime returns -1.
 constexpr int kLegacyAudioTok4 = 100352;
-constexpr int kLegacyEos4      = 100257;
+constexpr int kLegacyEos4 = 100257;
 
 class GraniteBackend : public CrispasrBackend {
 public:
     GraniteBackend() = default;
     ~GraniteBackend() override { GraniteBackend::shutdown(); }
 
-    const char * name() const override { return "granite"; }
+    const char* name() const override { return "granite"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE
-             | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN | CAP_TOKEN_CONFIDENCE
-             | CAP_TRANSLATE | CAP_SRC_TGT_LANGUAGE | CAP_DIARIZE
-             | CAP_PARALLEL_PROCESSORS;
+        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN |
+               CAP_TOKEN_CONFIDENCE | CAP_TRANSLATE | CAP_SRC_TGT_LANGUAGE | CAP_DIARIZE | CAP_PARALLEL_PROCESSORS;
     }
 
-    bool init(const whisper_params & p) override {
+    bool init(const whisper_params& p) override {
         granite_speech_context_params cp = granite_speech_context_default_params();
         cp.n_threads = p.n_threads;
         cp.verbosity = p.no_prints ? 0 : 1;
 
         ctx_ = granite_speech_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
-            fprintf(stderr, "crispasr[granite]: failed to load model '%s'\n",
-                    p.model.c_str());
+            fprintf(stderr, "crispasr[granite]: failed to load model '%s'\n", p.model.c_str());
             return false;
         }
         return true;
     }
 
-    std::vector<crispasr_segment> transcribe(
-        const float * samples, int n_samples,
-        int64_t t_offset_cs,
-        const whisper_params & params) override
-    {
+    std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
+                                             const whisper_params& params) override {
         std::vector<crispasr_segment> out;
-        if (!ctx_) return out;
+        if (!ctx_)
+            return out;
 
         // ---- Mel spectrogram ----
         int n_mels = 0, T_mel = 0;
-        float * mel = granite_speech_compute_mel(ctx_, samples, n_samples, &n_mels, &T_mel);
+        float* mel = granite_speech_compute_mel(ctx_, samples, n_samples, &n_mels, &T_mel);
         if (!mel) {
             fprintf(stderr, "crispasr[granite]: mel failed\n");
             return out;
@@ -98,7 +91,7 @@ public:
 
         // ---- Encoder ----
         int N_enc = 0, enc_dim = 0;
-        float * enc = granite_speech_run_encoder(ctx_, mel, n_mels, T_mel, &N_enc, &enc_dim);
+        float* enc = granite_speech_run_encoder(ctx_, mel, n_mels, T_mel, &N_enc, &enc_dim);
         free(mel);
         if (!enc) {
             fprintf(stderr, "crispasr[granite]: encoder failed\n");
@@ -107,7 +100,7 @@ public:
 
         // ---- Q-Former projector ----
         int N_proj = 0, proj_dim = 0;
-        float * proj = granite_speech_run_projector(ctx_, enc, N_enc, enc_dim, &N_proj, &proj_dim);
+        float* proj = granite_speech_run_projector(ctx_, enc, N_enc, enc_dim, &N_proj, &proj_dim);
         free(enc);
         if (!proj) {
             fprintf(stderr, "crispasr[granite]: projector failed\n");
@@ -130,22 +123,33 @@ public:
         //      merges) re-tokenize the chat-template prefix + suffix at
         //      runtime so the resulting ids match the model's vocab.
         int audio_tok = granite_speech_audio_token_id(ctx_);
-        int eos_tok   = granite_speech_eos_token_id(ctx_);
+        int eos_tok = granite_speech_eos_token_id(ctx_);
         const int vocab_sz = granite_speech_vocab_size(ctx_);
-        if (audio_tok < 0) audio_tok = kLegacyAudioTok4;
-        if (eos_tok   < 0) eos_tok   = kLegacyEos4;
+        if (audio_tok < 0)
+            audio_tok = kLegacyAudioTok4;
+        if (eos_tok < 0)
+            eos_tok = kLegacyEos4;
         (void)vocab_sz;
 
-        auto iso_to_eng = [](const std::string & c) -> std::string {
-            if (c == "en") return "English";
-            if (c == "de") return "German";
-            if (c == "fr") return "French";
-            if (c == "es") return "Spanish";
-            if (c == "it") return "Italian";
-            if (c == "pt") return "Portuguese";
-            if (c == "ru") return "Russian";
-            if (c == "ja") return "Japanese";
-            if (c == "zh") return "Chinese";
+        auto iso_to_eng = [](const std::string& c) -> std::string {
+            if (c == "en")
+                return "English";
+            if (c == "de")
+                return "German";
+            if (c == "fr")
+                return "French";
+            if (c == "es")
+                return "Spanish";
+            if (c == "it")
+                return "Italian";
+            if (c == "pt")
+                return "Portuguese";
+            if (c == "ru")
+                return "Russian";
+            if (c == "ja")
+                return "Japanese";
+            if (c == "zh")
+                return "Chinese";
             return c;
         };
 
@@ -172,23 +176,30 @@ public:
             // granite_speech_tokenize() detects <|...|> markers and
             // emits their vocab id directly.
             const std::string prefix_str = "<|start_of_role|>user<|end_of_role|>";
-            std::string suffix_str =
-                "can you transcribe the speech into a written format?"
-                "<|end_of_text|>\n"
-                "<|start_of_role|>assistant<|end_of_role|>";
+            std::string suffix_str = "can you transcribe the speech into a written format?"
+                                     "<|end_of_text|>\n"
+                                     "<|start_of_role|>assistant<|end_of_role|>";
             if (params.translate) {
-                const std::string tgt = params.target_lang.empty()
-                                      ? std::string("English")
-                                      : iso_to_eng(params.target_lang);
-                suffix_str = "can you translate the speech to " + tgt + "?"
+                const std::string tgt =
+                    params.target_lang.empty() ? std::string("English") : iso_to_eng(params.target_lang);
+                suffix_str = "can you translate the speech to " + tgt +
+                             "?"
                              "<|end_of_text|>\n"
                              "<|start_of_role|>assistant<|end_of_role|>";
             }
             int n = 0;
-            int32_t * a = granite_speech_tokenize(ctx_, prefix_str.c_str(), &n);
-            if (a && n > 0) { prefix_ids.assign(a, a + n); free(a); } else if (a) free(a);
+            int32_t* a = granite_speech_tokenize(ctx_, prefix_str.c_str(), &n);
+            if (a && n > 0) {
+                prefix_ids.assign(a, a + n);
+                free(a);
+            } else if (a)
+                free(a);
             a = granite_speech_tokenize(ctx_, suffix_str.c_str(), &n);
-            if (a && n > 0) { suffix_ids.assign(a, a + n); free(a); } else if (a) free(a);
+            if (a && n > 0) {
+                suffix_ids.assign(a, a + n);
+                free(a);
+            } else if (a)
+                free(a);
         } else {
             // granite-4.0-1b legacy prompt. Use the hardcoded kPrefix4/
             // kSuffix4 arrays because tokenize_simple's whitespace-skip
@@ -196,24 +207,25 @@ public:
             // changes the prefix from 3 tokens to 2 and breaks decoding.
             prefix_ids.assign(kPrefix4, kPrefix4 + kNumPrefix4);
             if (params.translate) {
-                const std::string tgt = params.target_lang.empty()
-                                      ? std::string("English")
-                                      : iso_to_eng(params.target_lang);
-                const std::string instr =
-                    "can you translate the speech to " + tgt + "?\n ASSISTANT:";
+                const std::string tgt =
+                    params.target_lang.empty() ? std::string("English") : iso_to_eng(params.target_lang);
+                const std::string instr = "can you translate the speech to " + tgt + "?\n ASSISTANT:";
                 int n = 0;
-                int32_t * a = granite_speech_tokenize(ctx_, instr.c_str(), &n);
-                if (a && n > 0) { suffix_ids.assign(a, a + n); free(a); } else if (a) free(a);
+                int32_t* a = granite_speech_tokenize(ctx_, instr.c_str(), &n);
+                if (a && n > 0) {
+                    suffix_ids.assign(a, a + n);
+                    free(a);
+                } else if (a)
+                    free(a);
             } else {
                 suffix_ids.assign(kSuffix4, kSuffix4 + kNumSuffix4);
             }
         }
 
         if (prefix_ids.empty() || suffix_ids.empty()) {
-            fprintf(stderr,
-                    "crispasr[granite]: tokenize failed — re-convert the GGUF "
-                    "with the newer models/convert-granite-speech-to-gguf.py "
-                    "to pick up the merges table\n");
+            fprintf(stderr, "crispasr[granite]: tokenize failed — re-convert the GGUF "
+                            "with the newer models/convert-granite-speech-to-gguf.py "
+                            "to pick up the merges table\n");
             free(proj);
             return out;
         }
@@ -223,11 +235,14 @@ public:
         const int total_prompt = n_prefix + N_proj + n_suffix;
         std::vector<int32_t> prompt_ids;
         prompt_ids.reserve(total_prompt);
-        for (int id : prefix_ids) prompt_ids.push_back(id);
-        for (int i = 0; i < N_proj; i++) prompt_ids.push_back(audio_tok);
-        for (int id : suffix_ids) prompt_ids.push_back(id);
+        for (int id : prefix_ids)
+            prompt_ids.push_back(id);
+        for (int i = 0; i < N_proj; i++)
+            prompt_ids.push_back(audio_tok);
+        for (int id : suffix_ids)
+            prompt_ids.push_back(id);
 
-        float * all_embeds = granite_speech_embed_tokens(ctx_, prompt_ids.data(), total_prompt);
+        float* all_embeds = granite_speech_embed_tokens(ctx_, prompt_ids.data(), total_prompt);
         if (!all_embeds) {
             free(proj);
             fprintf(stderr, "crispasr[granite]: embed failed\n");
@@ -236,8 +251,7 @@ public:
 
         // Splice projector output into the audio positions (skip the prefix).
         for (int i = 0; i < N_proj; i++) {
-            std::memcpy(all_embeds + (size_t)(n_prefix + i) * proj_dim,
-                        proj + (size_t)i * proj_dim,
+            std::memcpy(all_embeds + (size_t)(n_prefix + i) * proj_dim, proj + (size_t)i * proj_dim,
                         proj_dim * sizeof(float));
         }
         free(proj);
@@ -251,8 +265,7 @@ public:
         granite_speech_kv_reset(ctx_);
 
         int vocab = 0;
-        float * logits = granite_speech_run_llm_kv(ctx_, all_embeds, total_prompt, 0,
-                                                    nullptr, &vocab);
+        float* logits = granite_speech_run_llm_kv(ctx_, all_embeds, total_prompt, 0, nullptr, &vocab);
         free(all_embeds);
         if (!logits) {
             fprintf(stderr, "crispasr[granite]: prefill failed\n");
@@ -264,47 +277,44 @@ public:
         // we stay on the historical bit-identical greedy path.
         core_greedy_decode::Config dec_cfg;
         dec_cfg.max_new_tokens = params.max_new_tokens > 0 ? params.max_new_tokens : 200;
-        dec_cfg.eos_id         = eos_tok;
-        dec_cfg.vocab_size     = vocab;
-        dec_cfg.temperature    = params.temperature;
+        dec_cfg.eos_id = eos_tok;
+        dec_cfg.vocab_size = vocab;
+        dec_cfg.temperature = params.temperature;
 
-        int   next   = 0;
+        int next = 0;
         float next_p = 1.0f;
         if (dec_cfg.temperature > 0.0f) {
-            std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed
-                                       : (uint64_t)std::random_device{}());
-            next = core_greedy_decode::sample_temp(
-                logits, vocab, dec_cfg.temperature, seed_rng);
+            std::mt19937_64 seed_rng(dec_cfg.seed != 0 ? dec_cfg.seed : (uint64_t)std::random_device{}());
+            next = core_greedy_decode::sample_temp(logits, vocab, dec_cfg.temperature, seed_rng);
         } else {
             next = core_greedy_decode::argmax(logits, vocab);
         }
-        next_p = core_greedy_decode::softmax_of(
-            logits, vocab, next, logits[next]);
+        next_p = core_greedy_decode::softmax_of(logits, vocab, next, logits[next]);
         free(logits);
 
-        auto dec = core_greedy_decode::run_with_probs(
-            ctx_,
-            /*first_token=*/next,
-            /*first_prob=*/next_p,
-            /*initial_n_past=*/total_prompt,
-            granite_speech_embed_tokens,
-            granite_speech_run_llm_kv,
-            dec_cfg);
-        const std::vector<int32_t> & gen_ids = dec.tokens;
-        const std::vector<float>   & probs   = dec.probs;
+        auto dec = core_greedy_decode::run_with_probs(ctx_,
+                                                      /*first_token=*/next,
+                                                      /*first_prob=*/next_p,
+                                                      /*initial_n_past=*/total_prompt, granite_speech_embed_tokens,
+                                                      granite_speech_run_llm_kv, dec_cfg);
+        const std::vector<int32_t>& gen_ids = dec.tokens;
+        const std::vector<float>& probs = dec.probs;
 
         // Strip EOS from generated IDs before detokenizing.
         std::vector<int32_t> text_ids;
         text_ids.reserve(gen_ids.size());
-        for (int32_t id : gen_ids) if (id != eos_tok) text_ids.push_back(id);
+        for (int32_t id : gen_ids)
+            if (id != eos_tok)
+                text_ids.push_back(id);
 
-        char * text = granite_speech_decode_tokens(ctx_, text_ids.data(), (int)text_ids.size());
+        char* text = granite_speech_decode_tokens(ctx_, text_ids.data(), (int)text_ids.size());
 
         crispasr_segment seg;
         seg.t0 = t_offset_cs;
         seg.t1 = t_offset_cs + (int64_t)((double)n_samples / 16000.0 * 100.0);
         seg.text = text ? text : "";
-        if (text) free(text);
+        if (text)
+            free(text);
 
         // Trim leading whitespace emitted by the chat template.
         while (!seg.text.empty() && (seg.text.front() == ' ' || seg.text.front() == '\n')) {
@@ -319,9 +329,10 @@ public:
         // avoid duplicating the batch detokenizer's merging logic.
         seg.tokens.reserve(gen_ids.size());
         for (size_t i = 0; i < gen_ids.size(); i++) {
-            if (gen_ids[i] == eos_tok) break;
+            if (gen_ids[i] == eos_tok)
+                break;
             crispasr_token ct;
-            ct.id         = gen_ids[i];
+            ct.id = gen_ids[i];
             ct.confidence = (i < probs.size()) ? probs[i] : -1.0f;
             seg.tokens.push_back(std::move(ct));
         }
@@ -338,7 +349,7 @@ public:
     }
 
 private:
-    granite_speech_context * ctx_ = nullptr;
+    granite_speech_context* ctx_ = nullptr;
 };
 
 } // namespace

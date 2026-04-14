@@ -24,53 +24,41 @@ public:
     CohereBackend() = default;
     ~CohereBackend() override { CohereBackend::shutdown(); }
 
-    const char * name() const override { return "cohere"; }
+    const char* name() const override { return "cohere"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_NATIVE
-             | CAP_WORD_TIMESTAMPS
-             | CAP_TOKEN_CONFIDENCE
-             | CAP_DIARIZE
-             | CAP_PUNCTUATION_TOGGLE
-             | CAP_FLASH_ATTN
-             | CAP_TEMPERATURE
-             | CAP_PARALLEL_PROCESSORS
-             | CAP_AUTO_DOWNLOAD;
+        return CAP_TIMESTAMPS_NATIVE | CAP_WORD_TIMESTAMPS | CAP_TOKEN_CONFIDENCE | CAP_DIARIZE |
+               CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN | CAP_TEMPERATURE | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD;
     }
 
-    bool init(const whisper_params & p) override {
+    bool init(const whisper_params& p) override {
         cohere_context_params cp = cohere_context_default_params();
-        cp.n_threads      = p.n_threads;
-        cp.use_flash      = p.flash_attn;
+        cp.n_threads = p.n_threads;
+        cp.use_flash = p.flash_attn;
         cp.no_punctuation = !p.punctuation;
-        cp.diarize        = p.diarize;
-        cp.verbosity      = p.no_prints ? 0 : 1;
+        cp.diarize = p.diarize;
+        cp.verbosity = p.no_prints ? 0 : 1;
 
         ctx_ = cohere_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
-            fprintf(stderr, "crispasr[cohere]: failed to load model '%s'\n",
-                    p.model.c_str());
+            fprintf(stderr, "crispasr[cohere]: failed to load model '%s'\n", p.model.c_str());
             return false;
         }
         return true;
     }
 
-    std::vector<crispasr_segment> transcribe(
-        const float * samples, int n_samples,
-        int64_t t_offset_cs,
-        const whisper_params & params) override
-    {
+    std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
+                                             const whisper_params& params) override {
         std::vector<crispasr_segment> out;
-        if (!ctx_) return out;
+        if (!ctx_)
+            return out;
 
         // Sticky decode-time sampling controls.
         cohere_set_temperature(ctx_, params.temperature, /*seed=*/0);
 
-        cohere_result * r = cohere_transcribe_ex(
-            ctx_, samples, n_samples,
-            params.language.c_str(),
-            t_offset_cs);
-        if (!r) return out;
+        cohere_result* r = cohere_transcribe_ex(ctx_, samples, n_samples, params.language.c_str(), t_offset_cs);
+        if (!r)
+            return out;
 
         crispasr_segment seg;
         seg.t0 = t_offset_cs;
@@ -79,13 +67,13 @@ public:
 
         seg.tokens.reserve(r->n_tokens);
         for (int i = 0; i < r->n_tokens; i++) {
-            const auto & t = r->tokens[i];
+            const auto& t = r->tokens[i];
             crispasr_token ct;
-            ct.text       = t.text;
-            ct.id         = t.id;
+            ct.text = t.text;
+            ct.id = t.id;
             ct.confidence = t.p;
-            ct.t0         = t.t0;
-            ct.t1         = t.t1;
+            ct.t0 = t.t0;
+            ct.t1 = t.t1;
             seg.tokens.push_back(std::move(ct));
         }
 
@@ -101,7 +89,7 @@ public:
         {
             crispasr_word w;
             bool have = false;
-            for (const auto & t : seg.tokens) {
+            for (const auto& t : seg.tokens) {
                 const bool starts_word = !t.text.empty() && t.text[0] == ' ';
                 if (starts_word && have) {
                     seg.words.push_back(std::move(w));
@@ -115,10 +103,11 @@ public:
                 w.text += t.text;
                 w.t1 = t.t1;
             }
-            if (have) seg.words.push_back(std::move(w));
+            if (have)
+                seg.words.push_back(std::move(w));
             // Trim leading whitespace off each word text (cosmetic — the
             // space sat there as the word-start marker).
-            for (auto & word : seg.words) {
+            for (auto& word : seg.words) {
                 while (!word.text.empty() && word.text.front() == ' ')
                     word.text.erase(word.text.begin());
             }
@@ -137,7 +126,7 @@ public:
     }
 
 private:
-    cohere_context * ctx_ = nullptr;
+    cohere_context* ctx_ = nullptr;
 };
 
 } // namespace

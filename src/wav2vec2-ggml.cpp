@@ -323,7 +323,7 @@ static void grouped_conv1d_same(const float* x, const float* w, const float* b, 
     assert(C_in % groups == 0 && C_out % groups == 0);
     int cin_pg = C_in / groups;
     int cout_pg = C_out / groups;
-    int pad_total = K - 1;  // "same" padding
+    int pad_total = K - 1; // "same" padding
     int pad_l = pad_total / 2;
     int pad_r = pad_total - pad_l;
     int L_pad = L + pad_l + pad_r;

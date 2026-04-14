@@ -21,38 +21,31 @@ public:
     Wav2Vec2Backend() = default;
     ~Wav2Vec2Backend() override { Wav2Vec2Backend::shutdown(); }
 
-    const char * name() const override { return "wav2vec2"; }
+    const char* name() const override { return "wav2vec2"; }
 
-    uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS;
-    }
+    uint32_t capabilities() const override { return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS; }
 
-    bool init(const whisper_params & p) override {
+    bool init(const whisper_params& p) override {
         model_ = std::make_unique<wav2vec2_model>();
         if (!wav2vec2_load(p.model.c_str(), *model_)) {
-            fprintf(stderr, "crispasr[wav2vec2]: failed to load '%s'\n",
-                    p.model.c_str());
+            fprintf(stderr, "crispasr[wav2vec2]: failed to load '%s'\n", p.model.c_str());
             model_.reset();
             return false;
         }
         n_threads_ = p.n_threads;
         if (!p.no_prints) {
-            const auto & hp = model_->hparams;
-            fprintf(stderr, "wav2vec2: hidden=%u layers=%u heads=%u ff=%u vocab=%u\n",
-                    hp.hidden_size, hp.num_hidden_layers,
-                    hp.num_attention_heads, hp.intermediate_size,
-                    hp.vocab_size);
+            const auto& hp = model_->hparams;
+            fprintf(stderr, "wav2vec2: hidden=%u layers=%u heads=%u ff=%u vocab=%u\n", hp.hidden_size,
+                    hp.num_hidden_layers, hp.num_attention_heads, hp.intermediate_size, hp.vocab_size);
         }
         return true;
     }
 
-    std::vector<crispasr_segment> transcribe(
-        const float * samples, int n_samples,
-        int64_t t_offset_cs,
-        const whisper_params & /*params*/) override
-    {
+    std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
+                                             const whisper_params& /*params*/) override {
         std::vector<crispasr_segment> out;
-        if (!model_) return out;
+        if (!model_)
+            return out;
 
         auto logits = wav2vec2_compute_logits(*model_, samples, n_samples, n_threads_);
         if (logits.empty()) {
@@ -73,9 +66,7 @@ public:
         return out;
     }
 
-    void shutdown() override {
-        model_.reset();
-    }
+    void shutdown() override { model_.reset(); }
 
 private:
     std::unique_ptr<wav2vec2_model> model_;
