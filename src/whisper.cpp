@@ -1601,7 +1601,7 @@ static bool aheads_masks_init(const whisper_context_params& cparams, const whisp
     }
 
     struct ggml_init_params params = {
-        /*.mem_size   =*/(size_t)static_cast<size_t>(n_text_layer) * ggml_tensor_overhead(),
+        /*.mem_size   =*/(size_t) static_cast<size_t>(n_text_layer) * ggml_tensor_overhead(),
         /*.mem_buffer =*/nullptr,
         /*.no_alloc   =*/true,
     };

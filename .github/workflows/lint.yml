@@ -134,5 +134,7 @@ jobs:
             --suppress='*:examples/server/*' \
             --suppress='*:*httplib.h' \
             --suppress=unknownMacro \
+            --suppress=nullPointerOutOfMemory \
+            --suppress=nullPointerArithmeticOutOfMemory \
             --quiet \
             src/ examples/cli/

@@ -1246,6 +1246,7 @@ int main(int argc, char** argv) {
     // If the only argument starts with "@", read arguments line-by-line
     // from the given file.
     std::vector<std::string> vec_args;
+    std::vector<char*> vec_argv; // hoisted: must outlive argv usage below
     if (argc == 2 && argv != nullptr && argv[1] != nullptr && argv[1][0] == '@') {
         // Save the name of the executable.
         vec_args.push_back(argv[0]);
@@ -1266,7 +1267,7 @@ int main(int argc, char** argv) {
 
         // Use the contents of the response file as the command-line arguments.
         argc = static_cast<int>(vec_args.size());
-        std::vector<char*> vec_argv(argc);
+        vec_argv.resize(argc);
         for (int i = 0; i < argc; ++i) {
             vec_argv[i] = const_cast<char*>(vec_args[i].c_str());
         }
