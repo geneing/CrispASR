@@ -1,4 +1,4 @@
-// crispasr_cache.h — shared cache directory + curl/wget download helper.
+// crispasr_cache.h — shared cache directory + download helper.
 //
 // Three places in the unified CLI need to download a small companion file
 // from HuggingFace on first use and cache it under ~/.cache/crispasr/:
@@ -7,11 +7,9 @@
 //   * crispasr_lid       — whisper-tiny LID model auto-download
 //   * crispasr_vad       — Silero VAD model auto-download
 //
-// This header centralises the directory layout, the existence/zombie
-// check, and the curl-then-wget fallback so each consumer is a one-liner
-// over `crispasr_cache::ensure_cached_file(...)`. No new build deps —
-// the helpers shell out to whatever curl/wget the user already has on
-// $PATH, identical to the original per-module copies.
+// This header centralises the directory layout, the existence/zombie check,
+// and the download logic (WinHTTP on Windows, curl/wget on POSIX) so each
+// consumer is a one-liner over `crispasr_cache::ensure_cached_file(...)`.
 
 #pragma once
 
@@ -19,9 +17,14 @@
 
 namespace crispasr_cache {
 
-// Return ~/.cache/crispasr (creating it if missing). Falls back to
-// /tmp/.cache/crispasr when $HOME isn't set.
-std::string dir();
+// Return the cache directory (creating it if missing).
+//   • If cache_dir_override is non-empty, use it directly (creating the leaf
+//     directory if it does not exist; parents must already exist).
+//   • Otherwise use the platform default:
+//       - POSIX : $HOME/.cache/crispasr   (falls back to /tmp/.cache/crispasr)
+//       - Windows: %USERPROFILE%/.cache/crispasr
+//                  (%HOME% / %LOCALAPPDATA% as fallbacks if USERPROFILE unset)
+std::string dir(const std::string & cache_dir_override = "");
 
 // True iff `path` exists AND is non-zero bytes. Treats 0-byte zombies
 // (left behind by an interrupted earlier download) as missing so the
@@ -29,19 +32,22 @@ std::string dir();
 // to a model loader.
 bool file_present(const std::string & path);
 
-// Fetch `url` into `dest` via curl, falling back to wget on failure.
-// Returns true iff the file is present and non-empty after the
-// download. `quiet=true` suppresses progress bars; failure messages
-// always go to stderr.
+// Download `url` into `dest`.
+//   Windows: tries WinHTTP first (built-in, handles HTTPS + redirects natively,
+//            no shell-quoting issues), then falls back to curl, then wget.
+//   POSIX  : tries curl, then wget.
+// Returns true iff the file is present and non-empty after the download.
+// `quiet=true` suppresses progress bars; failure messages always go to stderr.
 bool fetch(const std::string & url, const std::string & dest, bool quiet);
 
-// Composite helper: if `dest` (= dir() + "/" + filename) already
-// satisfies file_present(), return its path immediately. Otherwise
-// invoke fetch() to populate it. Returns the absolute path on success
-// or an empty string on failure.
+// Composite helper: if `dest` (= dir(cache_dir_override) + "/" + filename)
+// already satisfies file_present(), return its path immediately. Otherwise
+// invoke fetch() to populate it. Returns the absolute path on success or an
+// empty string on failure.
 std::string ensure_cached_file(const std::string & filename,
                                const std::string & url,
                                bool quiet,
-                               const char * pretty_label = "crispasr");
+                               const char * pretty_label = "crispasr",
+                               const std::string & cache_dir_override = "");
 
 } // namespace crispasr_cache

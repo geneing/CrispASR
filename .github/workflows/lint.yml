@@ -1,0 +1,134 @@
+name: Lint
+
+# Run on every push / PR that touches C++ source, headers, or the tooling
+# configuration files themselves.  This is the CI analogue of the Python
+# black + ruff + mypy + bandit stack.
+#
+#   clang-format --dry-run  →  black / ruff-format check (style)
+#   clang-tidy              →  ruff-lint + mypy + bandit (correctness + types + security)
+#   cppcheck                →  additional static analysis (fast, no compilation needed)
+
+on:
+  push:
+    branches: [main, integrated_cli]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - '.clang-format'
+      - '.clang-tidy'
+      - '.github/workflows/lint.yml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - '.clang-format'
+      - '.clang-tidy'
+      - '.github/workflows/lint.yml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # clang-format: style check (equivalent to black / ruff-format --check)
+  # ---------------------------------------------------------------------------
+  clang-format:
+    name: clang-format (style)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-format
+
+      - name: Check formatting
+        # --dry-run: report diffs without touching files.
+        # --Werror:  exit non-zero if any file would change.
+        # Scope: project-owned C++ only — skip ggml/ and bindings/ (third-party).
+        run: |
+          find src examples/cli \
+               \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \) \
+               -print0 \
+          | xargs -0 clang-format --dry-run --Werror
+
+  # ---------------------------------------------------------------------------
+  # clang-tidy: lint + type-checking + security (ruff-lint + mypy + bandit)
+  #
+  # We run tidy via the CMake `tidy` preset so it uses the same compile flags
+  # and include paths as the real build — this prevents false positives from
+  # missing system headers or wrong C++ standard.
+  # ---------------------------------------------------------------------------
+  clang-tidy:
+    name: clang-tidy (lint / types / security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools + clang-tidy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang clang-tidy
+
+      - name: Configure (tidy preset)
+        # The `tidy` preset sets CMAKE_CXX_CLANG_TIDY so every TU is analysed
+        # during the build step.  We use Clang as the compiler so that clang-tidy
+        # gets the same diagnostics as the compiler it was built alongside.
+        run: |
+          cmake --preset tidy \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -G Ninja \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_EXAMPLES=ON
+
+      - name: Build (clang-tidy fires on each TU)
+        # tee the output so the full tidy log is visible in the Actions UI even
+        # when the build succeeds; the step fails if cmake --build exits non-zero.
+        run: |
+          cmake --build build-tidy --target whisper-cli 2>&1 | tee tidy.log
+          grep -q 'warning:' tidy.log && echo "::warning::clang-tidy warnings found" || true
+
+  # ---------------------------------------------------------------------------
+  # cppcheck: fast additional static analysis (no compilation required)
+  # Catches a complementary set of bugs vs clang-tidy.
+  # ---------------------------------------------------------------------------
+  cppcheck:
+    name: cppcheck (static analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cppcheck
+
+      - name: Run cppcheck
+        # --error-exitcode=1: fail on any error-level finding.
+        # --enable=warning,style,performance,portability: broad coverage.
+        # --suppress=*:ggml/*: skip third-party ggml code.
+        # --std=c++17: match the codebase standard.
+        run: |
+          cppcheck \
+            --error-exitcode=1 \
+            --enable=warning,style,performance,portability \
+            --std=c++17 \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            -i ggml \
+            -i bindings \
+            --quiet \
+            src/ examples/cli/

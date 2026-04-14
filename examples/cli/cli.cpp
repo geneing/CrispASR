@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -228,6 +229,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (                  arg == "--sherpa-segment-model") { params.sherpa_segment_model   = ARGV_NEXT; }
         else if (                  arg == "--sherpa-embedding-model"){ params.sherpa_embedding_model = ARGV_NEXT; }
         else if (                  arg == "--sherpa-num-clusters")  { params.sherpa_num_clusters    = std::stoi(ARGV_NEXT); }
+        else if (                  arg == "--cache-dir")            { params.cache_dir              = ARGV_NEXT; }
         else if (                  arg == "--list-backends")        {
             crispasr_print_backend_matrix();
             exit(0);
@@ -331,6 +333,7 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  --sherpa-segment-model PATH       [%-7s] sherpa pyannote segmentation ONNX\n",                 params.sherpa_segment_model.c_str());
     fprintf(stderr, "  --sherpa-embedding-model PATH     [%-7s] sherpa speaker embedding ONNX\n",                     params.sherpa_embedding_model.c_str());
     fprintf(stderr, "  --sherpa-num-clusters N           [%-7d] sherpa cluster count (0 = auto)\n",                   params.sherpa_num_clusters);
+    fprintf(stderr, "  --cache-dir DIR                   [%-7s] override auto-download cache directory\n",            params.cache_dir.empty() ? "default" : params.cache_dir.c_str());
     fprintf(stderr, "  -n N,      --max-new-tokens N     [%-7d] max new tokens for LLM backends\n",                params.max_new_tokens);
     fprintf(stderr, "  -ck N,     --chunk-seconds N      [%-7d] fallback chunk size when VAD is disabled\n",       params.chunk_seconds);
     fprintf(stderr, "             -m auto                        download a default model for the chosen backend\n");
@@ -1098,7 +1101,15 @@ int main(int argc, char ** argv) {
         }
 
         if (explicit_backend || model_is_auto || auto_detected_non_whisper) {
-            return crispasr_run_backend(params);
+            const int rc = crispasr_run_backend(params);
+#if defined(_WIN32)
+            // Bypass global C++ destructors (ggml Vulkan device teardown can
+            // stall indefinitely on Windows when the GPU is idle post-inference).
+            std::fflush(stdout); std::fflush(stderr);
+            _Exit(rc);
+#else
+            return rc;
+#endif
         }
     }
     // -----------------------------------------------------------------------
@@ -1428,5 +1439,12 @@ int main(int argc, char ** argv) {
     }
     whisper_free(ctx);
 
+#if defined(_WIN32)
+    // Bypass global C++ destructors (ggml Vulkan device teardown can
+    // stall indefinitely on Windows when the GPU is idle post-inference).
+    std::fflush(stdout); std::fflush(stderr);
+    _Exit(0);
+#else
     return 0;
+#endif
 }

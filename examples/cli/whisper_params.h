@@ -163,4 +163,9 @@ struct whisper_params {
     std::string sherpa_segment_model;     // pyannote-style segmentation ONNX
     std::string sherpa_embedding_model;   // speaker embedding ONNX (titanet / 3dspeaker)
     int         sherpa_num_clusters = 0;  // 0 = auto-estimate (sherpa default)
+
+    // Override the directory used to cache auto-downloaded model files.
+    // Default (empty): platform default (~/.cache/crispasr on POSIX,
+    // %USERPROFILE%/.cache/crispasr on Windows). Set via --cache-dir.
+    std::string cache_dir;
 };

@@ -68,7 +68,8 @@ const registry_entry * lookup(const std::string & backend) {
 
 std::string crispasr_resolve_model(const std::string & model_arg,
                                    const std::string & backend_name,
-                                   bool quiet)
+                                   bool quiet,
+                                   const std::string & cache_dir_override)
 {
     // Pass-through for explicit paths.
     if (model_arg != "auto" && model_arg != "default") {
@@ -89,5 +90,5 @@ std::string crispasr_resolve_model(const std::string & model_arg,
                 e->filename, e->approx_size);
     }
     return crispasr_cache::ensure_cached_file(
-        e->filename, e->url, quiet, "crispasr");
+        e->filename, e->url, quiet, "crispasr", cache_dir_override);
 }

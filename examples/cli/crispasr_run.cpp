@@ -282,7 +282,7 @@ int crispasr_run_backend(const whisper_params & params_in) {
 
     // Resolve "-m auto" via the model registry + curl/wget download.
     const std::string resolved = crispasr_resolve_model(
-        params.model, backend_name, params.no_prints);
+        params.model, backend_name, params.no_prints, params.cache_dir);
     if (resolved.empty()) {
         return 11;
     }

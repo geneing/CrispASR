@@ -36,7 +36,8 @@ std::string resolve_vad_model(const whisper_params & p) {
 
     // Auto path: delegate to the shared cache helper.
     return crispasr_cache::ensure_cached_file(
-        kVadDefaultFile, kVadDefaultUrl, p.no_prints, "crispasr[vad]");
+        kVadDefaultFile, kVadDefaultUrl, p.no_prints, "crispasr[vad]",
+        p.cache_dir);
 }
 
 } // namespace

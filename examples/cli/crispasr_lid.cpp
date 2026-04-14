@@ -93,7 +93,7 @@ std::string resolve_whisper_lid_model(const whisper_params & p) {
     }
     return crispasr_cache::ensure_cached_file(
         kWhisperLidDefaultFile, kWhisperLidDefaultUrl, p.no_prints,
-        "crispasr[lid]");
+        "crispasr[lid]", p.cache_dir);
 }
 
 // Process-lifetime cache: keep the whisper LID context around between
@@ -243,7 +243,7 @@ bool detect_with_silero(
         model_path = crispasr_cache::ensure_cached_file(
             "silero-lid-lang95-f32.gguf",
             "https://huggingface.co/cstr/silero-lid-lang95-GGUF/resolve/main/silero-lid-lang95-f32.gguf",
-            p.no_prints, "crispasr[lid-silero]");
+            p.no_prints, "crispasr[lid-silero]", p.cache_dir);
         if (model_path.empty()) {
             fprintf(stderr, "crispasr[lid]: failed to download Silero LID model\n");
             return false;

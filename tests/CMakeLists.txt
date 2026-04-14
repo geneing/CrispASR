@@ -1,6 +1,21 @@
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ─── Catch2 — unit-test framework (pytest analogue) ──────────────────────────
+# Fetched at configure time; pinned to a specific tag for reproducibility.
+# The resulting targets (Catch2::Catch2WithMain, Catch2::Catch2) are then
+# available for any test in this directory.
+include(FetchContent)
+FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG        v3.7.1
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(Catch2)
+list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
+include(Catch)
+
 if (EMSCRIPTEN)
     #
     # test-whisper-js
@@ -110,3 +125,54 @@ target_compile_definitions(${VAD_TEST} PRIVATE
     SAMPLE_PATH="${PROJECT_SOURCE_DIR}/samples/jfk.wav")
 add_test(NAME ${VAD_TEST} COMMAND ${VAD_TEST})
 set_tests_properties(${VAD_TEST} PROPERTIES LABELS "base;en")
+
+# ─── test-crispasr-cache — Catch2 unit tests for download/cache helpers ───────
+#
+# Compiles crispasr_cache.cpp directly into the test binary so the test is
+# self-contained and does not depend on the full crispasr link closure.
+# Tests are pure filesystem operations — no network requests are made.
+add_executable(test-crispasr-cache
+    test-crispasr-cache.cpp
+    ${PROJECT_SOURCE_DIR}/examples/cli/crispasr_cache.cpp
+)
+target_include_directories(test-crispasr-cache PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-crispasr-cache PRIVATE
+    Catch2::Catch2WithMain
+    $<$<BOOL:${WIN32}>:winhttp>
+)
+if (WHISPER_CURL)
+    target_compile_definitions(test-crispasr-cache PRIVATE CRISPASR_USE_LIBCURL)
+    target_link_libraries(test-crispasr-cache PRIVATE CURL::libcurl)
+endif()
+# catch_discover_tests registers one CTest entry per Catch2 TEST_CASE.
+catch_discover_tests(test-crispasr-cache
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
+# ─── test-params — Catch2 unit tests for whisper_params struct defaults ────────
+#
+# Default-constructs whisper_params and checks every crispasr-specific field
+# carries the right initial value.  Links whisper + common because
+# whisper_params inlines calls to whisper_full_default_params() in its field
+# initialisers.
+add_executable(test-params
+    test-params.cpp
+)
+target_include_directories(test-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/ggml/include
+    ${PROJECT_SOURCE_DIR}/examples
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-params PRIVATE
+    Catch2::Catch2WithMain
+    whisper
+    common
+)
+catch_discover_tests(test-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)

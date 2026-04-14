@@ -398,7 +398,7 @@ bool apply_pyannote_native(
         mp = crispasr_cache::ensure_cached_file(
             "pyannote-seg-3.0.gguf",
             "https://huggingface.co/cstr/pyannote-v3-segmentation-GGUF/resolve/main/pyannote-seg-3.0.gguf",
-            params.no_prints, "crispasr[diarize]");
+            params.no_prints, "crispasr[diarize]", params.cache_dir);
         if (mp.empty()) return false;
     }
     if (mp.size() < 5 || mp.compare(mp.size()-5, 5, ".gguf") != 0) {

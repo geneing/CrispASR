@@ -104,7 +104,13 @@ target_link_libraries(${TARGET} PRIVATE
     pyannote-seg
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
+    $<$<BOOL:${WIN32}>:winhttp>
+    $<$<BOOL:${WHISPER_CURL}>:CURL::libcurl>
 )
+
+if (WHISPER_CURL)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_USE_LIBCURL)
+endif()
 
 install(TARGETS ${TARGET} RUNTIME BUNDLE DESTINATION bin)
 

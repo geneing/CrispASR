@@ -16,10 +16,14 @@
 //
 // If model_arg is "auto" or "default", this consults the per-backend
 // registry to find the canonical URL+filename and downloads it to
-// ~/.cache/crispasr/ if not already cached. Otherwise the argument is
+// the cache directory if not already cached. Otherwise the argument is
 // returned unchanged.
+//
+// cache_dir_override: when non-empty, overrides the default cache directory
+// (~/.cache/crispasr). Corresponds to --cache-dir.
 //
 // Returns an empty string on failure.
 std::string crispasr_resolve_model(const std::string & model_arg,
                                    const std::string & backend_name,
-                                   bool quiet);
+                                   bool quiet,
+                                   const std::string & cache_dir_override = "");
