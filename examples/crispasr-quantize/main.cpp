@@ -46,7 +46,9 @@ static bool crispasr_model_quantize(const std::string & fname_inp, const std::st
     printf("%s: loading model from '%s'\n", __func__, fname_inp.c_str());
 
     struct ggml_context * ctx_in_ggml = nullptr;
-    struct gguf_init_params params = { .no_alloc = true, .ctx = &ctx_in_ggml };
+    struct gguf_init_params params = {};
+    params.no_alloc = true;
+    params.ctx = &ctx_in_ggml;
     struct gguf_context * ctx_in = gguf_init_from_file(fname_inp.c_str(), params);
     if (!ctx_in || !ctx_in_ggml) {
         fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, fname_inp.c_str());
