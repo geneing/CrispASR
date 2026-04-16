@@ -4,9 +4,11 @@
 
 #include "crispasr_output.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 // ---------------------------------------------------------------------------
@@ -189,7 +191,9 @@ bool crispasr_write_csv(const std::string& path, const std::vector<crispasr_disp
 }
 
 // Minimal JSON escape (RFC 8259): backslash, quote, control chars.
-static std::string json_escape(const std::string& s) {
+// Exposed publicly as crispasr_json_escape(); the static alias keeps
+// call sites in this file short.
+std::string crispasr_json_escape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 2);
     for (unsigned char c : s) {
@@ -227,6 +231,9 @@ static std::string json_escape(const std::string& s) {
     }
     return out;
 }
+
+// Internal short alias.
+static inline const std::string json_escape(const std::string& s) { return crispasr_json_escape(s); }
 
 bool crispasr_write_json(const std::string& path, const std::vector<crispasr_segment>& segs,
                          const std::string& backend_name, const std::string& model_path, const std::string& language,
@@ -475,4 +482,185 @@ void crispasr_print_stdout(const std::vector<crispasr_disp_segment>& segs, bool 
         printf("%s\n", joined.c_str());
     }
     fflush(stdout);
+}
+
+// ---------------------------------------------------------------------------
+// String-based formatters (for HTTP server responses)
+// ---------------------------------------------------------------------------
+
+std::string crispasr_segments_to_text(const std::vector<crispasr_segment>& segs) {
+    std::string out;
+    for (const auto& s : segs) {
+        if (!out.empty())
+            out += ' ';
+        out += s.text;
+    }
+    return out;
+}
+
+std::string crispasr_segments_to_srt(const std::vector<crispasr_segment>& segs, int max_len) {
+    auto disp = crispasr_make_disp_segments(segs, max_len);
+    std::ostringstream out;
+    for (size_t i = 0; i < disp.size(); i++) {
+        out << (i + 1) << "\n"
+            << crispasr_to_timestamp(disp[i].t0, /*comma=*/true) << " --> "
+            << crispasr_to_timestamp(disp[i].t1, /*comma=*/true) << "\n"
+            << prefix_speaker(disp[i].speaker) << disp[i].text << "\n\n";
+    }
+    return out.str();
+}
+
+std::string crispasr_segments_to_vtt(const std::vector<crispasr_segment>& segs, int max_len) {
+    auto disp = crispasr_make_disp_segments(segs, max_len);
+    std::ostringstream out;
+    out << "WEBVTT\n\n";
+    for (const auto& s : disp) {
+        out << crispasr_to_timestamp(s.t0) << " --> " << crispasr_to_timestamp(s.t1) << "\n"
+            << prefix_speaker(s.speaker) << s.text << "\n\n";
+    }
+    return out.str();
+}
+
+std::string crispasr_segments_to_openai_json(const std::vector<crispasr_segment>& segs) {
+    std::string text = crispasr_segments_to_text(segs);
+    return "{\"text\": \"" + json_escape(text) + "\"}";
+}
+
+// Convert centiseconds to seconds as a double for OpenAI JSON output.
+static double cs_to_sec(int64_t cs) { return cs / 100.0; }
+
+std::string crispasr_segments_to_openai_verbose_json(
+    const std::vector<crispasr_segment>& segs,
+    double duration_s,
+    const std::string& language,
+    const std::string& task,
+    float temperature) {
+
+    std::string full_text = crispasr_segments_to_text(segs);
+
+    std::ostringstream js;
+    js << std::fixed;
+    js << "{\n";
+    js << "  \"task\": \"" << json_escape(task) << "\",\n";
+    js << "  \"language\": \"" << json_escape(language) << "\",\n";
+    js << std::setprecision(3);
+    js << "  \"duration\": " << duration_s << ",\n";
+    js << "  \"text\": \"" << json_escape(full_text) << "\",\n";
+    js << "  \"segments\": [\n";
+    for (size_t i = 0; i < segs.size(); i++) {
+        const auto& s = segs[i];
+        js << "    {\n";
+        js << "      \"id\": " << i << ",\n";
+        js << std::setprecision(2);
+        js << "      \"start\": " << cs_to_sec(s.t0) << ",\n";
+        js << "      \"end\": " << cs_to_sec(s.t1) << ",\n";
+        js << "      \"text\": \"" << json_escape(s.text) << "\",\n";
+        js << std::setprecision(6);
+        js << "      \"temperature\": " << temperature << ",\n";
+
+        // Compute avg_logprob from token confidences if available.
+        double avg_logprob = 0.0;
+        int n_scored = 0;
+        for (const auto& t : s.tokens) {
+            if (t.confidence > 0.0f) {
+                avg_logprob += std::log(t.confidence);
+                n_scored++;
+            }
+        }
+        if (n_scored > 0)
+            avg_logprob /= n_scored;
+        js << "      \"avg_logprob\": " << avg_logprob << ",\n";
+
+        // no_speech_prob — not available from most backends, emit 0.
+        js << "      \"no_speech_prob\": 0.0";
+
+        // Word-level timestamps if available.
+        if (!s.words.empty()) {
+            js << ",\n      \"words\": [\n";
+            for (size_t j = 0; j < s.words.size(); j++) {
+                const auto& w = s.words[j];
+                js << "        {\"word\": \"" << json_escape(w.text) << "\", ";
+                js << std::setprecision(2);
+                js << "\"start\": " << cs_to_sec(w.t0) << ", ";
+                js << "\"end\": " << cs_to_sec(w.t1) << "}";
+                if (j + 1 < s.words.size())
+                    js << ",";
+                js << "\n";
+            }
+            js << "      ]";
+        }
+
+        // Token IDs if available.
+        if (!s.tokens.empty()) {
+            js << ",\n      \"tokens\": [";
+            bool first = true;
+            for (const auto& t : s.tokens) {
+                if (t.is_special)
+                    continue;
+                if (!first)
+                    js << ", ";
+                js << t.id;
+                first = false;
+            }
+            js << "]";
+        }
+
+        js << "\n    }";
+        if (i + 1 < segs.size())
+            js << ",";
+        js << "\n";
+    }
+    js << "  ]\n";
+    js << "}\n";
+    return js.str();
+}
+
+std::string crispasr_segments_to_native_json(
+    const std::vector<crispasr_segment>& segs,
+    const std::string& backend_name,
+    double duration_s) {
+
+    std::ostringstream js;
+    js << "{\n";
+    js << "  \"backend\": \"" << json_escape(backend_name) << "\",\n";
+    js << "  \"duration\": " << duration_s << ",\n";
+    js << "  \"segments\": [\n";
+    for (size_t i = 0; i < segs.size(); i++) {
+        const auto& s = segs[i];
+        js << "    {\n";
+        // t0/t1 are centiseconds; multiply by 10 to get milliseconds.
+        js << "      \"t0\": " << (s.t0 * 10) << ",\n";
+        js << "      \"t1\": " << (s.t1 * 10) << ",\n";
+        js << "      \"text\": \"" << json_escape(s.text) << "\"";
+        if (!s.speaker.empty()) {
+            js << ",\n      \"speaker\": \"" << json_escape(s.speaker) << "\"";
+        }
+        if (!s.tokens.empty()) {
+            js << ",\n      \"tokens\": [\n";
+            for (size_t j = 0; j < s.tokens.size(); j++) {
+                const auto& t = s.tokens[j];
+                js << "        {\"text\": \"" << json_escape(t.text) << "\"";
+                if (t.confidence >= 0)
+                    js << ", \"confidence\": " << t.confidence;
+                if (t.t0 >= 0)
+                    js << ", \"t0\": " << (t.t0 * 10);
+                if (t.t1 >= 0)
+                    js << ", \"t1\": " << (t.t1 * 10);
+                js << "}";
+                if (j + 1 < s.tokens.size())
+                    js << ",";
+                js << "\n";
+            }
+            js << "      ]";
+        }
+        js << "\n    }";
+        if (i + 1 < segs.size())
+            js << ",";
+        js << "\n";
+    }
+    js << "  ],\n";
+    std::string full_text = crispasr_segments_to_text(segs);
+    js << "  \"text\": \"" << json_escape(full_text) << "\"\n";
+    js << "}\n";
+    return js.str();
 }

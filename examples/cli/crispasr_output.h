@@ -76,6 +76,42 @@ void crispasr_print_stdout(const std::vector<crispasr_disp_segment>& segs, bool 
 // confidence and top-N alternative candidates, inspired by antirez/voxtral.c.
 void crispasr_print_alternatives(const std::vector<crispasr_segment>& segs, int n_alt);
 
+// ---------------------------------------------------------------------------
+// String-based formatters (for HTTP server responses, in-memory use).
+// These mirror the file-based writers above but return std::string.
+// ---------------------------------------------------------------------------
+
+// Concatenate all segment texts into a single string separated by spaces.
+std::string crispasr_segments_to_text(const std::vector<crispasr_segment>& segs);
+
+// Format segments as SRT subtitle string.
+std::string crispasr_segments_to_srt(const std::vector<crispasr_segment>& segs, int max_len = 0);
+
+// Format segments as WebVTT subtitle string.
+std::string crispasr_segments_to_vtt(const std::vector<crispasr_segment>& segs, int max_len = 0);
+
+// Minimal JSON escape (RFC 8259). Shared so the server doesn't duplicate it.
+std::string crispasr_json_escape(const std::string& s);
+
+// OpenAI-compatible JSON: {"text": "..."}
+std::string crispasr_segments_to_openai_json(const std::vector<crispasr_segment>& segs);
+
+// OpenAI-compatible verbose JSON with segments, word timestamps, duration,
+// language, task. Matches the OpenAI /v1/audio/transcriptions verbose_json
+// response format.
+std::string crispasr_segments_to_openai_verbose_json(
+    const std::vector<crispasr_segment>& segs,
+    double duration_s,
+    const std::string& language,
+    const std::string& task,
+    float temperature);
+
+// CrispASR native JSON (the format returned by /inference).
+std::string crispasr_segments_to_native_json(
+    const std::vector<crispasr_segment>& segs,
+    const std::string& backend_name,
+    double duration_s);
+
 // Remove punctuation from a segment in-place: from seg.text, each
 // seg.words[i].text, and each seg.tokens[i].text. Called by the
 // dispatch layer when --no-punctuation is set and the backend didn't
