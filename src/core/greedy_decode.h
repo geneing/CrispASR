@@ -279,4 +279,57 @@ inline Result run_with_probs(Ctx* ctx, int32_t first_token, float first_prob, in
     return r;
 }
 
+// run_with_probs + pre-forward hook (for voxtral4b streaming audio injection).
+template <typename Ctx, typename EmbedFn, typename ForwardFn, typename PreHook>
+inline Result run_with_probs(Ctx* ctx, int32_t first_token, float first_prob, int initial_n_past, EmbedFn embed_fn,
+                             ForwardFn forward_fn, PreHook pre_hook, const Config& cfg) {
+    Result r;
+    r.tokens.reserve((size_t)cfg.max_new_tokens);
+    r.probs.reserve((size_t)cfg.max_new_tokens);
+    r.tokens.push_back(first_token);
+    r.probs.push_back(first_prob);
+
+    if (first_token == cfg.eos_id)
+        return r;
+
+    std::mt19937_64 rng(cfg.seed != 0 ? cfg.seed : (uint64_t)std::random_device{}());
+    const bool sampling = cfg.temperature > 0.0f;
+
+    int n_past = initial_n_past;
+    while ((int)r.tokens.size() < cfg.max_new_tokens && r.tokens.back() != cfg.eos_id) {
+        const int step = (int)r.tokens.size() - 1;
+        int32_t last = r.tokens.back();
+        float* emb = embed_fn(ctx, &last, 1);
+        if (!emb)
+            break;
+
+        if (!pre_hook(step, emb)) {
+            std::free(emb);
+            break;
+        }
+
+        float* lg = forward_fn(ctx, emb, 1, n_past, nullptr, nullptr);
+        std::free(emb);
+        if (!lg)
+            break;
+        n_past++;
+
+        int nx;
+        float nx_lp;
+        if (sampling) {
+            nx = sample_temp(lg, cfg.vocab_size, cfg.temperature, rng);
+            nx_lp = lg[nx];
+        } else {
+            nx = argmax(lg, cfg.vocab_size);
+            nx_lp = lg[nx];
+        }
+        const float nx_p = softmax_of(lg, cfg.vocab_size, nx, nx_lp);
+        std::free(lg);
+
+        r.tokens.push_back(nx);
+        r.probs.push_back(nx_p);
+    }
+    return r;
+}
+
 } // namespace core_greedy_decode

@@ -170,18 +170,14 @@ be adapted.
 
 ---
 
-## 6. Best-of-N sampling for LLM backends — DONE (qwen3 + granite)
+## 6. Best-of-N sampling for LLM backends — DONE
 
-**Status:** Implemented for qwen3 and granite backend adapters,
-matching the voxtral pipeline pattern (N prefill+decode runs, seed
-varied per run, best selected by mean token probability). Verified:
-temperature=0 stays bit-identical; `--best-of 3 -tp 0.3` works on
-qwen3 (score=0.9726).
-
-**voxtral4b deferred:** Its streaming pre_hook (audio frame injection
-per decode step) is incompatible with `run_with_probs()` which doesn't
-accept a pre_hook. Would need a `run_with_probs_hooked()` variant in
-`greedy_decode.h`, or refactoring the hook into the embed_fn.
+**Status:** Implemented for all four LLM backends (voxtral, qwen3,
+granite, voxtral4b). Added `run_with_probs()` overload with PreHook
+in `greedy_decode.h` for voxtral4b's streaming audio injection.
+Verified: temperature=0 stays bit-identical on all backends;
+`--best-of 3 -tp 0.3` works on all (qwen3 score=0.9726, voxtral4b
+score=0.9785).
 
 ---
 
@@ -431,7 +427,7 @@ and remove any that remain.
 | **Done** | #2 Qwen3 forced aligner | Already implemented and verified | 0 LOC |
 | **Done** | #10 Granite encoder graph | Wired and tested on CPU; enable with GRANITE_ENCODER_GRAPH=1 | ~60 LOC new |
 | **Done** | #1 voxtral4b encoder migration | Migrated to encoder_self_attn() | 0 LOC |
-| **Done** | #6 Best-of-N for qwen3+granite | Implemented; voxtral4b deferred (needs pre_hook probs) | 0 LOC |
+| **Done** | #6 Best-of-N for all LLM backends | All 4 backends support --best-of N | 0 LOC |
 | **Done** | #13 canary_ctc CPU fallback | Already implemented | 0 LOC |
 | **Medium** | #5 Reference backends | Testing infrastructure completeness | ~400 LOC |
 | **Done** | #3 Granite µP | Already handled via existing knobs | 0 LOC |

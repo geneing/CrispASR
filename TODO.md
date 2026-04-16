@@ -122,11 +122,10 @@ each backend. High-value gaps to close:
   voxtral4b, qwen3 and granite all honour `-tp N` via the shared
   `core_greedy_decode` helper's `sample_temp` path. Default
   temperature=0 stays on the bit-identical pure-argmax path.
-- **[done]** ~~**Best-of-N sampling for LLM backends**~~ — voxtral
-  (via pipeline template), qwen3, and granite all support `--best-of N`
+- **[done]** ~~**Best-of-N sampling for LLM backends**~~ — all four LLM
+  backends (voxtral, voxtral4b, qwen3, granite) support `--best-of N`
   with `--temperature > 0`. Each run uses a different RNG seed, best
-  selected by mean token softmax probability. voxtral4b deferred
-  (streaming pre_hook incompatible with `run_with_probs`).
+  selected by mean token softmax probability.
 
 - **[later]** **VAD integration in LLM backends.** qwen3 and voxtral
   currently don't chunk long audio; the dispatch layer does VAD slicing
