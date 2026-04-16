@@ -20,7 +20,7 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_OPENBLAS=ON
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_OPENBLAS=ON
           cmake --build build --target whisper-cli crispasr-quantize -j $(nproc)
 
       - name: Package
@@ -44,7 +44,7 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON
           cmake --build build --target whisper-cli crispasr-quantize -j $(sysctl -n hw.logicalcpu)
 
       - name: Package
@@ -68,14 +68,14 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release --target whisper-cli -j $env:NUMBER_OF_PROCESSORS
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+          cmake --build build --config Release --target whisper-cli crispasr-quantize -j $env:NUMBER_OF_PROCESSORS
 
       - name: Package
         run: |
           New-Item -ItemType Directory -Force release\crispasr-windows-x86_64
           Copy-Item build\bin\Release\crispasr.exe release\crispasr-windows-x86_64\
-          Get-ChildItem build\bin\Release\*.dll | Copy-Item -Destination release\crispasr-windows-x86_64\
+          Copy-Item build\bin\Release\crispasr-quantize.exe release\crispasr-windows-x86_64\
           Compress-Archive -Path release\crispasr-windows-x86_64 -DestinationPath release\crispasr-windows-x86_64.zip
 
       - uses: actions/upload-artifact@v4
