@@ -351,6 +351,47 @@ curl http://localhost:8080/backends
 
 The server loads the model once at startup and keeps it in memory. Subsequent `/inference` requests reuse the loaded model with no reload overhead. Requests are mutex-serialized. Use `--host 0.0.0.0` to accept remote connections.
 
+### OpenAI-compatible API
+
+The server exposes `POST /v1/audio/transcriptions`, a drop-in replacement for the [OpenAI Whisper API](https://platform.openai.com/docs/api-reference/audio/createTranscription). Any tool that speaks the OpenAI transcription protocol (LiteLLM, LangChain, custom clients) can point at CrispASR with zero code changes.
+
+```bash
+# Same curl syntax as the OpenAI API:
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "response_format=json"
+# {"text": "And so, my fellow Americans, ask not what your country can do for you..."}
+
+# Verbose JSON with per-segment timestamps (matches OpenAI's format):
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "response_format=verbose_json"
+# {"task": "transcribe", "language": "en", "duration": 11.0, "text": "...", "segments": [...]}
+
+# SRT subtitles:
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "response_format=srt"
+
+# Plain text:
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "response_format=text"
+```
+
+**Supported form fields:**
+
+| Field | Description |
+|---|---|
+| `file` | Audio file (required) |
+| `model` | Ignored (uses the loaded model) |
+| `language` | ISO-639-1 code (default: server's `-l` setting) |
+| `prompt` | Initial prompt / context |
+| `response_format` | `json` (default), `verbose_json`, `text`, `srt`, `vtt` |
+| `temperature` | Sampling temperature (default: 0.0) |
+
+`GET /v1/models` returns an OpenAI-compatible model list with the currently loaded model.
+
 ---
 
 ## CLI reference
@@ -810,6 +851,8 @@ It is a model-agnostic tool that iterates through the GGUF tensor list and re-qu
   - `core/greedy_decode` ✅ **all 4** LLM backends migrated (voxtral, voxtral4b, qwen3, granite)
 - **Ground-truth diff infrastructure** — `tools/dump_reference.py` with plug-in per-backend Python modules + `crispasr_diff::Ref` C++ loader + `crispasr-diff` CLI. Runs the C++ forward pass against PyTorch-dumped reference activations and reports cosine-similarity / max-abs / RMS / top-1-argmax at every named stage. Plug-in modules: qwen3, voxtral, voxtral4b, granite (all 4 LLM backends).
 - **Bit-identical regression** on `samples/jfk.wav` is the gate for every commit, and the ground-truth gate is the gate for every new backend. ~1,000 lines of duplicated boilerplate removed from `src/`.
+- **HTTP server** with persistent model, hot-swap, streaming, microphone input, and per-token alternatives.
+- **OpenAI-compatible API** — `POST /v1/audio/transcriptions` with all five response formats (`json`, `verbose_json`, `text`, `srt`, `vtt`), drop-in replacement for the OpenAI Whisper API.
 
 ### Near-term (next sessions)
 
@@ -822,8 +865,7 @@ It is a model-agnostic tool that iterates through the GGUF tensor list and re-qu
 
 ### Long-term
 
-- Microphone input (SDL2-based, pattern exists in `examples/stream/`)
-- HTTP / WebSocket server mode (pattern in `examples/server/`)
+- WebSocket streaming mode for real-time transcription over HTTP
 - Model-agnostic batch processing with a progress bar
 - TTS subcommand (`crispasr speak …`) via voxtral-rs
 
