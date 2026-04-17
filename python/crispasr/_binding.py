@@ -68,46 +68,76 @@ class CrispASR:
         model.close()
     """
 
-    def __init__(self, model_path: str, lib_path: Optional[str] = None):
+    def __init__(self, model_path: str, lib_path: Optional[str] = None,
+                 helpers_lib_path: Optional[str] = None):
         self._lib = ctypes.CDLL(lib_path or _find_lib())
         self._setup_signatures()
 
-        # Create context params
-        self._lib.whisper_context_default_params_by_ref.restype = ctypes.c_void_p
-        params_ptr = self._lib.whisper_context_default_params_by_ref()
+        # Load helpers library (provides pointer-based wrappers for by-value struct APIs)
+        helpers_search = [
+            helpers_lib_path,
+            str(Path(lib_path).parent / "libcrispasr_helpers.so") if lib_path else None,
+            str(Path(__file__).parent.parent.parent / "build" / "libcrispasr_helpers.so"),
+        ]
+        self._helpers = None
+        for hp in helpers_search:
+            if hp and Path(hp).exists():
+                self._helpers = ctypes.CDLL(hp)
+                break
 
-        # Init model
-        self._ctx = self._lib.whisper_init_from_file_with_params(
-            model_path.encode("utf-8"), params_ptr
-        )
+        if self._helpers:
+            # Use pointer-based wrappers (avoids by-value struct issues)
+            self._helpers.whisper_init_from_file_ptr.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+            self._helpers.whisper_init_from_file_ptr.restype = ctypes.c_void_p
+            self._helpers.whisper_full_ptr.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+            ]
+            self._helpers.whisper_full_ptr.restype = ctypes.c_int
+
+            cparams = self._lib.whisper_context_default_params_by_ref()
+            self._ctx = self._helpers.whisper_init_from_file_ptr(
+                model_path.encode("utf-8"), cparams
+            )
+            self._lib.whisper_free_context_params(cparams)
+        else:
+            # Fallback: use deprecated simple init (no params)
+            self._lib.whisper_init_from_file.argtypes = [ctypes.c_char_p]
+            self._lib.whisper_init_from_file.restype = ctypes.c_void_p
+            self._ctx = self._lib.whisper_init_from_file(model_path.encode("utf-8"))
+
         if not self._ctx:
             raise RuntimeError(f"Failed to load model: {model_path}")
 
     def _setup_signatures(self):
         lib = self._lib
 
-        # Init
-        lib.whisper_init_from_file_with_params.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
-        lib.whisper_init_from_file_with_params.restype = ctypes.c_void_p
-
         # Free
         lib.whisper_free.argtypes = [ctypes.c_void_p]
         lib.whisper_free.restype = None
 
-        # Full inference
-        lib.whisper_full.argtypes = [
-            ctypes.c_void_p,  # ctx
-            ctypes.c_void_p,  # params (by ref)
-            ctypes.POINTER(ctypes.c_float),  # samples
-            ctypes.c_int,     # n_samples
-        ]
-        lib.whisper_full.restype = ctypes.c_int
+        # Context params (by ref)
+        lib.whisper_context_default_params_by_ref.argtypes = []
+        lib.whisper_context_default_params_by_ref.restype = ctypes.c_void_p
 
-        # Default params
+        lib.whisper_free_context_params.argtypes = [ctypes.c_void_p]
+        lib.whisper_free_context_params.restype = None
+
+        # Full params (by ref)
         lib.whisper_full_default_params_by_ref.argtypes = [ctypes.c_int]
         lib.whisper_full_default_params_by_ref.restype = ctypes.c_void_p
 
-        # Results
+        lib.whisper_free_params.argtypes = [ctypes.c_void_p]
+        lib.whisper_free_params.restype = None
+
+        # whisper_full (takes params by value — needs helpers lib for pointer variant)
+        lib.whisper_full.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+        ]
+        lib.whisper_full.restype = ctypes.c_int
+
+        # Results (ctx-based variants)
         lib.whisper_full_n_segments.argtypes = [ctypes.c_void_p]
         lib.whisper_full_n_segments.restype = ctypes.c_int
 
@@ -129,10 +159,6 @@ class CrispASR:
 
         lib.whisper_lang_str.argtypes = [ctypes.c_int]
         lib.whisper_lang_str.restype = ctypes.c_char_p
-
-        # Free params
-        lib.whisper_free_params.argtypes = [ctypes.c_void_p]
-        lib.whisper_free_params.restype = None
 
     def transcribe(
         self,
@@ -185,7 +211,10 @@ class CrispASR:
         params_ptr = self._lib.whisper_full_default_params_by_ref(strategy)
 
         # Run inference
-        ret = self._lib.whisper_full(self._ctx, params_ptr, samples_ptr, len(pcm))
+        if self._helpers:
+            ret = self._helpers.whisper_full_ptr(self._ctx, params_ptr, samples_ptr, len(pcm))
+        else:
+            ret = self._lib.whisper_full(self._ctx, params_ptr, samples_ptr, len(pcm))
         self._lib.whisper_free_params(params_ptr)
 
         if ret != 0:
