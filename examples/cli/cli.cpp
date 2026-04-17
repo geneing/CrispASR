@@ -47,6 +47,7 @@ struct whisper_params {
     int32_t progress_step = 5;
     int32_t max_context   = -1;
     int32_t max_len       = 0;
+    bool    split_on_punct = false;
     int32_t best_of       = whisper_full_default_params(WHISPER_SAMPLING_GREEDY).greedy.best_of;
     int32_t beam_size     = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH).beam_search.beam_size;
     int32_t audio_ctx     = 0;
@@ -173,6 +174,8 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             params.max_context = std::stoi(ARGV_NEXT);
         } else if (arg == "-ml" || arg == "--max-len") {
             params.max_len = std::stoi(ARGV_NEXT);
+        } else if (arg == "-sp" || arg == "--split-on-punct") {
+            params.split_on_punct = true;
         } else if (arg == "-bo" || arg == "--best-of") {
             params.best_of = std::stoi(ARGV_NEXT);
         } else if (arg == "-bs" || arg == "--beam-size") {
@@ -384,6 +387,8 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             params.duration_ms);
     fprintf(stderr, "  -mc N,     --max-context N        [%-7d] maximum number of text context tokens to store\n",
             params.max_context);
+    fprintf(stderr, "  -sp,       --split-on-punct       [%-7s] split subtitle lines at sentence-ending punctuation\n",
+            params.split_on_punct ? "true" : "false");
     fprintf(stderr, "  -ml N,     --max-len N            [%-7d] maximum segment length in characters\n",
             params.max_len);
     fprintf(stderr, "  -sow,      --split-on-word        [%-7s] split on word rather than on token\n",

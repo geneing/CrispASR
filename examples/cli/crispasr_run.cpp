@@ -264,7 +264,7 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, wh
         }
     }
 
-    const auto disp = crispasr_make_disp_segments(all_segs, params.max_len);
+    const auto disp = crispasr_make_disp_segments(all_segs, params.max_len, params.split_on_punct);
 
     const bool show_timestamps = !params.no_timestamps && (params.output_srt || params.output_vtt ||
                                                            params.max_len > 0 || params.print_colors || params.diarize);
@@ -729,7 +729,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
         }
 
         // Build display segments.
-        const auto disp = crispasr_make_disp_segments(all_segs, params.max_len);
+        const auto disp = crispasr_make_disp_segments(all_segs, params.max_len, params.split_on_punct);
 
         // Print to stdout.
         const bool show_timestamps =

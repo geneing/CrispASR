@@ -45,8 +45,12 @@ struct crispasr_disp_segment {
 //   max_len = 1 -> one display segment per word (requires words populated)
 //   max_len > 1 -> split at word boundaries when accumulated text would
 //                  exceed max_len characters
+// split_on_punct: additionally split at sentence-ending punctuation (. ! ?)
+//   This creates natural subtitle lines even when segments are long.
+//   Works with and without word-level timestamps.
 std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector<crispasr_segment>& segments,
-                                                               int max_len);
+                                                               int max_len,
+                                                               bool split_on_punct = false);
 
 // ---------------------------------------------------------------------------
 // Writers. All take a full file path; callers are expected to choose the

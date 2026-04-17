@@ -49,8 +49,49 @@ std::string crispasr_make_out_path(const std::string& audio, const std::string& 
 // Display segment builder
 // ---------------------------------------------------------------------------
 
+// Check if a character is sentence-ending punctuation.
+static bool is_sentence_end(char c) {
+    return c == '.' || c == '!' || c == '?';
+}
+
+// Split a long text into sentences at punctuation boundaries.
+// Returns pairs of (sentence_text, approximate_fraction_through_segment).
+static std::vector<std::pair<std::string, float>> split_text_at_punct(const std::string& text) {
+    std::vector<std::pair<std::string, float>> sentences;
+    size_t start = 0;
+    size_t len = text.size();
+
+    for (size_t i = 0; i < len; i++) {
+        // Check for sentence end: punctuation followed by space or end of text
+        if (is_sentence_end(text[i]) && (i + 1 >= len || text[i + 1] == ' ')) {
+            size_t end = i + 1;
+            std::string sentence = text.substr(start, end - start);
+            // Trim leading whitespace
+            size_t first = sentence.find_first_not_of(" \t");
+            if (first != std::string::npos)
+                sentence = sentence.substr(first);
+            if (!sentence.empty()) {
+                float frac = (float)(end) / (float)len;
+                sentences.push_back({sentence, frac});
+            }
+            start = end;
+        }
+    }
+    // Remainder (text after last punctuation)
+    if (start < len) {
+        std::string remainder = text.substr(start);
+        size_t first = remainder.find_first_not_of(" \t");
+        if (first != std::string::npos)
+            remainder = remainder.substr(first);
+        if (!remainder.empty())
+            sentences.push_back({remainder, 1.0f});
+    }
+    return sentences;
+}
+
 std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector<crispasr_segment>& segments,
-                                                               int max_len) {
+                                                               int max_len,
+                                                               bool split_on_punct) {
     std::vector<crispasr_disp_segment> out;
 
     for (const auto& seg : segments) {
@@ -58,7 +99,25 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
         // segment covers the whole backend segment.
         if (seg.words.empty() || max_len == 0) {
             if (!seg.text.empty()) {
-                out.push_back({seg.t0, seg.t1, seg.text, seg.speaker});
+                // If split_on_punct is enabled, split the text at sentence boundaries
+                // and interpolate timestamps proportionally.
+                if (split_on_punct) {
+                    auto sentences = split_text_at_punct(seg.text);
+                    if (sentences.size() <= 1) {
+                        out.push_back({seg.t0, seg.t1, seg.text, seg.speaker});
+                    } else {
+                        float prev_frac = 0.0f;
+                        int64_t duration = seg.t1 - seg.t0;
+                        for (const auto& [sent, frac] : sentences) {
+                            int64_t s_t0 = seg.t0 + (int64_t)(prev_frac * duration);
+                            int64_t s_t1 = seg.t0 + (int64_t)(frac * duration);
+                            out.push_back({s_t0, s_t1, sent, seg.speaker});
+                            prev_frac = frac;
+                        }
+                    }
+                } else {
+                    out.push_back({seg.t0, seg.t1, seg.text, seg.speaker});
+                }
             }
             continue;
         }
@@ -71,7 +130,7 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
             continue;
         }
 
-        // max_len > 1: pack words into segments up to max_len characters.
+        // max_len > 1 or split_on_punct: pack words into segments.
         crispasr_disp_segment cur;
         cur.t0 = -1;
         cur.speaker = seg.speaker;
@@ -90,10 +149,14 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
             cur.t1 = w.t1;
 
             const std::string sep = cur.text.empty() ? "" : " ";
-            const bool would_overflow =
+            const bool would_overflow = max_len > 1 &&
                 !cur.text.empty() && (int)(cur.text.size() + sep.size() + w.text.size()) > max_len;
 
-            if (would_overflow) {
+            // Split at sentence-ending punctuation
+            const bool at_sentence_end = split_on_punct && !cur.text.empty() &&
+                !w.text.empty() && is_sentence_end(cur.text.back());
+
+            if (would_overflow || at_sentence_end) {
                 flush();
                 cur.t0 = w.t0;
                 cur.t1 = w.t1;
