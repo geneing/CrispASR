@@ -883,30 +883,33 @@ It is a model-agnostic tool that iterates through the GGUF tensor list and re-qu
 
 ## Branch state & roadmap
 
-### What's done (on `integrated_cli`)
+### What's done
 
-- **Phase 1** — Unified CLI with backend dispatch, VAD, common output writers, CTC alignment, auto-download. 7 non-whisper backends wired (parakeet, canary, cohere, granite, voxtral, voxtral4b, qwen3). Whisper code path unchanged and byte-identical to upstream.
-- **Phase 0** — `src/core/` shared library (`crispasr-core`):
-  - `core/mel` ✅ **all 8** non-whisper models migrated (including granite's stacked-2-frame variant)
-  - `core/ffn` ✅ 4 of 4 SwiGLU consumers migrated
-  - `core/gguf_loader` ✅ all 8 non-whisper models migrated
-  - `core/attention` ✅ 1 of ~6 LLM attention blocks migrated (voxtral)
-  - `core/greedy_decode` ✅ **all 4** LLM backends migrated (voxtral, voxtral4b, qwen3, granite)
-- **Ground-truth diff infrastructure** — `tools/dump_reference.py` with plug-in per-backend Python modules + `crispasr_diff::Ref` C++ loader + `crispasr-diff` CLI. Runs the C++ forward pass against PyTorch-dumped reference activations and reports cosine-similarity / max-abs / RMS / top-1-argmax at every named stage. Plug-in modules: qwen3, voxtral, voxtral4b, granite (all 4 LLM backends).
-- **Bit-identical regression** on `samples/jfk.wav` is the gate for every commit, and the ground-truth gate is the gate for every new backend. ~1,000 lines of duplicated boilerplate removed from `src/`.
-- **HTTP server** with persistent model, hot-swap, streaming, microphone input, and per-token alternatives.
-- **OpenAI-compatible API** — `POST /v1/audio/transcriptions` with all five response formats (`json`, `verbose_json`, `text`, `srt`, `vtt`), drop-in replacement for the OpenAI Whisper API.
+- **Ten backends shipped, all runtime-ready** through the unified `crispasr_session_*` C-ABI: whisper, parakeet, canary, cohere, granite, fastconformer-ctc, canary_ctc, voxtral (3B), voxtral4b, qwen3, wav2vec2.
+- **Unified language bindings** — Dart (`package:crispasr` 0.4.x), Python (`crispasr.Session`), Rust (`crispasr::Session`). One C-ABI, three wrappers, all 10 backends reachable from each.
+- **Cross-platform audio decoding** via `crispasr_audio_load` (embedded miniaudio). WAV / MP3 / FLAC without an ffmpeg dependency; same loader used from CLI, server, and all language bindings.
+- **`src/core/` shared library** (`crispasr-core`) —
+  - `core/mel` ✅ all non-whisper models migrated (including granite's stacked-2-frame variant)
+  - `core/ffn` ✅ all 4 SwiGLU consumers migrated
+  - `core/gguf_loader` ✅ all non-whisper models migrated
+  - `core/attention` ✅ `encoder_self_attn()` shared; voxtral + voxtral4b migrated, qwen3/granite remaining
+  - `core/greedy_decode` ✅ all 4 LLM backends migrated
+- **Ground-truth diff infrastructure** — `tools/dump_reference.py` plug-in Python modules (qwen3, voxtral, voxtral4b, granite) + `crispasr_diff::Ref` C++ loader + `crispasr-diff` CLI. Bit-identical regression on `samples/jfk.wav` gates every commit.
+- **HTTP server** with persistent model, hot-swap, streaming, mic input, per-token alternatives.
+- **OpenAI-compatible API** — `POST /v1/audio/transcriptions` with all five response formats, drop-in replacement for the OpenAI Whisper API.
+- **Reference Flutter app** — [CrisperWeaver](https://github.com/CrispStrobe/CrisperWeaver), cross-platform desktop/mobile transcription app built on `package:crispasr`.
 
-### Near-term (next sessions)
+### Near-term
 
-- `core/attention.h` — voxtral audio encoder attention (biases, no RoPE) is still inline; needs a variant in the shared header
-- Move `crispasr_llm_pipeline.h` from `examples/cli/` to `src/core/` — the pipeline template is stable and used by voxtral; qwen3/granite/voxtral4b could adopt it too
+- Finish `core/attention.h` migration — qwen3 and granite attention blocks still inline.
+- Move `crispasr_llm_pipeline.h` from `examples/cli/` to `src/core/` — voxtral uses it, the other 3 LLM backends could adopt.
+- Windows CI for the Flutter reference app (libcrispasr.dll is already built in CI).
 
 ### Long-term
 
-- WebSocket streaming mode for real-time transcription over HTTP
-- Model-agnostic batch processing with a progress bar
-- TTS subcommand (`crispasr speak …`) via voxtral-rs
+- WebSocket streaming mode for real-time transcription over HTTP.
+- Model-agnostic batch processing with a progress bar.
+- TTS subcommand (`crispasr speak …`) via voxtral-rs.
 
 ---
 
