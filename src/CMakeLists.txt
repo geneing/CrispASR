@@ -467,6 +467,9 @@ endif()
 if (TARGET granite_speech)
     target_link_libraries(whisper PUBLIC granite_speech)
 endif()
+if (TARGET canary_ctc)
+    target_link_libraries(whisper PUBLIC canary_ctc)
+endif()
 
 # Convenience alias: produce `libcrispasr.{dylib,so,dll}` as a symlink (or
 # copy on Windows) next to `libwhisper`, pointing at the same file. Lets

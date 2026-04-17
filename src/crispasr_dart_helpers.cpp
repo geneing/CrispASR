@@ -40,6 +40,10 @@
   #include "granite_speech.h"
   #define CA_HAVE_GRANITE 1
 #endif
+#if __has_include("canary_ctc.h")
+  #include "canary_ctc.h"
+  #define CA_HAVE_CTC 1
+#endif
 
 #ifdef _WIN32
   #define CA_EXPORT extern "C" __declspec(dllexport)
@@ -553,6 +557,7 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char * path,
     else if (strcmp(arch, "voxtral4b") == 0) backend = "voxtral4b";
     else if (strcmp(arch, "granite-speech") == 0) backend = "granite";
     else if (strcmp(arch, "fastconformer-ctc") == 0) backend = "fastconformer-ctc";
+    else if (strcmp(arch, "canary-ctc") == 0) backend = "canary-ctc";
     else if (strcmp(arch, "wav2vec2") == 0) backend = "wav2vec2";
 
     std::strncpy(out_name, backend, out_cap - 1);
@@ -597,6 +602,12 @@ struct crispasr_session {
 #endif
 #ifdef CA_HAVE_GRANITE
     granite_speech_context * granite_ctx = nullptr;
+#endif
+#ifdef CA_HAVE_CTC
+    // Shared between the fastconformer-ctc and canary-ctc backends — they
+    // load different GGUFs but go through the same canary_ctc_* compute
+    // pipeline.
+    canary_ctc_context * ctc_ctx = nullptr;
 #endif
 };
 
@@ -679,6 +690,16 @@ CA_EXPORT crispasr_session * crispasr_session_open_explicit(const char * model_p
         return s;
     }
 #endif
+#ifdef CA_HAVE_CTC
+    if (s->backend == "fastconformer-ctc" || s->backend == "canary-ctc") {
+        canary_ctc_context_params p = canary_ctc_context_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = 0;
+        s->ctc_ctx = canary_ctc_init_from_file(model_path, p);
+        if (!s->ctc_ctx) { delete s; return nullptr; }
+        return s;
+    }
+#endif
 
     // Unknown or unsupported-in-this-build backend.
     delete s;
@@ -719,6 +740,9 @@ CA_EXPORT int crispasr_session_available_backends(char * out_csv, int out_cap) {
 #endif
 #ifdef CA_HAVE_GRANITE
     list += ",granite";
+#endif
+#ifdef CA_HAVE_CTC
+    list += ",fastconformer-ctc,canary-ctc";
 #endif
     std::strncpy(out_csv, list.c_str(), out_cap - 1);
     out_csv[out_cap - 1] = '\0';
@@ -827,6 +851,31 @@ CA_EXPORT crispasr_session_result * crispasr_session_transcribe(crispasr_session
             s->granite_ctx, pcm, n_samples));
     }
 #endif
+#ifdef CA_HAVE_CTC
+    if ((s->backend == "fastconformer-ctc" || s->backend == "canary-ctc") && s->ctc_ctx) {
+        // Two-stage: encoder → logits → greedy CTC decode. Same pipeline
+        // the CLI's FastConformerCtcBackend uses.
+        float * logits = nullptr;
+        int T_enc = 0, V = 0;
+        if (canary_ctc_compute_logits(s->ctc_ctx, pcm, n_samples, &logits, &T_enc, &V) != 0 || !logits) {
+            delete r;
+            return nullptr;
+        }
+        char * text = canary_ctc_greedy_decode(s->ctc_ctx, logits, T_enc, V);
+        std::free(logits);
+        if (!text) {
+            delete r;
+            return nullptr;
+        }
+        crispasr_session_seg seg;
+        seg.text = text;
+        seg.t0 = 0;
+        seg.t1 = (int64_t)((double) n_samples * 100.0 / 16000.0);
+        r->segments.push_back(std::move(seg));
+        std::free(text);
+        return r;
+    }
+#endif
 
     delete r;
     return nullptr;
@@ -885,6 +934,9 @@ CA_EXPORT void crispasr_session_close(crispasr_session * s) {
 #endif
 #ifdef CA_HAVE_GRANITE
     if (s->granite_ctx) granite_speech_free(s->granite_ctx);
+#endif
+#ifdef CA_HAVE_CTC
+    if (s->ctc_ctx) canary_ctc_free(s->ctc_ctx);
 #endif
     delete s;
 }
