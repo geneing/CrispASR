@@ -82,3 +82,8 @@ SETUP.md
 .claude/worktrees/
 __pycache__/
 *.pyc
+
+# Rust build output
+target/
+**/*.rlib
+Cargo.lock
