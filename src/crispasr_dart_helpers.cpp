@@ -16,6 +16,14 @@
 #include <vector>
 
 #include "whisper.h"
+// Non-Whisper backend headers. Each of these lives in `src/` and is built as
+// its own shared library — we link them into libwhisper privately so Dart
+// only has to open one library to reach every backend. Any missing header
+// in a slim build is skipped cleanly below.
+#if __has_include("parakeet.h")
+  #include "parakeet.h"
+  #define CA_HAVE_PARAKEET 1
+#endif
 
 #ifdef _WIN32
   #define CA_EXPORT extern "C" __declspec(dllexport)
@@ -410,9 +418,346 @@ CA_EXPORT int crispasr_stream_flush(crispasr_stream * s) {
 }
 
 // =========================================================================
+// Parakeet (nvidia/parakeet-tdt-0.6b-v3) — C-ABI wrappers for Dart
+// =========================================================================
+//
+// Parakeet's C API already has clean C linkage (see parakeet.h), but Dart
+// FFI can't deal with the returned `parakeet_result *` whose fields
+// include `parakeet_token_data[]` and `parakeet_word_data[]` by value.
+// These helpers wrap the handful of calls Dart needs: open / free,
+// transcribe → opaque result handle, iterate words with scalar getters.
+
+#ifdef CA_HAVE_PARAKEET
+
+CA_EXPORT parakeet_context * crispasr_parakeet_init(const char * model_path,
+                                                    int          n_threads,
+                                                    int          use_flash) {
+    if (!model_path) return nullptr;
+    parakeet_context_params p = parakeet_context_default_params();
+    p.n_threads = n_threads > 0 ? n_threads : 4;
+    p.use_flash = use_flash != 0;
+    p.verbosity = 0;
+    return parakeet_init_from_file(model_path, p);
+}
+
+CA_EXPORT void crispasr_parakeet_free(parakeet_context * ctx) {
+    if (ctx) parakeet_free(ctx);
+}
+
+CA_EXPORT parakeet_result * crispasr_parakeet_transcribe(parakeet_context * ctx,
+                                                         const float *     pcm,
+                                                         int               n_samples,
+                                                         int64_t           t_offset_cs) {
+    if (!ctx || !pcm || n_samples <= 0) return nullptr;
+    return parakeet_transcribe_ex(ctx, pcm, n_samples, t_offset_cs);
+}
+
+CA_EXPORT const char * crispasr_parakeet_result_text(parakeet_result * r) {
+    return (r && r->text) ? r->text : "";
+}
+
+CA_EXPORT int crispasr_parakeet_result_n_words(parakeet_result * r) {
+    return r ? r->n_words : 0;
+}
+CA_EXPORT const char * crispasr_parakeet_result_word_text(parakeet_result * r, int i) {
+    if (!r || i < 0 || i >= r->n_words) return "";
+    return r->words[i].text;
+}
+CA_EXPORT int64_t crispasr_parakeet_result_word_t0(parakeet_result * r, int i) {
+    return (r && i >= 0 && i < r->n_words) ? r->words[i].t0 : 0;
+}
+CA_EXPORT int64_t crispasr_parakeet_result_word_t1(parakeet_result * r, int i) {
+    return (r && i >= 0 && i < r->n_words) ? r->words[i].t1 : 0;
+}
+
+CA_EXPORT int crispasr_parakeet_result_n_tokens(parakeet_result * r) {
+    return r ? r->n_tokens : 0;
+}
+CA_EXPORT const char * crispasr_parakeet_result_token_text(parakeet_result * r, int i) {
+    if (!r || i < 0 || i >= r->n_tokens) return "";
+    return r->tokens[i].text;
+}
+CA_EXPORT int64_t crispasr_parakeet_result_token_t0(parakeet_result * r, int i) {
+    return (r && i >= 0 && i < r->n_tokens) ? r->tokens[i].t0 : 0;
+}
+CA_EXPORT int64_t crispasr_parakeet_result_token_t1(parakeet_result * r, int i) {
+    return (r && i >= 0 && i < r->n_tokens) ? r->tokens[i].t1 : 0;
+}
+CA_EXPORT float crispasr_parakeet_result_token_p(parakeet_result * r, int i) {
+    return (r && i >= 0 && i < r->n_tokens) ? r->tokens[i].p : 0.0f;
+}
+
+CA_EXPORT void crispasr_parakeet_result_free(parakeet_result * r) {
+    if (r) parakeet_result_free(r);
+}
+
+#endif // CA_HAVE_PARAKEET
+
+// =========================================================================
+// Backend auto-detection from GGUF metadata
+// =========================================================================
+//
+// Reads `general.architecture` from a GGUF file and returns one of the
+// backend names used by CrispASR ("whisper" / "parakeet" / "canary" /
+// "qwen3" / ...). Returns an empty string if the file is unreadable or
+// the architecture is unknown.
+
+#include "ggml.h"
+#include "gguf.h"
+
+CA_EXPORT int crispasr_detect_backend_from_gguf(const char * path,
+                                                char *       out_name,
+                                                int          out_cap) {
+    if (!path || !out_name || out_cap <= 0) return -1;
+    out_name[0] = '\0';
+
+    gguf_init_params p = { /*no_alloc*/ true, /*ctx*/ nullptr };
+    gguf_context * gctx = gguf_init_from_file(path, p);
+    if (!gctx) return -2;
+
+    const int key_id = gguf_find_key(gctx, "general.architecture");
+    if (key_id < 0) {
+        gguf_free(gctx);
+        return -3;
+    }
+    const char * arch = gguf_get_val_str(gctx, key_id);
+    if (!arch) {
+        gguf_free(gctx);
+        return -4;
+    }
+
+    // Map known architecture strings to CrispASR backend names.
+    const char * backend = "";
+    if (strcmp(arch, "whisper") == 0) backend = "whisper";
+    else if (strcmp(arch, "parakeet") == 0 || strcmp(arch, "parakeet-tdt") == 0) backend = "parakeet";
+    else if (strcmp(arch, "canary") == 0) backend = "canary";
+    else if (strcmp(arch, "cohere-transcribe") == 0) backend = "cohere";
+    else if (strcmp(arch, "qwen3-asr") == 0) backend = "qwen3";
+    else if (strcmp(arch, "voxtral") == 0) backend = "voxtral";
+    else if (strcmp(arch, "voxtral4b") == 0) backend = "voxtral4b";
+    else if (strcmp(arch, "granite-speech") == 0) backend = "granite";
+    else if (strcmp(arch, "fastconformer-ctc") == 0) backend = "fastconformer-ctc";
+    else if (strcmp(arch, "wav2vec2") == 0) backend = "wav2vec2";
+
+    std::strncpy(out_name, backend, out_cap - 1);
+    out_name[out_cap - 1] = '\0';
+    gguf_free(gctx);
+    return (int) std::strlen(out_name);
+}
+
+// =========================================================================
+// Unified session API — one entry point for every backend
+// =========================================================================
+//
+// Callers (Dart, Python, Rust) open a GGUF, we auto-detect the backend
+// from its `general.architecture` metadata, construct the right native
+// context internally, and expose a common segment/word/token surface.
+// No caller code needs to know which backend a given model uses.
+//
+// Internally a `crispasr_session` owns exactly one of the per-backend
+// contexts — we route every call to the matching per-backend wrapper.
+// Adding a backend to the unified API is therefore the same three steps
+// as adding it to the per-backend API, plus one more: a case in the big
+// switch statement in `crispasr_session_open_explicit`.
+
+struct crispasr_session {
+    std::string backend;   // "whisper", "parakeet", ...
+    std::string model_path;
+    int n_threads = 4;
+
+    // Exactly one of these pointers is non-null based on `backend`.
+    whisper_context *  whisper_ctx  = nullptr;
+#ifdef CA_HAVE_PARAKEET
+    parakeet_context * parakeet_ctx = nullptr;
+#endif
+};
+
+struct crispasr_session_seg {
+    std::string text;
+    int64_t t0 = 0; // centiseconds absolute
+    int64_t t1 = 0;
+    struct word { std::string text; int64_t t0; int64_t t1; float p; };
+    std::vector<word> words;
+};
+
+struct crispasr_session_result {
+    std::vector<crispasr_session_seg> segments;
+    std::string backend;
+};
+
+CA_EXPORT crispasr_session * crispasr_session_open_explicit(const char * model_path,
+                                                            const char * backend_name,
+                                                            int          n_threads) {
+    if (!model_path || !backend_name) return nullptr;
+
+    auto * s = new crispasr_session();
+    s->model_path = model_path;
+    s->backend    = backend_name;
+    s->n_threads  = n_threads > 0 ? n_threads : 4;
+
+    if (s->backend == "whisper") {
+        whisper_context_params cparams = whisper_context_default_params();
+        s->whisper_ctx = whisper_init_from_file_with_params(model_path, cparams);
+        if (!s->whisper_ctx) { delete s; return nullptr; }
+        return s;
+    }
+#ifdef CA_HAVE_PARAKEET
+    if (s->backend == "parakeet") {
+        parakeet_context_params pp = parakeet_context_default_params();
+        pp.n_threads = s->n_threads;
+        pp.verbosity = 0;
+        s->parakeet_ctx = parakeet_init_from_file(model_path, pp);
+        if (!s->parakeet_ctx) { delete s; return nullptr; }
+        return s;
+    }
+#endif
+
+    // Unknown or unsupported-in-this-build backend.
+    delete s;
+    return nullptr;
+}
+
+CA_EXPORT crispasr_session * crispasr_session_open(const char * model_path,
+                                                   int          n_threads) {
+    if (!model_path) return nullptr;
+    char detected[64] = {0};
+    if (crispasr_detect_backend_from_gguf(model_path, detected, (int) sizeof(detected)) <= 0) {
+        return nullptr;
+    }
+    return crispasr_session_open_explicit(model_path, detected, n_threads);
+}
+
+CA_EXPORT const char * crispasr_session_backend(crispasr_session * s) {
+    return s ? s->backend.c_str() : "";
+}
+
+/// Comma-separated list of backend names compiled into this libwhisper.
+/// e.g. "whisper,parakeet". Slim builds expose fewer. Used by language
+/// bindings to show the user which formats are runtime-ready.
+CA_EXPORT int crispasr_session_available_backends(char * out_csv, int out_cap) {
+    if (!out_csv || out_cap <= 0) return -1;
+    std::string list = "whisper";
+#ifdef CA_HAVE_PARAKEET
+    list += ",parakeet";
+#endif
+    std::strncpy(out_csv, list.c_str(), out_cap - 1);
+    out_csv[out_cap - 1] = '\0';
+    return (int) list.size();
+}
+
+CA_EXPORT crispasr_session_result * crispasr_session_transcribe(crispasr_session * s,
+                                                                const float *     pcm,
+                                                                int               n_samples) {
+    if (!s || !pcm || n_samples <= 0) return nullptr;
+
+    auto * r = new crispasr_session_result();
+    r->backend = s->backend;
+
+    if (s->backend == "whisper" && s->whisper_ctx) {
+        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        wparams.print_progress   = false;
+        wparams.print_realtime   = false;
+        wparams.print_timestamps = false;
+        wparams.print_special    = false;
+        wparams.n_threads        = s->n_threads;
+
+        if (whisper_full(s->whisper_ctx, wparams, pcm, n_samples) != 0) {
+            delete r;
+            return nullptr;
+        }
+        const int n = whisper_full_n_segments(s->whisper_ctx);
+        for (int i = 0; i < n; ++i) {
+            crispasr_session_seg seg;
+            const char * t = whisper_full_get_segment_text(s->whisper_ctx, i);
+            if (t) seg.text = t;
+            seg.t0 = whisper_full_get_segment_t0(s->whisper_ctx, i);
+            seg.t1 = whisper_full_get_segment_t1(s->whisper_ctx, i);
+            r->segments.push_back(std::move(seg));
+        }
+        return r;
+    }
+#ifdef CA_HAVE_PARAKEET
+    if (s->backend == "parakeet" && s->parakeet_ctx) {
+        parakeet_result * pr = parakeet_transcribe_ex(s->parakeet_ctx, pcm, n_samples, 0);
+        if (!pr) { delete r; return nullptr; }
+
+        // Parakeet produces one logical segment covering the whole input;
+        // we package word-level timings into a single segment for the
+        // unified shape.
+        crispasr_session_seg seg;
+        seg.text = pr->text ? pr->text : "";
+        if (pr->n_words > 0) {
+            seg.t0 = pr->words[0].t0;
+            seg.t1 = pr->words[pr->n_words - 1].t1;
+            seg.words.reserve(pr->n_words);
+            for (int i = 0; i < pr->n_words; ++i) {
+                crispasr_session_seg::word w;
+                w.text = pr->words[i].text;
+                w.t0   = pr->words[i].t0;
+                w.t1   = pr->words[i].t1;
+                w.p    = 1.0f;
+                seg.words.push_back(std::move(w));
+            }
+        }
+        r->segments.push_back(std::move(seg));
+        parakeet_result_free(pr);
+        return r;
+    }
+#endif
+
+    delete r;
+    return nullptr;
+}
+
+CA_EXPORT int crispasr_session_result_n_segments(crispasr_session_result * r) {
+    return r ? (int) r->segments.size() : 0;
+}
+CA_EXPORT const char * crispasr_session_result_segment_text(crispasr_session_result * r, int i) {
+    return (r && i >= 0 && i < (int) r->segments.size()) ? r->segments[i].text.c_str() : "";
+}
+CA_EXPORT int64_t crispasr_session_result_segment_t0(crispasr_session_result * r, int i) {
+    return (r && i >= 0 && i < (int) r->segments.size()) ? r->segments[i].t0 : 0;
+}
+CA_EXPORT int64_t crispasr_session_result_segment_t1(crispasr_session_result * r, int i) {
+    return (r && i >= 0 && i < (int) r->segments.size()) ? r->segments[i].t1 : 0;
+}
+CA_EXPORT int crispasr_session_result_n_words(crispasr_session_result * r, int i_seg) {
+    if (!r || i_seg < 0 || i_seg >= (int) r->segments.size()) return 0;
+    return (int) r->segments[i_seg].words.size();
+}
+CA_EXPORT const char * crispasr_session_result_word_text(crispasr_session_result * r, int i_seg, int i_word) {
+    if (!r || i_seg < 0 || i_seg >= (int) r->segments.size()) return "";
+    auto & ws = r->segments[i_seg].words;
+    return (i_word >= 0 && i_word < (int) ws.size()) ? ws[i_word].text.c_str() : "";
+}
+CA_EXPORT int64_t crispasr_session_result_word_t0(crispasr_session_result * r, int i_seg, int i_word) {
+    if (!r || i_seg < 0 || i_seg >= (int) r->segments.size()) return 0;
+    auto & ws = r->segments[i_seg].words;
+    return (i_word >= 0 && i_word < (int) ws.size()) ? ws[i_word].t0 : 0;
+}
+CA_EXPORT int64_t crispasr_session_result_word_t1(crispasr_session_result * r, int i_seg, int i_word) {
+    if (!r || i_seg < 0 || i_seg >= (int) r->segments.size()) return 0;
+    auto & ws = r->segments[i_seg].words;
+    return (i_word >= 0 && i_word < (int) ws.size()) ? ws[i_word].t1 : 0;
+}
+
+CA_EXPORT void crispasr_session_result_free(crispasr_session_result * r) {
+    if (r) delete r;
+}
+
+CA_EXPORT void crispasr_session_close(crispasr_session * s) {
+    if (!s) return;
+    if (s->whisper_ctx) whisper_free(s->whisper_ctx);
+#ifdef CA_HAVE_PARAKEET
+    if (s->parakeet_ctx) parakeet_free(s->parakeet_ctx);
+#endif
+    delete s;
+}
+
+// =========================================================================
 // Version reporting for the Dart binding
 // =========================================================================
 
 CA_EXPORT const char * crispasr_dart_helpers_version(void) {
-    return "0.3.0";
+    return "0.4.0";
 }

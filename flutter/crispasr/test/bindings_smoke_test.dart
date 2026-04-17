@@ -90,12 +90,12 @@ void main() {
     }
   });
 
-  test('helpers_version reports 0.3.0', () {
+  test('helpers_version reports 0.4.0', () {
     final fn = lib.lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
         'crispasr_dart_helpers_version');
     final ptr = fn();
     expect(ptr.cast<Uint8>().address, isNot(0));
-    expect(ptr.toDartString(), '0.3.0');
+    expect(ptr.toDartString(), '0.4.0');
   });
 
   test('0.3.0 streaming helpers resolve', () {
@@ -105,6 +105,29 @@ void main() {
       'crispasr_stream_flush',
       'crispasr_stream_get_text',
       'crispasr_stream_close',
+    ]) {
+      expect(() => lib.lookup(s), returnsNormally, reason: s);
+    }
+  });
+
+  test('0.4.0 unified session helpers resolve', () {
+    for (final s in [
+      'crispasr_session_open',
+      'crispasr_session_open_explicit',
+      'crispasr_session_backend',
+      'crispasr_session_available_backends',
+      'crispasr_session_transcribe',
+      'crispasr_session_result_n_segments',
+      'crispasr_session_result_segment_text',
+      'crispasr_session_result_segment_t0',
+      'crispasr_session_result_segment_t1',
+      'crispasr_session_result_n_words',
+      'crispasr_session_result_word_text',
+      'crispasr_session_result_word_t0',
+      'crispasr_session_result_word_t1',
+      'crispasr_session_result_free',
+      'crispasr_session_close',
+      'crispasr_detect_backend_from_gguf',
     ]) {
       expect(() => lib.lookup(s), returnsNormally, reason: s);
     }

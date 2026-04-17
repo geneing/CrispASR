@@ -113,6 +113,10 @@ add_library(whisper
             # upstream whisper.h identifiers.
             crispasr_dart_helpers.cpp
             )
+# Non-Whisper backends the Dart binding can reach through
+# crispasr_dart_helpers.cpp are linked into libwhisper further down in
+# this file, once those targets have been declared. See the
+# "Dart FFI multi-backend linkage" section near the bottom.
 
 # Cohere Transcribe library (Conformer encoder + transformer decoder)
 add_library(cohere
@@ -430,4 +434,24 @@ endif()
 if (BUILD_SHARED_LIBS)
     set_target_properties(whisper PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(whisper PRIVATE WHISPER_SHARED WHISPER_BUILD)
+endif()
+
+# ---------------------------------------------------------------------------
+# Dart FFI multi-backend linkage
+#
+# Non-Whisper CrispASR backends become reachable from Dart through the
+# `crispasr_*` C-ABI wrappers in crispasr_dart_helpers.cpp. Each backend
+# header is #included under `#if __has_include(...)`, and when the
+# corresponding CMake target exists we PUBLIC-link it into libwhisper so
+# the resulting shared library carries a DT_NEEDED on its sibling dylib.
+# Dart consumers only have to open libwhisper; the platform loader pulls
+# the rest automatically.
+#
+# Adding a new backend is a three-line change here: (1) build the
+# backend target as usual elsewhere in this file, (2) add
+# `target_link_libraries(whisper PUBLIC <target>)` below, (3) add the
+# `crispasr_<backend>_*` wrappers to crispasr_dart_helpers.cpp.
+# ---------------------------------------------------------------------------
+if (TARGET parakeet)
+    target_link_libraries(whisper PUBLIC parakeet)
 endif()

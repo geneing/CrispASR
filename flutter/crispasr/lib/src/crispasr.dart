@@ -61,6 +61,24 @@ class LanguageDetection {
       'LanguageDetection($code, ${(probability * 100).toStringAsFixed(1)}%)';
 }
 
+/// One decoded segment from [CrispasrSession.transcribe]. Similar to the
+/// Whisper-specific [Segment] but produced by a backend-agnostic code path.
+class SessionSegment {
+  final String text;
+  final double start; // seconds (centiseconds / 100 on the C side)
+  final double end;
+  final List<Word> words;
+  const SessionSegment({
+    required this.text,
+    required this.start,
+    required this.end,
+    this.words = const [],
+  });
+  @override
+  String toString() =>
+      '[${start.toStringAsFixed(1)}-${end.toStringAsFixed(1)}s] $text';
+}
+
 /// One "commit" from a streaming session — the latest concatenated text
 /// that whisper produced for the current rolling window, plus its absolute
 /// start/end time in the live audio stream.
@@ -712,7 +730,12 @@ class CrispASR {
     if (_disposed) throw StateError('CrispASR has been disposed');
   }
 
-  static String _findLib() {
+  static String _findLib() => defaultLibName();
+
+  /// Platform-default filename for the CrispASR shared library. Public so
+  /// [CrispasrSession] and other consumers can open it with the same
+  /// convention [CrispASR] uses.
+  static String defaultLibName() {
     if (Platform.isAndroid || Platform.isLinux) return 'libwhisper.so';
     if (Platform.isIOS || Platform.isMacOS) return 'whisper.framework/whisper';
     if (Platform.isWindows) return 'whisper.dll';
@@ -819,5 +842,218 @@ class StreamingSession {
     if (_closed) return;
     _closed = true;
     _closeFn(_handle);
+  }
+}
+
+// =====================================================================
+// Unified backend-agnostic session (0.4.0+)
+//
+// The [CrispASR] class is Whisper-only — it exists for backward
+// compatibility and low-overhead direct access to whisper.h. For any new
+// client, prefer [CrispasrSession]: one constructor, one `transcribe`
+// method, auto-dispatched to whichever backend (Whisper, Parakeet, …)
+// the GGUF metadata identifies. A backend the loaded libwhisper wasn't
+// linked with will cause the open call to throw — [availableBackends]
+// lists what's supported at runtime.
+// =====================================================================
+
+/// Unified session over any CrispASR-supported GGUF model.
+class CrispasrSession {
+  CrispasrSession._(
+    this._lib,
+    this._handle,
+    this._backend,
+  );
+
+  final DynamicLibrary _lib;
+  Pointer<Void> _handle;
+  final String _backend;
+  bool _closed = false;
+
+  /// Open a model file. Backend is auto-detected from the GGUF
+  /// `general.architecture` metadata key.
+  ///
+  /// Throws when the loaded dylib is pre-0.4.0 (no `crispasr_session_*`
+  /// symbols) or when the backend identified in the file wasn't compiled
+  /// into that dylib (`availableBackends` to introspect).
+  factory CrispasrSession.open(
+    String modelPath, {
+    int nThreads = 4,
+    String? libPath,
+    String? backend,
+  }) {
+    final lib = DynamicLibrary.open(libPath ?? CrispASR.defaultLibName());
+    if (!lib.providesSymbol('crispasr_session_open')) {
+      throw UnsupportedError(
+          'Unified session API not available — rebuild CrispASR with 0.4.0+ helpers.');
+    }
+
+    final pathPtr = modelPath.toNativeUtf8();
+    Pointer<Utf8> bePtr = nullptr;
+    try {
+      Pointer<Void> handle;
+      if (backend != null && backend.isNotEmpty) {
+        bePtr = backend.toNativeUtf8();
+        final openExpl = lib.lookupFunction<
+            Pointer<Void> Function(Pointer<Utf8>, Pointer<Utf8>, Int32),
+            Pointer<Void> Function(Pointer<Utf8>, Pointer<Utf8>, int)>(
+          'crispasr_session_open_explicit',
+        );
+        handle = openExpl(pathPtr, bePtr, nThreads);
+      } else {
+        final open = lib.lookupFunction<
+            Pointer<Void> Function(Pointer<Utf8>, Int32),
+            Pointer<Void> Function(Pointer<Utf8>, int)>(
+          'crispasr_session_open',
+        );
+        handle = open(pathPtr, nThreads);
+      }
+      if (handle == nullptr) {
+        throw Exception(
+            'crispasr_session_open returned null — either the GGUF backend '
+            'isn\'t one of ${_availableBackends(lib).join(", ")} or the '
+            'file is unreadable.');
+      }
+      final backendFn = lib.lookupFunction<
+          Pointer<Utf8> Function(Pointer<Void>),
+          Pointer<Utf8> Function(Pointer<Void>)>('crispasr_session_backend');
+      final bp = backendFn(handle);
+      final be = bp == nullptr ? '' : bp.toDartString();
+      return CrispasrSession._(lib, handle, be);
+    } finally {
+      calloc.free(pathPtr);
+      if (bePtr != nullptr) calloc.free(bePtr);
+    }
+  }
+
+  /// List of backend names compiled into the loaded libwhisper.
+  /// Always includes 'whisper'. Non-Whisper backends are added as they
+  /// get linked in (parakeet, canary, qwen3, …).
+  static List<String> availableBackends({String? libPath}) {
+    try {
+      final lib = DynamicLibrary.open(libPath ?? CrispASR.defaultLibName());
+      return _availableBackends(lib);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static List<String> _availableBackends(DynamicLibrary lib) {
+    if (!lib.providesSymbol('crispasr_session_available_backends')) {
+      return const [];
+    }
+    final fn = lib.lookupFunction<
+        Int32 Function(Pointer<Utf8>, Int32),
+        int Function(Pointer<Utf8>, int)>('crispasr_session_available_backends');
+    final buf = calloc<Uint8>(256);
+    try {
+      final ptr = buf.cast<Utf8>();
+      fn(ptr, 256);
+      final csv = ptr.toDartString();
+      return csv.isEmpty
+          ? const <String>[]
+          : csv.split(',').map((s) => s.trim()).toList();
+    } finally {
+      calloc.free(buf);
+    }
+  }
+
+  /// Name of the backend this session ended up using.
+  String get backend => _backend;
+  bool get isClosed => _closed;
+
+  /// Transcribe 16 kHz mono float32 PCM. Returns a list of segments
+  /// with word-level timings when the backend supports them.
+  List<SessionSegment> transcribe(Float32List pcm) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (pcm.isEmpty) return const [];
+
+    final samples = calloc<Float>(pcm.length);
+    for (var i = 0; i < pcm.length; i++) {
+      samples[i] = pcm[i];
+    }
+    final transcribeFn = _lib.lookupFunction<
+        Pointer<Void> Function(Pointer<Void>, Pointer<Float>, Int32),
+        Pointer<Void> Function(Pointer<Void>, Pointer<Float>, int)>(
+      'crispasr_session_transcribe',
+    );
+    final res = transcribeFn(_handle, samples, pcm.length);
+    calloc.free(samples);
+    if (res == nullptr) {
+      throw Exception('crispasr_session_transcribe returned null');
+    }
+
+    try {
+      return _readSegments(res);
+    } finally {
+      final freeFn =
+          _lib.lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
+        'crispasr_session_result_free',
+      );
+      freeFn(res);
+    }
+  }
+
+  List<SessionSegment> _readSegments(Pointer<Void> res) {
+    final nSegs = _lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+        'crispasr_session_result_n_segments')(res);
+    final segText = _lib.lookupFunction<
+        Pointer<Utf8> Function(Pointer<Void>, Int32),
+        Pointer<Utf8> Function(Pointer<Void>, int)>(
+      'crispasr_session_result_segment_text',
+    );
+    final segT0 = _lib.lookupFunction<
+        Int64 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_result_segment_t0');
+    final segT1 = _lib.lookupFunction<
+        Int64 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_result_segment_t1');
+    final nWords = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_result_n_words');
+    final wordText = _lib.lookupFunction<
+        Pointer<Utf8> Function(Pointer<Void>, Int32, Int32),
+        Pointer<Utf8> Function(Pointer<Void>, int, int)>(
+      'crispasr_session_result_word_text',
+    );
+    final wordT0 = _lib.lookupFunction<
+        Int64 Function(Pointer<Void>, Int32, Int32),
+        int Function(Pointer<Void>, int, int)>('crispasr_session_result_word_t0');
+    final wordT1 = _lib.lookupFunction<
+        Int64 Function(Pointer<Void>, Int32, Int32),
+        int Function(Pointer<Void>, int, int)>('crispasr_session_result_word_t1');
+
+    final out = <SessionSegment>[];
+    for (var i = 0; i < nSegs; i++) {
+      final tp = segText(res, i);
+      final text = tp == nullptr ? '' : tp.toDartString();
+      final t0 = segT0(res, i) / 100.0;
+      final t1 = segT1(res, i) / 100.0;
+      final wc = nWords(res, i);
+      final words = <Word>[];
+      for (var k = 0; k < wc; k++) {
+        final wp = wordText(res, i, k);
+        final wt = wp == nullptr ? '' : wp.toDartString();
+        words.add(Word(
+          text: wt,
+          start: wordT0(res, i, k) / 100.0,
+          end:   wordT1(res, i, k) / 100.0,
+          p: 1.0,
+        ));
+      }
+      out.add(SessionSegment(text: text.trim(), start: t0, end: t1, words: words));
+    }
+    return out;
+  }
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    final closeFn =
+        _lib.lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
+      'crispasr_session_close',
+    );
+    closeFn(_handle);
+    _handle = nullptr;
   }
 }
