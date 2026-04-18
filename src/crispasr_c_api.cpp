@@ -22,6 +22,7 @@
 #include "whisper.h"
 #include "crispasr_vad.h"     // VAD slicing + stitching (shared with CLI)
 #include "crispasr_diarize.h" // Speaker diarization (shared with CLI)
+#include "crispasr_lid.h"     // Language identification (shared with CLI)
 // Non-Whisper backend headers. Each of these lives in `src/` and is built as
 // its own shared library — we link them into libwhisper privately so Dart
 // only has to open one library to reach every backend. Any missing header
@@ -1421,6 +1422,61 @@ CA_EXPORT int crispasr_diarize_segments_abi(const float* left_pcm, const float* 
     for (int i = 0; i < n_segs; i++) {
         segs[i].speaker = lib_segs[i].speaker;
     }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Language identification (shared across all 4 consumers).
+//
+// Runs LID on a 16 kHz mono float PCM buffer. Two methods:
+//   0 Whisper — encoder + lang head on a multilingual ggml-*.bin
+//   1 Silero  — GGUF-packed Silero 95-language classifier
+//
+// `model_path` must point to a concrete file on disk (callers handle
+// auto-download themselves — the CLI has a shim for that; wrappers can
+// ship the model as an asset).
+//
+// Returns 0 on success. `out_lang_buf` is populated with a null-terminated
+// ISO-639-1 code (e.g. "en", "de"). `out_confidence` gets the posterior
+// probability ([0, 1]) on whisper or silero's softmax peak.
+//
+// Error codes: -1 = invalid args, 1 = model load / detect failure, 2 =
+// output buffer too small.
+// ---------------------------------------------------------------------------
+CA_EXPORT int crispasr_detect_language_pcm(const float* samples, int32_t n_samples,
+                                           int32_t method,           // 0 = whisper, 1 = silero
+                                           const char* model_path,   // concrete path (required)
+                                           int32_t n_threads,
+                                           int32_t use_gpu,          // 0 / 1
+                                           int32_t gpu_device,
+                                           int32_t flash_attn,       // 0 / 1
+                                           char* out_lang_buf,
+                                           int32_t out_lang_cap,
+                                           float* out_confidence) {
+    if (!samples || n_samples <= 0 || !model_path || !out_lang_buf || out_lang_cap <= 0)
+        return -1;
+    if (method != 0 && method != 1)
+        return -1;
+
+    CrispasrLidOptions opts;
+    opts.method = (method == 0) ? CrispasrLidMethod::Whisper : CrispasrLidMethod::Silero;
+    opts.model_path = model_path;
+    opts.n_threads = n_threads > 0 ? n_threads : 4;
+    opts.use_gpu = use_gpu != 0;
+    opts.gpu_device = gpu_device;
+    opts.flash_attn = flash_attn != 0;
+    opts.verbose = false;
+
+    CrispasrLidResult r;
+    if (!crispasr_detect_language(samples, n_samples, opts, r))
+        return 1;
+
+    if ((int)r.lang_code.size() + 1 > out_lang_cap)
+        return 2;
+    std::memcpy(out_lang_buf, r.lang_code.c_str(), r.lang_code.size());
+    out_lang_buf[r.lang_code.size()] = '\0';
+    if (out_confidence)
+        *out_confidence = r.confidence;
     return 0;
 }
 

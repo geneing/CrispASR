@@ -380,6 +380,74 @@ class DiarizeSegment:
     speaker: int = -1
 
 
+# =========================================================================
+# Language identification (shared C-ABI, 0.4.6+)
+# =========================================================================
+
+class LidMethod:
+    """LID method identifiers matching the C-ABI enum."""
+    WHISPER = 0
+    SILERO = 1
+
+
+@dataclass
+class LidResult:
+    """Result from :func:`detect_language_pcm`. ``lang_code`` is ISO 639-1."""
+    lang_code: str
+    confidence: float
+
+
+def detect_language_pcm(
+    pcm: np.ndarray,
+    *,
+    method: int = LidMethod.WHISPER,
+    model_path: str,
+    n_threads: int = 4,
+    use_gpu: bool = False,
+    gpu_device: int = 0,
+    flash_attn: bool = True,
+    lib_path: Optional[str] = None,
+) -> LidResult:
+    """Run language identification on a 16 kHz mono float PCM buffer.
+
+    ``model_path`` must point to a concrete file (auto-download is the
+    caller's responsibility — Python users typically cache the model
+    themselves). Returns an empty :class:`LidResult` (``lang_code == ""``)
+    on failure.
+    """
+    if pcm is None or len(pcm) == 0 or not model_path:
+        return LidResult(lang_code="", confidence=-1.0)
+
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    if not hasattr(lib, "crispasr_detect_language_pcm"):
+        raise RuntimeError(
+            "crispasr_detect_language_pcm not in loaded library — rebuild "
+            "CrispASR 0.4.6+ to use LID from the Python binding."
+        )
+    lib.crispasr_detect_language_pcm.argtypes = [
+        ctypes.POINTER(ctypes.c_float), ctypes.c_int32, ctypes.c_int32,
+        ctypes.c_char_p, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+        ctypes.c_int32, ctypes.c_char_p, ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+    lib.crispasr_detect_language_pcm.restype = ctypes.c_int
+
+    pcm_np = np.asarray(pcm, dtype=np.float32)
+    buf = ctypes.create_string_buffer(16)
+    conf = ctypes.c_float(-1.0)
+    rc = lib.crispasr_detect_language_pcm(
+        pcm_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        int(len(pcm_np)), int(method),
+        model_path.encode("utf-8"),
+        int(n_threads), 1 if use_gpu else 0, int(gpu_device),
+        1 if flash_attn else 0,
+        buf, 16, ctypes.byref(conf),
+    )
+    if rc == 0:
+        return LidResult(lang_code=buf.value.decode("utf-8"), confidence=conf.value)
+    return LidResult(lang_code="", confidence=-1.0)
+
+
 def diarize_segments(
     segs: List[DiarizeSegment],
     left: np.ndarray,
@@ -546,6 +614,15 @@ class Session:
                 ctypes.c_int32, ctypes.c_void_p,
             ]
             lib.crispasr_diarize_segments_abi.restype = ctypes.c_int
+        # 0.4.6+: shared language identification.
+        if hasattr(lib, "crispasr_detect_language_pcm"):
+            lib.crispasr_detect_language_pcm.argtypes = [
+                ctypes.POINTER(ctypes.c_float), ctypes.c_int32, ctypes.c_int32,
+                ctypes.c_char_p, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_char_p, ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_float),
+            ]
+            lib.crispasr_detect_language_pcm.restype = ctypes.c_int
         lib.crispasr_session_result_n_segments.argtypes = [ctypes.c_void_p]
         lib.crispasr_session_result_n_segments.restype = ctypes.c_int
         lib.crispasr_session_result_segment_text.argtypes = [ctypes.c_void_p, ctypes.c_int]

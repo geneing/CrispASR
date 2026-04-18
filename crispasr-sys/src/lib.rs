@@ -223,6 +223,25 @@ extern "C" {
         opts: *const CrispasrDiarizeOptsAbi,
     ) -> c_int;
 
+    /// Shared language identification (0.4.6+). `method` is 0 for
+    /// whisper, 1 for silero. `model_path` is required. Fills
+    /// `out_lang_buf` with a null-terminated ISO 639-1 code. Returns 0
+    /// on success, -1 on invalid args, 1 on model / detect failure,
+    /// 2 when the output buffer is too small.
+    pub fn crispasr_detect_language_pcm(
+        samples: *const c_float,
+        n_samples: c_int,
+        method: c_int,
+        model_path: *const c_char,
+        n_threads: c_int,
+        use_gpu: c_int,
+        gpu_device: c_int,
+        flash_attn: c_int,
+        out_lang_buf: *mut c_char,
+        out_lang_cap: c_int,
+        out_confidence: *mut c_float,
+    ) -> c_int;
+
     pub fn crispasr_session_result_n_segments(r: *mut CrispasrSessionResult) -> c_int;
     pub fn crispasr_session_result_segment_text(
         r: *mut CrispasrSessionResult,

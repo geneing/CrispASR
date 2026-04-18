@@ -123,6 +123,11 @@ add_library(whisper
             # Consumed by the CLI and by the C-ABI `crispasr_diarize_segments`.
             # The sherpa-ONNX subprocess method stays in the CLI shim.
             crispasr_diarize.cpp
+            # Shared language identification (whisper-tiny + native silero).
+            # Consumed by the CLI and by the C-ABI
+            # `crispasr_detect_language_pcm`. The sherpa-ONNX subprocess
+            # method stays in the CLI shim.
+            crispasr_lid.cpp
             )
 # Non-Whisper backends reachable through crispasr_c_api.cpp are linked
 # into libwhisper further down in this file, once those targets have been
@@ -499,6 +504,10 @@ endif()
 # so the native diarizer's symbols resolve at libwhisper load time.
 if (TARGET pyannote-seg)
     target_link_libraries(whisper PUBLIC pyannote-seg)
+endif()
+# Silero LID engine used by crispasr_lid.cpp's native Silero path.
+if (TARGET silero-lid)
+    target_link_libraries(whisper PUBLIC silero-lid)
 endif()
 
 # Convenience alias: produce `libcrispasr.{dylib,so,dll}` as a symlink (or

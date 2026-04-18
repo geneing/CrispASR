@@ -13,6 +13,7 @@
 //! ```
 
 use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_float};
 
 /// A transcription segment with timing information.
 #[derive(Debug, Clone)]
@@ -511,6 +512,85 @@ impl Drop for Session {
     fn drop(&mut self) {
         unsafe { crispasr_sys::crispasr_session_close(self.handle) }
     }
+}
+
+// =========================================================================
+// Language identification (shared C-ABI, 0.4.6+)
+// =========================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum LidMethod {
+    /// Whisper encoder + language head. Needs a multilingual ggml-*.bin model.
+    Whisper = 0,
+    /// GGUF-packed Silero 95-language classifier.
+    Silero = 1,
+}
+
+#[derive(Clone, Debug)]
+pub struct LidResult {
+    /// ISO 639-1 language code (`"en"`, `"de"`, …). Empty on failure.
+    pub lang_code: String,
+    /// Posterior probability on the argmax language. `-1.0` on failure.
+    pub confidence: f32,
+}
+
+/// Run language identification on a 16 kHz mono float PCM buffer.
+///
+/// `model_path` must point to a concrete model file on disk (the
+/// whisper `ggml-*.bin` for [`LidMethod::Whisper`] or a Silero GGUF
+/// for [`LidMethod::Silero`]). Auto-download / cache resolution is the
+/// caller's responsibility; the CrispASR CLI has a helper for that,
+/// wrappers can ship the model as an asset.
+pub fn detect_language_pcm(
+    pcm: &[f32],
+    method: LidMethod,
+    model_path: &str,
+    n_threads: i32,
+    use_gpu: bool,
+    gpu_device: i32,
+    flash_attn: bool,
+) -> Result<LidResult, String> {
+    if pcm.is_empty() || model_path.is_empty() {
+        return Ok(LidResult {
+            lang_code: String::new(),
+            confidence: -1.0,
+        });
+    }
+    let path_c =
+        CString::new(model_path).map_err(|e| format!("model_path contains NUL: {e}"))?;
+
+    let mut buf = [0u8; 16];
+    let mut conf: c_float = -1.0;
+    let rc = unsafe {
+        crispasr_sys::crispasr_detect_language_pcm(
+            pcm.as_ptr(),
+            pcm.len() as i32,
+            method as i32,
+            path_c.as_ptr(),
+            n_threads,
+            if use_gpu { 1 } else { 0 },
+            gpu_device,
+            if flash_attn { 1 } else { 0 },
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as i32,
+            &mut conf,
+        )
+    };
+    if rc != 0 {
+        return Ok(LidResult {
+            lang_code: String::new(),
+            confidence: -1.0,
+        });
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let code = std::str::from_utf8(&buf[..end])
+        .map_err(|e| format!("LID returned non-UTF8 bytes: {e}"))?
+        .to_string();
+    Ok(LidResult {
+        lang_code: code,
+        confidence: conf as f32,
+    })
 }
 
 // =========================================================================

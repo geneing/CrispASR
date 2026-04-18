@@ -12,7 +12,7 @@
 #include "crispasr_output.h"
 #include "crispasr_model_mgr.h"
 #include "crispasr_aligner.h"
-#include "crispasr_lid.h"
+#include "crispasr_lid_cli.h"
 #include "crispasr_diarize_cli.h"
 #include "whisper_params.h"
 
@@ -135,7 +135,7 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, wh
     const bool lid_disabled = params.lid_backend == "off" || params.lid_backend == "none";
     if (want_auto_lang && !has_native_lid && !lid_disabled) {
         crispasr_lid_result lid;
-        if (crispasr_detect_language(samples.data(), (int)samples.size(), params, lid)) {
+        if (crispasr_detect_language_cli(samples.data(), (int)samples.size(), params, lid)) {
             params.language = lid.lang_code;
             if (params.source_lang.empty()) {
                 params.source_lang = lid.lang_code;
@@ -712,7 +712,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
                                     params.lid_backend == "none";
         if (want_auto_lang && !has_native_lid && !lid_disabled) {
             crispasr_lid_result lid;
-            if (crispasr_detect_language(samples.data(), (int)samples.size(),
+            if (crispasr_detect_language_cli(samples.data(), (int)samples.size(),
                                           params, lid)) {
                 params.language = lid.lang_code;
                 if (params.source_lang.empty()) {

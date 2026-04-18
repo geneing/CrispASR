@@ -79,6 +79,9 @@ void main() {
       // caller-supplied segment; 4 methods (energy, xcorr, vad-turns,
       // pyannote) share the library path with the CLI.
       'crispasr_diarize_segments_abi',
+      // Shared language identification (0.4.6+). Two methods (whisper,
+      // silero) share the library path with the CLI.
+      'crispasr_detect_language_pcm',
       // Canonical C-ABI version symbol (was `crispasr_dart_helpers_version`
       // before the file moved to `src/crispasr_c_api.cpp`).
       'crispasr_c_api_version',

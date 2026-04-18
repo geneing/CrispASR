@@ -233,6 +233,72 @@ bool diarizeSegments({
   return rc == 0;
 }
 
+/// Language identification result from [detectLanguagePcm]. `langCode`
+/// is an ISO 639-1 code ("en", "de", …) or empty on failure.
+class LidResult {
+  final String langCode;
+  final double confidence;
+  const LidResult({required this.langCode, required this.confidence});
+  bool get isEmpty => langCode.isEmpty;
+}
+
+enum LidMethod {
+  /// Whisper encoder + language head on a multilingual ggml-*.bin model.
+  whisper,
+  /// GGUF-packed Silero 95-language classifier.
+  silero,
+}
+
+/// Run LID on a 16 kHz mono [pcm] buffer using the method in
+/// [method]. [modelPath] must point to a concrete file on disk (the
+/// whisper ggml-*.bin or the Silero GGUF); auto-download is the
+/// caller's responsibility.
+///
+/// Returns an empty [LidResult] on failure.
+LidResult detectLanguagePcm({
+  required Float32List pcm,
+  required LidMethod method,
+  required String modelPath,
+  int nThreads = 4,
+  bool useGpu = false,
+  int gpuDevice = 0,
+  bool flashAttn = true,
+  DynamicLibrary? lib,
+}) {
+  if (pcm.isEmpty || modelPath.isEmpty) {
+    return const LidResult(langCode: '', confidence: -1);
+  }
+  lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+
+  final samples = calloc<Float>(pcm.length);
+  for (var i = 0; i < pcm.length; i++) samples[i] = pcm[i];
+  final pathPtr = modelPath.toNativeUtf8();
+  final outBuf = calloc<Uint8>(16);
+  final outConf = calloc<Float>();
+
+  final fn = lib.lookupFunction<
+      Int32 Function(Pointer<Float>, Int32, Int32, Pointer<Utf8>, Int32, Int32,
+          Int32, Int32, Pointer<Uint8>, Int32, Pointer<Float>),
+      int Function(Pointer<Float>, int, int, Pointer<Utf8>, int, int, int, int,
+          Pointer<Uint8>, int, Pointer<Float>)>('crispasr_detect_language_pcm');
+  final rc = fn(samples, pcm.length, method.index, pathPtr, nThreads,
+      useGpu ? 1 : 0, gpuDevice, flashAttn ? 1 : 0, outBuf, 16, outConf);
+
+  String code = '';
+  double conf = -1;
+  if (rc == 0) {
+    code = outBuf.cast<Utf8>().toDartString();
+    conf = outConf.value;
+  }
+
+  calloc.free(samples);
+  calloc.free(pathPtr);
+  calloc.free(outBuf);
+  calloc.free(outConf);
+
+  return LidResult(langCode: code, confidence: conf);
+}
+
 /// Tunables for [CrispasrSession.transcribeVad]. Field names and defaults
 /// mirror whisper.cpp's `whisper_vad_params` plus the max-chunk fallback
 /// the shared library uses to bound encoder cost on long audio.

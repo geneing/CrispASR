@@ -28,7 +28,7 @@ add_executable(${TARGET}
     crispasr_backend_wav2vec2.cpp
     crispasr_aligner.cpp
     crispasr_vad_cli.cpp
-    crispasr_lid.cpp
+    crispasr_lid_cli.cpp
     crispasr_diarize_cli.cpp
     crispasr_cache.cpp
     crispasr_output.cpp
