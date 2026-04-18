@@ -93,12 +93,40 @@ std::vector<crispasr_audio_slice> crispasr_compute_audio_slices(const float* sam
         if (vseg)
             whisper_vad_free_segments(vseg);
         whisper_vad_free(vctx);
+
+        // Post-merge: combine adjacent VAD segments that are too short
+        // or too close together. ASR models need at least a few seconds
+        // of audio context to produce reliable output; tiny VAD segments
+        // (< 2s) and short inter-segment gaps (< 1s) degrade quality.
+        if (slices.size() > 1) {
+            const int min_dur_samples = 3 * sample_rate;   // 3 s minimum
+            const int merge_gap_samples = 1 * sample_rate; // merge if gap < 1 s
+            std::vector<crispasr_audio_slice> merged;
+            merged.push_back(slices[0]);
+            for (size_t i = 1; i < slices.size(); i++) {
+                auto& prev = merged.back();
+                const int gap = slices[i].start - prev.end;
+                const int prev_dur = prev.end - prev.start;
+                if (gap < merge_gap_samples || prev_dur < min_dur_samples) {
+                    // Merge: extend prev to cover the current segment
+                    prev.end = slices[i].end;
+                    prev.t1_cs = slices[i].t1_cs;
+                } else {
+                    merged.push_back(slices[i]);
+                }
+            }
+            slices = std::move(merged);
+        }
+
         return slices;
     }
 
     // No VAD: fall back to fixed chunking. Encoders scale O(T^2) in frame
     // count, so unbounded audio hits memory/latency walls. The default
     // chunk_seconds (30 s) is a conservative window most models handle well.
+    //
+    // Note: fixed chunking can cut mid-sentence at boundaries. For better
+    // results, use --vad which segments at natural speech pauses.
     const int chunk_samples = chunk_seconds > 0 ? chunk_seconds * sample_rate : n_samples;
 
     if (n_samples <= chunk_samples) {

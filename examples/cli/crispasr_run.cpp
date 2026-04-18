@@ -74,7 +74,8 @@ int warn_unsupported(const CrispasrBackend& backend, const whisper_params& p) {
 }
 
 // Merge individual-slice results into a flat list preserving time order.
-std::vector<crispasr_segment> merge_segments(std::vector<std::vector<crispasr_segment>>&& per_slice) {
+std::vector<crispasr_segment> merge_segments(std::vector<std::vector<crispasr_segment>>&& per_slice,
+                                             const std::vector<crispasr_audio_slice>& /*slices*/) {
     std::vector<crispasr_segment> out;
     size_t total = 0;
     for (auto& v : per_slice)
@@ -256,7 +257,7 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, wh
         for (size_t i = 0; i < slices.size(); i++)
             process_slice(i, backend);
     }
-    auto all_segs = merge_segments(std::move(per_slice));
+    auto all_segs = merge_segments(std::move(per_slice), slices);
 
     if (!params.punctuation) {
         for (auto& seg : all_segs) {
@@ -712,7 +713,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
 
             per_slice.push_back(std::move(segs));
         }
-        auto all_segs = merge_segments(std::move(per_slice));
+        auto all_segs = merge_segments(std::move(per_slice), slices);
 
         // Optional post-processing: strip punctuation when --no-punctuation
         // is set. Cohere and canary pass p.punctuation through to their C
