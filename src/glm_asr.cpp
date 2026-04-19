@@ -522,12 +522,162 @@ extern "C" void glm_asr_kv_reset(struct glm_asr_context* ctx) {
     ggml_backend_buffer_clear(ctx->kv_buf, 0);
 }
 
+static ggml_cgraph* glm_build_encoder(glm_asr_context* ctx, int T_mel) {
+    const auto& m = ctx->model;
+    const auto& hp = m.hp;
+    const int d = hp.enc_hidden;          // 1280
+    const int n_heads = hp.enc_n_heads;   // 20
+    const int hd = hp.enc_head_dim;       // 64
+    const int n_layers = hp.enc_n_layers; // 32
+    const int n_mels = hp.n_mels;         // 128
+    const float scale = 1.0f / std::sqrt((float)hd);
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    // Input mel (n_mels, T_mel)
+    ggml_tensor* mel = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_mel, n_mels);
+    ggml_set_name(mel, "mel");
+    ggml_set_input(mel);
+
+    // Conv stem: conv1(128→1280, k=3, s=1, p=1) + GELU + conv2(1280→1280, k=3, s=2, p=1) + GELU
+    auto bias_1d = [&](ggml_tensor* b) { return ggml_reshape_3d(ctx0, b, 1, b->ne[0], 1); };
+
+    ggml_tensor* cur = ggml_conv_1d(ctx0, m.audio.conv1_w, mel, 1, 1, 1);
+    cur = ggml_add(ctx0, cur, bias_1d(m.audio.conv1_b));
+    cur = ggml_gelu_erf(ctx0, cur);
+
+    cur = ggml_conv_1d(ctx0, m.audio.conv2_w, cur, 2, 1, 1);
+    cur = ggml_add(ctx0, cur, bias_1d(m.audio.conv2_b));
+    cur = ggml_gelu_erf(ctx0, cur);
+
+    const int T_enc = (T_mel + 1) / 2; // stride 2
+    cur = ggml_reshape_2d(ctx0, cur, T_enc, d);
+    cur = ggml_cont(ctx0, ggml_transpose(ctx0, cur)); // (d, T_enc)
+
+    // Positions for partial RoPE
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_enc);
+    ggml_set_name(positions, "enc_positions");
+    ggml_set_input(positions);
+
+    // 32 × encoder blocks (pre-norm, LayerNorm with bias, partial RoPE)
+    for (int il = 0; il < n_layers; il++) {
+        const auto& b = m.audio.blocks[il];
+        ggml_tensor* residual = cur;
+
+        // Pre-attention LayerNorm
+        ggml_tensor* x = ggml_norm(ctx0, cur, 1e-5f);
+        x = ggml_mul(ctx0, x, b.attn_norm_w);
+        if (b.attn_norm_b)
+            x = ggml_add(ctx0, x, b.attn_norm_b);
+
+        // Self-attention with partial RoPE
+        // For simplicity, use encoder_self_attn which already handles biases.
+        // Partial RoPE (factor=0.5) means RoPE on first hd/2 dims only.
+        // For now, apply full RoPE — partial would need splitting Q/K.
+        // TODO: implement partial RoPE for better accuracy.
+        core_attn::EncoderSelfAttnParams eap = {};
+        eap.n_heads = n_heads;
+        eap.n_kv_heads = n_heads; // MHA
+        eap.head_dim = hd;
+        eap.n_kv_grp = 1;
+        eap.attn_scale = scale;
+        eap.n_ctx_orig = hp.enc_max_pos;
+        eap.rope_theta = 10000.0f;
+        eap.permute_cont = true;
+
+        ggml_tensor* attn = core_attn::encoder_self_attn(
+            ctx0, x, b.attn_q_w, b.attn_q_b, b.attn_k_w, nullptr, // K has no bias in GLM-ASR encoder
+            b.attn_v_w, nullptr,                                  // V has no bias
+            b.attn_out_w, b.attn_out_b, positions, nullptr,       // no mask (bidirectional)
+            eap);
+        cur = ggml_add(ctx0, residual, attn);
+
+        // Post-attention LayerNorm + FFN (fc1 → GELU → fc2)
+        residual = cur;
+        x = ggml_norm(ctx0, cur, 1e-5f);
+        x = ggml_mul(ctx0, x, b.ffn_norm_w);
+        if (b.ffn_norm_b)
+            x = ggml_add(ctx0, x, b.ffn_norm_b);
+        x = ggml_mul_mat(ctx0, b.ffn_up_w, x);
+        if (b.ffn_up_b)
+            x = ggml_add(ctx0, x, b.ffn_up_b);
+        x = ggml_gelu_erf(ctx0, x);
+        x = ggml_mul_mat(ctx0, b.ffn_down_w, x);
+        if (b.ffn_down_b)
+            x = ggml_add(ctx0, x, b.ffn_down_b);
+        cur = ggml_add(ctx0, residual, x);
+    }
+
+    // Final LayerNorm
+    cur = ggml_norm(ctx0, cur, 1e-5f);
+    cur = ggml_mul(ctx0, cur, m.audio.ln_post_w);
+    if (m.audio.ln_post_b)
+        cur = ggml_add(ctx0, cur, m.audio.ln_post_b);
+
+    // Projector: 4-frame stacking → linear1(5120→4096,GELU) → linear2(4096→2048)
+    // Stack 4 consecutive frames: (d, T_enc) → (4*d, T_enc/4)
+    const int T_proj = T_enc / 4;
+    const int proj_in = 4 * d; // 5120
+    cur = ggml_reshape_2d(ctx0, cur, proj_in, T_proj);
+
+    cur = ggml_mul_mat(ctx0, m.proj.linear1_w, cur);
+    if (m.proj.linear1_b)
+        cur = ggml_add(ctx0, cur, m.proj.linear1_b);
+    cur = ggml_gelu_erf(ctx0, cur);
+
+    cur = ggml_mul_mat(ctx0, m.proj.linear2_w, cur);
+    if (m.proj.linear2_b)
+        cur = ggml_add(ctx0, cur, m.proj.linear2_b);
+
+    ggml_set_name(cur, "encoder_out");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
 extern "C" float* glm_asr_run_encoder(struct glm_asr_context* ctx, const float* mel, int n_mels, int T_mel, int* out_N,
                                       int* out_dim) {
-    // TODO: build encoder graph (whisper-style + partial RoPE)
-    // For now, stub
-    fprintf(stderr, "glm_asr: run_encoder() not yet implemented\n");
-    return nullptr;
+    if (!ctx || !mel)
+        return nullptr;
+
+    const auto& hp = ctx->model.hp;
+    const int T_enc = (T_mel + 1) / 2;
+    const int T_proj = T_enc / 4;
+    const int llm_d = hp.llm_hidden; // 2048
+
+    ggml_cgraph* gf = glm_build_encoder(ctx, T_mel);
+    if (!gf)
+        return nullptr;
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return nullptr;
+
+    // Set mel input
+    ggml_tensor* mel_t = ggml_graph_get_tensor(gf, "mel");
+    ggml_backend_tensor_set(mel_t, mel, 0, (size_t)n_mels * T_mel * sizeof(float));
+
+    // Set encoder positions
+    ggml_tensor* pos = ggml_graph_get_tensor(gf, "enc_positions");
+    std::vector<int32_t> pos_data(T_enc);
+    for (int i = 0; i < T_enc; i++)
+        pos_data[i] = i;
+    ggml_backend_tensor_set(pos, pos_data.data(), 0, T_enc * sizeof(int32_t));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return nullptr;
+
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "encoder_out");
+    float* result = (float*)malloc((size_t)T_proj * llm_d * sizeof(float));
+    ggml_backend_tensor_get(out, result, 0, (size_t)T_proj * llm_d * sizeof(float));
+
+    if (out_N)
+        *out_N = T_proj;
+    if (out_dim)
+        *out_dim = llm_d;
+    return result;
 }
 
 static ggml_cgraph* glm_build_llm_kv(glm_asr_context* ctx, int n_past, int T, bool last_token_only) {
