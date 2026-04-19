@@ -875,7 +875,19 @@ CA_EXPORT crispasr_session* crispasr_session_open(const char* model_path, int n_
         return nullptr;
     char detected[64] = {0};
     if (crispasr_detect_backend_from_gguf(model_path, detected, (int)sizeof(detected)) <= 0) {
-        return nullptr;
+        // GGUF detection failed — check if this is a whisper GGML file
+        // (magic "lmgg" or "ggjt"). Whisper models use the legacy GGML
+        // format, not GGUF.
+        FILE* f = fopen(model_path, "rb");
+        if (f) {
+            char magic[4] = {0};
+            if (fread(magic, 1, 4, f) == 4 && (memcmp(magic, "lmgg", 4) == 0 || memcmp(magic, "ggjt", 4) == 0)) {
+                snprintf(detected, sizeof(detected), "whisper");
+            }
+            fclose(f);
+        }
+        if (detected[0] == '\0')
+            return nullptr;
     }
     return crispasr_session_open_explicit(model_path, detected, n_threads);
 }

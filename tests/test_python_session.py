@@ -65,7 +65,8 @@ class TestWhisperSession(unittest.TestCase):
         if not os.path.exists(WHISPER_TINY):
             raise unittest.SkipTest(f"Model not found: {WHISPER_TINY}")
         from crispasr import Session
-        cls.session = Session(WHISPER_TINY, lib_path=LIB_PATH, n_threads=2, backend="whisper")
+        # Whisper GGML files are auto-detected via magic bytes fallback
+        cls.session = Session(WHISPER_TINY, lib_path=LIB_PATH, n_threads=2)
 
     @classmethod
     def tearDownClass(cls):
