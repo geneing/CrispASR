@@ -662,3 +662,21 @@ which is a niche use case. Users can run MFA externally via
 `pip install montreal-forced-aligner`.
 
 **Decision:** Not worth the dependency cost. Keep as external tool.
+
+## 26. GLM-ASR-Nano backend — DONE
+
+**Model:** zai-org/GLM-ASR-Nano-2512 (1.5B params, MIT license)
+**Architecture:** Whisper encoder (1280d, 32L, partial RoPE factor=0.5)
++ 4-frame-stack projector (5120→4096→2048) + Llama LLM (2048d, 28L,
+GQA 16/4, SwiGLU). 17 languages, optimized for Mandarin + English.
+
+**Shipped:**
+- GGUF converter (747 tensors, 4.52 GB F16)
+- C++ runtime with partial RoPE, GPT-2 BPE decoding
+- Backend adapter registered as 'glm-asr', auto-detection for 'glmasr'
+- Correct transcription on jfk.wav verified
+
+**Key learnings:**
+- Partial RoPE (factor≠1.0) must split Q/K, apply RoPE to first half only
+- FFT for n_fft=400 needs zero-padding to 512 (radix-2 requirement)
+- KV cache context must be no_alloc=true for ggml_backend_sched

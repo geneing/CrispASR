@@ -939,3 +939,42 @@ end time. Moved flush to before the update.
 **Lesson:** When two features interact (max_len + split_on_punct),
 test all four combinations: (0,false), (0,true), (N,false), (N,true).
 The (0,true) case was never tested and silently degraded accuracy.
+
+### GLM-ASR-Nano: partial RoPE is non-negotiable
+
+GLM-ASR-Nano uses `partial_rotary_factor = 0.5`, meaning RoPE is
+applied to only the first half of each attention head's dimensions
+(32 out of 64). Applying full RoPE (to all 64 dims) produces encoder
+outputs that are ~30% off from the reference — close enough to load
+and run, but too divergent for correct transcription.
+
+**Implementation:** Split Q/K tensors along head_dim via `ggml_view_3d`,
+apply `ggml_rope_ext` to the first-half view, concatenate back with
+`ggml_concat`. This can't use `encoder_self_attn()` (which assumes
+full RoPE), so the attention is implemented inline.
+
+**Lesson:** Always check `partial_rotary_factor` in the config before
+using RoPE helpers. If it's not 1.0, split-apply-concat is required.
+The same pattern appears in Gemma, Phi, and other recent architectures.
+
+### FFT size must be power of 2 for radix-2
+
+`core_mel::compute()` calls `fft(data, n_fft, output)` where `n_fft`
+may not be a power of 2 (whisper uses 400). A radix-2 Cooley-Tukey
+FFT requires power-of-2 input — passing 400 corrupts memory via
+bit-reversal permutation on a non-power-of-2 array.
+
+**Fix:** Zero-pad to the next power of 2 (400→512) inside the FFT
+function, then truncate the output back to N bins.
+
+### KV cache: no_alloc=true is mandatory for scheduler
+
+The `ggml_backend_sched` requires all tensor contexts referenced in
+the graph to have `no_alloc=true`. Creating the KV cache context with
+`no_alloc=false` + `ggml_backend_alloc_ctx_tensors()` causes an
+assertion failure in `ggml_backend_sched_alloc_graph`.
+
+**Fix:** Use `no_alloc=true` context + manual `ggml_backend_alloc_buffer`
++ `ggml_backend_tensor_alloc` (matching voxtral's pattern). Also call
+`ggml_backend_sched_set_tensor_backend` for KV tensors before graph
+allocation.

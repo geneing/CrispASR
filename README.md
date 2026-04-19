@@ -1,6 +1,6 @@
 # CrispASR
 
-**One C++ binary, ten ASR model families, zero Python dependencies.**
+**One C++ binary, twelve ASR model families, zero Python dependencies.**
 
 CrispASR is a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that extends the familiar `whisper-cli` interface into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR architectures. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
 
@@ -59,8 +59,9 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 | **voxtral4b** | [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) | Causal RoPE+SwiGLU encoder + 3.4B LLM with adaptive RMSNorm + sliding window | 13, realtime streaming | Apache-2.0 |
 | **qwen3** | [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) | Whisper-style audio encoder + Qwen3 0.6B LLM | 30 + 22 Chinese dialects | Apache-2.0 |
 | **wav2vec2** | [`jonatasgrosman/wav2vec2-large-xlsr-53-english`](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-english) | CNN + 24-layer transformer + CTC head (any Wav2Vec2ForCTC) | per-model (en, de, multilingual available) | Apache-2.0 |
+| **glm-asr** | [`zai-org/GLM-ASR-Nano-2512`](https://huggingface.co/zai-org/GLM-ASR-Nano-2512) | Whisper encoder (partial RoPE) + 4-frame projector + Llama 1.5B LLM (GQA) | 17 (Mandarin, English, Cantonese, ...) | MIT |
 
-All eleven runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family (small through xxlarge, same architecture as the canary aligner) with greedy CTC decoding.
+All twelve runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**, **glm-asr**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family (small through xxlarge, same architecture as the canary aligner) with greedy CTC decoding.
 
 ## Feature matrix
 

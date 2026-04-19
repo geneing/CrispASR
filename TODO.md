@@ -375,6 +375,13 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 
 ---
 
+### GLM-ASR-Nano (#26) — DONE ✅
+- **Model:** zai-org/GLM-ASR-Nano-2512 (1.5B params, MIT, 17 languages)
+- **Architecture:** Whisper encoder (1280d, 32L, partial RoPE 0.5) + 4-frame projector + Llama LLM (2048d, 28L, GQA 16/4)
+- **Files:** src/glm_asr.{h,cpp}, models/convert-glm-asr-to-gguf.py, examples/cli/crispasr_backend_glm_asr.cpp
+- **GGUF:** F16 4.52 GB (747 tensors). Quantization supported via crispasr-quantize.
+- **State:** Correct transcription on jfk.wav. 12th backend.
+
 ## Current session WIP (April 2026)
 
 ### Silero LID native port (#56) — DONE ✅
