@@ -408,6 +408,9 @@ set_target_properties(pyannote-seg PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(pyannote-seg PUBLIC .)
 target_compile_features   (pyannote-seg PUBLIC cxx_std_17)
 target_link_libraries     (pyannote-seg PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+# PIC required so this static lib can be PUBLIC-linked into libwhisper.so
+# on ELF (Linux/Android). Same rationale as wav2vec2-ggml above.
+set_target_properties(pyannote-seg PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(NOT MSVC)
     target_compile_options(pyannote-seg PRIVATE -O3)
 endif()
@@ -420,6 +423,9 @@ set_target_properties(silero-lid PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(silero-lid PUBLIC .)
 target_compile_features   (silero-lid PUBLIC cxx_std_17)
 target_link_libraries     (silero-lid PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+# PIC required so this static lib can be PUBLIC-linked into libwhisper.so
+# on ELF (Linux/Android). Same rationale as wav2vec2-ggml / pyannote-seg.
+set_target_properties(silero-lid PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(NOT MSVC)
     target_compile_options(silero-lid PRIVATE -O3)
 endif()
