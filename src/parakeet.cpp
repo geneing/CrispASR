@@ -1338,6 +1338,28 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
         if (have_cur)
             words.push_back(cur);
 
+        // Post-process: insert minimum gaps after sentence-ending punctuation.
+        // The TDT decoder often produces contiguous timestamps even across
+        // sentence boundaries (e.g. "code." t1==6.400, "In" t0==6.400).
+        // When a word ends with .!? and the next word starts at the exact
+        // same frame, shrink the punctuated word's t1 by one frame duration
+        // to create a visible gap in subtitles.
+        for (size_t wi = 0; wi + 1 < words.size(); wi++) {
+            const char* txt = words[wi].text;
+            size_t len = strlen(txt);
+            if (len == 0)
+                continue;
+            char last = txt[len - 1];
+            if (last == '.' || last == '!' || last == '?') {
+                if (words[wi].t1 >= words[wi + 1].t0 && words[wi].t1 > words[wi].t0) {
+                    // Shrink by one frame (80ms) but don't go below t0
+                    int64_t shrunk = words[wi].t1 - frame_dur_cs;
+                    if (shrunk > words[wi].t0)
+                        words[wi].t1 = shrunk;
+                }
+            }
+        }
+
         r->n_words = (int)words.size();
         r->words = (parakeet_word_data*)calloc(r->n_words > 0 ? r->n_words : 1, sizeof(parakeet_word_data));
         for (int i = 0; i < r->n_words; i++)

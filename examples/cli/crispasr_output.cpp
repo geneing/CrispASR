@@ -94,9 +94,10 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
     std::vector<crispasr_disp_segment> out;
 
     for (const auto& seg : segments) {
-        // Easy path: no word data or no splitting requested — one display
-        // segment covers the whole backend segment.
-        if (seg.words.empty() || max_len == 0) {
+        // Easy path: no word data, or no splitting/max_len requested.
+        // When split_on_punct is enabled AND words exist, skip this path
+        // and use the word-level packing below for accurate timestamps.
+        if (seg.words.empty() || (max_len == 0 && !split_on_punct)) {
             if (!seg.text.empty()) {
                 // If split_on_punct is enabled, split the text at sentence boundaries
                 // and interpolate timestamps proportionally.
@@ -143,23 +144,23 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
         };
 
         for (const auto& w : seg.words) {
-            if (cur.t0 < 0)
-                cur.t0 = w.t0;
-            cur.t1 = w.t1;
-
             const std::string sep = cur.text.empty() ? "" : " ";
             const bool would_overflow =
                 max_len > 1 && !cur.text.empty() && (int)(cur.text.size() + sep.size() + w.text.size()) > max_len;
 
-            // Split at sentence-ending punctuation
+            // Split at sentence-ending punctuation. Check BEFORE updating
+            // cur.t1 so the flushed sentence keeps its last word's end time,
+            // not the next word's end time.
             const bool at_sentence_end =
                 split_on_punct && !cur.text.empty() && !w.text.empty() && is_sentence_end(cur.text.back());
 
             if (would_overflow || at_sentence_end) {
                 flush();
-                cur.t0 = w.t0;
-                cur.t1 = w.t1;
             }
+
+            if (cur.t0 < 0)
+                cur.t0 = w.t0;
+            cur.t1 = w.t1;
             cur.text += sep + w.text;
         }
         flush();
