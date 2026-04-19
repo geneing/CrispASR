@@ -7,8 +7,12 @@
 //
 // miniaudio (MIT-0) handles WAV, MP3 and FLAC out of the box and does
 // resampling + channel down-mix internally via its `ma_decoder` stream.
-// The only format it doesn't natively speak is Ogg Vorbis, which would
-// need stb_vorbis alongside — skipped for now, add later if demand shows.
+// Ogg Vorbis is handled by stb_vorbis — include it header-only before
+// miniaudio so MA_HAS_VORBIS is auto-defined.
+
+// stb_vorbis lives in examples/ — use relative path from src/
+#define STB_VORBIS_HEADER_ONLY
+#include "../examples/stb_vorbis.c"
 
 #define MINIAUDIO_IMPLEMENTATION
 #define MA_NO_DEVICE_IO  // we don't need playback/capture devices
@@ -16,6 +20,9 @@
 #define MA_NO_GENERATION // skip synth helpers
 
 #include "miniaudio.h"
+
+#undef STB_VORBIS_HEADER_ONLY
+#include "../examples/stb_vorbis.c"
 
 #include <cstdlib>
 #include <cstring>
