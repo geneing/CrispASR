@@ -61,7 +61,7 @@ public:
         }
     }
 
-    ~GlmAsrBackend() override { shutdown(); }
+    ~GlmAsrBackend() override { GlmAsrBackend::shutdown(); }
 
 private:
     glm_asr_context* ctx_ = nullptr;

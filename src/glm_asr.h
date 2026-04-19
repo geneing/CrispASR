@@ -35,12 +35,12 @@ char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* samples, int 
 // Pipeline building blocks for differential testing:
 
 // Compute mel spectrogram from raw PCM. Returns malloc'd (n_mels, T_mel) F32.
-float* glm_asr_compute_mel(struct glm_asr_context* ctx, const float* samples, int n_samples,
-                           int* out_n_mels, int* out_T_mel);
+float* glm_asr_compute_mel(struct glm_asr_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                           int* out_T_mel);
 
 // Run audio encoder on mel. Returns malloc'd (N, proj_dim) F32.
-float* glm_asr_run_encoder(struct glm_asr_context* ctx, const float* mel, int n_mels, int T_mel,
-                           int* out_N, int* out_dim);
+float* glm_asr_run_encoder(struct glm_asr_context* ctx, const float* mel, int n_mels, int T_mel, int* out_N,
+                           int* out_dim);
 
 // Embed token IDs. Returns malloc'd (n_tokens, d_model) F32.
 float* glm_asr_embed_tokens(struct glm_asr_context* ctx, const int32_t* ids, int n_ids);
@@ -50,8 +50,8 @@ bool glm_asr_kv_init(struct glm_asr_context* ctx, int max_ctx);
 void glm_asr_kv_reset(struct glm_asr_context* ctx);
 
 // Run LLM forward with KV cache. Returns malloc'd logits (vocab_size,) F32.
-float* glm_asr_run_llm_kv(struct glm_asr_context* ctx, const float* inputs_embeds, int n_tokens,
-                          int n_past, int* out_n_tokens, int* out_vocab_size);
+float* glm_asr_run_llm_kv(struct glm_asr_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
+                          int* out_n_tokens, int* out_vocab_size);
 
 // Token text lookup.
 const char* glm_asr_token_text(struct glm_asr_context* ctx, int id);
