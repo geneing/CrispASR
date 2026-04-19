@@ -978,3 +978,123 @@ assertion failure in `ggml_backend_sched_alloc_graph`.
 + `ggml_backend_tensor_alloc` (matching voxtral's pattern). Also call
 `ggml_backend_sched_set_tensor_backend` for KV tensors before graph
 allocation.
+
+---
+
+## Windows / MSVC portability (April 2026)
+
+### `M_PI` is not defined on MSVC by default
+
+`<cmath>` under MSVC does not expose `M_PI` unless `_USE_MATH_DEFINES`
+is `#define`d *before* the header is included. POSIX toolchains
+(glibc, libc++ on macOS) leak it through by default, so code that
+relies on `M_PI` builds cleanly on Linux and macOS and then fails on
+Windows with:
+
+```
+error C2065: 'M_PI': undeclared identifier
+```
+
+This bit `src/glm_asr.cpp` (the Cooley-Tukey FFT butterfly uses
+`-2 * M_PI / len`) — the rest of the codebase had already standardised
+on `core/mel.h`'s FFT helpers, which avoid `M_PI` internally, so the
+issue was invisible until glm-asr landed its own inline FFT.
+
+**Fix pattern, applied at the very top of any TU that uses `M_PI`:**
+
+```cpp
+#define _USE_MATH_DEFINES
+#include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+```
+
+The redundant `#ifndef` guard covers the case where someone further
+down the include graph has already pulled in `<cmath>` before the
+define (harmless on POSIX; a no-op on MSVC where the guard fires).
+
+**Lesson:** Every new `src/` TU that touches trigonometry on its own
+(rather than going through `core/mel.h`) needs this three-line
+preamble. Consider banning direct `M_PI` use in code review — pulling
+FFT/trig through `core_mel` is portable for free.
+
+### Vulkan build works, performance varies wildly on hybrid GPUs
+
+`build-vulkan.bat` (`-DGGML_VULKAN=ON -DGGML_CUDA=OFF`) builds and
+runs. On a laptop with **both** an Intel iGPU and an NVIDIA dGPU,
+`ggml_vulkan` enumerates **both** and picks device 0 (the iGPU) by
+default. For parakeet Q4_K on jfk.wav:
+
+| Backend | Device | Wall-time | RTFx |
+|---|---|---|---|
+| CUDA (build/) | RTX A1000 | 1.10 s | 10.0× |
+| Vulkan (build-vulkan/) | Intel Iris Xe (default device 0) | 22.96 s | 0.5× |
+
+The transcript is identical across all three paths, so it's a
+performance issue, not a correctness one: parakeet's graph leans
+heavily on `mul_mat` and small `conv1d`, and the Intel UMA iGPU with
+no matrix cores is ~20× slower than the dGPU on these ops. Vulkan on
+the dGPU (force via `--device 1` or `CRISPASR_VK_DEVICE=1`) closes
+most of the gap.
+
+**Lesson:** Don't ship a prebuilt Vulkan binary without a sensible
+device-selection default. On a hybrid-GPU laptop the user will pay a
+20× perf tax silently. Log the chosen device + a hint at startup, or
+prefer the discrete GPU when both are present.
+
+### Issue #12 (prebuilt binary: silent exit after "using cached")
+
+Reported against a prebuilt release binary on Windows 11 / Intel i3
+with no NVIDIA GPU. User sees `crispasr: using cached …` and then
+the process returns to the shell prompt — no `parakeet: vocab=…`,
+no error, no crash dialog.
+
+**Could not reproduce** at HEAD with a fresh local build on Windows
+11 (with NVIDIA GPU). The same `parakeet-tdt-0.6b-v3-q4_k` command
+transcribes correctly. Deliberately-corrupt cache files (1 KB
+truncated, empty) all produce **loud** errors:
+
+```
+gguf_init_from_file_ptr: failed to read key-value pairs
+core_gguf: failed to open '…' for metadata read
+parakeet: failed to load '…'
+crispasr[parakeet]: failed to load model '…'
+crispasr: error: failed to initialise backend 'parakeet'
+```
+
+with exit code 13. So a partial-download cache file is not the cause.
+
+**The giveaway in the reporter's log:** no `ggml_cuda_init: …` line,
+which we always print at startup as long as `ggml-cuda.dll` loads
+successfully (regardless of `--no-gpu`). On a machine with no
+NVIDIA driver installed, `ggml-cuda.dll` depends transitively on
+`cudart64_*.dll` / `cublas64_*.dll`. If those are missing, Windows
+fails the DLL load. The backend registry might still swallow the
+error and let the exe run on CPU — but depending on the loader
+state, a later *deferred-bind* resolve can exit the process with
+code `0xc0000135` / `STATUS_DLL_NOT_FOUND` with no stderr output at
+all. That matches the reporter's symptom.
+
+**Remediations to consider (none shipped yet):**
+1. Ship a **CPU-only** prebuilt alongside the CUDA build for users
+   without NVIDIA drivers. `build-windows.bat -DGGML_CUDA=OFF`
+   produces a binary with no CUDA dependency.
+2. Delay-load `ggml-cuda.dll` via `/DELAYLOAD:ggml-cuda.dll` + a
+   `__HrLoadAllImportsForDll` guard, so a missing runtime falls
+   back to CPU instead of exiting the process.
+3. At startup, call `SetErrorMode(SEM_FAILCRITICALERRORS)` and log
+   `GetLastError()` on any DLL resolve failure so the user sees
+   *why* the process stopped.
+4. Add a `--diagnose` subcommand that prints loaded backends,
+   device list, and cache dir — one-line "is my install broken"
+   check for end-users.
+
+**Lesson:** A Windows process can exit **completely silently**
+when a delay-loaded or transitively-required DLL is missing. Any
+"prints one line then disappears" bug report on Windows should
+first be diagnosed by (a) checking Event Viewer →
+`Application` for a `Faulting module name` crash log, and (b)
+running the binary against `Dependencies.exe` or
+`dumpbin /dependents` to find the missing import. The codebase
+itself is usually fine.
