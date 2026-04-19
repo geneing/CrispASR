@@ -465,6 +465,9 @@ extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* sa
         T_mel = T_target;
     }
     fprintf(stderr, "glm_asr: mel done — n_mels=%d T_mel=%d\n", n_mels, T_mel);
+    fprintf(stderr, "glm_asr: mel[0,:4] = [%.6f, %.6f, %.6f, %.6f]\n", mel[0], mel[1], mel[2], mel[3]);
+    fprintf(stderr, "glm_asr: mel[127,:4] = [%.6f, %.6f, %.6f, %.6f]\n", mel[127 * T_mel], mel[127 * T_mel + 1],
+            mel[127 * T_mel + 2], mel[127 * T_mel + 3]);
 
     // 2. Run encoder + projector
     fprintf(stderr, "glm_asr: step 2 — running encoder...\n");
@@ -475,6 +478,10 @@ extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* sa
         return nullptr;
 
     fprintf(stderr, "glm_asr: encoder done — N_enc=%d enc_dim=%d\n", N_enc, enc_dim);
+    fprintf(stderr, "glm_asr: enc[0,:4] = [%.6f, %.6f, %.6f, %.6f]\n", audio_embeds[0], audio_embeds[1],
+            audio_embeds[2], audio_embeds[3]);
+    fprintf(stderr, "glm_asr: enc[1,:4] = [%.6f, %.6f, %.6f, %.6f]\n", audio_embeds[enc_dim], audio_embeds[enc_dim + 1],
+            audio_embeds[enc_dim + 2], audio_embeds[enc_dim + 3]);
 
     // 3. Build prompt: <|user|>\n<|begin_of_audio|><|pad|>×N<|end_of_audio|><|user|>\nPlease transcribe...<|assistant|>\n
     std::vector<int32_t> ids;
