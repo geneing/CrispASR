@@ -603,6 +603,23 @@ backends that lack native timestamps (voxtral, granite, cohere).
 
 ---
 
+## 24. Wrapper integration test suites — DONE
+
+Python (13 tests), Rust (5+3 ignored), Dart (9 tests) — all passing.
+
+| Wrapper | Tests | Pass | Notes |
+|---|---|---|---|
+| Python | 13 | 13 | Session API: whisper + parakeet, transcription, timestamps, edge cases |
+| Rust | 8 | 5 (+3 ignored) | Session API works; old CrispASR API crashes (C++ exceptions through FFI) |
+| Dart | 9 | 9 | FFI smoke (7) + transcription (2) |
+
+**Known issue:** The old Rust `CrispASR` struct (wrapping `whisper_full()`
+directly) crashes because C++ exceptions propagate through Rust's FFI
+boundary. The `Session` API is safe (C-ABI wrapper catches exceptions).
+`CrispASR` is deprecated in favor of `Session`.
+
+---
+
 ## Priority ordering
 
 | Priority | Item | Impact | Effort |

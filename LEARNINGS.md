@@ -893,3 +893,22 @@ catches: symbol rename typos, missing `CA_EXPORT`, new backend
 dropping a target from `target_link_libraries(whisper PUBLIC ...)`,
 and stale `.so`/`.dylib` on the test machine. Ran it after every
 release in this cycle; caught one typo that would've shipped.
+
+### Rust FFI: C++ exceptions abort the process
+
+The old `CrispASR` Rust API (wrapping `whisper_full()` directly) crashes
+with "Rust cannot catch foreign exceptions" because whisper.cpp's C++
+code can throw exceptions (ggml assertion failures, `std::bad_alloc`).
+Rust's `extern "C"` FFI boundary treats C++ exceptions as undefined
+behavior — they unwind through Rust stack frames and trigger `abort()`.
+
+The `Session` API works because `crispasr_session_transcribe()` is a
+C-ABI wrapper implemented in C++ that catches exceptions internally
+and returns error codes. The old `whisper_full()` path has no such
+wrapper.
+
+**Lesson:** All C-ABI functions exposed to Rust/Dart/Python must wrap
+their body in `try { ... } catch (...) { return error_code; }`. The
+Session API does this by design. The legacy whisper-direct functions
+(`whisper_full`, `whisper_init_from_file_with_params`) do not. We mark
+the old Rust `CrispASR` struct as deprecated in favor of `Session`.

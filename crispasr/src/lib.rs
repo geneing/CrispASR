@@ -40,9 +40,14 @@ pub struct TranscribeOptions {
     pub tdrz: bool,
 }
 
-/// A loaded CrispASR model.
+/// A loaded CrispASR model (whisper-only, legacy API).
+///
+/// **Deprecated:** Use [`Session`] instead. `CrispASR` wraps `whisper_full()`
+/// directly without exception safety — C++ exceptions from ggml/whisper will
+/// abort the process. `Session` uses the C-ABI wrapper which catches exceptions.
 ///
 /// Not `Sync` — do not share between threads.
+#[deprecated(since = "0.1.6", note = "Use Session::open() instead — CrispASR can abort on C++ exceptions")]
 pub struct CrispASR {
     ctx: *mut crispasr_sys::WhisperContext,
 }
