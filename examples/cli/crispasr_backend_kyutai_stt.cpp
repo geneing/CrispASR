@@ -15,9 +15,7 @@ public:
 
     const char* name() const override { return "kyutai-stt"; }
 
-    uint32_t capabilities() const override {
-        return CAP_AUTO_DOWNLOAD;
-    }
+    uint32_t capabilities() const override { return CAP_AUTO_DOWNLOAD; }
 
     bool init(const whisper_params& params) override {
         kyutai_stt_context_params cp = kyutai_stt_context_default_params();
@@ -61,7 +59,7 @@ public:
         }
     }
 
-    ~KyutaiSttBackend() override { shutdown(); }
+    ~KyutaiSttBackend() override { KyutaiSttBackend::shutdown(); }
 
 private:
     kyutai_stt_context* ctx_ = nullptr;

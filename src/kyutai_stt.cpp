@@ -41,8 +41,8 @@ struct kyutai_hparams {
     int num_heads = 16;
     int num_layers = 16;
     int text_card = 8000;
-    int card = 2048;        // audio codebook size
-    int n_q = 32;           // number of audio codebooks
+    int card = 2048; // audio codebook size
+    int n_q = 32;    // number of audio codebooks
     int context = 750;
     float max_period = 100000.0f;
     float hidden_scale = 4.125f;
@@ -61,9 +61,9 @@ struct kyutai_hparams {
     float frame_rate = 12.5f;
 
     // Derived
-    int head_dim = 128;       // dim / num_heads
-    int mimi_head_dim = 64;   // mimi_dim / mimi_num_heads
-    int ffn_hidden = 0;       // computed from hidden_scale
+    int head_dim = 128;     // dim / num_heads
+    int mimi_head_dim = 64; // mimi_dim / mimi_num_heads
+    int ffn_hidden = 0;     // computed from hidden_scale
 };
 
 // --- SEANet encoder layers (conv1d + resnet blocks) ---
@@ -85,8 +85,8 @@ struct seanet_conv {
 };
 
 struct seanet_resblock {
-    seanet_conv shortcut;  // block.1 conv
-    seanet_conv expand;    // block.3 conv
+    seanet_conv shortcut; // block.1 conv
+    seanet_conv expand;   // block.3 conv
 };
 
 struct seanet_encoder {
@@ -101,24 +101,24 @@ struct seanet_encoder {
 struct mimi_enc_layer {
     ggml_tensor* norm1_w = nullptr;
     ggml_tensor* norm1_b = nullptr;
-    ggml_tensor* attn_in_w = nullptr;   // combined QKV
+    ggml_tensor* attn_in_w = nullptr; // combined QKV
     ggml_tensor* attn_out_w = nullptr;
     ggml_tensor* layer_scale_1 = nullptr;
     ggml_tensor* norm2_w = nullptr;
     ggml_tensor* norm2_b = nullptr;
-    ggml_tensor* linear1_w = nullptr;   // FFN up (dim→4*dim)
-    ggml_tensor* linear2_w = nullptr;   // FFN down (4*dim→dim)
+    ggml_tensor* linear1_w = nullptr; // FFN up (dim→4*dim)
+    ggml_tensor* linear2_w = nullptr; // FFN down (4*dim→dim)
     ggml_tensor* layer_scale_2 = nullptr;
 };
 
 // --- RVQ codebook ---
 struct rvq_codebook {
-    ggml_tensor* embedding = nullptr;  // [num_codes, codebook_dim]
+    ggml_tensor* embedding = nullptr; // [num_codes, codebook_dim]
 };
 
 struct rvq_group {
-    seanet_conv input_proj;   // Conv1d: mimi_dim → codebook_dim
-    seanet_conv output_proj;  // Conv1d: codebook_dim → mimi_dim
+    seanet_conv input_proj;  // Conv1d: mimi_dim → codebook_dim
+    seanet_conv output_proj; // Conv1d: codebook_dim → mimi_dim
     std::vector<rvq_codebook> codebooks;
 };
 
@@ -138,15 +138,15 @@ struct kyutai_model {
     // Mimi encoder
     seanet_encoder seanet;
     std::vector<mimi_enc_layer> mimi_layers;
-    seanet_conv downsample;          // stride-2 conv
+    seanet_conv downsample; // stride-2 conv
 
     // RVQ
-    rvq_group rvq_first;   // 1 semantic codebook
-    rvq_group rvq_rest;    // 31 acoustic codebooks
+    rvq_group rvq_first; // 1 semantic codebook
+    rvq_group rvq_rest;  // 31 acoustic codebooks
 
     // LM
-    std::vector<ggml_tensor*> audio_emb;  // n_q embedding tables [card+1, dim]
-    ggml_tensor* text_emb = nullptr;      // [text_card+1, dim]
+    std::vector<ggml_tensor*> audio_emb; // n_q embedding tables [card+1, dim]
+    ggml_tensor* text_emb = nullptr;     // [text_card+1, dim]
     std::vector<lm_layer> lm_layers;
     ggml_tensor* out_norm_alpha = nullptr; // RMSNorm
     ggml_tensor* text_linear_w = nullptr;  // [dim, text_card]
@@ -171,7 +171,7 @@ struct kyutai_stt_context {
     // KV cache for LM (autoregressive decoding)
     ggml_context* kv_ctx = nullptr;
     ggml_backend_buffer_t kv_buf = nullptr;
-    ggml_tensor* kv_k = nullptr;  // [head_dim, max_ctx, n_heads, n_layers]
+    ggml_tensor* kv_k = nullptr; // [head_dim, max_ctx, n_heads, n_layers]
     ggml_tensor* kv_v = nullptr;
 
     int n_threads = 4;
@@ -187,8 +187,7 @@ extern "C" struct kyutai_stt_context_params kyutai_stt_context_default_params(vo
 
 // --- Helpers ---
 
-static void load_seanet_conv(const std::map<std::string, ggml_tensor*>& ts,
-                             const char* prefix, seanet_conv& conv) {
+static void load_seanet_conv(const std::map<std::string, ggml_tensor*>& ts, const char* prefix, seanet_conv& conv) {
     std::string w_name = std::string(prefix) + ".weight";
     std::string b_name = std::string(prefix) + ".bias";
     auto it_w = ts.find(w_name);
@@ -201,8 +200,7 @@ static void load_seanet_conv(const std::map<std::string, ggml_tensor*>& ts,
 // Padding: prepend (kernel_size - stride) zeros to the LEFT of the input.
 // ggml_conv_1d: kernel a = [K, IC, OC], data b = [T, IC]
 // output shape in ggml ne: [OL, OC, 1] (3D with batch=1)
-static ggml_tensor* conv1d_fwd(ggml_context* ctx, const seanet_conv& conv,
-                               ggml_tensor* x, int stride) {
+static ggml_tensor* conv1d_fwd(ggml_context* ctx, const seanet_conv& conv, ggml_tensor* x, int stride) {
     int kernel_size = (int)conv.w->ne[0];
     int pad_left = kernel_size - stride;
     if (pad_left > 0) {
@@ -217,7 +215,7 @@ static ggml_tensor* conv1d_fwd(ggml_context* ctx, const seanet_conv& conv,
         ggml_tensor* b = ggml_reshape_2d(ctx, conv.b, 1, ggml_nelements(conv.b));
         out = ggml_add(ctx, out, b);
     }
-    return out;  // [T_out, channels_out] in ggml ne terms
+    return out; // [T_out, channels_out] in ggml ne terms
 }
 
 // ELU activation: elu(x) = x if x > 0, else alpha*(exp(x)-1), alpha=1.0
@@ -226,8 +224,7 @@ static ggml_tensor* elu(ggml_context* ctx, ggml_tensor* x) {
 }
 
 // ResnetBlock: shortcut(elu(x)) → expand → add(x)
-static ggml_tensor* resblock_fwd(ggml_context* ctx, const seanet_resblock& rb,
-                                 ggml_tensor* x) {
+static ggml_tensor* resblock_fwd(ggml_context* ctx, const seanet_resblock& rb, ggml_tensor* x) {
     ggml_tensor* h = elu(ctx, x);
     // block.1: Conv(c_in → c_in/2, k=3, s=1)
     h = conv1d_fwd(ctx, rb.shortcut, h, 1);
@@ -240,8 +237,7 @@ static ggml_tensor* resblock_fwd(ggml_context* ctx, const seanet_resblock& rb,
 
 // ---- RMSNorm with alpha (Kyutai uses learned scale 'alpha') ----
 // alpha shape is [dim, 1, 1] in the GGUF. We need [dim].
-static ggml_tensor* rms_norm_alpha(ggml_context* ctx, ggml_tensor* x,
-                                   ggml_tensor* alpha, float eps = 1e-5f) {
+static ggml_tensor* rms_norm_alpha(ggml_context* ctx, ggml_tensor* x, ggml_tensor* alpha, float eps = 1e-5f) {
     ggml_tensor* n = ggml_rms_norm(ctx, x, eps);
     // alpha is stored as [dim, 1, 1], flatten to [dim]
     ggml_tensor* a = ggml_reshape_1d(ctx, alpha, alpha->ne[0]);
@@ -252,15 +248,15 @@ static ggml_tensor* rms_norm_alpha(ggml_context* ctx, ggml_tensor* x,
 // Model loading
 // ===========================================================================
 
-extern "C" struct kyutai_stt_context* kyutai_stt_init_from_file(
-    const char* path_model, struct kyutai_stt_context_params params) {
-
+extern "C" struct kyutai_stt_context* kyutai_stt_init_from_file(const char* path_model,
+                                                                struct kyutai_stt_context_params params) {
     auto* sctx = new kyutai_stt_context();
     sctx->params = params;
     sctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
 
     sctx->backend = ggml_backend_init_best();
-    if (!sctx->backend) sctx->backend = ggml_backend_cpu_init();
+    if (!sctx->backend)
+        sctx->backend = ggml_backend_cpu_init();
     sctx->backend_cpu = ggml_backend_cpu_init();
     ggml_backend_cpu_set_n_threads(sctx->backend_cpu, sctx->n_threads);
     if (ggml_backend_is_cpu(sctx->backend))
@@ -278,30 +274,29 @@ extern "C" struct kyutai_stt_context* kyutai_stt_init_from_file(
             return nullptr;
         }
         // LM hparams
-        hp.dim       = core_gguf::kv_u32(gctx, "kyutai.dim", hp.dim);
+        hp.dim = core_gguf::kv_u32(gctx, "kyutai.dim", hp.dim);
         hp.num_heads = core_gguf::kv_u32(gctx, "kyutai.num_heads", hp.num_heads);
-        hp.num_layers= core_gguf::kv_u32(gctx, "kyutai.num_layers", hp.num_layers);
+        hp.num_layers = core_gguf::kv_u32(gctx, "kyutai.num_layers", hp.num_layers);
         hp.text_card = core_gguf::kv_u32(gctx, "kyutai.text_card", hp.text_card);
-        hp.card      = core_gguf::kv_u32(gctx, "kyutai.card", hp.card);
-        hp.n_q       = core_gguf::kv_u32(gctx, "kyutai.n_q", hp.n_q);
-        hp.context   = core_gguf::kv_u32(gctx, "kyutai.context", hp.context);
-        hp.max_period= core_gguf::kv_f32(gctx, "kyutai.max_period", hp.max_period);
+        hp.card = core_gguf::kv_u32(gctx, "kyutai.card", hp.card);
+        hp.n_q = core_gguf::kv_u32(gctx, "kyutai.n_q", hp.n_q);
+        hp.context = core_gguf::kv_u32(gctx, "kyutai.context", hp.context);
+        hp.max_period = core_gguf::kv_f32(gctx, "kyutai.max_period", hp.max_period);
         hp.hidden_scale = core_gguf::kv_f32(gctx, "kyutai.hidden_scale", hp.hidden_scale);
-        hp.existing_text_padding_id = core_gguf::kv_u32(gctx, "kyutai.existing_text_padding_id",
-                                                         hp.existing_text_padding_id);
-        hp.audio_delay_seconds = core_gguf::kv_f32(gctx, "kyutai.stt.audio_delay_seconds",
-                                                     hp.audio_delay_seconds);
+        hp.existing_text_padding_id =
+            core_gguf::kv_u32(gctx, "kyutai.existing_text_padding_id", hp.existing_text_padding_id);
+        hp.audio_delay_seconds = core_gguf::kv_f32(gctx, "kyutai.stt.audio_delay_seconds", hp.audio_delay_seconds);
 
         // Mimi hparams
-        hp.mimi_dim       = core_gguf::kv_u32(gctx, "kyutai.mimi.encoder_dim", hp.mimi_dim);
+        hp.mimi_dim = core_gguf::kv_u32(gctx, "kyutai.mimi.encoder_dim", hp.mimi_dim);
         hp.mimi_num_heads = core_gguf::kv_u32(gctx, "kyutai.mimi.encoder_num_heads", hp.mimi_num_heads);
-        hp.mimi_num_layers= core_gguf::kv_u32(gctx, "kyutai.mimi.encoder_num_layers", hp.mimi_num_layers);
-        hp.mimi_context   = core_gguf::kv_u32(gctx, "kyutai.mimi.encoder_context", hp.mimi_context);
-        hp.codebook_dim   = core_gguf::kv_u32(gctx, "kyutai.mimi.codebook_dim", hp.codebook_dim);
-        hp.n_q_semantic   = core_gguf::kv_u32(gctx, "kyutai.mimi.n_q_semantic", hp.n_q_semantic);
-        hp.n_q_acoustic   = core_gguf::kv_u32(gctx, "kyutai.mimi.n_q_acoustic", hp.n_q_acoustic);
-        hp.sample_rate    = core_gguf::kv_u32(gctx, "kyutai.mimi.sample_rate", hp.sample_rate);
-        hp.frame_rate     = core_gguf::kv_f32(gctx, "kyutai.mimi.frame_rate", hp.frame_rate);
+        hp.mimi_num_layers = core_gguf::kv_u32(gctx, "kyutai.mimi.encoder_num_layers", hp.mimi_num_layers);
+        hp.mimi_context = core_gguf::kv_u32(gctx, "kyutai.mimi.encoder_context", hp.mimi_context);
+        hp.codebook_dim = core_gguf::kv_u32(gctx, "kyutai.mimi.codebook_dim", hp.codebook_dim);
+        hp.n_q_semantic = core_gguf::kv_u32(gctx, "kyutai.mimi.n_q_semantic", hp.n_q_semantic);
+        hp.n_q_acoustic = core_gguf::kv_u32(gctx, "kyutai.mimi.n_q_acoustic", hp.n_q_acoustic);
+        hp.sample_rate = core_gguf::kv_u32(gctx, "kyutai.mimi.sample_rate", hp.sample_rate);
+        hp.frame_rate = core_gguf::kv_f32(gctx, "kyutai.mimi.frame_rate", hp.frame_rate);
 
         // Derived
         hp.head_dim = hp.dim / hp.num_heads;
@@ -313,7 +308,8 @@ extern "C" struct kyutai_stt_context* kyutai_stt_init_from_file(
         // Round to nearest multiple of 256 for efficiency
         hp.ffn_hidden = ((hp.ffn_hidden + 255) / 256) * 256;
         // Actually, just derive from the weight shape later. Use 5632 as default.
-        if (hp.dim == 2048) hp.ffn_hidden = 5632;
+        if (hp.dim == 2048)
+            hp.ffn_hidden = 5632;
 
         // Tokenizer
         m.vocab.resize(hp.text_card + 1);
@@ -322,7 +318,8 @@ extern "C" struct kyutai_stt_context* kyutai_stt_init_from_file(
             const int n = gguf_get_arr_n(gctx, tok_key);
             for (int i = 0; i < n && i < (int)m.vocab.size(); i++) {
                 const char* s = gguf_get_arr_str(gctx, tok_key, i);
-                if (s) m.vocab[i] = s;
+                if (s)
+                    m.vocab[i] = s;
             }
         }
 
@@ -466,29 +463,35 @@ extern "C" struct kyutai_stt_context* kyutai_stt_init_from_file(
         backends[n_be++] = sctx->backend_cpu;
     }
     sctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
-    sctx->compute_meta.resize(ggml_tensor_overhead() * 16384 +
-                               ggml_graph_overhead_custom(16384, false));
+    sctx->compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
 
     if (params.verbosity >= 1) {
-        fprintf(stderr, "kyutai_stt: loaded %d mimi layers + %d LM layers, vocab %d, n_q=%d\n",
-                hp.mimi_num_layers, hp.num_layers, hp.text_card, hp.n_q);
-        fprintf(stderr, "kyutai_stt: dim=%d, heads=%d, head_dim=%d, ffn_hidden=%d\n",
-                hp.dim, hp.num_heads, hp.head_dim, hp.ffn_hidden);
+        fprintf(stderr, "kyutai_stt: loaded %d mimi layers + %d LM layers, vocab %d, n_q=%d\n", hp.mimi_num_layers,
+                hp.num_layers, hp.text_card, hp.n_q);
+        fprintf(stderr, "kyutai_stt: dim=%d, heads=%d, head_dim=%d, ffn_hidden=%d\n", hp.dim, hp.num_heads, hp.head_dim,
+                hp.ffn_hidden);
     }
 
     return sctx;
 }
 
 extern "C" void kyutai_stt_free(struct kyutai_stt_context* ctx) {
-    if (!ctx) return;
-    if (ctx->kv_buf) ggml_backend_buffer_free(ctx->kv_buf);
-    if (ctx->kv_ctx) ggml_free(ctx->kv_ctx);
-    if (ctx->sched) ggml_backend_sched_free(ctx->sched);
-    if (ctx->model.buf) ggml_backend_buffer_free(ctx->model.buf);
-    if (ctx->model.ctx) ggml_free(ctx->model.ctx);
+    if (!ctx)
+        return;
+    if (ctx->kv_buf)
+        ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
+    if (ctx->model.buf)
+        ggml_backend_buffer_free(ctx->model.buf);
+    if (ctx->model.ctx)
+        ggml_free(ctx->model.ctx);
     if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
         ggml_backend_free(ctx->backend_cpu);
-    if (ctx->backend) ggml_backend_free(ctx->backend);
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
     delete ctx;
 }
 
@@ -503,17 +506,16 @@ static bool kv_cache_init(kyutai_stt_context* ctx, int max_ctx) {
 
     // Allocate context with no_alloc=true, then manual buffer
     struct ggml_init_params gp = {
-        /*.mem_size   =*/ ggml_tensor_overhead() * 2,
-        /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ true,
+        /*.mem_size   =*/ggml_tensor_overhead() * 2,
+        /*.mem_buffer =*/nullptr,
+        /*.no_alloc   =*/true,
     };
     ctx->kv_ctx = ggml_init(gp);
-    if (!ctx->kv_ctx) return false;
+    if (!ctx->kv_ctx)
+        return false;
 
-    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32,
-                                    hp.head_dim, max_ctx, hp.num_heads, hp.num_layers);
-    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32,
-                                    hp.head_dim, max_ctx, hp.num_heads, hp.num_layers);
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hp.head_dim, max_ctx, hp.num_heads, hp.num_layers);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F32, hp.head_dim, max_ctx, hp.num_heads, hp.num_layers);
 
     ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, ctx->backend);
     if (!ctx->kv_buf) {
@@ -532,8 +534,7 @@ static bool kv_cache_init(kyutai_stt_context* ctx, int max_ctx) {
 // ===========================================================================
 
 // Run SEANet encoder: raw PCM → [mimi_dim, T_enc]
-static ggml_tensor* build_seanet_encoder(ggml_context* ctx, const seanet_encoder& se,
-                                          ggml_tensor* pcm) {
+static ggml_tensor* build_seanet_encoder(ggml_context* ctx, const seanet_encoder& se, ggml_tensor* pcm) {
     // pcm is [n_samples] → reshape to [n_samples, 1] for conv1d (data b = [T, IC])
     ggml_tensor* x = ggml_reshape_2d(ctx, pcm, ggml_nelements(pcm), 1);
 
@@ -558,15 +559,14 @@ static ggml_tensor* build_seanet_encoder(ggml_context* ctx, const seanet_encoder
     // Transpose from conv layout [T, channels] to transformer layout [channels, T]
     x = ggml_cont(ctx, ggml_transpose(ctx, x));
 
-    return x;  // [mimi_dim=512, T_enc]
+    return x; // [mimi_dim=512, T_enc]
 }
 
 // Run Mimi encoder transformer (8 layers): [mimi_dim, T] → [mimi_dim, T]
-static ggml_tensor* build_mimi_transformer(ggml_context* ctx,
-                                            const std::vector<mimi_enc_layer>& layers,
-                                            ggml_tensor* x, int n_heads, int head_dim) {
+static ggml_tensor* build_mimi_transformer(ggml_context* ctx, const std::vector<mimi_enc_layer>& layers, ggml_tensor* x,
+                                           int n_heads, int head_dim) {
     int T = (int)x->ne[1];
-    int dim = (int)x->ne[0];  // 512
+    int dim = (int)x->ne[0]; // 512
 
     // Build position indices for RoPE
     ggml_tensor* positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
@@ -582,7 +582,8 @@ static ggml_tensor* build_mimi_transformer(ggml_context* ctx,
         // Pre-norm (LayerNorm with weight+bias)
         ggml_tensor* h = ggml_norm(ctx, x, 1e-5f);
         h = ggml_mul(ctx, h, L.norm1_w);
-        if (L.norm1_b) h = ggml_add(ctx, h, L.norm1_b);
+        if (L.norm1_b)
+            h = ggml_add(ctx, h, L.norm1_b);
 
         // Self-attention with combined QKV projection
         // in_proj_weight: [dim, 3*dim]
@@ -599,11 +600,13 @@ static ggml_tensor* build_mimi_transformer(ggml_context* ctx,
         V = ggml_reshape_3d(ctx, ggml_cont(ctx, V), head_dim, n_heads, T);
 
         // RoPE (causal, max_period=10000 for encoder transformer)
-        Q = ggml_rope_ext(ctx, Q, positions, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 0, 10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        K = ggml_rope_ext(ctx, K, positions, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 0, 10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        Q = ggml_rope_ext(ctx, Q, positions, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 0, 10000.0f, 1.0f, 0.0f, 1.0f,
+                          0.0f, 0.0f);
+        K = ggml_rope_ext(ctx, K, positions, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 0, 10000.0f, 1.0f, 0.0f, 1.0f,
+                          0.0f, 0.0f);
 
         // Permute to [head_dim, T, n_heads] for flash attention
-        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));  // [hd, T, nh]
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3)); // [hd, T, nh]
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
         V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
 
@@ -627,7 +630,8 @@ static ggml_tensor* build_mimi_transformer(ggml_context* ctx,
         residual = x;
         h = ggml_norm(ctx, x, 1e-5f);
         h = ggml_mul(ctx, h, L.norm2_w);
-        if (L.norm2_b) h = ggml_add(ctx, h, L.norm2_b);
+        if (L.norm2_b)
+            h = ggml_add(ctx, h, L.norm2_b);
 
         // Gating FFN: linear1(dim → 4*dim) → GELU → linear2(4*dim → dim)
         // Actually moshi uses a simple linear1+gelu+linear2 FFN, NOT gating/SwiGLU
@@ -644,16 +648,15 @@ static ggml_tensor* build_mimi_transformer(ggml_context* ctx,
         x = ggml_add(ctx, residual, h);
     }
 
-    return x;  // [mimi_dim, T]
+    return x; // [mimi_dim, T]
 }
 
 // Run RVQ encode on a single RVQ group.
 // x: [mimi_dim, T] → integer codes [n_codebooks, T]
 // This requires iterative compute (each codebook depends on residual from previous).
 // Returns the codes as a flat int32 array.
-static void rvq_encode_group(kyutai_stt_context* sctx, ggml_tensor* x_projected,
-                              const rvq_group& rvq, int n_codebooks,
-                              std::vector<std::vector<int32_t>>& out_codes, int T) {
+static void rvq_encode_group(kyutai_stt_context* sctx, ggml_tensor* x_projected, const rvq_group& rvq, int n_codebooks,
+                             std::vector<std::vector<int32_t>>& out_codes, int T) {
     auto& hp = sctx->model.hp;
 
     // We need to do residual quantization iteratively:
@@ -686,8 +689,8 @@ static void rvq_encode_group(kyutai_stt_context* sctx, ggml_tensor* x_projected,
         int num_codes = (int)rvq.codebooks[q].embedding->ne[1];
 
         std::vector<float> codebook_data(num_codes * cb_dim);
-        ggml_backend_tensor_get(rvq.codebooks[q].embedding, codebook_data.data(),
-                                 0, num_codes * cb_dim * sizeof(float));
+        ggml_backend_tensor_get(rvq.codebooks[q].embedding, codebook_data.data(), 0,
+                                num_codes * cb_dim * sizeof(float));
         // codebook memory: codebook_data[code * cb_dim + d]
 
         std::vector<int32_t> codes(T);
@@ -725,15 +728,15 @@ static void rvq_encode_group(kyutai_stt_context* sctx, ggml_tensor* x_projected,
 
 // Encode PCM (24 kHz) → audio codes [n_q, T_frames]
 static bool mimi_encode(kyutai_stt_context* sctx, const float* pcm_24k, int n_samples,
-                         std::vector<std::vector<int32_t>>& codes, int& T_frames) {
+                        std::vector<std::vector<int32_t>>& codes, int& T_frames) {
     auto& m = sctx->model;
     auto& hp = m.hp;
 
     // Build graph for SEANet + transformer + downsample
     struct ggml_init_params gp = {
-        /*.mem_size   =*/ sctx->compute_meta.size(),
-        /*.mem_buffer =*/ sctx->compute_meta.data(),
-        /*.no_alloc   =*/ true,
+        /*.mem_size   =*/sctx->compute_meta.size(),
+        /*.mem_buffer =*/sctx->compute_meta.data(),
+        /*.no_alloc   =*/true,
     };
     ggml_context* ctx0 = ggml_init(gp);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
@@ -753,7 +756,7 @@ static bool mimi_encode(kyutai_stt_context* sctx, const float* pcm_24k, int n_sa
     ggml_set_name(enc, "enc_transformer_out");
 
     // Transpose back to [T, channels] for conv1d
-    enc = ggml_cont(ctx0, ggml_transpose(ctx0, enc));  // [T_enc, mimi_dim]
+    enc = ggml_cont(ctx0, ggml_transpose(ctx0, enc)); // [T_enc, mimi_dim]
 
     // Downsample: Conv1d(512→512, k=4, s=2)
     // Padding: (kernel_size - stride) / 2 = (4-2)/2 = 1
@@ -801,8 +804,7 @@ static bool mimi_encode(kyutai_stt_context* sctx, const float* pcm_24k, int n_sa
     int cdim = (int)proj_first->ne[1];
 
     if (sctx->params.verbosity >= 2) {
-        fprintf(stderr, "kyutai_stt: mimi encode: %d samples → %d frames (cdim=%d)\n",
-                n_samples, T_frames, cdim);
+        fprintf(stderr, "kyutai_stt: mimi encode: %d samples → %d frames (cdim=%d)\n", n_samples, T_frames, cdim);
     }
 
     // RVQ encode on CPU (iterative residual quantization)
@@ -822,13 +824,12 @@ static bool mimi_encode(kyutai_stt_context* sctx, const float* pcm_24k, int n_sa
 // input_emb: [dim, 1] — sum of all audio embeddings + text embedding for this step.
 // n_past: number of past tokens in KV cache.
 // Returns logits [text_card].
-static ggml_tensor* build_lm_step(ggml_context* ctx, ggml_cgraph* gf,
-                                   kyutai_stt_context* sctx,
-                                   ggml_tensor* input_emb, int n_past) {
+static ggml_tensor* build_lm_step(ggml_context* ctx, ggml_cgraph* gf, kyutai_stt_context* sctx, ggml_tensor* input_emb,
+                                  int n_past) {
     auto& m = sctx->model;
     auto& hp = m.hp;
 
-    ggml_tensor* x = input_emb;  // [dim, 1]
+    ggml_tensor* x = input_emb; // [dim, 1]
 
     // Position tensor
     ggml_tensor* positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
@@ -861,46 +862,41 @@ static ggml_tensor* build_lm_step(ggml_context* ctx, ggml_cgraph* gf,
         V_cur = ggml_reshape_3d(ctx, ggml_cont(ctx, V_cur), hd, nh, 1);
 
         // RoPE
-        Q = ggml_rope_ext(ctx, Q, positions, nullptr, hd, GGML_ROPE_TYPE_NORMAL, 0,
-                           hp.max_period, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        K_cur = ggml_rope_ext(ctx, K_cur, positions, nullptr, hd, GGML_ROPE_TYPE_NORMAL, 0,
-                               hp.max_period, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        Q = ggml_rope_ext(ctx, Q, positions, nullptr, hd, GGML_ROPE_TYPE_NORMAL, 0, hp.max_period, 1.0f, 0.0f, 1.0f,
+                          0.0f, 0.0f);
+        K_cur = ggml_rope_ext(ctx, K_cur, positions, nullptr, hd, GGML_ROPE_TYPE_NORMAL, 0, hp.max_period, 1.0f, 0.0f,
+                              1.0f, 0.0f, 0.0f);
 
         // Permute to (hd, T, nh) for cache write
-        ggml_tensor* K_perm = ggml_permute(ctx, K_cur, 0, 2, 1, 3);  // [hd, 1, nh]
+        ggml_tensor* K_perm = ggml_permute(ctx, K_cur, 0, 2, 1, 3); // [hd, 1, nh]
         ggml_tensor* V_perm = ggml_permute(ctx, V_cur, 0, 2, 1, 3);
 
         // Write K, V into cache at position n_past
         // KV cache shape: [head_dim, max_ctx, n_heads, n_layers]
         {
-            ggml_tensor* k_dst = ggml_view_4d(ctx, sctx->kv_k, hd, 1, nh, 1,
-                                               sctx->kv_k->nb[1], sctx->kv_k->nb[2], sctx->kv_k->nb[3],
-                                               (size_t)li * sctx->kv_k->nb[3] + (size_t)n_past * sctx->kv_k->nb[1]);
+            ggml_tensor* k_dst =
+                ggml_view_4d(ctx, sctx->kv_k, hd, 1, nh, 1, sctx->kv_k->nb[1], sctx->kv_k->nb[2], sctx->kv_k->nb[3],
+                             (size_t)li * sctx->kv_k->nb[3] + (size_t)n_past * sctx->kv_k->nb[1]);
             ggml_build_forward_expand(gf, ggml_cpy(ctx, K_perm, k_dst));
 
-            ggml_tensor* v_dst = ggml_view_4d(ctx, sctx->kv_v, hd, 1, nh, 1,
-                                               sctx->kv_v->nb[1], sctx->kv_v->nb[2], sctx->kv_v->nb[3],
-                                               (size_t)li * sctx->kv_v->nb[3] + (size_t)n_past * sctx->kv_v->nb[1]);
+            ggml_tensor* v_dst =
+                ggml_view_4d(ctx, sctx->kv_v, hd, 1, nh, 1, sctx->kv_v->nb[1], sctx->kv_v->nb[2], sctx->kv_v->nb[3],
+                             (size_t)li * sctx->kv_v->nb[3] + (size_t)n_past * sctx->kv_v->nb[1]);
             ggml_build_forward_expand(gf, ggml_cpy(ctx, V_perm, v_dst));
         }
 
         // Read full K, V from cache [head_dim, n_past+1, n_heads]
         int kv_len = n_past + 1;
-        ggml_tensor* K_full = ggml_cont(ctx,
-            ggml_view_3d(ctx, sctx->kv_k, hd, kv_len, nh,
-                          sctx->kv_k->nb[1], sctx->kv_k->nb[2],
-                          (size_t)li * sctx->kv_k->nb[3]));
-        ggml_tensor* V_full = ggml_cont(ctx,
-            ggml_view_3d(ctx, sctx->kv_v, hd, kv_len, nh,
-                          sctx->kv_v->nb[1], sctx->kv_v->nb[2],
-                          (size_t)li * sctx->kv_v->nb[3]));
+        ggml_tensor* K_full = ggml_cont(ctx, ggml_view_3d(ctx, sctx->kv_k, hd, kv_len, nh, sctx->kv_k->nb[1],
+                                                          sctx->kv_k->nb[2], (size_t)li * sctx->kv_k->nb[3]));
+        ggml_tensor* V_full = ggml_cont(ctx, ggml_view_3d(ctx, sctx->kv_v, hd, kv_len, nh, sctx->kv_v->nb[1],
+                                                          sctx->kv_v->nb[2], (size_t)li * sctx->kv_v->nb[3]));
 
         // Permute Q to (hd, 1, nh) for flash-attn
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
 
         // Flash attention (causal — but with single query, mask not needed)
-        ggml_tensor* attn = ggml_flash_attn_ext(ctx, Q, K_full, V_full, nullptr,
-                                                 1.0f / sqrtf((float)hd), 0.0f, 0.0f);
+        ggml_tensor* attn = ggml_flash_attn_ext(ctx, Q, K_full, V_full, nullptr, 1.0f / sqrtf((float)hd), 0.0f, 0.0f);
         // attn: [hd, 1, nh] → [dim, 1]
         attn = ggml_reshape_2d(ctx, attn, dim, 1);
 
@@ -916,8 +912,7 @@ static ggml_tensor* build_lm_step(ggml_context* ctx, ggml_cgraph* gf,
         ggml_tensor* gate_up = ggml_mul_mat(ctx, L.gating_in_w, h);
         int ffn_h = (int)(L.gating_in_w->ne[1]) / 2;
         ggml_tensor* gate = ggml_view_2d(ctx, gate_up, ffn_h, 1, gate_up->nb[1], 0);
-        ggml_tensor* up = ggml_view_2d(ctx, gate_up, ffn_h, 1, gate_up->nb[1],
-                                        ffn_h * ggml_type_size(gate_up->type));
+        ggml_tensor* up = ggml_view_2d(ctx, gate_up, ffn_h, 1, gate_up->nb[1], ffn_h * ggml_type_size(gate_up->type));
         gate = ggml_cont(ctx, gate);
         up = ggml_cont(ctx, up);
         ggml_tensor* mlp = ggml_mul(ctx, ggml_silu(ctx, gate), up);
@@ -960,9 +955,9 @@ static void resample_16k_to_24k(const float* in, int n_in, std::vector<float>& o
 // High-level transcribe
 // ===========================================================================
 
-extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
-                                        const float* samples, int n_samples) {
-    if (!ctx || !samples || n_samples <= 0) return nullptr;
+extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx, const float* samples, int n_samples) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
 
     auto& hp = ctx->model.hp;
     auto& m = ctx->model;
@@ -972,8 +967,7 @@ extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
     resample_16k_to_24k(samples, n_samples, pcm_24k);
 
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "kyutai_stt: resampled %d → %d samples (16k → 24k)\n",
-                n_samples, (int)pcm_24k.size());
+        fprintf(stderr, "kyutai_stt: resampled %d → %d samples (16k → 24k)\n", n_samples, (int)pcm_24k.size());
     }
 
     // Step 2: Mimi encode → audio codes
@@ -985,14 +979,13 @@ extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
     }
 
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "kyutai_stt: mimi encoded %d frames, %d codebooks\n",
-                T_frames, (int)codes.size());
+        fprintf(stderr, "kyutai_stt: mimi encoded %d frames, %d codebooks\n", T_frames, (int)codes.size());
     }
 
     // Step 3: Initialize KV cache for LM
     // Audio delay in frames
     int delay_frames = (int)(hp.audio_delay_seconds * hp.frame_rate);
-    int max_ctx = T_frames + delay_frames + 64;  // some extra for text tokens
+    int max_ctx = T_frames + delay_frames + 64; // some extra for text tokens
     if (!kv_cache_init(ctx, max_ctx)) {
         fprintf(stderr, "kyutai_stt: KV cache init failed\n");
         return nullptr;
@@ -1012,9 +1005,9 @@ extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
         // This needs a small graph each step.
 
         struct ggml_init_params gp = {
-            /*.mem_size   =*/ ctx->compute_meta.size(),
-            /*.mem_buffer =*/ ctx->compute_meta.data(),
-            /*.no_alloc   =*/ true,
+            /*.mem_size   =*/ctx->compute_meta.size(),
+            /*.mem_buffer =*/ctx->compute_meta.data(),
+            /*.no_alloc   =*/true,
         };
         ggml_context* ctx0 = ggml_init(gp);
         ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
@@ -1108,15 +1101,12 @@ extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
         }
 
         // Decode token to text
-        if (text_token != 0 && text_token != hp.existing_text_padding_id &&
-            text_token < (int)m.vocab.size()) {
+        if (text_token != 0 && text_token != hp.existing_text_padding_id && text_token < (int)m.vocab.size()) {
             std::string piece = m.vocab[text_token];
             // SentencePiece: ▁ (U+2581, 3 bytes: E2 96 81) = space
             std::string decoded;
             for (size_t ci = 0; ci < piece.size(); ci++) {
-                if ((unsigned char)piece[ci] == 0xE2 &&
-                    ci + 2 < piece.size() &&
-                    (unsigned char)piece[ci + 1] == 0x96 &&
+                if ((unsigned char)piece[ci] == 0xE2 && ci + 2 < piece.size() && (unsigned char)piece[ci + 1] == 0x96 &&
                     (unsigned char)piece[ci + 2] == 0x81) {
                     decoded += ' ';
                     ci += 2;
@@ -1135,11 +1125,18 @@ extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
     }
 
     // Clean up KV cache
-    if (ctx->kv_buf) { ggml_backend_buffer_free(ctx->kv_buf); ctx->kv_buf = nullptr; }
-    if (ctx->kv_ctx) { ggml_free(ctx->kv_ctx); ctx->kv_ctx = nullptr; }
+    if (ctx->kv_buf) {
+        ggml_backend_buffer_free(ctx->kv_buf);
+        ctx->kv_buf = nullptr;
+    }
+    if (ctx->kv_ctx) {
+        ggml_free(ctx->kv_ctx);
+        ctx->kv_ctx = nullptr;
+    }
 
     // Return result
-    if (result.empty()) return nullptr;
+    if (result.empty())
+        return nullptr;
     char* out = (char*)malloc(result.size() + 1);
     memcpy(out, result.c_str(), result.size());
     out[result.size()] = '\0';
@@ -1147,6 +1144,7 @@ extern "C" char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
 }
 
 extern "C" const char* kyutai_stt_token_text(struct kyutai_stt_context* ctx, int id) {
-    if (!ctx || id < 0 || id >= (int)ctx->model.vocab.size()) return nullptr;
+    if (!ctx || id < 0 || id >= (int)ctx->model.vocab.size())
+        return nullptr;
     return ctx->model.vocab[id].c_str();
 }

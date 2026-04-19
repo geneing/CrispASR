@@ -24,16 +24,14 @@ struct kyutai_stt_context_params {
 
 struct kyutai_stt_context_params kyutai_stt_context_default_params(void);
 
-struct kyutai_stt_context* kyutai_stt_init_from_file(const char* path_model,
-                                                     struct kyutai_stt_context_params params);
+struct kyutai_stt_context* kyutai_stt_init_from_file(const char* path_model, struct kyutai_stt_context_params params);
 
 void kyutai_stt_free(struct kyutai_stt_context* ctx);
 
 // High-level: transcribe raw 16 kHz mono PCM audio.
 // Internally resamples to 24 kHz for Mimi codec.
 // Returns malloc'd UTF-8 string, caller frees with free().
-char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx,
-                            const float* samples, int n_samples);
+char* kyutai_stt_transcribe(struct kyutai_stt_context* ctx, const float* samples, int n_samples);
 
 // Token text lookup.
 const char* kyutai_stt_token_text(struct kyutai_stt_context* ctx, int id);
