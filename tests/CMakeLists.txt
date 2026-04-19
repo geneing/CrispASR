@@ -133,10 +133,10 @@ set_tests_properties(${VAD_TEST} PROPERTIES LABELS "base;en")
 # Tests are pure filesystem operations — no network requests are made.
 add_executable(test-crispasr-cache
     test-crispasr-cache.cpp
-    ${PROJECT_SOURCE_DIR}/examples/cli/crispasr_cache.cpp
+    ${PROJECT_SOURCE_DIR}/src/crispasr_cache.cpp
 )
 target_include_directories(test-crispasr-cache PRIVATE
-    ${PROJECT_SOURCE_DIR}/examples/cli
+    ${PROJECT_SOURCE_DIR}/src
 )
 target_link_libraries(test-crispasr-cache PRIVATE
     Catch2::Catch2WithMain

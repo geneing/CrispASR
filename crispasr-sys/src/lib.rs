@@ -268,6 +268,47 @@ extern "C" {
     pub fn crispasr_align_result_word_t1(r: *mut CrispasrAlignResult, i: c_int) -> i64;
     pub fn crispasr_align_result_free(r: *mut CrispasrAlignResult);
 
+    /// Shared HF download + cache (0.4.8+). Writes the resolved path
+    /// into `out_buf`. Returns 0 on success, -1 on invalid args, 1 on
+    /// download failure, 2 when the output buffer is too small.
+    pub fn crispasr_cache_ensure_file_abi(
+        filename: *const c_char,
+        url: *const c_char,
+        quiet: c_int,
+        cache_dir_override: *const c_char,
+        out_buf: *mut c_char,
+        out_cap: c_int,
+    ) -> c_int;
+
+    /// Return the CrispASR cache directory (creating it if missing).
+    pub fn crispasr_cache_dir_abi(
+        cache_dir_override: *const c_char,
+        out_buf: *mut c_char,
+        out_cap: c_int,
+    ) -> c_int;
+
+    /// Shared known-model registry lookup by backend. 0 = hit, 1 = miss.
+    pub fn crispasr_registry_lookup_abi(
+        backend: *const c_char,
+        out_filename: *mut c_char,
+        filename_cap: c_int,
+        out_url: *mut c_char,
+        url_cap: c_int,
+        out_size: *mut c_char,
+        size_cap: c_int,
+    ) -> c_int;
+
+    /// Shared known-model registry lookup by filename (exact then fuzzy).
+    pub fn crispasr_registry_lookup_by_filename_abi(
+        filename: *const c_char,
+        out_filename: *mut c_char,
+        filename_cap: c_int,
+        out_url: *mut c_char,
+        url_cap: c_int,
+        out_size: *mut c_char,
+        size_cap: c_int,
+    ) -> c_int;
+
     pub fn crispasr_session_result_n_segments(r: *mut CrispasrSessionResult) -> c_int;
     pub fn crispasr_session_result_segment_text(
         r: *mut CrispasrSessionResult,

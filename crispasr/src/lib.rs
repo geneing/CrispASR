@@ -515,6 +515,121 @@ impl Drop for Session {
 }
 
 // =========================================================================
+// HF download + cache + model registry (shared C-ABI, 0.4.8+)
+// =========================================================================
+
+/// Known-model registry entry.
+#[derive(Clone, Debug)]
+pub struct RegistryEntry {
+    pub filename: String,
+    pub url: String,
+    pub approx_size: String,
+}
+
+/// Look up the canonical GGUF for a backend (whisper, parakeet, canary,
+/// voxtral, voxtral4b, granite, qwen3, cohere, wav2vec2). Returns `None`
+/// on miss.
+pub fn registry_lookup(backend: &str) -> Result<Option<RegistryEntry>, String> {
+    registry_call_inner(backend, true)
+}
+
+/// Look up by filename (exact match, then fuzzy substring).
+pub fn registry_lookup_by_filename(filename: &str) -> Result<Option<RegistryEntry>, String> {
+    registry_call_inner(filename, false)
+}
+
+fn registry_call_inner(key: &str, by_backend: bool) -> Result<Option<RegistryEntry>, String> {
+    if key.is_empty() {
+        return Ok(None);
+    }
+    let key_c = CString::new(key).map_err(|e| format!("key NUL: {e}"))?;
+    let mut fn_buf = [0u8; 256];
+    let mut url_buf = [0u8; 512];
+    let mut size_buf = [0u8; 32];
+    let rc = unsafe {
+        if by_backend {
+            crispasr_sys::crispasr_registry_lookup_abi(
+                key_c.as_ptr(),
+                fn_buf.as_mut_ptr() as *mut c_char, fn_buf.len() as i32,
+                url_buf.as_mut_ptr() as *mut c_char, url_buf.len() as i32,
+                size_buf.as_mut_ptr() as *mut c_char, size_buf.len() as i32,
+            )
+        } else {
+            crispasr_sys::crispasr_registry_lookup_by_filename_abi(
+                key_c.as_ptr(),
+                fn_buf.as_mut_ptr() as *mut c_char, fn_buf.len() as i32,
+                url_buf.as_mut_ptr() as *mut c_char, url_buf.len() as i32,
+                size_buf.as_mut_ptr() as *mut c_char, size_buf.len() as i32,
+            )
+        }
+    };
+    if rc != 0 {
+        return Ok(None);
+    }
+    fn slice_to_string(buf: &[u8]) -> String {
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..end]).into_owned()
+    }
+    Ok(Some(RegistryEntry {
+        filename: slice_to_string(&fn_buf),
+        url: slice_to_string(&url_buf),
+        approx_size: slice_to_string(&size_buf),
+    }))
+}
+
+/// Download `filename` from `url` into the CrispASR cache — or return
+/// the cached path if already present. Pass `None` for
+/// `cache_dir_override` to use the platform default.
+pub fn cache_ensure_file(
+    filename: &str,
+    url: &str,
+    quiet: bool,
+    cache_dir_override: Option<&str>,
+) -> Result<Option<String>, String> {
+    if filename.is_empty() || url.is_empty() {
+        return Ok(None);
+    }
+    let fn_c = CString::new(filename).map_err(|e| format!("filename NUL: {e}"))?;
+    let url_c = CString::new(url).map_err(|e| format!("url NUL: {e}"))?;
+    let ov_c = CString::new(cache_dir_override.unwrap_or(""))
+        .map_err(|e| format!("cache_dir_override NUL: {e}"))?;
+    let mut buf = vec![0u8; 2048];
+    let rc = unsafe {
+        crispasr_sys::crispasr_cache_ensure_file_abi(
+            fn_c.as_ptr(),
+            url_c.as_ptr(),
+            if quiet { 1 } else { 0 },
+            ov_c.as_ptr(),
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as i32,
+        )
+    };
+    if rc != 0 {
+        return Ok(None);
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(Some(String::from_utf8_lossy(&buf[..end]).into_owned()))
+}
+
+/// Return the CrispASR cache directory (creating it if missing).
+pub fn cache_dir(override_path: Option<&str>) -> Result<Option<String>, String> {
+    let ov_c = CString::new(override_path.unwrap_or("")).map_err(|e| format!("override NUL: {e}"))?;
+    let mut buf = vec![0u8; 2048];
+    let rc = unsafe {
+        crispasr_sys::crispasr_cache_dir_abi(
+            ov_c.as_ptr(),
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as i32,
+        )
+    };
+    if rc != 0 {
+        return Ok(None);
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(Some(String::from_utf8_lossy(&buf[..end]).into_owned()))
+}
+
+// =========================================================================
 // CTC / forced-aligner word timings (shared C-ABI, 0.4.7+)
 // =========================================================================
 

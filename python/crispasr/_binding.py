@@ -409,6 +409,108 @@ class AlignedWord:
     end: float
 
 
+# =========================================================================
+# Cache + model registry (shared C-ABI, 0.4.8+)
+# =========================================================================
+
+@dataclass
+class RegistryEntry:
+    """Known-model registry entry."""
+    filename: str
+    url: str
+    approx_size: str
+
+
+def registry_lookup(backend: str, *, lib_path: Optional[str] = None) -> Optional[RegistryEntry]:
+    """Look up the canonical GGUF for a backend. Returns ``None`` on miss."""
+    return _registry_call("crispasr_registry_lookup_abi", backend, lib_path)
+
+
+def registry_lookup_by_filename(filename: str, *, lib_path: Optional[str] = None) -> Optional[RegistryEntry]:
+    """Look up the canonical GGUF by filename (exact, then fuzzy substring)."""
+    return _registry_call("crispasr_registry_lookup_by_filename_abi", filename, lib_path)
+
+
+def _registry_call(sym: str, key: str, lib_path: Optional[str]) -> Optional[RegistryEntry]:
+    if not key:
+        return None
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    if not hasattr(lib, sym):
+        raise RuntimeError(f"{sym} not in loaded library — rebuild CrispASR 0.4.8+.")
+    fn = getattr(lib, sym)
+    fn.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p, ctypes.c_int32,
+        ctypes.c_char_p, ctypes.c_int32,
+        ctypes.c_char_p, ctypes.c_int32,
+    ]
+    fn.restype = ctypes.c_int
+    fn_buf = ctypes.create_string_buffer(256)
+    url_buf = ctypes.create_string_buffer(512)
+    size_buf = ctypes.create_string_buffer(32)
+    rc = fn(
+        key.encode("utf-8"),
+        fn_buf, 256,
+        url_buf, 512,
+        size_buf, 32,
+    )
+    if rc != 0:
+        return None
+    return RegistryEntry(
+        filename=fn_buf.value.decode("utf-8"),
+        url=url_buf.value.decode("utf-8"),
+        approx_size=size_buf.value.decode("utf-8"),
+    )
+
+
+def cache_ensure_file(
+    filename: str,
+    url: str,
+    *,
+    quiet: bool = False,
+    cache_dir_override: Optional[str] = None,
+    lib_path: Optional[str] = None,
+) -> Optional[str]:
+    """Return the path to a cached copy of ``filename``, downloading
+    from ``url`` if missing. ``None`` on failure.
+    """
+    if not filename or not url:
+        return None
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    if not hasattr(lib, "crispasr_cache_ensure_file_abi"):
+        raise RuntimeError(
+            "crispasr_cache_ensure_file_abi not in loaded library — rebuild CrispASR 0.4.8+."
+        )
+    lib.crispasr_cache_ensure_file_abi.argtypes = [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32,
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32,
+    ]
+    lib.crispasr_cache_ensure_file_abi.restype = ctypes.c_int
+    buf = ctypes.create_string_buffer(2048)
+    rc = lib.crispasr_cache_ensure_file_abi(
+        filename.encode("utf-8"),
+        url.encode("utf-8"),
+        1 if quiet else 0,
+        (cache_dir_override or "").encode("utf-8"),
+        buf, 2048,
+    )
+    return buf.value.decode("utf-8") if rc == 0 else None
+
+
+def cache_dir(*, override: Optional[str] = None, lib_path: Optional[str] = None) -> Optional[str]:
+    """Return the CrispASR cache directory (creating it if missing)."""
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    if not hasattr(lib, "crispasr_cache_dir_abi"):
+        raise RuntimeError(
+            "crispasr_cache_dir_abi not in loaded library — rebuild CrispASR 0.4.8+."
+        )
+    lib.crispasr_cache_dir_abi.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32]
+    lib.crispasr_cache_dir_abi.restype = ctypes.c_int
+    buf = ctypes.create_string_buffer(2048)
+    rc = lib.crispasr_cache_dir_abi((override or "").encode("utf-8"), buf, 2048)
+    return buf.value.decode("utf-8") if rc == 0 else None
+
+
 def align_words(
     aligner_model: str,
     transcript: str,

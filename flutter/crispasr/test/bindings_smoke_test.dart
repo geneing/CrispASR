@@ -90,6 +90,11 @@ void main() {
       'crispasr_align_result_word_t0',
       'crispasr_align_result_word_t1',
       'crispasr_align_result_free',
+      // Shared HF download + cache + model registry (0.4.8+).
+      'crispasr_cache_ensure_file_abi',
+      'crispasr_cache_dir_abi',
+      'crispasr_registry_lookup_abi',
+      'crispasr_registry_lookup_by_filename_abi',
       // Canonical C-ABI version symbol (was `crispasr_dart_helpers_version`
       // before the file moved to `src/crispasr_c_api.cpp`).
       'crispasr_c_api_version',

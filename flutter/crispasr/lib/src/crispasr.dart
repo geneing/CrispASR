@@ -233,6 +233,107 @@ bool diarizeSegments({
   return rc == 0;
 }
 
+/// A registry entry returned by [registryLookup] / [registryLookupByFilename].
+class RegistryEntry {
+  final String filename;
+  final String url;
+  final String approxSize;
+  const RegistryEntry({
+    required this.filename,
+    required this.url,
+    required this.approxSize,
+  });
+}
+
+/// Look up the canonical GGUF for a backend (whisper, parakeet, canary,
+/// voxtral, voxtral4b, granite, qwen3, cohere, wav2vec2). Returns null
+/// on miss.
+RegistryEntry? registryLookup(String backend, {DynamicLibrary? lib}) =>
+    _registryCall('crispasr_registry_lookup_abi', backend, lib);
+
+/// Look up the canonical GGUF by filename (exact match or substring).
+/// Useful when a user-supplied filename isn't cached yet and we want to
+/// suggest a download URL.
+RegistryEntry? registryLookupByFilename(String filename, {DynamicLibrary? lib}) =>
+    _registryCall('crispasr_registry_lookup_by_filename_abi', filename, lib);
+
+RegistryEntry? _registryCall(String sym, String key, DynamicLibrary? lib) {
+  if (key.isEmpty) return null;
+  lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+  final keyPtr = key.toNativeUtf8();
+  final fnBuf = calloc<Uint8>(256);
+  final urlBuf = calloc<Uint8>(512);
+  final sizeBuf = calloc<Uint8>(32);
+  final fn = lib.lookupFunction<
+      Int32 Function(Pointer<Utf8>, Pointer<Uint8>, Int32, Pointer<Uint8>, Int32,
+          Pointer<Uint8>, Int32),
+      int Function(Pointer<Utf8>, Pointer<Uint8>, int, Pointer<Uint8>, int,
+          Pointer<Uint8>, int)>(sym);
+  final rc = fn(keyPtr, fnBuf, 256, urlBuf, 512, sizeBuf, 32);
+  RegistryEntry? out;
+  if (rc == 0) {
+    out = RegistryEntry(
+      filename: fnBuf.cast<Utf8>().toDartString(),
+      url: urlBuf.cast<Utf8>().toDartString(),
+      approxSize: sizeBuf.cast<Utf8>().toDartString(),
+    );
+  }
+  calloc.free(keyPtr);
+  calloc.free(fnBuf);
+  calloc.free(urlBuf);
+  calloc.free(sizeBuf);
+  return out;
+}
+
+/// Download [filename] from [url] into the CrispASR cache (or return
+/// the cached path if it's already present). Returns the absolute path
+/// or null on failure.
+///
+/// [cacheDirOverride] defaults to the platform cache dir
+/// (`~/.cache/crispasr` on POSIX). Flutter / mobile callers that want
+/// a sandbox-friendly directory should pass their own.
+String? cacheEnsureFile(
+  String filename,
+  String url, {
+  bool quiet = false,
+  String? cacheDirOverride,
+  DynamicLibrary? lib,
+}) {
+  if (filename.isEmpty || url.isEmpty) return null;
+  lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+  final fnPtr = filename.toNativeUtf8();
+  final urlPtr = url.toNativeUtf8();
+  final ovPtr = (cacheDirOverride ?? '').toNativeUtf8();
+  final outBuf = calloc<Uint8>(2048);
+  final fn = lib.lookupFunction<
+      Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>,
+          Pointer<Uint8>, Int32),
+      int Function(Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>,
+          Pointer<Uint8>, int)>('crispasr_cache_ensure_file_abi');
+  final rc = fn(fnPtr, urlPtr, quiet ? 1 : 0, ovPtr, outBuf, 2048);
+  final path = rc == 0 ? outBuf.cast<Utf8>().toDartString() : null;
+  calloc.free(fnPtr);
+  calloc.free(urlPtr);
+  calloc.free(ovPtr);
+  calloc.free(outBuf);
+  return path;
+}
+
+/// Return the CrispASR cache directory (creating it if missing).
+String? cacheDir({String? override, DynamicLibrary? lib}) {
+  lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+  final ovPtr = (override ?? '').toNativeUtf8();
+  final outBuf = calloc<Uint8>(2048);
+  final fn = lib.lookupFunction<
+      Int32 Function(Pointer<Utf8>, Pointer<Uint8>, Int32),
+      int Function(Pointer<Utf8>, Pointer<Uint8>, int)>('crispasr_cache_dir_abi');
+  final rc = fn(ovPtr, outBuf, 2048);
+  final dir = rc == 0 ? outBuf.cast<Utf8>().toDartString() : null;
+  calloc.free(ovPtr);
+  calloc.free(outBuf);
+  return dir;
+}
+
 /// One word + centisecond timings returned by [alignWords].
 class AlignedWord {
   final String text;

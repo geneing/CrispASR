@@ -132,6 +132,14 @@ add_library(whisper
             # and by the C-ABI `crispasr_align_words_abi`. Both canary-ctc
             # and qwen3-forced-aligner paths route through one call.
             crispasr_aligner.cpp
+            # HF download + filesystem cache (shared with CLI). Consumed
+            # by the library's VAD / LID / diarize auto-download paths
+            # and by the CLI's `-m auto` resolver.
+            crispasr_cache.cpp
+            # Known-model registry lookup (backend → canonical GGUF URL).
+            # CLI keeps the TTY prompting shim; the library does the
+            # non-interactive resolve.
+            crispasr_model_registry.cpp
             )
 # Non-Whisper backends reachable through crispasr_c_api.cpp are linked
 # into libwhisper further down in this file, once those targets have been

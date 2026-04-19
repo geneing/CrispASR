@@ -20,10 +20,12 @@
 #include <vector>
 
 #include "whisper.h"
-#include "crispasr_vad.h"     // VAD slicing + stitching (shared with CLI)
-#include "crispasr_diarize.h" // Speaker diarization (shared with CLI)
-#include "crispasr_lid.h"     // Language identification (shared with CLI)
-#include "crispasr_aligner.h" // CTC / forced-aligner word timings (shared with CLI)
+#include "crispasr_vad.h"            // VAD slicing + stitching (shared with CLI)
+#include "crispasr_diarize.h"        // Speaker diarization (shared with CLI)
+#include "crispasr_lid.h"            // Language identification (shared with CLI)
+#include "crispasr_aligner.h"        // CTC / forced-aligner word timings (shared with CLI)
+#include "crispasr_cache.h"          // HF download + filesystem cache (shared with CLI)
+#include "crispasr_model_registry.h" // Known-model lookup (shared with CLI)
 // Non-Whisper backend headers. Each of these lives in `src/` and is built as
 // its own shared library — we link them into libwhisper privately so Dart
 // only has to open one library to reach every backend. Any missing header
@@ -1536,6 +1538,89 @@ CA_EXPORT int64_t crispasr_align_result_word_t1(crispasr_align_result* r, int i)
 CA_EXPORT void crispasr_align_result_free(crispasr_align_result* r) {
     if (r)
         delete r;
+}
+
+// ---------------------------------------------------------------------------
+// HF download + filesystem cache (shared across all 4 consumers).
+//
+// Writes the resolved path into `out_buf` (null-terminated) and returns 0
+// on success. Returns -1 on invalid args, 1 on download failure, 2 when
+// the output buffer is too small to hold the resolved path.
+//
+// `cache_dir_override` may be nullptr / empty to use the platform default
+// (~/.cache/crispasr on POSIX, %USERPROFILE%/.cache/crispasr on Windows).
+// ---------------------------------------------------------------------------
+CA_EXPORT int crispasr_cache_ensure_file_abi(const char* filename, const char* url, int32_t quiet,
+                                             const char* cache_dir_override, char* out_buf, int32_t out_cap) {
+    if (!filename || !url || !out_buf || out_cap <= 0)
+        return -1;
+    const std::string override_s = cache_dir_override ? cache_dir_override : "";
+    const std::string path =
+        crispasr_cache::ensure_cached_file(filename, url, quiet != 0, "crispasr", override_s);
+    if (path.empty())
+        return 1;
+    if ((int)path.size() + 1 > out_cap)
+        return 2;
+    std::memcpy(out_buf, path.c_str(), path.size());
+    out_buf[path.size()] = '\0';
+    return 0;
+}
+
+// Write the resolved cache dir (creating it if missing) into `out_buf`.
+// Same return convention as above.
+CA_EXPORT int crispasr_cache_dir_abi(const char* cache_dir_override, char* out_buf, int32_t out_cap) {
+    if (!out_buf || out_cap <= 0)
+        return -1;
+    const std::string override_s = cache_dir_override ? cache_dir_override : "";
+    const std::string d = crispasr_cache::dir(override_s);
+    if (d.empty())
+        return 1;
+    if ((int)d.size() + 1 > out_cap)
+        return 2;
+    std::memcpy(out_buf, d.c_str(), d.size());
+    out_buf[d.size()] = '\0';
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Known-model registry lookup.
+//
+// Writes the canonical filename, HF URL, and human-readable approx size
+// into caller-provided buffers. Returns 0 on hit, 1 on miss, -1 on
+// invalid args, 2 when any of the output buffers is too small.
+// ---------------------------------------------------------------------------
+static int write_entry(const CrispasrRegistryEntry& e, char* out_filename, int32_t filename_cap, char* out_url,
+                       int32_t url_cap, char* out_size, int32_t size_cap) {
+    if ((int)e.filename.size() + 1 > filename_cap || (int)e.url.size() + 1 > url_cap ||
+        (int)e.approx_size.size() + 1 > size_cap)
+        return 2;
+    std::memcpy(out_filename, e.filename.c_str(), e.filename.size());
+    out_filename[e.filename.size()] = '\0';
+    std::memcpy(out_url, e.url.c_str(), e.url.size());
+    out_url[e.url.size()] = '\0';
+    std::memcpy(out_size, e.approx_size.c_str(), e.approx_size.size());
+    out_size[e.approx_size.size()] = '\0';
+    return 0;
+}
+
+CA_EXPORT int crispasr_registry_lookup_abi(const char* backend, char* out_filename, int32_t filename_cap,
+                                           char* out_url, int32_t url_cap, char* out_size, int32_t size_cap) {
+    if (!backend || !out_filename || !out_url || !out_size || filename_cap <= 0 || url_cap <= 0 || size_cap <= 0)
+        return -1;
+    CrispasrRegistryEntry e;
+    if (!crispasr_registry_lookup(backend, e))
+        return 1;
+    return write_entry(e, out_filename, filename_cap, out_url, url_cap, out_size, size_cap);
+}
+
+CA_EXPORT int crispasr_registry_lookup_by_filename_abi(const char* filename, char* out_filename, int32_t filename_cap,
+                                                      char* out_url, int32_t url_cap, char* out_size, int32_t size_cap) {
+    if (!filename || !out_filename || !out_url || !out_size || filename_cap <= 0 || url_cap <= 0 || size_cap <= 0)
+        return -1;
+    CrispasrRegistryEntry e;
+    if (!crispasr_registry_lookup_by_filename(filename, e))
+        return 1;
+    return write_entry(e, out_filename, filename_cap, out_url, url_cap, out_size, size_cap);
 }
 
 CA_EXPORT int crispasr_session_result_n_segments(crispasr_session_result* r) {

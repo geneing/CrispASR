@@ -1,0 +1,45 @@
+// crispasr_model_registry.h — known-model registry lookup.
+//
+// Tiny table mapping a backend name (whisper, parakeet, canary, voxtral,
+// voxtral4b, granite, qwen3, cohere, wav2vec2) to the canonical GGUF
+// filename + HuggingFace download URL + approximate size. Used by:
+//
+//   * the CLI's `-m auto` / `-m default` resolver
+//   * file-not-found → offer-download flow (CLI shim adds TTY prompt)
+//   * wrapper bindings that want to auto-download a stock model
+//
+// The interactive "prompt on a TTY" behaviour stays in the CLI shim
+// (`examples/cli/crispasr_model_mgr_cli.cpp`). The library interface
+// is non-interactive: callers decide policy, the library resolves.
+
+#pragma once
+
+#include <string>
+
+struct CrispasrRegistryEntry {
+    std::string backend;
+    std::string filename;
+    std::string url;         // direct HuggingFace resolve URL
+    std::string approx_size; // human-readable (e.g. "~467 MB")
+};
+
+/// Look up a registry entry by backend name. Returns true on hit.
+bool crispasr_registry_lookup(const std::string& backend, CrispasrRegistryEntry& out);
+
+/// Look up by filename. Exact match first, then fuzzy (substring) match.
+/// Used by the file-not-found path to suggest the canonical URL for a
+/// user-supplied filename.
+bool crispasr_registry_lookup_by_filename(const std::string& filename, CrispasrRegistryEntry& out);
+
+/// Non-interactive resolve. If `model_arg` is a concrete file path that
+/// exists, returns it unchanged. If it's "auto" / "default", downloads
+/// the backend's canonical GGUF into the cache directory.
+///
+/// When the file is missing and `allow_download` is true, also downloads
+/// it if the filename matches a registry entry. When `allow_download` is
+/// false, returns `model_arg` untouched and leaves it to the caller to
+/// decide what to do (prompt on TTY, raise an error, etc.).
+///
+/// Returns an empty string on unrecoverable failure.
+std::string crispasr_resolve_model(const std::string& model_arg, const std::string& backend_name, bool quiet,
+                                   const std::string& cache_dir_override = "", bool allow_download = false);

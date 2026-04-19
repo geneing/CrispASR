@@ -7,13 +7,18 @@ from ._binding import (
     DiarizeSegment,
     LidMethod,
     LidResult,
+    RegistryEntry,
     Segment,
     Session,
     SessionSegment,
     SessionWord,
     align_words,
+    cache_dir,
+    cache_ensure_file,
     detect_language_pcm,
     diarize_segments,
+    registry_lookup,
+    registry_lookup_by_filename,
 )
 
 __all__ = [
@@ -23,12 +28,17 @@ __all__ = [
     "DiarizeSegment",
     "LidMethod",
     "LidResult",
+    "RegistryEntry",
     "Segment",
     "Session",
     "SessionSegment",
     "SessionWord",
     "align_words",
+    "cache_dir",
+    "cache_ensure_file",
     "detect_language_pcm",
     "diarize_segments",
+    "registry_lookup",
+    "registry_lookup_by_filename",
 ]
-__version__ = "0.4.7"
+__version__ = "0.4.8"

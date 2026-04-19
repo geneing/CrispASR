@@ -30,9 +30,8 @@ add_executable(${TARGET}
     crispasr_vad_cli.cpp
     crispasr_lid_cli.cpp
     crispasr_diarize_cli.cpp
-    crispasr_cache.cpp
     crispasr_output.cpp
-    crispasr_model_mgr.cpp
+    crispasr_model_mgr_cli.cpp
     crispasr_run.cpp
     crispasr_server.cpp
 )
