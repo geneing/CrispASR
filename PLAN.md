@@ -680,3 +680,28 @@ GQA 16/4, SwiGLU). 17 languages, optimized for Mandarin + English.
 - Partial RoPE (factor≠1.0) must split Q/K, apply RoPE to first half only
 - FFT for n_fft=400 needs zero-padding to 512 (radix-2 requirement)
 - KV cache context must be no_alloc=true for ggml_backend_sched
+
+## 27. Kyutai STT evaluation — DEFERRED
+
+**Model:** kyutai/stt-2.6b-en (2.6B params, CC-BY-4.0, English only)
+**Architecture:** Decoder-only transformer with Mimi neural audio codec.
+
+Unlike all other CrispASR backends which use mel spectrograms, Kyutai
+STT uses a **neural audio codec** (Mimi) to tokenize audio into 32
+parallel codebook streams at 12.5 Hz. The STT decoder is a 48-layer
+transformer that processes these 32+1 (audio+text) token streams
+simultaneously with sliding window attention (375).
+
+**Complexity assessment:**
+1. **Mimi codec** — CNN encoder + 8-layer transformer + 32-codebook
+   residual VQ. Novel architecture, ~200MB. No mel at all.
+2. **Multistream decoder** — 32 audio codebook streams + 1 text stream
+   interleaved. 48 layers, 2048 hidden, 32 heads.
+3. **24 kHz audio** — our pipeline assumes 16 kHz everywhere.
+4. **Two-model inference** — Mimi runs first, then STT decoder.
+
+**Estimated effort:** 2-3 weeks (Mimi codec port is the hard part).
+
+**Decision:** Deferred. Novel and interesting but significantly more
+complex than encoder-decoder models. Would be CrispASR's first
+codec-based ASR backend. Track for future work.
