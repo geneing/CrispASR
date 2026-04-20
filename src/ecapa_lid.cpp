@@ -650,45 +650,44 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
             }
         }
 
-        // SE: squeeze-excitation
-        // Global average pool → conv1(1024→128) → ReLU → conv2(128→1024) → sigmoid → scale
-        std::vector<float> se_pool(C, 0);
-        for (int c = 0; c < C; c++) {
-            for (int t = 0; t < T_cur; t++)
-                se_pool[c] += res2_out[c * T_cur + t];
-            se_pool[c] /= T_cur;
-        }
+        // SpeechBrain order: tdnn1 → res2net → tdnn2 → SE → residual
 
-        // SE conv1: 1024→128 (stored as squeezed 2D)
-        std::vector<float> se1(128, 0);
-        for (int i = 0; i < 128; i++) {
-            double s = blk.se.conv1.conv_b.empty() ? 0 : blk.se.conv1.conv_b[i];
-            for (int k = 0; k < C; k++)
-                s += se_pool[k] * blk.se.conv1.conv_w[i * C + k];
-            se1[i] = std::max((float)s, 0.0f); // ReLU
-        }
-
-        // SE conv2: 128→1024
-        std::vector<float> se2(C, 0);
-        for (int i = 0; i < C; i++) {
-            double s = blk.se.conv2.conv_b.empty() ? 0 : blk.se.conv2.conv_b[i];
-            for (int k = 0; k < 128; k++)
-                s += se1[k] * blk.se.conv2.conv_w[i * 128 + k];
-            se2[i] = 1.0f / (1.0f + expf(-(float)s)); // sigmoid
-        }
-
-        // Scale
-        for (int c = 0; c < C; c++)
-            for (int t = 0; t < T_cur; t++)
-                res2_out[c * T_cur + t] *= se2[c];
-
-        // tdnn2: pointwise conv (1024→1024, k=1) + BN + ReLU
+        // tdnn2: pointwise conv (1024→1024, k=1) + ReLU + BN
         std::vector<float> h_tdnn2(C * T_cur);
         conv1d(res2_out.data(), C, T_cur, blk.tdnn2.conv_w.data(), blk.tdnn2.conv_b.data(), C, 1, 1, 1,
                h_tdnn2.data(), T_tmp);
         relu_inplace(h_tdnn2.data(), C * T_cur);
         batchnorm1d(h_tdnn2.data(), C, T_cur, blk.tdnn2.bn.weight.data(), blk.tdnn2.bn.bias.data(),
                     blk.tdnn2.bn.mean.data(), blk.tdnn2.bn.var.data());
+
+        // SE: squeeze-excitation on tdnn2 output (NOT on res2_out!)
+        // Global average pool of tdnn2 output
+        std::vector<float> se_pool(C, 0);
+        for (int c = 0; c < C; c++) {
+            for (int t = 0; t < T_cur; t++)
+                se_pool[c] += h_tdnn2[c * T_cur + t];
+            se_pool[c] /= T_cur;
+        }
+        // conv1: 1024→128 + ReLU
+        std::vector<float> se1(128, 0);
+        for (int i = 0; i < 128; i++) {
+            double s = blk.se.conv1.conv_b.empty() ? 0 : blk.se.conv1.conv_b[i];
+            for (int k = 0; k < C; k++)
+                s += se_pool[k] * blk.se.conv1.conv_w[i * C + k];
+            se1[i] = std::max((float)s, 0.0f);
+        }
+        // conv2: 128→1024 + sigmoid
+        std::vector<float> se2(C, 0);
+        for (int i = 0; i < C; i++) {
+            double s = blk.se.conv2.conv_b.empty() ? 0 : blk.se.conv2.conv_b[i];
+            for (int k = 0; k < 128; k++)
+                s += se1[k] * blk.se.conv2.conv_w[i * 128 + k];
+            se2[i] = 1.0f / (1.0f + expf(-(float)s));
+        }
+        // Scale tdnn2 output
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < T_cur; t++)
+                h_tdnn2[c * T_cur + t] *= se2[c];
 
         // Residual
         for (int i = 0; i < C * T_cur; i++)
