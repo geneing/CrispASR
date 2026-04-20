@@ -269,10 +269,12 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
     std::vector<float> pcm_norm(n_samples);
     {
         double mean = 0;
-        for (int i = 0; i < n_samples; i++) mean += samples[i];
+        for (int i = 0; i < n_samples; i++)
+            mean += samples[i];
         mean /= n_samples;
         double var = 0;
-        for (int i = 0; i < n_samples; i++) var += (samples[i] - mean) * (samples[i] - mean);
+        for (int i = 0; i < n_samples; i++)
+            var += (samples[i] - mean) * (samples[i] - mean);
         var /= n_samples;
         float inv_std = 1.0f / (sqrtf((float)var + 1e-5f));
         for (int i = 0; i < n_samples; i++)
@@ -359,11 +361,11 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
 
         if (wv_t && pb_t) {
             // Read weights to CPU
-            int K_pos = (int)wv_t->ne[0];  // 128
-            int IC_g = (int)wv_t->ne[1];   // 64 (input channels per group)
-            int OC = (int)wv_t->ne[2];     // 1024
-            int groups = OC / IC_g;        // 16
-            int pad_pos = K_pos / 2; // 64 (fairseq2 convention: K//2, then trim output)
+            int K_pos = (int)wv_t->ne[0]; // 128
+            int IC_g = (int)wv_t->ne[1];  // 64 (input channels per group)
+            int OC = (int)wv_t->ne[2];    // 1024
+            int groups = OC / IC_g;       // 16
+            int pad_pos = K_pos / 2;      // 64 (fairseq2 convention: K//2, then trim output)
 
             // Read the projection output to CPU for pos conv computation
             // h is [d_model=1024, T] in ggml. Mark as output to read after graph.
