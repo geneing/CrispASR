@@ -562,9 +562,10 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
     }
     conv1d(x_pad.data(), m.n_mels, T + 2 * pad0, m.block0.conv_w.data(), m.block0.conv_b.data(), 1024,
            m.block0.K, 1, 1, h0.data(), T0);
+    // SpeechBrain order: conv → ReLU → BN
+    relu_inplace(h0.data(), 1024 * T0);
     batchnorm1d(h0.data(), 1024, T0, m.block0.bn.weight.data(), m.block0.bn.bias.data(), m.block0.bn.mean.data(),
                 m.block0.bn.var.data());
-    relu_inplace(h0.data(), 1024 * T0);
 
     // 4. SE-Res2Net blocks 1-3
     int C = 1024, scale = 8, sub_c = C / scale; // sub_c = 128
@@ -576,14 +577,20 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
         auto& blk = m.se_blocks[bi];
         int dilation = bi + 2; // dilations: 2, 3, 4
 
-        // tdnn1: pointwise conv (1024→1024, k=1) + BN + ReLU
+        // tdnn1: pointwise conv (1024→1024, k=1) + ReLU + BN
+        // SpeechBrain order: conv → activation → norm → dropout
         std::vector<float> h_tdnn1(C * T_cur);
         int T_tmp = 0;
         conv1d(cur.data(), C, T_cur, blk.tdnn1.conv_w.data(), blk.tdnn1.conv_b.data(), C, 1, 1, 1, h_tdnn1.data(),
                T_tmp);
+        relu_inplace(h_tdnn1.data(), C * T_cur);
         batchnorm1d(h_tdnn1.data(), C, T_cur, blk.tdnn1.bn.weight.data(), blk.tdnn1.bn.bias.data(),
                     blk.tdnn1.bn.mean.data(), blk.tdnn1.bn.var.data());
-        relu_inplace(h_tdnn1.data(), C * T_cur);
+        if (bi == 0) {
+            fprintf(stderr, "  B1 tdnn1: h[:3,0]=[%.4f,%.4f,%.4f]\n",
+                    h_tdnn1[0*T_cur], h_tdnn1[1*T_cur], h_tdnn1[2*T_cur]);
+            fflush(stderr);
+        }
 
         // Res2Net: split into 8 sub-bands of 128 channels
         // Sub-band 0: pass through
@@ -594,13 +601,25 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
             for (int c = 0; c < sub_c; c++)
                 res2_out[c * T_cur + t] = h_tdnn1[c * T_cur + t];
 
-        std::vector<float> prev_sub(sub_c * T_cur, 0);
-        for (int si = 0; si < 7; si++) { // sub-bands 1-7
+        // prev starts as sub-band 0 (Python: prev = chunks[0])
+        std::vector<float> prev_sub(sub_c * T_cur);
+        for (int t = 0; t < T_cur; t++)
+            for (int c = 0; c < sub_c; c++)
+                prev_sub[c * T_cur + t] = h_tdnn1[c * T_cur + t];
+        for (int si = 0; si < 7; si++) { // sub-bands 1-7 (Python i=1..7)
             int c_off = (si + 1) * sub_c;
             std::vector<float> sub_in(sub_c * T_cur);
-            for (int t = 0; t < T_cur; t++)
-                for (int c = 0; c < sub_c; c++)
-                    sub_in[c * T_cur + t] = h_tdnn1[(c_off + c) * T_cur + t] + prev_sub[c * T_cur + t];
+            if (si == 0) {
+                // Sub-band 1: conv on x_i alone (no prev addition)
+                for (int t = 0; t < T_cur; t++)
+                    for (int c = 0; c < sub_c; c++)
+                        sub_in[c * T_cur + t] = h_tdnn1[(c_off + c) * T_cur + t];
+            } else {
+                // Sub-bands 2-7: add previous output
+                for (int t = 0; t < T_cur; t++)
+                    for (int c = 0; c < sub_c; c++)
+                        sub_in[c * T_cur + t] = h_tdnn1[(c_off + c) * T_cur + t] + prev_sub[c * T_cur + t];
+            }
 
             // Conv1d(128→128, k=3, dilation=dilation) with causal-style padding
             int pad_r2 = dilation; // padding = dilation for k=3
@@ -613,9 +632,9 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
 
             // BN + ReLU
             if (T_r2 == T_cur) {
+                relu_inplace(sub_out.data(), sub_c * T_r2);
                 batchnorm1d(sub_out.data(), sub_c, T_r2, blk.subs[si].bn.weight.data(), blk.subs[si].bn.bias.data(),
                             blk.subs[si].bn.mean.data(), blk.subs[si].bn.var.data());
-                relu_inplace(sub_out.data(), sub_c * T_r2);
 
                 // Copy to output and save as prev
                 for (int t = 0; t < T_cur; t++)
@@ -623,6 +642,11 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
                         res2_out[(c_off + c) * T_cur + t] = sub_out[c * T_cur + t];
                         prev_sub[c * T_cur + t] = sub_out[c * T_cur + t];
                     }
+                if (bi == 0 && si == 0) {
+                    fprintf(stderr, "  B1 r2n sub0: o[:3,0]=[%.4f,%.4f,%.4f]\n",
+                            sub_out[0*T_cur], sub_out[1*T_cur], sub_out[2*T_cur]);
+                    fflush(stderr);
+                }
             }
         }
 
@@ -662,13 +686,19 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
         std::vector<float> h_tdnn2(C * T_cur);
         conv1d(res2_out.data(), C, T_cur, blk.tdnn2.conv_w.data(), blk.tdnn2.conv_b.data(), C, 1, 1, 1,
                h_tdnn2.data(), T_tmp);
+        relu_inplace(h_tdnn2.data(), C * T_cur);
         batchnorm1d(h_tdnn2.data(), C, T_cur, blk.tdnn2.bn.weight.data(), blk.tdnn2.bn.bias.data(),
                     blk.tdnn2.bn.mean.data(), blk.tdnn2.bn.var.data());
-        relu_inplace(h_tdnn2.data(), C * T_cur);
 
         // Residual
         for (int i = 0; i < C * T_cur; i++)
             h_tdnn2[i] += cur[i];
+        if (bi == 0) {
+            fprintf(stderr, "  B1 output: h[:3,0]=[%.4f,%.4f,%.4f], mean=%.6f\n",
+                    h_tdnn2[0*T_cur], h_tdnn2[1*T_cur], h_tdnn2[2*T_cur],
+                    [&]{float s=0; for(int i=0;i<C*T_cur;i++) s+=h_tdnn2[i]; return s/(C*T_cur);}());
+            fflush(stderr);
+        }
 
         cur = h_tdnn2;
         block_outputs.push_back(cur); // save for MFA
@@ -687,9 +717,9 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
     int T_mfa = 0;
     conv1d(mfa_in.data(), C_mfa, T_cur, m.mfa.conv_w.data(), m.mfa.conv_b.data(), C_mfa, 1, 1, 1, mfa_out.data(),
            T_mfa);
+    relu_inplace(mfa_out.data(), C_mfa * T_cur);
     batchnorm1d(mfa_out.data(), C_mfa, T_cur, m.mfa.bn.weight.data(), m.mfa.bn.bias.data(), m.mfa.bn.mean.data(),
                 m.mfa.bn.var.data());
-    relu_inplace(mfa_out.data(), C_mfa * T_cur);
 
     // 6. ASP: attentive statistical pooling
     // Concatenate mfa_out [3072, T] with mfa_out [3072, T] × 3 (for context) → actually just [3072, T]
