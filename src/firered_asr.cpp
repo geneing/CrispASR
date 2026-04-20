@@ -652,10 +652,10 @@ static void cpu_matmul_bt(const float* A, const float* B, float* C, int M, int K
 #pragma omp parallel for schedule(static)
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
-            float s = 0;
+            double s = 0; // double precision accumulator for accuracy
             for (int k = 0; k < K; k++)
-                s += A[m * K + k] * B[n * K + k];
-            C[m * N + n] = s;
+                s += (double)A[m * K + k] * (double)B[n * K + k];
+            C[m * N + n] = (float)s;
         }
     }
 }
@@ -739,7 +739,21 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
             x[t * d + i] += proj_b_v[i];
     fprintf(stderr, "  cpu_proj t=0 first 8: [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n", x[0], x[1], x[2], x[3], x[4],
             x[5], x[6], x[7]);
-    // Continue to conformer layers below
+
+    // DEBUG: load reference features for exact comparison
+    {
+        FILE* ref_f = fopen("/mnt/storage/firered_ref/post_proj_dither0.bin", "rb");
+        if (ref_f) {
+            std::vector<float> ref_x(T * d);
+            size_t nread = fread(ref_x.data(), sizeof(float), T * d, ref_f);
+            fclose(ref_f);
+            if ((int)nread == T * d) {
+                x = std::move(ref_x);
+                fprintf(stderr, "  [DEBUG] loaded reference features: first 4 = [%.4f,%.4f,%.4f,%.4f]\n", x[0], x[1],
+                        x[2], x[3]);
+            }
+        }
+    }
 
     // Load PE: ggml [d_model, 9999, 1] → read as [9999, d_model] row-major
     // Actually ggml ne[0]=d_model is fastest, so flat data is: pe[0,0], pe[1,0], ..., pe[d-1,0], pe[0,1], ...
@@ -770,6 +784,9 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
             read_f32_vec(b.ffn1.down_b, down_b_v);
 
             cpu_layernorm(x.data(), ln_w.data(), ln_b_v.data(), tmp.data(), T, d);
+            if (li == 0) {
+                fprintf(stderr, "  FFN1 after LN: [%.4f,%.4f,%.4f,%.4f]\n", tmp[0], tmp[1], tmp[2], tmp[3]);
+            }
             // up: [T, d] @ up_w^T → [T, di]
             std::vector<float> h_up(T * di);
             cpu_matmul_bt(tmp.data(), up_w.data(), h_up.data(), T, d, di);
@@ -777,15 +794,29 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
                 for (int i = 0; i < di; i++)
                     h_up[t * di + i] += up_b_v[i];
             cpu_swish(h_up.data(), T * di);
+            if (li == 0) {
+                fprintf(stderr, "  FFN1 swish: [%.4f,%.4f,%.4f,%.4f]\n", h_up[0], h_up[1], h_up[2], h_up[3]);
+            }
             // down: [T, di] @ down_w^T → [T, d]
             cpu_matmul_bt(h_up.data(), down_w.data(), tmp.data(), T, di, d);
             for (int t = 0; t < T; t++)
-                for (int i = 0; i < d; i++) {
+                for (int i = 0; i < d; i++)
                     tmp[t * d + i] += down_b_v[i];
-                    x[t * d + i] = 0.5f * x[t * d + i] + 0.5f * tmp[t * d + i];
-                }
+            if (li == 0) {
+                fprintf(stderr, "  FFN1 down+bias: [%.4f,%.4f,%.4f,%.4f]\n", tmp[0], tmp[1], tmp[2], tmp[3]);
+            }
+            // The macaron residual in the Python code is:
+            // block.forward: out = 0.5*x + 0.5*ffn1(x)
+            // ffn1.forward: return net(x) + x  (internal residual!)
+            // So: out = 0.5*x + 0.5*(net(x) + x) = x + 0.5*net(x)
+            for (int t = 0; t < T; t++)
+                for (int i = 0; i < d; i++)
+                    x[t * d + i] = x[t * d + i] + 0.5f * tmp[t * d + i];
         }
 
+        if (li == 0) {
+            fprintf(stderr, "  CPU b0 after FFN1: [%.4f,%.4f,%.4f,%.4f]\n", x[0], x[1], x[2], x[3]);
+        }
         // === MHSA with relative PE ===
         {
             std::vector<float> lnq_w, lnq_b, lnk_w, lnk_b, lnv_w, lnv_b;
@@ -953,7 +984,8 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
             for (int t = 0; t < T; t++)
                 for (int i = 0; i < d; i++) {
                     tmp[t * d + i] += down_b_v[i];
-                    x[t * d + i] = 0.5f * x[t * d + i] + 0.5f * tmp[t * d + i];
+                    // Same as FFN1: ffn2.forward adds internal residual
+                    x[t * d + i] = x[t * d + i] + 0.5f * tmp[t * d + i];
                 }
         }
 
@@ -963,6 +995,11 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
             read_f32_vec(b.ln_w, ln_w);
             read_f32_vec(b.ln_b, ln_b_v);
             cpu_layernorm(x.data(), ln_w.data(), ln_b_v.data(), x.data(), T, d);
+        }
+        if (li == 0) {
+            fprintf(stderr, "  CPU b0 after LN: [%.4f,%.4f,%.4f,%.4f]\n", x[0], x[1], x[2], x[3]);
+            enc_output = std::move(x);
+            return; // early exit to check block 0
         }
     }
 
