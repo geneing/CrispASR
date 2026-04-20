@@ -756,13 +756,14 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
     }
 
     // Load PE: ggml [d_model, 9999, 1] → read as [9999, d_model] row-major
-    // Actually ggml ne[0]=d_model is fastest, so flat data is: pe[0,0], pe[1,0], ..., pe[d-1,0], pe[0,1], ...
-    // = for each position p: d values. So row-major [9999, d_model] ← that's what we want.
-    std::vector<float> pe_data;
-    read_f32_vec(m.enc.pe, pe_data);
+    std::vector<float> pe_full;
+    read_f32_vec(m.enc.pe, pe_full);
     int T_pe = 2 * T - 1;
-    // pe_data is [9999 * d_model] in ggml-flat order: groups of d_model for each position
-    // For relative PE, extract first T_pe positions: pe[0..T_pe-1, 0..d-1]
+    int Tmax = (int)(m.enc.pe->ne[1]); // 9999
+    // Python extracts CENTER positions: pe[:, Tmax//2 - T + 1 : Tmax//2 + T]
+    int pe_start = Tmax / 2 - T + 1;
+    std::vector<float> pe_data(T_pe * d);
+    memcpy(pe_data.data(), &pe_full[pe_start * d], T_pe * d * sizeof(float));
     // pe_row_major[p * d + i] = pe_data[p * d + i] (ggml ne[0]=d fastest → same as row-major)
     // ← Actually no. ggml ne[0]=d=1280 means the first 1280 values are position 0.
     // So pe_data[p * d + i] = PE at position p, dimension i. This IS row-major [pos, dim].
@@ -864,7 +865,7 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
                 for (int tq = 0; tq < T; tq++) {
                     for (int tk = 0; tk < T; tk++) {
                         float content = 0, position = 0;
-                        int pos_idx = tq - tk + T - 1;
+                        int pos_idx = T - 1 - tq + tk; // rel_shift: NOT tq-tk+T-1!
                         for (int dd = 0; dd < hd; dd++) {
                             float q_val = Q[tq * d + h * hd + dd];
                             float k_val = K[tk * d + h * hd + dd];
@@ -897,6 +898,8 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
             for (int i = 0; i < T * d; i++)
                 x[i] += fc_out[i]; // residual connection
         }
+        if (li == 0)
+            fprintf(stderr, "  CPU b0 after MHSA: [%.4f,%.4f,%.4f,%.4f]\n", x[0], x[1], x[2], x[3]);
 
         // === Conv module ===
         {
@@ -962,6 +965,8 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
             for (int i = 0; i < T * d; i++)
                 x[i] += conv_out[i];
         }
+        if (li == 0)
+            fprintf(stderr, "  CPU b0 after Conv: [%.4f,%.4f,%.4f,%.4f]\n", x[0], x[1], x[2], x[3]);
 
         // === Macaron FFN2: out = 0.5*x + 0.5*ffn2(x) ===
         {
@@ -998,8 +1003,6 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
         }
         if (li == 0) {
             fprintf(stderr, "  CPU b0 after LN: [%.4f,%.4f,%.4f,%.4f]\n", x[0], x[1], x[2], x[3]);
-            enc_output = std::move(x);
-            return; // early exit to check block 0
         }
     }
 

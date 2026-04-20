@@ -1186,3 +1186,52 @@ code: `text_initial_token_id = config.text_card; initial_token_id = config.card`
 The causal padding bug was invisible at the architecture level — the
 shapes were correct, the model ran without errors, but every single
 output value was wrong. Only the diff-test protocol caught it.
+
+## FireRedASR: Conformer encoder debugging (April 2026)
+
+### Internal residual in ConformerFeedForward
+
+The `ConformerFeedForward` module has a **hidden internal residual**:
+```python
+def forward(self, x):
+    residual = x
+    output = self.net(x)
+    output = output + residual  # ← internal!
+    return output
+```
+
+The Conformer block's macaron residual `0.5*x + 0.5*ffn(x)` expands to:
+`0.5*x + 0.5*(net(x) + x) = x + 0.5*net(x)`.
+
+My code was computing `0.5*x + 0.5*net(x)` — missing the `0.5*x` that
+comes from the internal residual. The fix changed FFN1 from matching
+at 0.3 error to matching at 0.0003.
+
+**Lesson:** Always check `forward()` of ALL modules, not just the
+top-level block. Hidden residual connections are easy to miss when
+reading the block-level code `out = 0.5*x + 0.5*ffn(x)`.
+
+### Relative positional encoding index formula
+
+The `_rel_shift` operation maps:
+`shifted[h, tq, tk] = original[h, tq, T-1-tq+tk]`
+
+NOT `original[h, tq, tq-tk+T-1]` (the sign of `tq-tk` is flipped).
+Verified with a T=5 example: `shifted[0,0] = original[0,4]`,
+`shifted[0,1] = original[0,5]`, `shifted[1,0] = original[1,3]`.
+
+### Positional encoding center extraction
+
+`RelPositionalEncoding.forward()` extracts the CENTER of the PE table:
+`pe[:, Tmax//2 - T + 1 : Tmax//2 + T]` where Tmax=9999.
+
+Taking the FIRST positions (pe[0:2T-1]) gives completely wrong values
+and causes the position attention to produce garbage.
+
+### ggml reshape is column-major
+
+`ggml_reshape_2d([T1, T2] → [T2, T1])` reinterprets the same flat
+data with ne[0] as the fast dimension. This is NOT the same as
+Python's `view(T2, T1)` which reinterprets with the LAST dimension
+fastest (row-major). For the `_rel_shift` operation, this means ggml
+reshape cannot be used — need CPU-side computation or transposing.
