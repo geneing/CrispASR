@@ -638,16 +638,28 @@ static void compute_fbank(const float* pcm, int n_samples, std::vector<float>& f
 // CPU-side helpers for the encoder
 // ===========================================================================
 
-// Read ggml tensor to float vector (handles F16→F32 conversion)
+// Read ggml tensor to float vector (handles F16, quantized, and F32 types)
 static void read_f32_vec(ggml_tensor* t, std::vector<float>& out) {
     int n = (int)ggml_nelements(t);
     out.resize(n);
-    if (t->type == GGML_TYPE_F16) {
+    if (t->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
+    } else if (t->type == GGML_TYPE_F16) {
         std::vector<uint16_t> tmp(n);
         ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(uint16_t));
         ggml_fp16_to_fp32_row((const ggml_fp16_t*)tmp.data(), out.data(), n);
     } else {
-        ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
+        // Quantized types (Q8_0, Q4_K_M, etc.): read raw bytes, dequantize
+        size_t nbytes = ggml_nbytes(t);
+        std::vector<uint8_t> raw(nbytes);
+        ggml_backend_tensor_get(t, raw.data(), 0, nbytes);
+        const auto* traits = ggml_get_type_traits(t->type);
+        if (traits && traits->to_float) {
+            traits->to_float(raw.data(), out.data(), n);
+        } else {
+            fprintf(stderr, "read_f32_vec: unsupported type %d for tensor, zeroing\n", (int)t->type);
+            std::fill(out.begin(), out.end(), 0.0f);
+        }
     }
 }
 
@@ -1272,13 +1284,12 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, ggml_tensor* x, const f
         h = ggml_add(ctx, h, conv.pre_ln_b);
 
     // Pointwise conv1: d_model → 2*d_inner
-    // pw1_w shape in PyTorch: [5120, 1280, 1] (Conv1d with kernel=1)
-    // In ggml ne: depends on F16/F32 storage layout
-    // For matmul: need [in_dim, out_dim] = [1280, 5120]
-    // pw1_w ne: [1, 1280, 5120] → reshape to [1280, 5120] for matmul
-    // Use ggml_view to create a 2D view without reallocating
-    // pw1_w is 3D [1, 1280, 5120] — need 2D [1280, 5120] for matmul
-    ggml_tensor* pw1 = ggml_reshape_2d(ctx, conv.pw1_w, conv.pw1_w->ne[0] * conv.pw1_w->ne[1], conv.pw1_w->ne[2]);
+    // Legacy GGUF: 3D [1, 1280, 5120] → reshape to [1280, 5120]
+    // New GGUF (squeezed): already 2D [1280, 5120]
+    ggml_tensor* pw1 = (ggml_n_dims(conv.pw1_w) > 2)
+                            ? ggml_reshape_2d(ctx, conv.pw1_w, conv.pw1_w->ne[0] * conv.pw1_w->ne[1],
+                                              conv.pw1_w->ne[2])
+                            : conv.pw1_w;
     h = ggml_mul_mat(ctx, pw1, h);
 
     // GLU: split → sigmoid gate
@@ -1305,8 +1316,10 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, ggml_tensor* x, const f
     h = swish_act(ctx, h);
 
     // Pointwise conv2: 2560 → 1280
-    // pw2_w ne: [1, 2560, 1280]
-    ggml_tensor* pw2 = ggml_reshape_2d(ctx, conv.pw2_w, conv.pw2_w->ne[0] * conv.pw2_w->ne[1], conv.pw2_w->ne[2]);
+    ggml_tensor* pw2 = (ggml_n_dims(conv.pw2_w) > 2)
+                            ? ggml_reshape_2d(ctx, conv.pw2_w, conv.pw2_w->ne[0] * conv.pw2_w->ne[1],
+                                              conv.pw2_w->ne[2])
+                            : conv.pw2_w;
     h = ggml_mul_mat(ctx, pw2, h); // [1280, T]
 
     return ggml_add(ctx, residual, h);
@@ -1474,18 +1487,8 @@ static void conv2d_subsample_cpu(const float* features, int n_frames, int n_mels
     int F1 = (F0 - 3) / 2 + 1;      // (80-3)/2+1 = 39
 
     // Conv0: [32, 1, 3, 3], stride 2, no padding
-    auto read_f32 = [](ggml_tensor* t, std::vector<float>& out) {
-        int n = (int)ggml_nelements(t);
-        out.resize(n);
-        if (t->type == GGML_TYPE_F16) {
-            std::vector<uint16_t> tmp(n);
-            ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(uint16_t));
-            for (int i = 0; i < n; i++)
-                out[i] = ggml_fp16_to_fp32(tmp[i]);
-        } else {
-            ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
-        }
-    };
+    // Reuse the file-scope read_f32_vec which handles F32/F16/quantized types
+    auto read_f32 = [](ggml_tensor* t, std::vector<float>& out) { read_f32_vec(t, out); };
 
     int C0 = 32;
     std::vector<float> conv0_w_data;
@@ -1627,7 +1630,11 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         read_f32_vec(m.dec.prj_w, prj_w); // [odim, d]
 
         float scale = sqrtf((float)hp.d_model);
-        int max_len = std::min(T_sub * 2, 300); // max output tokens
+        // For LID models (odim <= 256, small vocab), only 1 decode step needed —
+        // the first token after SOS is the language. Full ASR needs longer sequences.
+        const bool is_lid = (hp.odim <= 256);
+        int max_len = is_lid ? 2 : std::min(T_sub * 2, 300);
+        int beam_size_effective = is_lid ? 1 : 3; // greedy for LID, beam for ASR
         int d = hp.d_model;
         int odim = hp.odim;
 
@@ -1701,7 +1708,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
             fprintf(stderr, "firered_asr: decoder weights cached, K/V pre-computed\n");
 
         // Beam search state
-        int beam_size = 3; // TODO: make configurable via params
+        int beam_size = beam_size_effective;
         struct beam_hyp {
             std::vector<int> tokens;
             float score = 0;
@@ -1958,21 +1965,34 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
 
         // Decode tokens
         std::string result;
-        for (int i = 1; i < (int)tokens.size(); i++) { // skip SOS
-            int tid = tokens[i];
-            if (tid < (int)m.vocab.size() && tid != hp.pad_id && tid != hp.sos_id && tid != hp.eos_id) {
-                std::string piece = m.vocab[tid];
-                std::string decoded;
-                for (size_t ci = 0; ci < piece.size(); ci++) {
-                    if ((unsigned char)piece[ci] == 0xE2 && ci + 2 < piece.size() &&
-                        (unsigned char)piece[ci + 1] == 0x96 && (unsigned char)piece[ci + 2] == 0x81) {
-                        decoded += ' ';
-                        ci += 2;
-                    } else {
-                        decoded += piece[ci];
-                    }
+        if (is_lid) {
+            // LID: take only the first token as language code
+            for (int i = 1; i < (int)tokens.size(); i++) {
+                int tid = tokens[i];
+                if (tid < (int)m.vocab.size() && tid != hp.pad_id && tid != hp.sos_id && tid != hp.eos_id &&
+                    tid != hp.blank_id) {
+                    result = m.vocab[tid];
+                    break; // first meaningful token = language
                 }
-                result += decoded;
+            }
+        } else {
+            // ASR: decode full token sequence
+            for (int i = 1; i < (int)tokens.size(); i++) {
+                int tid = tokens[i];
+                if (tid < (int)m.vocab.size() && tid != hp.pad_id && tid != hp.sos_id && tid != hp.eos_id) {
+                    std::string piece = m.vocab[tid];
+                    std::string decoded;
+                    for (size_t ci = 0; ci < piece.size(); ci++) {
+                        if ((unsigned char)piece[ci] == 0xE2 && ci + 2 < piece.size() &&
+                            (unsigned char)piece[ci + 1] == 0x96 && (unsigned char)piece[ci + 2] == 0x81) {
+                            decoded += ' ';
+                            ci += 2;
+                        } else {
+                            decoded += piece[ci];
+                        }
+                    }
+                    result += decoded;
+                }
             }
         }
 

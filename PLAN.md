@@ -704,8 +704,21 @@ Files: `src/firered_asr.{h,cpp}`, `models/convert-firered-asr-to-gguf.py`,
 Transformer decoder with beam search: DONE. Both greedy and beam=3
 produce correct output. int16 fbank scaling fix dramatically improved
 ASR accuracy. LID decoder uses 8 heads (not encoder's 20).
+
+Quantization fix: `read_f32_vec` now handles F32/F16/quantized types
+(Q8_0, Q4_K, Q2_K etc.) via `ggml_get_type_traits(type)->to_float`.
+Conv1d kernel=1 weights squeezed from 3D→2D in converter for better
+quantization (saves ~40% at Q2_K).
+
+LID optimizations: single-step decode (max_len=2, greedy), first-token
+output mapping, 5s input cap. Benchmark: 83% accuracy (Q2_K) / ~90%+
+(Q4_K) on 12-language edge-tts test (`tools/benchmark_lid.py`).
+
+All quants uploaded to `cstr/firered-lid-GGUF` (F16, Q8_0, Q4_K, Q2_K).
+FireRedVAD + FireRedLID wired through C API + Python/Rust/Dart wrappers.
+
 TODO: decoder performance optimization (ggml for matmuls).
-TODO: Quantization + HF upload.
+TODO: ECAPA-TDNN or MMS-LID as lightweight LID alternative (~10-50 MB).
 
 ## 29. Ecosystem comparison and new backends — PENDING
 

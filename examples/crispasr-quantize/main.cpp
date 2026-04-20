@@ -80,6 +80,15 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     gguf_set_val_u32(ctx_out, "general.quantization_version", GGML_QNT_VERSION);
     gguf_set_val_u32(ctx_out, "general.file_type", ftype);
 
+    // Detect architecture for arch-specific quantization rules
+    std::string arch;
+    {
+        int key = gguf_find_key(ctx_in, "general.architecture");
+        if (key >= 0 && gguf_get_kv_type(ctx_in, key) == GGUF_TYPE_STRING)
+            arch = gguf_get_val_str(ctx_in, key);
+    }
+    const bool is_firered = (arch.find("firered") != std::string::npos);
+
     const int n_tensors = gguf_get_n_tensors(ctx_in);
     for (int i = 0; i < n_tensors; i++) {
         const char* name = gguf_get_tensor_name(ctx_in, i);
@@ -125,9 +134,13 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
         bool is_weight = (sname.find("weight") != std::string::npos) ||
                          // Kyutai STT uses shortened names ending in _w
                          (sname.size() >= 2 && sname.substr(sname.size() - 2) == "_w");
+        // FireRedASR/LID: pw1/pw2 convs are stored as 3D [1,in,out] but are
+        // effectively 2D matmuls — safe to quantize. Other architectures'
+        // 3D conv weights may be actual spatial kernels, so keep the 2D-only
+        // rule for them.
+        const bool ok_dims = (ggml_n_dims(t) == 2) || (is_firered && ggml_n_dims(t) >= 2);
         bool quantize = ggml_is_quantized(qtype) && (type == GGML_TYPE_F32 || type == GGML_TYPE_F16) &&
-                        (ggml_n_dims(t) == 2) && // Quantize only 2D matrices
-                        is_weight &&
+                        ok_dims && is_weight &&
                         (sname.find("norm") == std::string::npos) &&
                         // Skip projector tensors (Granite Speech: precision-sensitive)
                         (sname.find("proj.") != 0);

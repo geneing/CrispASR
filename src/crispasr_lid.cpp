@@ -7,6 +7,7 @@
 // the CLI shim.
 
 #include "crispasr_lid.h"
+#include "firered_lid.h"
 #include "silero_lid.h"
 #include "whisper.h"
 
@@ -146,6 +147,37 @@ bool detect_silero(const float* samples, int n_samples, const CrispasrLidOptions
     return true;
 }
 
+bool detect_firered(const float* samples, int n_samples, const CrispasrLidOptions& opts, CrispasrLidResult& out) {
+    if (opts.model_path.empty())
+        return false;
+
+    firered_lid_context* lid = firered_lid_init(opts.model_path.c_str(), opts.n_threads);
+    if (!lid) {
+        if (opts.verbose)
+            fprintf(stderr, "crispasr[lid]: firered_lid_init('%s') failed\n", opts.model_path.c_str());
+        return false;
+    }
+
+    float conf = 0.0f;
+    const char* lang = firered_lid_detect(lid, samples, n_samples, &conf);
+    std::string code = lang ? lang : "";
+    firered_lid_free(lid);
+
+    if (code.empty()) {
+        if (opts.verbose)
+            fprintf(stderr, "crispasr[lid]: firered_lid_detect returned no code\n");
+        return false;
+    }
+
+    out.lang_code = code;
+    out.confidence = conf;
+    out.source = "firered";
+    if (opts.verbose) {
+        fprintf(stderr, "crispasr[lid]: detected '%s' (p=%.3f) via firered\n", out.lang_code.c_str(), out.confidence);
+    }
+    return true;
+}
+
 } // namespace
 
 bool crispasr_detect_language(const float* samples, int n_samples, const CrispasrLidOptions& opts,
@@ -157,6 +189,8 @@ bool crispasr_detect_language(const float* samples, int n_samples, const Crispas
         return detect_whisper(samples, n_samples, opts, out);
     case CrispasrLidMethod::Silero:
         return detect_silero(samples, n_samples, opts, out);
+    case CrispasrLidMethod::Firered:
+        return detect_firered(samples, n_samples, opts, out);
     }
     return false;
 }

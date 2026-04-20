@@ -1407,3 +1407,53 @@ check **transitive** DLL imports, not just the binary you control.
 `dumpbin /dependents` / PE import parsing only shows first-order
 imports — you need to walk the chain recursively. On this project
 the chain was `crispasr.exe → ggml-cuda.dll → cublas64 → cublasLt`.
+
+### Quantized weight dequantization (read_f32_vec)
+
+The hybrid ggml/CPU encoder reads weights into CPU float vectors via
+`read_f32_vec`. The original only handled F16→F32. Quantized models
+(Q8_0, Q4_K_M, etc.) passed raw quantized bytes to float arrays →
+garbage or crash.
+
+**Fix:** Use `ggml_get_type_traits(t->type)->to_float` to dequantize
+any type. Also apply to the conv2d subsampling lambda.
+
+### Conv1d kernel=1 stored as 3D blocks quantization
+
+Pointwise Conv1d weights `[out, in, 1]` stored as 3D tensors in GGUF
+have `ne[0]=1`, failing the quantizer's row-alignment check (1 % 256 ≠ 0).
+~30% of model weights were left unquantized.
+
+**Fix:** Squeeze the kernel dimension in the converter (`t.squeeze()`
+when shape has a `1` and name contains `pointwise_conv`). Makes them 2D
+`[out, in]` → quantizer can process normally. Saves ~40% at Q2_K.
+
+**Architecture-specific:** Only apply for `firered` architecture. Other
+models' 3D conv weights may be actual spatial kernels.
+
+### LID decoder decode length
+
+FireRedLID only needs 1 decode step — the first token after SOS is
+the language code. Running full beam search (300 steps, beam=3) wastes
+~50x compute. Detect LID models by `odim <= 256` and set `max_len=2`,
+`beam_size=1`.
+
+### LID output mapping
+
+The LID model outputs multi-token sequences for dialect languages
+(e.g., "zh" then "mandarin" for Mandarin Chinese). Taking only the
+first non-special token gives the ISO 639-1 code.
+
+### Layer pruning for LID
+
+Tested removing encoder layers to shrink the LID model. Only keeping
+the last 4 of 16 layers (12-15) works for a single English sample,
+but fails on multilingual test (0% accuracy). SLERP merging of adjacent
+layers also fails. The Conformer encoder layers are too specialized
+for simple pruning — unlike Whisper Turbo's decoder-only pruning.
+
+### Q2_K too aggressive for similar languages
+
+Q2_K quantization causes confusion between similar languages
+(de→cy, hi→pa, es→gl). Q4_K maintains accuracy. For LID,
+Q4_K (544 MB) is the practical minimum; Q2_K (350 MB) is unreliable.

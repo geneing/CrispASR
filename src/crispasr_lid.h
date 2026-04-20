@@ -28,8 +28,9 @@
 #include <string>
 
 enum class CrispasrLidMethod {
-    Whisper,
-    Silero,
+    Whisper  = 0,
+    Silero   = 1,
+    Firered  = 2,
 };
 
 struct CrispasrLidResult {

@@ -210,7 +210,7 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "kyutai-stt";
     if (contains_ci("moshi") && contains_ci("stt"))
         return "kyutai-stt";
-    if (contains_ci("firered") && contains_ci("asr"))
+    if (contains_ci("firered") && (contains_ci("asr") || contains_ci("lid")))
         return "firered-asr";
     if (contains_ci("moonshine"))
         return "moonshine";
@@ -262,7 +262,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "glm-asr";
             else if (a == "kyutai-stt" || a == "kyutai_stt" || a == "kyutaistt")
                 result = "kyutai-stt";
-            else if (a == "firered-asr" || a == "firered_asr" || a == "firereadasr")
+            else if (a == "firered-asr" || a == "firered_asr" || a == "firereadasr" || a == "firered-lid" ||
+                     a == "firered_lid")
                 result = "firered-asr";
             else if (a == "moonshine" || a == "moonshine-tiny" || a == "moonshine-base")
                 result = "moonshine";

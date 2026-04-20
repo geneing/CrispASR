@@ -9,11 +9,56 @@
 
 #include "crispasr_vad.h"
 
-#include "whisper.h" // whisper_vad_* API
+#include "firered_vad.h" // FireRedVAD (DFSMN) — alternative to Silero
+#include "whisper.h"     // whisper_vad_* API (Silero VAD)
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+
+// Check if a model path is a FireRedVAD model (by filename pattern)
+static bool is_firered_vad_model(const char* path) {
+    std::string p(path);
+    // basename
+    auto pos = p.find_last_of("/\\");
+    std::string basename = (pos != std::string::npos) ? p.substr(pos + 1) : p;
+    return basename.find("firered") != std::string::npos && basename.find("vad") != std::string::npos;
+}
+
+// FireRedVAD path: uses the DFSMN-based VAD model
+static std::vector<crispasr_audio_slice> compute_firered_vad_slices(const float* samples, int n_samples,
+                                                                     int sample_rate, const char* vad_model_path,
+                                                                     const crispasr_vad_options& opts) {
+    std::vector<crispasr_audio_slice> slices;
+
+    firered_vad_context* vctx = firered_vad_init(vad_model_path);
+    if (!vctx) {
+        fprintf(stderr, "crispasr: warning: failed to load FireRedVAD model '%s'\n", vad_model_path);
+        return slices;
+    }
+
+    firered_vad_segment* segs = nullptr;
+    int n_segs = 0;
+    float min_speech_sec = opts.min_speech_duration_ms / 1000.0f;
+    float min_silence_sec = opts.min_silence_duration_ms / 1000.0f;
+    int rc = firered_vad_detect(vctx, samples, n_samples, &segs, &n_segs, opts.threshold, min_speech_sec,
+                                min_silence_sec);
+    if (rc == 0 && segs && n_segs > 0) {
+        for (int i = 0; i < n_segs; i++) {
+            int64_t t0_cs = (int64_t)(segs[i].start_sec * 100.0f);
+            int64_t t1_cs = (int64_t)(segs[i].end_sec * 100.0f);
+            int s = std::max(0, (int)(segs[i].start_sec * sample_rate));
+            int e = std::min(n_samples, (int)(segs[i].end_sec * sample_rate));
+            if (e > s)
+                slices.push_back({s, e, t0_cs, t1_cs});
+        }
+    }
+    free(segs);
+    firered_vad_free(vctx);
+    return slices;
+}
 
 std::vector<crispasr_audio_slice> crispasr_compute_vad_slices(const float* samples, int n_samples, int sample_rate,
                                                               const char* vad_model_path,
@@ -22,43 +67,41 @@ std::vector<crispasr_audio_slice> crispasr_compute_vad_slices(const float* sampl
     if (!vad_model_path || !*vad_model_path || n_samples <= 0)
         return slices;
 
-    whisper_vad_context_params vcp = whisper_vad_default_context_params();
-    vcp.n_threads = opts.n_threads;
-    whisper_vad_context* vctx = whisper_vad_init_from_file_with_params(vad_model_path, vcp);
-    if (!vctx) {
-        fprintf(stderr, "crispasr: warning: failed to load VAD model '%s'\n", vad_model_path);
-        return slices;
-    }
-
-    whisper_vad_params vp = whisper_vad_default_params();
-    vp.threshold = opts.threshold;
-    vp.min_speech_duration_ms = opts.min_speech_duration_ms;
-    vp.min_silence_duration_ms = opts.min_silence_duration_ms;
-    vp.speech_pad_ms = (float)opts.speech_pad_ms;
-
-    whisper_vad_segments* vseg = whisper_vad_segments_from_samples(vctx, vp, samples, n_samples);
-    const int nv = vseg ? whisper_vad_segments_n_segments(vseg) : 0;
-    for (int i = 0; i < nv; i++) {
-        // The whisper VAD API returns timestamps in centiseconds,
-        // not seconds. Convert to seconds for sample index computation.
-        const float t0_cs = whisper_vad_segments_get_segment_t0(vseg, i);
-        const float t1_cs = whisper_vad_segments_get_segment_t1(vseg, i);
-        const float t0s = t0_cs / 100.0f;
-        const float t1s = t1_cs / 100.0f;
-        const int s = std::max(0, (int)(t0s * sample_rate));
-        const int e = std::min(n_samples, (int)(t1s * sample_rate));
-        if (e > s) {
-            slices.push_back({
-                s,
-                e,
-                (int64_t)t0_cs,
-                (int64_t)t1_cs,
-            });
+    // Dispatch: use FireRedVAD for firered-vad models, Silero for everything else
+    if (is_firered_vad_model(vad_model_path)) {
+        slices = compute_firered_vad_slices(samples, n_samples, sample_rate, vad_model_path, opts);
+    } else {
+        // Default: Silero VAD via whisper.cpp API
+        whisper_vad_context_params vcp = whisper_vad_default_context_params();
+        vcp.n_threads = opts.n_threads;
+        whisper_vad_context* vctx = whisper_vad_init_from_file_with_params(vad_model_path, vcp);
+        if (!vctx) {
+            fprintf(stderr, "crispasr: warning: failed to load VAD model '%s'\n", vad_model_path);
+            return slices;
         }
+
+        whisper_vad_params vp = whisper_vad_default_params();
+        vp.threshold = opts.threshold;
+        vp.min_speech_duration_ms = opts.min_speech_duration_ms;
+        vp.min_silence_duration_ms = opts.min_silence_duration_ms;
+        vp.speech_pad_ms = (float)opts.speech_pad_ms;
+
+        whisper_vad_segments* vseg = whisper_vad_segments_from_samples(vctx, vp, samples, n_samples);
+        const int nv = vseg ? whisper_vad_segments_n_segments(vseg) : 0;
+        for (int i = 0; i < nv; i++) {
+            const float t0_cs = whisper_vad_segments_get_segment_t0(vseg, i);
+            const float t1_cs = whisper_vad_segments_get_segment_t1(vseg, i);
+            const float t0s = t0_cs / 100.0f;
+            const float t1s = t1_cs / 100.0f;
+            const int s = std::max(0, (int)(t0s * sample_rate));
+            const int e = std::min(n_samples, (int)(t1s * sample_rate));
+            if (e > s)
+                slices.push_back({s, e, (int64_t)t0_cs, (int64_t)t1_cs});
+        }
+        if (vseg)
+            whisper_vad_free_segments(vseg);
+        whisper_vad_free(vctx);
     }
-    if (vseg)
-        whisper_vad_free_segments(vseg);
-    whisper_vad_free(vctx);
 
     // Post-merge: combine adjacent VAD segments that are too short
     // or too close together. ASR models need at least a few seconds

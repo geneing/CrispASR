@@ -1509,11 +1509,11 @@ CA_EXPORT int crispasr_detect_language_pcm(const float* samples, int32_t n_sampl
                                            char* out_lang_buf, int32_t out_lang_cap, float* out_confidence) {
     if (!samples || n_samples <= 0 || !model_path || !out_lang_buf || out_lang_cap <= 0)
         return -1;
-    if (method != 0 && method != 1)
+    if (method < 0 || method > 2)
         return -1;
 
     CrispasrLidOptions opts;
-    opts.method = (method == 0) ? CrispasrLidMethod::Whisper : CrispasrLidMethod::Silero;
+    opts.method = static_cast<CrispasrLidMethod>(method);
     opts.model_path = model_path;
     opts.n_threads = n_threads > 0 ? n_threads : 4;
     opts.use_gpu = use_gpu != 0;

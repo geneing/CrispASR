@@ -432,6 +432,15 @@ target_compile_features   (firered-vad PUBLIC cxx_std_17)
 target_link_libraries     (firered-vad PUBLIC crispasr-core ggml ggml-base ggml-cpu)
 
 # ---------------------------------------------------------------------------
+# firered-lid — FireRedLID (120-language identification)
+# ---------------------------------------------------------------------------
+add_library(firered-lid STATIC firered_lid.h firered_lid.cpp)
+set_target_properties(firered-lid PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(firered-lid PUBLIC .)
+target_compile_features   (firered-lid PUBLIC cxx_std_17)
+target_link_libraries     (firered-lid PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+
+# ---------------------------------------------------------------------------
 # firered-asr — FireRedASR2-AED (FireRedTeam/FireRedASR2-AED)
 # ---------------------------------------------------------------------------
 add_library(firered-asr STATIC firered_asr.h firered_asr.cpp)
@@ -589,6 +598,9 @@ if (TARGET firered-asr)
 endif()
 if (TARGET firered-vad)
     target_link_libraries(whisper PUBLIC firered-vad)
+endif()
+if (TARGET firered-lid)
+    target_link_libraries(whisper PUBLIC firered-lid)
 endif()
 if (TARGET moonshine)
     target_link_libraries(whisper PUBLIC moonshine)

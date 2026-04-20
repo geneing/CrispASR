@@ -190,6 +190,11 @@ def main():
         gguf_name = shorten_name(name)
         assert len(gguf_name) < 64, f"Name too long ({len(gguf_name)}): {gguf_name}"
 
+        # Squeeze Conv1d kernel=1 weights from 3D [out, in, 1] to 2D [out, in]
+        # so the quantizer can process them as regular matrices.
+        if len(t.shape) == 3 and 1 in t.shape and ("pointwise_conv" in name):
+            t = t.squeeze()
+
         if "norm" in name or name.endswith(".bias") or "pe" in name or len(t.shape) <= 1:
             data = f32(t)
             dtype_str = "F32"
