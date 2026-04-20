@@ -20,6 +20,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_glm_asr_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_kyutai_stt_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_firered_asr_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_moonshine_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_omniasr_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -53,7 +54,7 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_qwen3_backend();
     if (name == "fastconformer-ctc")
         return crispasr_make_fastconformer_ctc_backend();
-    if (name == "wav2vec2" || name == "omniasr")
+    if (name == "wav2vec2")
         return crispasr_make_wav2vec2_backend();
     if (name == "glm-asr" || name == "glmasr")
         return crispasr_make_glm_asr_backend();
@@ -63,6 +64,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_firered_asr_backend();
     if (name == "moonshine")
         return crispasr_make_moonshine_backend();
+    if (name == "omniasr" || name == "omniasr-ctc")
+        return crispasr_make_omniasr_backend();
 
     fprintf(stderr, "crispasr: error: unknown backend '%s'\n", name.c_str());
     return nullptr;
@@ -72,6 +75,7 @@ std::vector<std::string> crispasr_list_backends() {
     return {
         "whisper", "parakeet",          "canary",   "cohere",  "granite",    "voxtral",     "voxtral4b",
         "qwen3",   "fastconformer-ctc", "wav2vec2", "glm-asr", "kyutai-stt", "firered-asr", "moonshine",
+        "omniasr",
     };
 }
 
@@ -193,7 +197,7 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
     if (contains_ci("fastconformer") && contains_ci("ctc"))
         return "fastconformer-ctc";
     if (contains_ci("omniasr"))
-        return "wav2vec2";
+        return "omniasr";
     if (contains_ci("wav2vec2"))
         return "wav2vec2";
     if (contains_ci("canary"))
@@ -267,6 +271,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "firered-asr";
             else if (a == "moonshine" || a == "moonshine-tiny" || a == "moonshine-base")
                 result = "moonshine";
+            else if (a == "omniasr-ctc" || a == "omniasr_ctc" || a == "omniasr")
+                result = "omniasr";
         }
     }
     gguf_free(gctx);

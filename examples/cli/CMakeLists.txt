@@ -30,6 +30,7 @@ add_executable(${TARGET}
     crispasr_backend_kyutai_stt.cpp
     crispasr_backend_firered_asr.cpp
     crispasr_backend_moonshine.cpp
+    crispasr_backend_omniasr.cpp
     crispasr_aligner_cli.cpp
     crispasr_vad_cli.cpp
     crispasr_lid_cli.cpp

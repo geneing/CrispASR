@@ -423,6 +423,15 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# omniasr — Facebook OmniASR-CTC (wav2vec2-style, 1600+ languages)
+# ---------------------------------------------------------------------------
+add_library(omniasr STATIC omniasr.h omniasr.cpp)
+set_target_properties(omniasr PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(omniasr PUBLIC .)
+target_compile_features   (omniasr PUBLIC cxx_std_17)
+target_link_libraries     (omniasr PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+
+# ---------------------------------------------------------------------------
 # ecapa-lid — ECAPA-TDNN language identification (107 languages, 43 MB)
 # ---------------------------------------------------------------------------
 add_library(ecapa-lid STATIC ecapa_lid.h ecapa_lid.cpp)
@@ -616,6 +625,9 @@ if (TARGET firered-vad)
 endif()
 if (TARGET firered-lid)
     target_link_libraries(whisper PUBLIC firered-lid)
+endif()
+if (TARGET omniasr)
+    target_link_libraries(whisper PUBLIC omniasr)
 endif()
 if (TARGET ecapa-lid)
     target_link_libraries(whisper PUBLIC ecapa-lid)
