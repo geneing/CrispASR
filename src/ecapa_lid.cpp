@@ -586,12 +586,6 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
         relu_inplace(h_tdnn1.data(), C * T_cur);
         batchnorm1d(h_tdnn1.data(), C, T_cur, blk.tdnn1.bn.weight.data(), blk.tdnn1.bn.bias.data(),
                     blk.tdnn1.bn.mean.data(), blk.tdnn1.bn.var.data());
-        if (bi == 0) {
-            fprintf(stderr, "  B1 tdnn1: h[:3,0]=[%.4f,%.4f,%.4f]\n",
-                    h_tdnn1[0*T_cur], h_tdnn1[1*T_cur], h_tdnn1[2*T_cur]);
-            fflush(stderr);
-        }
-
         // Res2Net: split into 8 sub-bands of 128 channels
         // Sub-band 0: pass through
         // Sub-bands 1-7: conv1d(128→128, k=3, d=dilation) + BN + ReLU, with residual from prev
@@ -642,11 +636,6 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
                         res2_out[(c_off + c) * T_cur + t] = sub_out[c * T_cur + t];
                         prev_sub[c * T_cur + t] = sub_out[c * T_cur + t];
                     }
-                if (bi == 0 && si == 0) {
-                    fprintf(stderr, "  B1 r2n sub0: o[:3,0]=[%.4f,%.4f,%.4f]\n",
-                            sub_out[0*T_cur], sub_out[1*T_cur], sub_out[2*T_cur]);
-                    fflush(stderr);
-                }
             }
         }
 
@@ -692,13 +681,6 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
         // Residual
         for (int i = 0; i < C * T_cur; i++)
             h_tdnn2[i] += cur[i];
-        if (bi == 0) {
-            fprintf(stderr, "  B1 output: h[:3,0]=[%.4f,%.4f,%.4f], mean=%.6f\n",
-                    h_tdnn2[0*T_cur], h_tdnn2[1*T_cur], h_tdnn2[2*T_cur],
-                    [&]{float s=0; for(int i=0;i<C*T_cur;i++) s+=h_tdnn2[i]; return s/(C*T_cur);}());
-            fflush(stderr);
-        }
-
         cur = h_tdnn2;
         block_outputs.push_back(cur); // save for MFA
     }
