@@ -699,6 +699,32 @@ Files: `src/firered_asr.{h,cpp}`, `models/convert-firered-asr-to-gguf.py`,
 TODO: Transformer decoder (beam search) for higher accuracy than CTC.
 TODO: Quantization + HF upload.
 
+## 29. Ecosystem comparison and new backends — PENDING
+
+### ggml ASR projects to benchmark against:
+| Project | Models | Key optimizations | Priority |
+|---|---|---|---|
+| [qwen3-asr.cpp](https://github.com/predict-woo/qwen3-asr.cpp) | Qwen3-ASR | Flash Attn 3.7x, selective logits, F16 KV cache, vDSP mel (45x on Apple) | High — adopt optimizations |
+| [RapidSpeech.cpp](https://github.com/RapidAI/RapidSpeech.cpp) | Multi-model | Zero-allocation graphs, edge-focused, advanced quant (Q4_K/Q5_K/Q6_K) | Medium |
+| [moonshine.cpp](https://github.com/csexton-ua/moonshine.cpp) | Moonshine v1/v2 | Lightweight, streaming v2, clean GGML-native | High — implement as backend |
+| [FunASR-GGML](https://github.com/huaxin0/FunASR-GGML) | SenseVoice (Qwen3) | 3-stage pipeline, CUDA support, KV cache | Medium |
+| [whisper_ggml](https://github.com/sk3llo/whisper_ggml) | Whisper | CoreML leveraging for iOS | Low |
+| koboldcpp | Various | Unknown | Medium — need to check |
+
+### FireRed companion models:
+| Model | Task | F1/Accuracy | Notes |
+|---|---|---|---|
+| FireRedVAD | Voice Activity Detection | 97.57% F1 | Beats Silero/TEN/FunASR/WebRTC VAD, streaming support |
+| FireRedLID | Language ID | 97.18% | 100+ languages + 20+ Chinese dialects |
+| FireRedPunc | Punctuation | 78.90% F1 | BERT-based, Chinese+English |
+
+### VAD alternatives to evaluate:
+- TEN-VAD, FunASR-VAD, WebRTC-VAD — compare accuracy/latency vs our Silero VAD
+
+### New model backends to consider:
+- **Moonshine** (15th backend) — lightweight, streaming, already has ggml impl
+- **SenseVoice/Paraformer** — via FunASR-GGML reference, Alibaba's ASR family
+
 ## 25. Montreal Forced Aligner evaluation — NOT PLANNED
 
 MFA uses Kaldi + OpenFST + Pynini (heavy C++ dependencies, ~500MB).
