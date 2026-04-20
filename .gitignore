@@ -87,3 +87,4 @@ __pycache__/
 target/
 **/*.rlib
 Cargo.lock
+CrispASR
