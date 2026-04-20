@@ -19,6 +19,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_wav2vec2_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_glm_asr_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_kyutai_stt_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_firered_asr_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_moonshine_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -60,6 +61,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_kyutai_stt_backend();
     if (name == "firered-asr" || name == "firered")
         return crispasr_make_firered_asr_backend();
+    if (name == "moonshine")
+        return crispasr_make_moonshine_backend();
 
     fprintf(stderr, "crispasr: error: unknown backend '%s'\n", name.c_str());
     return nullptr;
@@ -68,7 +71,7 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
 std::vector<std::string> crispasr_list_backends() {
     return {
         "whisper", "parakeet",          "canary",   "cohere",  "granite",    "voxtral",     "voxtral4b",
-        "qwen3",   "fastconformer-ctc", "wav2vec2", "glm-asr", "kyutai-stt", "firered-asr",
+        "qwen3",   "fastconformer-ctc", "wav2vec2", "glm-asr", "kyutai-stt", "firered-asr", "moonshine",
     };
 }
 
@@ -209,6 +212,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "kyutai-stt";
     if (contains_ci("firered") && contains_ci("asr"))
         return "firered-asr";
+    if (contains_ci("moonshine"))
+        return "moonshine";
     if (contains_ci("ggml-") && contains_ci(".bin"))
         return "whisper";
 
@@ -259,6 +264,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "kyutai-stt";
             else if (a == "firered-asr" || a == "firered_asr" || a == "firereadasr")
                 result = "firered-asr";
+            else if (a == "moonshine" || a == "moonshine-tiny" || a == "moonshine-base")
+                result = "moonshine";
         }
     }
     gguf_free(gctx);

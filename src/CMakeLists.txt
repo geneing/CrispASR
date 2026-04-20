@@ -410,6 +410,19 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# moonshine — Moonshine ASR (UsefulSensors)
+# ---------------------------------------------------------------------------
+add_library(moonshine STATIC moonshine.h moonshine.cpp moonshine-impl.h
+            moonshine-audio.h moonshine-tokenizer.h moonshine-tokenizer.cpp)
+set_target_properties(moonshine PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(moonshine PUBLIC .)
+target_compile_features   (moonshine PUBLIC cxx_std_17)
+target_link_libraries     (moonshine PUBLIC ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(moonshine PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # firered-vad — FireRedVAD (DFSMN voice activity detection)
 # ---------------------------------------------------------------------------
 add_library(firered-vad STATIC firered_vad.h firered_vad.cpp)
@@ -576,6 +589,9 @@ if (TARGET firered-asr)
 endif()
 if (TARGET firered-vad)
     target_link_libraries(whisper PUBLIC firered-vad)
+endif()
+if (TARGET moonshine)
+    target_link_libraries(whisper PUBLIC moonshine)
 endif()
 # Pyannote segmentation is not a backend; it's consumed by
 # crispasr_diarize.cpp for the "pyannote" method. Still needs linking in
