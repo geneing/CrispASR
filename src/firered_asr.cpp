@@ -975,6 +975,253 @@ static void cpu_encoder(const float* subsampled, // [T, 608] row-major
     enc_output = std::move(x);
 }
 
+// Forward declarations for ggml graph builders
+static ggml_tensor* swish_act(ggml_context* ctx, ggml_tensor* x);
+static ggml_tensor* build_macaron_ffn(ggml_context* ctx, ggml_tensor* x, const firered_enc_ffn& f);
+static ggml_tensor* build_conv_module(ggml_context* ctx, ggml_tensor* x, const firered_enc_conv& conv, int d_model,
+                                      int kernel_size);
+
+// ===========================================================================
+// Hybrid encoder: ggml for matmuls, CPU for rel_shift attention
+// ===========================================================================
+
+static void hybrid_encoder(const float* subsampled, int T, int flat_dim, firered_asr_context* sctx,
+                           std::vector<float>& enc_output) {
+    auto& m = sctx->model;
+    auto& hp = m.hp;
+    int d = hp.d_model;
+    int nh = hp.n_head;
+    int hd = hp.head_dim;
+
+    // Load PE center
+    std::vector<float> pe_full;
+    read_f32_vec(m.enc.pe, pe_full);
+    int T_pe = 2 * T - 1;
+    int Tmax = (int)(m.enc.pe->ne[1]);
+    int pe_start = Tmax / 2 - T + 1;
+    std::vector<float> pe_center(T_pe * d);
+    memcpy(pe_center.data(), &pe_full[pe_start * d], T_pe * d * sizeof(float));
+
+    // Read pos_bias_u/v for all layers (they're small — 20*64 each)
+    struct layer_bias {
+        std::vector<float> bu, bv;
+    };
+    std::vector<layer_bias> biases(hp.n_layers_enc);
+    for (int li = 0; li < hp.n_layers_enc; li++) {
+        read_f32_vec(m.enc.blocks[li].mhsa.pos_bias_u, biases[li].bu);
+        read_f32_vec(m.enc.blocks[li].mhsa.pos_bias_v, biases[li].bv);
+    }
+
+    // Working buffer: x [d, T] in ggml layout = [T, d] row-major
+    // Start with subsampled data
+    std::vector<float> x_buf(T * d);
+
+    // Linear projection via small ggml graph
+    {
+        struct ggml_init_params gp = {ggml_tensor_overhead() * 32 + ggml_graph_overhead(), nullptr, true};
+        ggml_context* ctx0 = ggml_init(gp);
+        ggml_cgraph* gf = ggml_new_graph(ctx0);
+
+        ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, flat_dim, T);
+        ggml_set_name(inp, "inp");
+        ggml_set_input(inp);
+        ggml_tensor* out = ggml_mul_mat(ctx0, m.enc.proj_w, inp);
+        if (m.enc.proj_b)
+            out = ggml_add(ctx0, out, m.enc.proj_b);
+        ggml_set_name(out, "proj");
+        ggml_set_output(out);
+        ggml_build_forward_expand(gf, out);
+
+        ggml_backend_sched_reset(sctx->sched);
+        ggml_backend_sched_alloc_graph(sctx->sched, gf);
+        ggml_backend_tensor_set(inp, subsampled, 0, flat_dim * T * sizeof(float));
+        ggml_backend_sched_graph_compute(sctx->sched, gf);
+        ggml_backend_tensor_get(out, x_buf.data(), 0, d * T * sizeof(float));
+        ggml_free(ctx0);
+    }
+
+    // Per-layer: ggml for FFN/proj + CPU for attention
+    for (int li = 0; li < hp.n_layers_enc; li++) {
+        auto& b = m.enc.blocks[li];
+
+        // Graph A: FFN1 + Q/K/V/P projections
+        std::vector<float> Q_buf(T * d), K_buf(T * d), V_buf(T * d), P_buf(T_pe * d);
+        {
+            size_t mem = ggml_tensor_overhead() * 256 + ggml_graph_overhead_custom(4096, false);
+            std::vector<uint8_t> meta(mem);
+            struct ggml_init_params gp = {mem, meta.data(), true};
+            ggml_context* ctx0 = ggml_init(gp);
+            ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 4096, false);
+
+            ggml_tensor* x_in = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+            ggml_set_name(x_in, "x_in");
+            ggml_set_input(x_in);
+
+            ggml_tensor* pe_in = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T_pe);
+            ggml_set_name(pe_in, "pe_in");
+            ggml_set_input(pe_in);
+
+            // FFN1: x + 0.5*net(x)
+            ggml_tensor* x = build_macaron_ffn(ctx0, x_in, b.ffn1);
+            ggml_set_name(x, "ffn1_out");
+            ggml_set_output(x);
+
+            // Q projection with LN
+            ggml_tensor* q = ggml_norm(ctx0, x, 1e-5f);
+            q = ggml_mul(ctx0, q, b.mhsa.ln_q_w);
+            if (b.mhsa.ln_q_b)
+                q = ggml_add(ctx0, q, b.mhsa.ln_q_b);
+            q = ggml_mul_mat(ctx0, b.mhsa.w_qs, q);
+            ggml_set_name(q, "Q");
+            ggml_set_output(q);
+
+            // K projection
+            ggml_tensor* k = ggml_norm(ctx0, x, 1e-5f);
+            k = ggml_mul(ctx0, k, b.mhsa.ln_k_w);
+            if (b.mhsa.ln_k_b)
+                k = ggml_add(ctx0, k, b.mhsa.ln_k_b);
+            k = ggml_mul_mat(ctx0, b.mhsa.w_ks, k);
+            ggml_set_name(k, "K");
+            ggml_set_output(k);
+
+            // V projection
+            ggml_tensor* v = ggml_norm(ctx0, x, 1e-5f);
+            v = ggml_mul(ctx0, v, b.mhsa.ln_v_w);
+            if (b.mhsa.ln_v_b)
+                v = ggml_add(ctx0, v, b.mhsa.ln_v_b);
+            v = ggml_mul_mat(ctx0, b.mhsa.w_vs, v);
+            ggml_set_name(v, "V");
+            ggml_set_output(v);
+
+            // P projection (position embeddings)
+            ggml_tensor* p = ggml_mul_mat(ctx0, b.mhsa.lin_pos, pe_in);
+            ggml_set_name(p, "P");
+            ggml_set_output(p);
+
+            ggml_build_forward_expand(gf, q);
+            ggml_build_forward_expand(gf, k);
+            ggml_build_forward_expand(gf, v);
+            ggml_build_forward_expand(gf, p);
+
+            ggml_backend_sched_reset(sctx->sched);
+            if (!ggml_backend_sched_alloc_graph(sctx->sched, gf)) {
+                fprintf(stderr, "firered_asr: layer %d graph A alloc failed\n", li);
+                enc_output.assign(T * d, 0);
+                return;
+            }
+            ggml_backend_tensor_set(x_in, x_buf.data(), 0, d * T * sizeof(float));
+            ggml_backend_tensor_set(pe_in, pe_center.data(), 0, d * T_pe * sizeof(float));
+            ggml_backend_sched_graph_compute(sctx->sched, gf);
+
+            // Read outputs
+            ggml_tensor* ffn1_t = ggml_graph_get_tensor(gf, "ffn1_out");
+            ggml_backend_tensor_get(ffn1_t, x_buf.data(), 0, d * T * sizeof(float));
+            ggml_tensor* Q_t = ggml_graph_get_tensor(gf, "Q");
+            ggml_backend_tensor_get(Q_t, Q_buf.data(), 0, d * T * sizeof(float));
+            ggml_tensor* K_t = ggml_graph_get_tensor(gf, "K");
+            ggml_backend_tensor_get(K_t, K_buf.data(), 0, d * T * sizeof(float));
+            ggml_tensor* V_t = ggml_graph_get_tensor(gf, "V");
+            ggml_backend_tensor_get(V_t, V_buf.data(), 0, d * T * sizeof(float));
+            ggml_tensor* P_t = ggml_graph_get_tensor(gf, "P");
+            ggml_backend_tensor_get(P_t, P_buf.data(), 0, d * T_pe * sizeof(float));
+            ggml_free(ctx0);
+        }
+
+        // CPU attention with rel_shift
+        // Q/K/V are [d, T] in ggml layout = column-major
+        // In ggml: Q[i, t] = Q_buf[t * d + i] for i < d, t < T
+        // = Q_buf[t*d + h*hd + dd] for head h, dim dd
+        // This is the SAME layout as my cpu_encoder used: row-major [T, d]
+        {
+            float scale = 1.0f / sqrtf((float)hd);
+            auto& bu = biases[li].bu;
+            auto& bv = biases[li].bv;
+            std::vector<float> attn_out(T * d, 0.0f);
+
+            for (int h = 0; h < nh; h++) {
+                std::vector<float> scores(T * T);
+                for (int tq = 0; tq < T; tq++) {
+                    for (int tk = 0; tk < T; tk++) {
+                        double content = 0, position = 0;
+                        int pos_idx = T - 1 - tq + tk;
+                        for (int dd = 0; dd < hd; dd++) {
+                            float q_val = Q_buf[tq * d + h * hd + dd];
+                            float k_val = K_buf[tk * d + h * hd + dd];
+                            content += (q_val + bu[h * hd + dd]) * k_val;
+                            if (pos_idx >= 0 && pos_idx < T_pe) {
+                                float p_val = P_buf[pos_idx * d + h * hd + dd];
+                                position += (q_val + bv[h * hd + dd]) * p_val;
+                            }
+                        }
+                        scores[tq * T + tk] = (float)((content + position) * scale);
+                    }
+                }
+                cpu_softmax_rows(scores.data(), T, T);
+                for (int tq = 0; tq < T; tq++)
+                    for (int dd = 0; dd < hd; dd++) {
+                        double s = 0;
+                        for (int tk = 0; tk < T; tk++)
+                            s += scores[tq * T + tk] * V_buf[tk * d + h * hd + dd];
+                        attn_out[tq * d + h * hd + dd] = (float)s;
+                    }
+            }
+
+            // Graph B: FC output projection + residual + conv + FFN2 + LN
+            {
+                size_t mem = ggml_tensor_overhead() * 512 + ggml_graph_overhead_custom(8192, false);
+                std::vector<uint8_t> meta(mem);
+                struct ggml_init_params gp = {mem, meta.data(), true};
+                ggml_context* ctx0 = ggml_init(gp);
+                ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 8192, false);
+
+                // Input: x (after FFN1) and attn_out
+                ggml_tensor* x_in = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+                ggml_set_name(x_in, "x_in");
+                ggml_set_input(x_in);
+                ggml_tensor* attn_in = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+                ggml_set_name(attn_in, "attn_in");
+                ggml_set_input(attn_in);
+
+                // FC output projection + residual
+                ggml_tensor* fc_out = ggml_mul_mat(ctx0, b.mhsa.fc_w, attn_in);
+                ggml_tensor* x = ggml_add(ctx0, x_in, fc_out);
+
+                // Conv module
+                x = build_conv_module(ctx0, x, b.conv, d, hp.kernel_size);
+
+                // FFN2
+                x = build_macaron_ffn(ctx0, x, b.ffn2);
+
+                // Final LayerNorm
+                x = ggml_norm(ctx0, x, 1e-5f);
+                x = ggml_mul(ctx0, x, b.ln_w);
+                if (b.ln_b)
+                    x = ggml_add(ctx0, x, b.ln_b);
+
+                ggml_set_name(x, "layer_out");
+                ggml_set_output(x);
+                ggml_build_forward_expand(gf, x);
+
+                ggml_backend_sched_reset(sctx->sched);
+                if (!ggml_backend_sched_alloc_graph(sctx->sched, gf)) {
+                    fprintf(stderr, "firered_asr: layer %d graph B alloc failed\n", li);
+                    enc_output.assign(T * d, 0);
+                    return;
+                }
+                ggml_backend_tensor_set(x_in, x_buf.data(), 0, d * T * sizeof(float));
+                ggml_backend_tensor_set(attn_in, attn_out.data(), 0, d * T * sizeof(float));
+                ggml_backend_sched_graph_compute(sctx->sched, gf);
+
+                ggml_tensor* out_t = ggml_graph_get_tensor(gf, "layer_out");
+                ggml_backend_tensor_get(out_t, x_buf.data(), 0, d * T * sizeof(float));
+                ggml_free(ctx0);
+            }
+        }
+    }
+
+    enc_output = std::move(x_buf);
+}
+
 // ===========================================================================
 // Swish activation (ggml graph version)
 // ===========================================================================
@@ -999,8 +1246,10 @@ static ggml_tensor* build_macaron_ffn(ggml_context* ctx, ggml_tensor* x, const f
     h = ggml_mul_mat(ctx, f.down_w, h);
     if (f.down_b)
         h = ggml_add(ctx, h, f.down_b);
-    // Macaron residual: 0.5*x + 0.5*ffn(x)
-    return ggml_add(ctx, ggml_scale(ctx, x, 0.5f), ggml_scale(ctx, h, 0.5f));
+    // Macaron residual: x + 0.5*net(x)
+    // (ffn.forward adds internal residual: ffn(x) = net(x) + x)
+    // So: 0.5*x + 0.5*ffn(x) = 0.5*x + 0.5*(net(x)+x) = x + 0.5*net(x)
+    return ggml_add(ctx, x, ggml_scale(ctx, h, 0.5f));
 }
 
 // ===========================================================================
@@ -1033,12 +1282,10 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, ggml_tensor* x, const f
     ggml_tensor* h2 = ggml_cont(ctx, ggml_view_2d(ctx, h, ch, T, h->nb[1], ch * ggml_type_size(h->type)));
     h = ggml_mul(ctx, h1, ggml_sigmoid(ctx, h2)); // [2560, T]
 
-    // Depthwise conv1d: groups=2560, kernel=33
-    // Transpose to [T, channels] for conv1d_dw
+    // Depthwise conv1d: groups=2560, kernel=33, SYMMETRIC padding=16
     ggml_tensor* ht = ggml_cont(ctx, ggml_transpose(ctx, h)); // [T, 2560]
-    // Causal padding: pad_left = kernel_size - 1 (stride=1)
-    int pad_left = kernel_size - 1;
-    ht = ggml_pad_ext(ctx, ht, pad_left, 0, 0, 0, 0, 0, 0, 0);
+    int pad_sym = (kernel_size - 1) / 2;                      // 16 on each side
+    ht = ggml_pad_ext(ctx, ht, pad_sym, pad_sym, 0, 0, 0, 0, 0, 0);
     ht = ggml_conv_1d_dw(ctx, conv.dw_w, ht, 1, 0, 1);
     // Output is [OL, 1, channels, 1] — reshape to [OL, channels]
     ht = ggml_reshape_2d(ctx, ht, ht->ne[0], ht->ne[2]);
@@ -1354,7 +1601,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
     // Step 3: CPU encoder (Conformer with relative PE attention)
     int flat_dim = 608; // 32 * 19
     std::vector<float> enc_output;
-    cpu_encoder(subsampled.data(), T_sub, flat_dim, m, enc_output);
+    hybrid_encoder(subsampled.data(), T_sub, flat_dim, ctx, enc_output);
     // enc_output: [T_sub, d_model] row-major
 
     if (ctx->params.verbosity >= 1) {
