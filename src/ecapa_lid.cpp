@@ -263,8 +263,8 @@ static void compute_fbank60(const float* pcm, int n_samples, std::vector<float>&
                     re += frame[n] * cos_tw[k * N + n];
                     im += frame[n] * sin_tw[k * N + n];
                 }
-                // SpeechBrain spectral_magnitude(power=1) = |STFT| (amplitude)
-                s += sqrtf(re * re + im * im) * mel_fb[m * bins + k];
+                // SpeechBrain spectral_magnitude(power=1) = re² + im² (POWER spectrum)
+                s += (re * re + im * im) * mel_fb[m * bins + k];
             }
             // SpeechBrain uses 10*log10 (dB), not ln
             features[t * n_mels + m] = 10.0f * log10f(std::max(s, 1e-10f));
@@ -459,15 +459,11 @@ extern "C" struct ecapa_lid_context* ecapa_lid_init(const char* model_path, int 
         auto it = wl.tensors.find("mel_filterbank");
         ggml_tensor* fb_t = (it != wl.tensors.end()) ? it->second : nullptr;
         if (fb_t) {
-            // GGUF stores [bins, n_mels] (column-major), we need [n_mels, bins] row-major
-            std::vector<float> raw;
-            read_f32(fb_t, raw);
-            int bins = m.fbank_bins;
-            m.mel_fb_embedded.resize(m.n_mels * bins);
-            for (int mel = 0; mel < m.n_mels; mel++)
-                for (int k = 0; k < bins; k++)
-                    m.mel_fb_embedded[mel * bins + k] = raw[k * m.n_mels + mel];
-            fprintf(stderr, "ecapa_lid: loaded+transposed filterbank [%d, %d]\n", m.n_mels, bins);
+            // GGUF raw data is numpy row-major [n_mels, bins] — no transpose needed.
+            // ggml metadata says ne=[bins, n_mels] but the flat data layout matches numpy.
+            read_f32(fb_t, m.mel_fb_embedded);
+            fprintf(stderr, "ecapa_lid: loaded filterbank [%d, %d] (%zu floats)\n",
+                    m.n_mels, m.fbank_bins, m.mel_fb_embedded.size());
         }
     }
 
@@ -503,13 +499,20 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
     int T = 0;
     compute_fbank60(samples, n_samples, fbank, T, m.mel_fb_embedded, m.n_fft_orig);
     fprintf(stderr, "ecapa_lid: fbank T=%d, n_mels=%d\n", T, m.n_mels);
-    fprintf(stderr, "  fbank[0,:5]=[%.2f,%.2f,%.2f,%.2f,%.2f]\n",
-            fbank[0], fbank[1], fbank[2], fbank[3], fbank[4]);
-    if (T > 50)
-        fprintf(stderr, "  fbank[50,:5]=[%.2f,%.2f,%.2f,%.2f,%.2f]\n",
-                fbank[50*m.n_mels], fbank[50*m.n_mels+1], fbank[50*m.n_mels+2],
-                fbank[50*m.n_mels+3], fbank[50*m.n_mels+4]);
     fflush(stderr);
+
+    // Debug: dump fbank to file for Python comparison
+    {
+        const char* dump_path = getenv("ECAPA_DUMP_FBANK");
+        if (dump_path && *dump_path) {
+            FILE* f = fopen(dump_path, "wb");
+            if (f) {
+                fwrite(fbank.data(), sizeof(float), fbank.size(), f);
+                fclose(f);
+                fprintf(stderr, "ecapa_lid: dumped fbank to %s (%zu floats)\n", dump_path, fbank.size());
+            }
+        }
+    }
     fflush(stderr);
     if (T <= 0)
         return nullptr;
