@@ -744,6 +744,23 @@ for CrispASR:
 
 Recommendation: use Qwen3-ASR (0.6B/1.7B) for Qwen-based ASR.
 
+### Facebook OmniASR — HIGH PRIORITY
+
+Facebook's OmniASR family (Apache-2.0): wav2vec2-based, 1,600+ languages,
+300M to 7B parameters. Three variants:
+- **CTC** (non-autoregressive, fastest): wav2vec2 encoder + linear projection
+- **W2V** (encoder only): self-supervised representations
+- **LLM** (autoregressive, best quality): wav2vec2 encoder + 1.2B transformer decoder
+
+**Recommended first target: OmniASR-CTC-300M**
+- 325M params, ~1.3 GB F32 → ~350 MB Q4_K
+- Can reuse our existing wav2vec2 backend for the encoder
+- CTC head is a single linear layer (trivial to add)
+- Beats Whisper-small/medium on multilingual benchmarks
+- 1,600+ languages without explicit language ID
+
+No GGUF conversions exist yet. High-impact new backend.
+
 ## 29. Ecosystem comparison and new backends — PENDING
 
 ### ggml ASR projects to benchmark against:
