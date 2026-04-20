@@ -652,6 +652,9 @@ boundary. The `Session` API is safe (C-ABI wrapper catches exceptions).
 | **Done** | #28 FireRedASR2-AED (14th backend) | Conformer encoder with rel-PE + CTC, hybrid ggml/CPU, 0.7x RT | ~1400 LOC |
 | **Done** | #29 FireRedVAD (DFSMN) | 588K-param VAD, 97.57% F1, output matches reference exactly | ~400 LOC |
 | **Done** | #30 Moonshine (15th backend) | 27M-param encoder-decoder, 11.2x RT, English-only, vendored from moonshine.cpp | ~1500 LOC vendored |
+| **Done** | #31 FireRedASR decoder | Greedy Transformer decoder (self+cross attn), matches reference exactly | ~200 LOC |
+| **Done** | #32 FireRedLID converter | 120-language LID via shared encoder + 6L decoder, output verified | converter only |
+| **Pending** | #33 Beam search decoder | Extend greedy to beam_size>1 with per-beam KV cache | ~150 LOC |
 
 ## 27. Kyutai STT — DONE
 
