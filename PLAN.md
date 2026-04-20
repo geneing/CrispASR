@@ -949,3 +949,10 @@ examples/cli/crispasr_backend_omniasr.cpp
 
 Next: dump CNN output + first transformer layer output, compare
 with Python reference (fairseq2 inference).
+
+### OmniASR-CTC — DONE (300M variant, update)
+
+16th backend working! 194 MB Q4_K, 1600+ languages.
+JFK: "en so my tonek n what yor campri kand fur yo s watyukandfur yor kontry"
+Key: input layer_norm, CTC blank=0, pos conv padding=K//2.
+TODO: upload to HF, convert 1B/3B/7B, grouped conv precision.
