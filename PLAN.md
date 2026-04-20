@@ -911,3 +911,23 @@ component; everything else maps to patterns we've already implemented.
 SentencePiece C++ library. We'd need to either bundle it or implement
 a compatible tokenizer reader. Their tokenizer model is a `.model`
 file (protobuf), not JSON like our other backends.
+
+### ECAPA-TDNN ggml graph — IN PROGRESS
+
+The CPU+OpenMP version works correctly (12.9s, detects English).
+The ggml graph version runs in 4.6s but has accuracy issues from:
+1. Tensor layout mismatch in build_conv1d_k1 transpose chain
+2. Res2Net sub-band ggml_view_2d offset needs verification
+3. SE block pool_1d on transposed tensor
+
+Block0 output matches Python when using ggml_pad_reflect_1d + correct
+input layout (column-major = no transpose from CPU). The issue is in
+how subsequent layers handle the [T, C] ↔ [C, T] transpositions.
+
+Key ggml ops used:
+- ggml_conv_1d + ggml_pad_reflect_1d (block0, Res2Net k=3 convs)
+- ggml_mul_mat (tdnn1/tdnn2/MFA k=1 convs, SE convs, classifier)
+- ggml_pool_1d (SE global average pool)
+- ggml_relu, ggml_sigmoid
+- ggml_view_2d (Res2Net sub-band splitting)
+- ggml_concat (Res2Net + MFA recombination)

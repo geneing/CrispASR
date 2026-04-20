@@ -1578,3 +1578,39 @@ with p ≥ 0.96 confidence on edge-tts generated samples.
 This is dramatically better than FireRedLID (544 MB Q4_K, 83% accuracy)
 for common languages, and 13x smaller. For the 25 extra languages
 (Chinese dialects) that FireRedLID covers, it remains the only option.
+
+### ggml tensor layout for conv1d input
+
+ggml uses column-major storage. A 2D tensor `[T, C]` has `ne[0]=T, ne[1]=C`.
+The flat data layout is `data[c * T + t]` — channels change SLOWER than time.
+
+This is the SAME as our CPU layout `x[c * T + t]`. So when passing CPU arrays
+to ggml tensors, NO transpose is needed — just copy directly.
+
+The confusion arises because `ggml_conv_1d(kernel [K,IC,OC], input [T,IC])`
+produces output `[T_out, OC]`, and the flat layout of input `data[ic * T + t]`
+puts consecutive time steps of the same channel together — which IS what
+conv1d processes along.
+
+**Lesson:** For ggml 2D tensors, `ne[0]` is the fast-changing (innermost)
+dimension. For `[T, C]`: time changes fastest, channels slowest.
+CPU row-major `x[c * T + t]` and ggml column-major `data[c * T + t]`
+are the SAME thing — both index as `slower_dim * faster_size + faster_dim`.
+
+### ggml_pad_reflect_1d exists
+
+ggml has `ggml_pad_reflect_1d(ctx, tensor, pad_left, pad_right)` for
+reflect padding. Use this instead of ggml_conv_1d's built-in zero padding
+when the model expects reflect padding (SpeechBrain default).
+
+### OpenMP for CPU-only models
+
+Adding `#pragma omp parallel for` to the outer loop of conv1d (over output
+channels) and batchnorm1d (over channels) gives ~2x speedup on 4 threads
+for ECAPA-TDNN. The CMakeLists needs explicit OpenMP linkage:
+```cmake
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(ecapa-lid PUBLIC OpenMP::OpenMP_CXX)
+endif()
+```
