@@ -1694,3 +1694,20 @@ The CTC blank = pad_id = 1 (SentencePiece <pad>).
 4. **No language conditioning for CTC**: confirmed from official repo comment
    "It is ignored when performing inference with CTC." The CTC model is
    fully language-agnostic across 1600+ languages.
+
+### OmniASR audio length limit
+
+Official docs: "Currently only audio files shorter than 40 seconds are
+accepted for inference." Models trained on ≤30s segments. For longer
+audio, use VAD segmentation to split into chunks.
+
+Our implementation doesn't enforce this limit — it will run on longer
+audio but quality degrades. The CNN downsampling (320x) means 40s of
+16kHz audio = 2000 frames through the transformer, which is within
+typical attention window limits.
+
+### fairseq2n native extension
+
+fairseq2's Python package requires `fairseq2n` C++ extension which is
+compiled for specific Python/CUDA combos. Not available for Python 3.13
+or CPU-only setups via pip. Our manual forward pass serves as reference.
