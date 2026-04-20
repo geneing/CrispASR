@@ -1235,3 +1235,45 @@ data with ne[0] as the fast dimension. This is NOT the same as
 Python's `view(T2, T1)` which reinterprets with the LAST dimension
 fastest (row-major). For the `_rel_shift` operation, this means ggml
 reshape cannot be used — need CPU-side computation or transposing.
+
+### Hybrid ggml/CPU encoder for relative position attention
+
+When a model requires an operation that ggml can't express natively
+(like rel_shift's row-major reshape), split the computation:
+- **ggml** for all matrix multiplications (FFN, projections, conv)
+- **CPU** only for the unsupported operation (attention scoring)
+
+For FireRedASR: 2 ggml graphs per layer (pre-attention + post-attention)
+with CPU attention scoring in between. This gave **20x speedup**
+(323s → 16s) over the full-CPU approach, because ggml handles the
+O(T*d²) matmuls while CPU only does the O(T²*d) attention scoring.
+
+### Depthwise conv padding: causal vs symmetric
+
+Streaming models (Mimi/Kyutai) use **causal** (left-only) padding:
+`pad_left = kernel_size - stride`.
+
+Non-streaming models (FireRedASR Conformer) use **symmetric** padding:
+`pad = (kernel_size - 1) / 2` on each side.
+
+Using the wrong padding gives completely wrong conv outputs but no
+error — the shapes are the same. Always check the PyTorch Conv1d's
+`padding` attribute to determine which type.
+
+### Stage-by-stage protocol results (FireRedASR)
+
+All 6 bugs were found by comparing at each sub-module boundary:
+
+1. FFN1 diverged at residual: found hidden internal residual in
+   `ConformerFeedForward.forward()` — `ffn(x) = net(x) + x`
+2. MHSA diverged: content-only matched perfectly, position component
+   was wrong → found rel_shift formula was inverted (`T-1-tq+tk` not
+   `tq-tk+T-1`) AND PE was extracted from wrong offset (first vs center)
+3. Conv diverged: found padding was causal (32+0) instead of symmetric
+   (16+16) by checking `depthwise_conv.padding` attribute
+4. Each fix was verified to bring the sub-module output within 0.002
+   of the reference before proceeding to the next
+
+Without the stage-by-stage protocol, these bugs would have been
+invisible — the model runs without errors in all cases, just produces
+wrong text.

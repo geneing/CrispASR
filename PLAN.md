@@ -649,7 +649,7 @@ boundary. The `Session` API is safe (C-ABI wrapper catches exceptions).
 | **Pending** | #22 Stream + audio decoder in wrappers | Expose `crispasr_audio_decode_*` + streaming session through Dart/Python/Rust bindings | ~150 LOC each |
 | **Pending** | #23 Diarization + LID + align in CrisperWeaver | Swap the MFCC/k-means stopgap for the lib path; wire LID for auto-language; add forced-aligner for LLM backends | ~250 LOC |
 | **Done** | #27 Kyutai STT (13th backend) | Mimi neural audio codec + causal LM, novel codec-based architecture | ~900 LOC |
-| **Done** | #28 FireRedASR2-AED (14th backend) | Conformer encoder with rel-PE + CTC, Mandarin/English/20+ Chinese dialects | ~1200 LOC |
+| **Done** | #28 FireRedASR2-AED (14th backend) | Conformer encoder with rel-PE + CTC, hybrid ggml/CPU, 0.7x RT | ~1400 LOC |
 
 ## 27. Kyutai STT — DONE
 
@@ -671,6 +671,33 @@ Key implementation lessons (discovered via stage-by-stage diff testing):
 Files: `src/kyutai_stt.{h,cpp}`, `models/convert-kyutai-stt-to-gguf.py`,
 `examples/cli/crispasr_backend_kyutai_stt.cpp`,
 `tools/dump_kyutai_stt_reference.py`.
+
+## 28. FireRedASR2-AED — DONE
+
+14th backend. Architecture: Conformer encoder (16L, d=1280, 20 heads,
+relative positional encoding with pos_bias_u/v, macaron FFN, depthwise
+separable conv k=33, LayerNorm) + CTC head (8667 tokens).
+
+Key implementation: hybrid ggml/CPU encoder. All matrix multiplications
+(FFN, Q/K/V projections, pointwise convolutions, depthwise conv, FC)
+run on ggml. Only the attention scoring (rel_shift + softmax + V
+weighting) runs on CPU, since the `_rel_shift` operation requires
+row-major reshape which ggml (column-major) cannot express.
+
+Performance: 16s for 11s audio (0.7x RT). The CPU attention scoring
+is O(T²·hd) per head which is small (~6MB for T=275, nh=20, hd=64)
+compared to the O(T·d²) matmuls handled by ggml.
+
+Six bugs found via stage-by-stage diff-testing (see LEARNINGS.md):
+FFN internal residual, rel_shift index formula, PE center extraction,
+symmetric conv padding, fbank energy floor, dw conv reshape.
+
+Files: `src/firered_asr.{h,cpp}`, `models/convert-firered-asr-to-gguf.py`,
+`examples/cli/crispasr_backend_firered_asr.cpp`,
+`tools/dump_firered_asr_reference.py`.
+
+TODO: Transformer decoder (beam search) for higher accuracy than CTC.
+TODO: Quantization + HF upload.
 
 ## 25. Montreal Forced Aligner evaluation — NOT PLANNED
 
