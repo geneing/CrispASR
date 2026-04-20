@@ -1,12 +1,12 @@
-// ecapa_lid.cpp — ECAPA-TDNN LID runtime (ggml graph).
+// ecapa_lid.cpp — ECAPA-TDNN LID runtime.
 //
-// Builds one ggml graph for the entire forward pass. All conv1d/BN/matmul
-// operations use ggml ops for BLAS-accelerated computation.
+// All-CPU implementation. The model is small enough (~21M params) that
+// ggml graph overhead isn't worth it — plain loops with simple helpers
+// are faster for this model size.
 
 #include "ecapa_lid.h"
 #include "core/gguf_loader.h"
 #include "ggml-backend.h"
-#include "ggml-cpu.h"
 #include "ggml.h"
 #include "gguf.h"
 
@@ -15,7 +15,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -24,171 +23,304 @@
 #endif
 
 // ===========================================================================
-// Model — stores ggml tensor pointers into the weight buffer
+// Helpers
 // ===========================================================================
 
+static void read_f32(ggml_tensor* t, std::vector<float>& out) {
+    if (!t) {
+        out.clear();
+        return;
+    }
+    int n = (int)ggml_nelements(t);
+    out.resize(n);
+    if (t->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
+    } else if (t->type == GGML_TYPE_F16) {
+        std::vector<uint16_t> tmp(n);
+        ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(uint16_t));
+        ggml_fp16_to_fp32_row((const ggml_fp16_t*)tmp.data(), out.data(), n);
+    } else {
+        size_t nbytes = ggml_nbytes(t);
+        std::vector<uint8_t> raw(nbytes);
+        ggml_backend_tensor_get(t, raw.data(), 0, nbytes);
+        const auto* traits = ggml_get_type_traits(t->type);
+        if (traits && traits->to_float)
+            traits->to_float(raw.data(), out.data(), n);
+        else
+            std::fill(out.begin(), out.end(), 0.0f);
+    }
+}
+
+// Conv1d: out[co][t] = sum_ci sum_k w[co][ci][k] * in[ci][t*stride + k*dilation] + bias[co]
+// in: [C_in, T], out: [C_out, T_out], w: [C_out, C_in, K]
+static void conv1d(const float* in, int C_in, int T_in, const float* w, const float* bias, int C_out, int K,
+                   int stride, int dilation, float* out, int& T_out) {
+    T_out = (T_in - dilation * (K - 1) - 1) / stride + 1;
+    if (T_out <= 0)
+        return;
+#pragma omp parallel for schedule(static)
+    for (int co = 0; co < C_out; co++) {
+        for (int t = 0; t < T_out; t++) {
+            double s = bias ? bias[co] : 0;
+            for (int ci = 0; ci < C_in; ci++) {
+                for (int k = 0; k < K; k++) {
+                    int ti = t * stride + k * dilation;
+                    if (ti >= 0 && ti < T_in)
+                        s += (double)w[(co * C_in + ci) * K + k] * (double)in[ci * T_in + ti];
+                }
+            }
+            out[co * T_out + t] = (float)s;
+        }
+    }
+}
+
+// BatchNorm1d: out = (in - running_mean) / sqrt(running_var + eps) * weight + bias
+static void batchnorm1d(float* data, int C, int T, const float* weight, const float* bias, const float* mean,
+                        const float* var, float eps = 1e-5f) {
+    #pragma omp parallel for schedule(static)
+    for (int c = 0; c < C; c++) {
+        float scale = weight[c] / sqrtf(var[c] + eps);
+        float shift = bias[c] - mean[c] * scale;
+        for (int t = 0; t < T; t++)
+            data[c * T + t] = data[c * T + t] * scale + shift;
+    }
+}
+
+static void relu_inplace(float* data, int n) {
+    for (int i = 0; i < n; i++)
+        if (data[i] < 0)
+            data[i] = 0;
+}
+
+// Pad input symmetrically with reflect mode: [C, T] → [C, T + pad_left + pad_right]
+// SpeechBrain Conv1d uses reflect padding by default.
+static void pad_1d_reflect(const float* in, int C, int T, int pad_left, int pad_right, float* out) {
+    int T_new = T + pad_left + pad_right;
+    for (int c = 0; c < C; c++) {
+        for (int t = 0; t < T_new; t++) {
+            int ti = t - pad_left;
+            if (ti < 0)
+                ti = -ti; // reflect left: -1→1, -2→2
+            else if (ti >= T)
+                ti = 2 * (T - 1) - ti; // reflect right
+            ti = std::max(0, std::min(ti, T - 1));
+            out[c * T_new + t] = in[c * T + ti];
+        }
+    }
+}
+
+// ===========================================================================
+// Model structures
+// ===========================================================================
+
+struct bn_params {
+    std::vector<float> weight, bias, mean, var;
+};
+
+struct conv_bn {
+    std::vector<float> conv_w, conv_b;
+    bn_params bn;
+    int C_out = 0, C_in = 0, K = 0;
+};
+
+struct se_block {
+    conv_bn conv1; // [128, 1024, 1] — squeeze
+    conv_bn conv2; // [1024, 128, 1] — excite
+};
+
+struct res2net_sub {
+    std::vector<float> conv_w, conv_b;
+    bn_params bn;
+};
+
+struct se_res2net_block {
+    conv_bn tdnn1;                  // [1024, 1024, 1]
+    std::vector<res2net_sub> subs;  // 7 sub-bands (scale-1)
+    se_block se;
+    conv_bn tdnn2;                  // [1024, 1024, 1]
+};
+
 struct ecapa_model {
-    int n_mels = 60, n_classes = 107, n_fft_orig = 400, fbank_bins = 201;
-    std::vector<float> mel_fb_embedded;
+    // Block 0: initial TDNN
+    conv_bn block0;           // Conv1d(60, 1024, 5)
+
+    // Blocks 1-3: SE-Res2Net
+    std::vector<se_res2net_block> se_blocks;
+
+    // MFA
+    conv_bn mfa;              // Conv1d(3072, 3072, 1)
+
+    // ASP (attentive statistical pooling)
+    conv_bn asp_tdnn;         // Conv1d(9216, 128, 1) — attention input
+    std::vector<float> asp_conv_w, asp_conv_b; // [3072, 128, 1] — attention output
+
+    // ASP BN
+    bn_params asp_bn;         // BN(6144)
+
+    // FC: embedding
+    std::vector<float> fc_w, fc_b; // Conv1d(6144, 256, 1)
+
+    // Classifier
+    bn_params cls_bn;
+    std::vector<float> cls_w1, cls_b1; // Linear(256, 512)
+    bn_params cls_bn1;
+    std::vector<float> cls_w2, cls_b2; // Linear(512, 107)
+
+    // Labels
     std::vector<std::string> labels;
-    std::map<std::string, ggml_tensor*> tensors; // all weight tensors by name
+    int n_mels = 60;
+    int n_classes = 107;
+    int n_fft_orig = 400;  // SpeechBrain's DFT size
+    int fbank_bins = 201;  // n_fft_orig/2 + 1
+    std::vector<float> mel_fb_embedded; // [n_mels * fbank_bins] from GGUF
 };
 
 struct ecapa_lid_context {
     ecapa_model model;
     int n_threads = 4;
-    ggml_backend_t backend = nullptr;
-    ggml_backend_buffer_t buf = nullptr;
-    ggml_backend_sched_t sched = nullptr;
-    ggml_context* weight_ctx = nullptr;
     std::string last_result;
 };
 
 // ===========================================================================
-// Fbank (60-dim, 512-point FFT with bin interpolation to 400-point grid)
+// Fbank (60-dim, Hamming window, matching SpeechBrain defaults)
 // ===========================================================================
 
 static void compute_fbank60(const float* pcm, int n_samples, std::vector<float>& features, int& n_frames,
-                            const std::vector<float>& mel_fb_override, int n_fft_target) {
-    const int sr = 16000, n_mels = 60, win_len = 400, hop = 160;
-    const int N = n_fft_target, N_fft = 512;
+                            const std::vector<float>& mel_fb_override = {}, int n_fft_target = 400) {
+    // SpeechBrain Fbank: n_fft=400 (we zero-pad to 512 for our radix-2 FFT).
+    // Mel filterbank uses n_fft_orig=400 for frequency bin spacing.
+    // No preemphasis, f_min=0, Hann window (periodic), center=True (reflect pad).
+    const int sr = 16000, n_mels = 60;
+    const int win_len = 400, hop = 160;
+    const int N = n_fft_target; // 400 for SpeechBrain (exact DFT, not power-of-2)
     const float low_freq = 0.0f, high_freq = (float)sr / 2;
-
     int pad_len = N / 2;
     int n_padded = n_samples + 2 * pad_len;
     std::vector<float> pcm_padded(n_padded, 0.0f);
     memcpy(pcm_padded.data() + pad_len, pcm, n_samples * sizeof(float));
+    // Reflect padding (SpeechBrain default pad_mode='reflect')
     for (int i = 0; i < pad_len; i++) {
         pcm_padded[pad_len - 1 - i] = pcm[std::min(i + 1, n_samples - 1)];
         pcm_padded[pad_len + n_samples + i] = pcm[std::max(n_samples - 2 - i, 0)];
     }
 
     n_frames = (n_padded - win_len) / hop + 1;
-    if (n_frames <= 0) { n_frames = 0; return; }
+    if (n_frames <= 0) {
+        n_frames = 0;
+        return;
+    }
 
-    int bins = N / 2 + 1;
+    int bins = N / 2 + 1;     // 201
     std::vector<float> mel_fb;
     if (!mel_fb_override.empty() && (int)mel_fb_override.size() == n_mels * bins) {
+        // Use the embedded SpeechBrain filterbank — exact match guaranteed
         mel_fb = mel_fb_override;
     } else {
+        // Fallback: compute triangular mel filterbank
         mel_fb.resize(n_mels * bins, 0.0f);
         auto hz2mel = [](float hz) { return 2595.0f * log10f(1.0f + hz / 700.0f); };
         auto mel2hz = [](float m) { return 700.0f * (powf(10.0f, m / 2595.0f) - 1.0f); };
         float ml = hz2mel(low_freq), mh = hz2mel(high_freq);
         std::vector<float> c(n_mels + 2);
-        for (int i = 0; i < n_mels + 2; i++) c[i] = mel2hz(ml + i * (mh - ml) / (n_mels + 1));
+        for (int i = 0; i < n_mels + 2; i++)
+            c[i] = mel2hz(ml + i * (mh - ml) / (n_mels + 1));
         for (int m = 0; m < n_mels; m++)
             for (int k = 0; k < bins; k++) {
                 float f = (float)k * sr / N;
-                if (f > c[m] && f <= c[m+1] && c[m+1] > c[m]) mel_fb[m*bins+k] = (f-c[m])/(c[m+1]-c[m]);
-                else if (f > c[m+1] && f < c[m+2] && c[m+2] > c[m+1]) mel_fb[m*bins+k] = (c[m+2]-f)/(c[m+2]-c[m+1]);
+                if (f > c[m] && f <= c[m + 1] && c[m + 1] > c[m])
+                    mel_fb[m * bins + k] = (f - c[m]) / (c[m + 1] - c[m]);
+                else if (f > c[m + 1] && f < c[m + 2] && c[m + 2] > c[m + 1])
+                    mel_fb[m * bins + k] = (c[m + 2] - f) / (c[m + 2] - c[m + 1]);
             }
     }
 
+    // Hann window (SpeechBrain STFT default, periodic=True)
     std::vector<float> window(win_len);
     for (int i = 0; i < win_len; i++)
-        window[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / win_len));
+        window[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / win_len)); // periodic Hann
 
     features.resize(n_frames * n_mels);
 
-    auto fft512 = [](float* r, float* im) {
-        const int n = 512;
-        for (int i = 1, j = 0; i < n; i++) {
-            int b = n >> 1; for (; j & b; b >>= 1) j ^= b; j ^= b;
-            if (i < j) { std::swap(r[i], r[j]); std::swap(im[i], im[j]); }
+    // Pre-compute DFT twiddle factors for 400-point DFT (only first 201 bins)
+    // cos_k[k*N+n] = cos(-2*pi*k*n/N), sin_k[k*N+n] = sin(-2*pi*k*n/N)
+    // N already defined above from n_fft_target
+    std::vector<float> cos_tw(bins * N), sin_tw(bins * N);
+    for (int k = 0; k < bins; k++)
+        for (int n = 0; n < N; n++) {
+            float angle = -2.0f * (float)M_PI * k * n / N;
+            cos_tw[k * N + n] = cosf(angle);
+            sin_tw[k * N + n] = sinf(angle);
         }
-        for (int l = 2; l <= n; l <<= 1) {
-            float a = -2.f * (float)M_PI / l, wr = cosf(a), wi = sinf(a);
-            for (int i = 0; i < n; i += l) {
-                float cr = 1, ci = 0;
-                for (int j = 0; j < l / 2; j++) {
-                    float t = r[i+j+l/2]*cr - im[i+j+l/2]*ci, u = r[i+j+l/2]*ci + im[i+j+l/2]*cr;
-                    r[i+j+l/2] = r[i+j]-t; im[i+j+l/2] = im[i+j]-u;
-                    r[i+j] += t; im[i+j] += u;
-                    float nr = cr*wr - ci*wi; ci = cr*wi + ci*wr; cr = nr;
-                }
-            }
-        }
-    };
 
-    const int fft_bins = N_fft / 2 + 1;
-    std::vector<int> bin_lo(bins); std::vector<float> bin_frac(bins);
-    for (int k = 0; k < bins; k++) {
-        float fft_idx = (float)k * sr / N * N_fft / (float)sr;
-        int lo = std::min((int)fft_idx, fft_bins - 2);
-        bin_lo[k] = lo; bin_frac[k] = fft_idx - lo;
-    }
-
-    std::vector<float> fre(N_fft), fim(N_fft);
     for (int t = 0; t < n_frames; t++) {
         int off = t * hop;
-        std::fill(fre.begin(), fre.end(), 0); std::fill(fim.begin(), fim.end(), 0);
-        for (int i = 0; i < win_len; i++) fre[i] = pcm_padded[off + i] * window[i];
-        fft512(fre.data(), fim.data());
-        std::vector<float> fft_power(fft_bins);
-        for (int j = 0; j < fft_bins; j++) fft_power[j] = fre[j]*fre[j] + fim[j]*fim[j];
+        // Windowed frame
+        std::vector<float> frame(N);
+        for (int i = 0; i < N; i++)
+            frame[i] = pcm_padded[off + i] * window[i];
+
+        // 400-point DFT: only first 201 bins (0..N/2)
+        // Magnitude = |DFT[k]| = sqrt(Re^2 + Im^2)
+        // Apply mel filterbank on the fly
         for (int m = 0; m < n_mels; m++) {
             float s = 0;
             for (int k = 0; k < bins; k++) {
-                float pw = fft_power[bin_lo[k]]*(1-bin_frac[k]) + fft_power[std::min(bin_lo[k]+1,fft_bins-1)]*bin_frac[k];
-                s += pw * mel_fb[m * bins + k];
+                if (mel_fb[m * bins + k] == 0) continue;
+                float re = 0, im = 0;
+                for (int n = 0; n < N; n++) {
+                    re += frame[n] * cos_tw[k * N + n];
+                    im += frame[n] * sin_tw[k * N + n];
+                }
+                // SpeechBrain spectral_magnitude(power=1) = re² + im² (POWER spectrum)
+                s += (re * re + im * im) * mel_fb[m * bins + k];
             }
+            // SpeechBrain uses 10*log10 (dB), not ln
             features[t * n_mels + m] = 10.0f * log10f(std::max(s, 1e-10f));
         }
     }
-    float global_max = *std::max_element(features.begin(), features.end());
+
+    // SpeechBrain dynamic range clamping (top_db=80):
+    // x_db = max(x_db, max_over_sequence - 80.0)
+    float global_max = features[0];
+    for (int i = 1; i < n_frames * n_mels; i++)
+        if (features[i] > global_max)
+            global_max = features[i];
     float floor = global_max - 80.0f;
-    for (auto& v : features) if (v < floor) v = floor;
+    for (int i = 0; i < n_frames * n_mels; i++)
+        if (features[i] < floor)
+            features[i] = floor;
 }
 
 // ===========================================================================
-// ggml graph helpers
+// Load helpers
 // ===========================================================================
 
-// Fused BN: x * (w/sqrt(v+eps)) + (b - m*w/sqrt(v+eps))
-// Pre-compute scale and shift on CPU, apply as ggml_mul + ggml_add
-static ggml_tensor* build_bn(ggml_context* ctx, ggml_tensor* x,
-                              ggml_tensor* w, ggml_tensor* b, ggml_tensor* m, ggml_tensor* v,
-                              ggml_tensor* eps) {
-    if (!w) return x;
-    // x: [T, C] → transpose to [C, T] for broadcasting, then back
-    ggml_tensor* xt = ggml_cont(ctx, ggml_transpose(ctx, x));
-    ggml_tensor* h = ggml_sub(ctx, xt, m);
-    h = ggml_div(ctx, h, ggml_sqrt(ctx, ggml_add(ctx, v, eps)));
-    h = ggml_mul(ctx, h, w);
-    if (b) h = ggml_add(ctx, h, b);
-    return ggml_cont(ctx, ggml_transpose(ctx, h));
-}
+static void load_conv_bn(const std::map<std::string, ggml_tensor*>& ts, const std::string& prefix, conv_bn& cb) {
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        auto it = ts.find(name);
+        return it != ts.end() ? it->second : nullptr;
+    };
+    read_f32(get(prefix + ".conv.weight"), cb.conv_w);
+    read_f32(get(prefix + ".conv.bias"), cb.conv_b);
+    read_f32(get(prefix + ".bn.weight"), cb.bn.weight);
+    read_f32(get(prefix + ".bn.bias"), cb.bn.bias);
+    read_f32(get(prefix + ".bn.running_mean"), cb.bn.mean);
+    read_f32(get(prefix + ".bn.running_var"), cb.bn.var);
 
-// Conv1d(k=1) = matmul. Input [C_in, T], weight [C_in, C_out] (2D) or [1, C_in, C_out] (3D)
-// Output [C_out, T]
-// Conv1d(k=1) = matmul. Input x: [T, C_in], weight w: [C_in, C_out] → output [T, C_out]
-static ggml_tensor* build_conv1d_k1(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b) {
-    ggml_tensor* ww = (ggml_n_dims(w) > 2) ? ggml_reshape_2d(ctx, w, w->ne[0] * w->ne[1], w->ne[2]) : w;
-    // x: [T, C_in] → transpose to [C_in, T]
-    ggml_tensor* xt = ggml_cont(ctx, ggml_transpose(ctx, x)); // [C_in, T]
-    // mul_mat(ww [C_in, C_out], xt [C_in, T]) → [C_out, T]
-    ggml_tensor* h = ggml_mul_mat(ctx, ww, xt); // [C_out, T]
-    // Add bias [C_out] — broadcasts over dim 1 (T)
-    if (b) h = ggml_add(ctx, h, b);
-    // Transpose back to [T, C_out]
-    return ggml_cont(ctx, ggml_transpose(ctx, h));
-}
-
-// Conv1d with kernel > 1 using ggml_conv_1d
-// Needs reflect padding first — done via ggml_pad_ext (zero pad) then fixup
-// For simplicity, use ggml_conv_1d with built-in padding
-static ggml_tensor* build_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b,
-                                  int stride, int dilation) {
-    int K = (int)w->ne[0];
-    int pad = dilation * (K - 1) / 2;
-    ggml_tensor* h = ggml_conv_1d(ctx, w, x, stride, pad, dilation);
-    if (b) {
-        ggml_tensor* ht = ggml_cont(ctx, ggml_transpose(ctx, h));
-        ht = ggml_add(ctx, ht, b);
-        h = ggml_cont(ctx, ggml_transpose(ctx, ht));
+    // Infer dimensions from conv weight shape
+    ggml_tensor* w = get(prefix + ".conv.weight");
+    if (w) {
+        // ggml shape: ne[0] is fastest. For 3D [K, C_in, C_out] or 2D [C_in, C_out]
+        if (ggml_n_dims(w) == 3) {
+            cb.K = (int)w->ne[0];
+            cb.C_in = (int)w->ne[1];
+            cb.C_out = (int)w->ne[2];
+        } else {
+            cb.K = 1;
+            cb.C_in = (int)w->ne[0];
+            cb.C_out = (int)w->ne[1];
+        }
     }
-    return h;
 }
 
 // ===========================================================================
@@ -200,461 +332,554 @@ extern "C" struct ecapa_lid_context* ecapa_lid_init(const char* model_path, int 
     ctx->n_threads = n_threads > 0 ? n_threads : 4;
     auto& m = ctx->model;
 
+    // Read hyperparams
     gguf_context* gctx = core_gguf::open_metadata(model_path);
-    if (!gctx) { delete ctx; return nullptr; }
+    if (!gctx) {
+        delete ctx;
+        return nullptr;
+    }
     m.n_mels = core_gguf::kv_u32(gctx, "ecapa.n_mels", 60);
     m.n_classes = core_gguf::kv_u32(gctx, "ecapa.n_classes", 107);
     m.n_fft_orig = core_gguf::kv_u32(gctx, "ecapa.n_fft", 400);
     m.fbank_bins = core_gguf::kv_u32(gctx, "ecapa.fbank_bins", 201);
+
+    // Labels
     const int tok_key = gguf_find_key(gctx, "tokenizer.ggml.tokens");
     if (tok_key >= 0) {
         int n = gguf_get_arr_n(gctx, tok_key);
         m.labels.resize(n);
         for (int i = 0; i < n; i++) {
             const char* s = gguf_get_arr_str(gctx, tok_key, i);
-            if (s) m.labels[i] = s;
+            if (s)
+                m.labels[i] = s;
         }
     }
     gguf_free(gctx);
 
     fprintf(stderr, "ecapa_lid: %d mels, %d classes, %zu labels\n", m.n_mels, m.n_classes, m.labels.size());
 
-    ctx->backend = ggml_backend_init_best();
-    if (!ctx->backend) { delete ctx; return nullptr; }
-
-    core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(model_path, ctx->backend, "ecapa-tdnn-lid", wl)) {
-        ggml_backend_free(ctx->backend); delete ctx; return nullptr;
+    // Load weights
+    ggml_backend_t backend = ggml_backend_init_best();
+    if (!backend) {
+        delete ctx;
+        return nullptr;
     }
-    ctx->weight_ctx = wl.ctx;
-    ctx->buf = wl.buf;
-    m.tensors = wl.tensors;
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(model_path, backend, "ecapa-tdnn-lid", wl)) {
+        ggml_backend_free(backend);
+        delete ctx;
+        return nullptr;
+    }
 
-    // Load embedded filterbank to CPU
+    auto& ts = wl.tensors;
+
+    // Block 0
+    load_conv_bn(ts, "emb.blocks.0", m.block0);
+
+    // SE-Res2Net blocks 1-3
+    m.se_blocks.resize(3);
+    for (int i = 0; i < 3; i++) {
+        auto& b = m.se_blocks[i];
+        std::string bp = "emb.blocks." + std::to_string(i + 1);
+
+        load_conv_bn(ts, bp + ".tdnn1", b.tdnn1);
+        load_conv_bn(ts, bp + ".tdnn2", b.tdnn2);
+
+        // Res2Net sub-bands (7 = scale-1)
+        b.subs.resize(7);
+        for (int j = 0; j < 7; j++) {
+            std::string sp = bp + ".res2net_block.blocks." + std::to_string(j);
+            auto get = [&](const std::string& name) -> ggml_tensor* {
+                auto it = ts.find(name);
+                return it != ts.end() ? it->second : nullptr;
+            };
+            read_f32(get(sp + ".conv.weight"), b.subs[j].conv_w);
+            read_f32(get(sp + ".conv.bias"), b.subs[j].conv_b);
+            read_f32(get(sp + ".bn.weight"), b.subs[j].bn.weight);
+            read_f32(get(sp + ".bn.bias"), b.subs[j].bn.bias);
+            read_f32(get(sp + ".bn.running_mean"), b.subs[j].bn.mean);
+            read_f32(get(sp + ".bn.running_var"), b.subs[j].bn.var);
+        }
+
+        // SE block
+        load_conv_bn(ts, bp + ".se_block.conv1", b.se.conv1);
+        load_conv_bn(ts, bp + ".se_block.conv2", b.se.conv2);
+    }
+
+    // MFA
+    load_conv_bn(ts, "emb.mfa", m.mfa);
+
+    // ASP
+    load_conv_bn(ts, "emb.asp.tdnn", m.asp_tdnn);
     {
-        auto it = m.tensors.find("mel_filterbank");
-        if (it != m.tensors.end()) {
-            std::vector<float> raw;
-            int n = (int)ggml_nelements(it->second);
-            raw.resize(n);
-            if (it->second->type == GGML_TYPE_F32)
-                ggml_backend_tensor_get(it->second, raw.data(), 0, n * sizeof(float));
-            m.mel_fb_embedded = raw;
-            fprintf(stderr, "ecapa_lid: loaded filterbank [%d, %d]\n", m.n_mels, m.fbank_bins);
+        auto it_w = ts.find("emb.asp.conv.weight");
+        auto it_b = ts.find("emb.asp.conv.bias");
+        if (it_w != ts.end())
+            read_f32(it_w->second, m.asp_conv_w);
+        if (it_b != ts.end())
+            read_f32(it_b->second, m.asp_conv_b);
+    }
+
+    // ASP BN
+    {
+        auto get = [&](const std::string& name) -> ggml_tensor* {
+            auto it = ts.find(name);
+            return it != ts.end() ? it->second : nullptr;
+        };
+        read_f32(get("emb.asp_bn.norm.weight"), m.asp_bn.weight);
+        read_f32(get("emb.asp_bn.norm.bias"), m.asp_bn.bias);
+        read_f32(get("emb.asp_bn.norm.running_mean"), m.asp_bn.mean);
+        read_f32(get("emb.asp_bn.norm.running_var"), m.asp_bn.var);
+    }
+
+    // FC
+    {
+        auto it_w = ts.find("emb.fc.conv.weight");
+        auto it_b = ts.find("emb.fc.conv.bias");
+        if (it_w != ts.end())
+            read_f32(it_w->second, m.fc_w);
+        if (it_b != ts.end())
+            read_f32(it_b->second, m.fc_b);
+    }
+
+    // Classifier
+    {
+        auto get = [&](const std::string& name) -> ggml_tensor* {
+            auto it = ts.find(name);
+            return it != ts.end() ? it->second : nullptr;
+        };
+        read_f32(get("cls.bn.weight"), m.cls_bn.weight);
+        read_f32(get("cls.bn.bias"), m.cls_bn.bias);
+        read_f32(get("cls.bn.running_mean"), m.cls_bn.mean);
+        read_f32(get("cls.bn.running_var"), m.cls_bn.var);
+        read_f32(get("cls.DNN.block_0.linear.weight"), m.cls_w1);
+        read_f32(get("cls.DNN.block_0.linear.bias"), m.cls_b1);
+        read_f32(get("cls.DNN.block_0.bn.weight"), m.cls_bn1.weight);
+        read_f32(get("cls.DNN.block_0.bn.bias"), m.cls_bn1.bias);
+        read_f32(get("cls.DNN.block_0.bn.running_mean"), m.cls_bn1.mean);
+        read_f32(get("cls.DNN.block_0.bn.running_var"), m.cls_bn1.var);
+        read_f32(get("cls.out.w.weight"), m.cls_w2);
+        read_f32(get("cls.out.w.bias"), m.cls_b2);
+    }
+
+    // Load embedded SpeechBrain mel filterbank if available
+    {
+        auto it = wl.tensors.find("mel_filterbank");
+        ggml_tensor* fb_t = (it != wl.tensors.end()) ? it->second : nullptr;
+        if (fb_t) {
+            // GGUF raw data is numpy row-major [n_mels, bins] — no transpose needed.
+            // ggml metadata says ne=[bins, n_mels] but the flat data layout matches numpy.
+            read_f32(fb_t, m.mel_fb_embedded);
+            fprintf(stderr, "ecapa_lid: loaded filterbank [%d, %d] (%zu floats)\n",
+                    m.n_mels, m.fbank_bins, m.mel_fb_embedded.size());
         }
     }
 
-    ctx->sched = ggml_backend_sched_new(&ctx->backend, nullptr, 1, 32768, false, false);
+    // Clean up — keep data in CPU vectors, free ggml context
+    ggml_free(wl.ctx);
+    ggml_backend_buffer_free(wl.buf);
+    ggml_backend_free(backend);
+
     return ctx;
 }
 
 extern "C" void ecapa_lid_free(struct ecapa_lid_context* ctx) {
-    if (!ctx) return;
-    if (ctx->sched) ggml_backend_sched_free(ctx->sched);
-    if (ctx->weight_ctx) ggml_free(ctx->weight_ctx);
-    if (ctx->buf) ggml_backend_buffer_free(ctx->buf);
-    if (ctx->backend) ggml_backend_free(ctx->backend);
     delete ctx;
 }
 
 // ===========================================================================
-// Detect — builds ggml graph for entire forward pass
+// Forward pass
 // ===========================================================================
 
 extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const float* samples, int n_samples,
                                         float* confidence) {
-    if (!ctx || !samples || n_samples <= 0) return nullptr;
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
     auto& m = ctx->model;
-    auto& ts = m.tensors;
 
+    // Cap input at 5 seconds — LID doesn't need more, and the MFA conv is O(C²×T)
     constexpr int kMaxSamples = 16000 * 5;
-    if (n_samples > kMaxSamples) n_samples = kMaxSamples;
+    if (n_samples > kMaxSamples)
+        n_samples = kMaxSamples;
 
-    // Helper to get tensor by name
-    auto G = [&](const std::string& name) -> ggml_tensor* {
-        auto it = ts.find(name);
-        return it != ts.end() ? it->second : nullptr;
-    };
-
-    // 1. Fbank on CPU
+    // 1. Fbank
     std::vector<float> fbank;
     int T = 0;
     compute_fbank60(samples, n_samples, fbank, T, m.mel_fb_embedded, m.n_fft_orig);
-    if (T <= 0) return nullptr;
+    fprintf(stderr, "ecapa_lid: fbank T=%d, n_mels=%d\n", T, m.n_mels);
+    fflush(stderr);
 
-    // Debug: optionally load reference fbank
-    const char* ref_path = getenv("ECAPA_REF_FBANK");
-    if (ref_path && *ref_path) {
-        FILE* f = fopen(ref_path, "rb");
-        if (f) {
-            fread(fbank.data(), sizeof(float), T * m.n_mels, f);
-            fclose(f);
-            fprintf(stderr, "ecapa_lid: LOADED ref fbank from %s\n", ref_path);
+    // Debug: dump/load fbank for Python comparison
+    {
+        const char* dump_path = getenv("ECAPA_DUMP_FBANK");
+        if (dump_path && *dump_path) {
+            FILE* f = fopen(dump_path, "wb");
+            if (f) {
+                fwrite(fbank.data(), sizeof(float), fbank.size(), f);
+                fclose(f);
+                fprintf(stderr, "ecapa_lid: dumped fbank to %s (%zu floats)\n", dump_path, fbank.size());
+            }
+        }
+        // Load reference fbank instead of our computed one (for debugging)
+        const char* ref_path = getenv("ECAPA_REF_FBANK");
+        if (ref_path && *ref_path) {
+            FILE* f = fopen(ref_path, "rb");
+            if (f) {
+                size_t expected = T * m.n_mels;
+                fread(fbank.data(), sizeof(float), expected, f);
+                fclose(f);
+                fprintf(stderr, "ecapa_lid: LOADED reference fbank from %s\n", ref_path);
+            }
         }
     }
+    fflush(stderr);
+    if (T <= 0)
+        return nullptr;
 
-    // Transpose to [n_mels, T] + mean normalize
-    std::vector<float> x_data(m.n_mels * T);
+    // Transpose to [C=60, T] for conv1d processing
+    std::vector<float> x(m.n_mels * T);
+    for (int c = 0; c < m.n_mels; c++)
+        for (int t = 0; t < T; t++)
+            x[c * T + t] = fbank[t * m.n_mels + c];
+
+    // 2. Sentence-level mean normalization
     for (int c = 0; c < m.n_mels; c++) {
         float mean = 0;
-        for (int t = 0; t < T; t++) mean += fbank[t * m.n_mels + c];
+        for (int t = 0; t < T; t++)
+            mean += x[c * T + t];
         mean /= T;
         for (int t = 0; t < T; t++)
-            x_data[c * T + t] = fbank[t * m.n_mels + c] - mean;
+            x[c * T + t] -= mean;
     }
 
-    // 2. Build ggml graph
-    size_t mem = ggml_tensor_overhead() * 4096 + ggml_graph_overhead_custom(32768, false);
-    std::vector<uint8_t> meta(mem);
-    struct ggml_init_params gp = {mem, meta.data(), true};
-    ggml_context* ctx0 = ggml_init(gp);
-    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
+    // 3. Block 0: Conv1d(60→1024, k=5, d=1) + BN + ReLU
+    int pad0 = (m.block0.K - 1) / 2; // symmetric padding for k=5 → pad=2
+    std::vector<float> x_pad(m.n_mels * (T + 2 * pad0));
+    pad_1d_reflect(x.data(), m.n_mels, T, pad0, pad0, x_pad.data());
+    int T0 = 0;
+    std::vector<float> h0(1024 * T); // output channels=1024
+    if (m.block0.conv_w.empty()) {
+        fprintf(stderr, "ecapa_lid: ERROR — block0 weights not loaded!\n");
+        return nullptr;
+    }
+    conv1d(x_pad.data(), m.n_mels, T + 2 * pad0, m.block0.conv_w.data(), m.block0.conv_b.data(), 1024,
+           m.block0.K, 1, 1, h0.data(), T0);
+    // SpeechBrain order: conv → ReLU → BN
+    relu_inplace(h0.data(), 1024 * T0);
+    batchnorm1d(h0.data(), 1024, T0, m.block0.bn.weight.data(), m.block0.bn.bias.data(), m.block0.bn.mean.data(),
+                m.block0.bn.var.data());
 
-    // Input + constants
-    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T, m.n_mels);
-    ggml_set_name(inp, "input");
-    ggml_set_input(inp);
+    // 4. SE-Res2Net blocks 1-3
+    int C = 1024, scale = 8, sub_c = C / scale; // sub_c = 128
+    std::vector<std::vector<float>> block_outputs; // for MFA concatenation
+    std::vector<float> cur = h0;
+    int T_cur = T0;
 
-    // Epsilon constant for BN (must be allocated as input, not created with ggml_new_f32 in no_alloc context)
-    ggml_tensor* eps_t = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
-    ggml_set_name(eps_t, "eps");
-    ggml_set_input(eps_t);
+    for (int bi = 0; bi < 3; bi++) {
+        auto& blk = m.se_blocks[bi];
+        int dilation = bi + 2; // dilations: 2, 3, 4
 
-    // Block 0: Conv1d(60→1024, k=5) + ReLU + BN
-    ggml_tensor* h = build_conv1d(ctx0, inp, G("emb.blocks.0.conv.weight"), G("emb.blocks.0.conv.bias"), 1, 1);
-    // Debug: output pre-relu conv
-    ggml_set_name(h, "block0_pre_relu");
-    ggml_set_output(h);
+        // tdnn1: pointwise conv (1024→1024, k=1) + ReLU + BN
+        // SpeechBrain order: conv → activation → norm → dropout
+        std::vector<float> h_tdnn1(C * T_cur);
+        int T_tmp = 0;
+        conv1d(cur.data(), C, T_cur, blk.tdnn1.conv_w.data(), blk.tdnn1.conv_b.data(), C, 1, 1, 1, h_tdnn1.data(),
+               T_tmp);
+        relu_inplace(h_tdnn1.data(), C * T_cur);
+        batchnorm1d(h_tdnn1.data(), C, T_cur, blk.tdnn1.bn.weight.data(), blk.tdnn1.bn.bias.data(),
+                    blk.tdnn1.bn.mean.data(), blk.tdnn1.bn.var.data());
+        if (bi == 0) {
+            fprintf(stderr, "  B1 tdnn1: h[:3,0]=[%.4f,%.4f,%.4f]\n",
+                    h_tdnn1[0*T_cur], h_tdnn1[1*T_cur], h_tdnn1[2*T_cur]);
+            fflush(stderr);
+        }
 
-    h = ggml_relu(ctx0, h);
-    h = build_bn(ctx0, h, G("emb.blocks.0.bn.weight"), G("emb.blocks.0.bn.bias"),
-                 G("emb.blocks.0.bn.running_mean"), G("emb.blocks.0.bn.running_var"), eps_t);
-
-    ggml_set_name(h, "block0_out");
-    ggml_set_output(h);
-
-    // Blocks 1-3: SE-Res2Net
-    // Each block: tdnn1(k=1) → Res2Net → tdnn2(k=1) → SE → residual
-    std::vector<ggml_tensor*> block_outputs;
-    for (int bi = 1; bi <= 3; bi++) {
-        std::string bp = "emb.blocks." + std::to_string(bi);
-        int dilation = bi + 1;
-        ggml_tensor* residual = h;
-
-        // tdnn1: Conv1d(1024→1024, k=1) + ReLU + BN
-        ggml_tensor* h1 = build_conv1d_k1(ctx0, h, G(bp + ".tdnn1.conv.weight"), G(bp + ".tdnn1.conv.bias"));
-        h1 = ggml_relu(ctx0, h1);
-        h1 = build_bn(ctx0, h1, G(bp + ".tdnn1.bn.weight"), G(bp + ".tdnn1.bn.bias"),
-                       G(bp + ".tdnn1.bn.running_mean"), G(bp + ".tdnn1.bn.running_var"), eps_t);
-
-        // Res2Net: split 1024 channels into 8 sub-bands of 128
-        // h1: [T, 1024] in ggml (ne[0]=T, ne[1]=1024)
-        int sub_c = 128;
-        int T_cur = (int)h1->ne[0];
-
+        // Res2Net: split into 8 sub-bands of 128 channels
         // Sub-band 0: pass through
-        ggml_tensor* chunk0 = ggml_view_2d(ctx0, h1, T_cur, sub_c, h1->nb[1], 0);
+        // Sub-bands 1-7: conv1d(128→128, k=3, d=dilation) + BN + ReLU, with residual from prev
+        std::vector<float> res2_out(C * T_cur, 0);
+        // Copy sub-band 0 directly
+        for (int t = 0; t < T_cur; t++)
+            for (int c = 0; c < sub_c; c++)
+                res2_out[c * T_cur + t] = h_tdnn1[c * T_cur + t];
 
-        // Process sub-bands 1-7 with cumulative connections
-        std::vector<ggml_tensor*> chunks;
-        chunks.push_back(chunk0);
-        ggml_tensor* prev = chunk0;
-
-        for (int si = 1; si < 8; si++) {
-            size_t offset = (size_t)si * sub_c * ggml_type_size(h1->type) * T_cur;
-            ggml_tensor* chunk_i = ggml_view_2d(ctx0, h1, T_cur, sub_c, h1->nb[1], offset);
-
-            ggml_tensor* sub_in;
-            if (si == 1) {
-                sub_in = chunk_i; // sub-band 1: no prev addition
+        // prev starts as sub-band 0 (Python: prev = chunks[0])
+        std::vector<float> prev_sub(sub_c * T_cur);
+        for (int t = 0; t < T_cur; t++)
+            for (int c = 0; c < sub_c; c++)
+                prev_sub[c * T_cur + t] = h_tdnn1[c * T_cur + t];
+        for (int si = 0; si < 7; si++) { // sub-bands 1-7 (Python i=1..7)
+            int c_off = (si + 1) * sub_c;
+            std::vector<float> sub_in(sub_c * T_cur);
+            if (si == 0) {
+                // Sub-band 1: conv on x_i alone (no prev addition)
+                for (int t = 0; t < T_cur; t++)
+                    for (int c = 0; c < sub_c; c++)
+                        sub_in[c * T_cur + t] = h_tdnn1[(c_off + c) * T_cur + t];
             } else {
-                sub_in = ggml_add(ctx0, chunk_i, prev);
+                // Sub-bands 2-7: add previous output
+                for (int t = 0; t < T_cur; t++)
+                    for (int c = 0; c < sub_c; c++)
+                        sub_in[c * T_cur + t] = h_tdnn1[(c_off + c) * T_cur + t] + prev_sub[c * T_cur + t];
             }
 
-            // Conv1d(128→128, k=3, d=dilation) + ReLU + BN
-            std::string sp = bp + ".res2net_block.blocks." + std::to_string(si - 1);
-            ggml_tensor* sub_out = build_conv1d(ctx0, sub_in, G(sp + ".conv.weight"), G(sp + ".conv.bias"),
-                                                1, dilation);
-            sub_out = ggml_relu(ctx0, sub_out);
-            sub_out = build_bn(ctx0, sub_out, G(sp + ".bn.weight"), G(sp + ".bn.bias"),
-                               G(sp + ".bn.running_mean"), G(sp + ".bn.running_var"), eps_t);
+            // Conv1d(128→128, k=3, dilation=dilation) with causal-style padding
+            int pad_r2 = dilation; // padding = dilation for k=3
+            std::vector<float> sub_padded(sub_c * (T_cur + 2 * pad_r2));
+            pad_1d_reflect(sub_in.data(), sub_c, T_cur, pad_r2, pad_r2, sub_padded.data());
+            int T_r2 = 0;
+            std::vector<float> sub_out(sub_c * T_cur);
+            conv1d(sub_padded.data(), sub_c, T_cur + 2 * pad_r2, blk.subs[si].conv_w.data(),
+                   blk.subs[si].conv_b.data(), sub_c, 3, 1, dilation, sub_out.data(), T_r2);
 
-            chunks.push_back(sub_out);
-            prev = sub_out;
+            // BN + ReLU
+            if (T_r2 == T_cur) {
+                relu_inplace(sub_out.data(), sub_c * T_r2);
+                batchnorm1d(sub_out.data(), sub_c, T_r2, blk.subs[si].bn.weight.data(), blk.subs[si].bn.bias.data(),
+                            blk.subs[si].bn.mean.data(), blk.subs[si].bn.var.data());
+
+                // Copy to output and save as prev
+                for (int t = 0; t < T_cur; t++)
+                    for (int c = 0; c < sub_c; c++) {
+                        res2_out[(c_off + c) * T_cur + t] = sub_out[c * T_cur + t];
+                        prev_sub[c * T_cur + t] = sub_out[c * T_cur + t];
+                    }
+                if (bi == 0 && si == 0) {
+                    fprintf(stderr, "  B1 r2n sub0: o[:3,0]=[%.4f,%.4f,%.4f]\n",
+                            sub_out[0*T_cur], sub_out[1*T_cur], sub_out[2*T_cur]);
+                    fflush(stderr);
+                }
+            }
         }
 
-        // Concatenate sub-bands: [T, 128] × 8 → [T, 1024]
-        ggml_tensor* r2_out = ggml_concat(ctx0, chunks[0], chunks[1], 1);
-        for (int si = 2; si < 8; si++)
-            r2_out = ggml_concat(ctx0, r2_out, chunks[si], 1);
+        // SpeechBrain order: tdnn1 → res2net → tdnn2 → SE → residual
 
-        // tdnn2: Conv1d(1024→1024, k=1) + ReLU + BN
-        ggml_tensor* h2 = build_conv1d_k1(ctx0, r2_out, G(bp + ".tdnn2.conv.weight"), G(bp + ".tdnn2.conv.bias"));
-        h2 = ggml_relu(ctx0, h2);
-        h2 = build_bn(ctx0, h2, G(bp + ".tdnn2.bn.weight"), G(bp + ".tdnn2.bn.bias"),
-                       G(bp + ".tdnn2.bn.running_mean"), G(bp + ".tdnn2.bn.running_var"), eps_t);
+        // tdnn2: pointwise conv (1024→1024, k=1) + ReLU + BN
+        std::vector<float> h_tdnn2(C * T_cur);
+        conv1d(res2_out.data(), C, T_cur, blk.tdnn2.conv_w.data(), blk.tdnn2.conv_b.data(), C, 1, 1, 1,
+               h_tdnn2.data(), T_tmp);
+        relu_inplace(h_tdnn2.data(), C * T_cur);
+        batchnorm1d(h_tdnn2.data(), C, T_cur, blk.tdnn2.bn.weight.data(), blk.tdnn2.bn.bias.data(),
+                    blk.tdnn2.bn.mean.data(), blk.tdnn2.bn.var.data());
 
-        // SE: squeeze-excitation on tdnn2 output
-        // Pool: mean over time → [1, 1024]
-        ggml_tensor* se_pool = ggml_pool_1d(ctx0, h2, GGML_OP_POOL_AVG, T_cur, T_cur, 0);
+        // SE: squeeze-excitation on tdnn2 output (NOT on res2_out!)
+        // Global average pool of tdnn2 output
+        std::vector<float> se_pool(C, 0);
+        for (int c = 0; c < C; c++) {
+            for (int t = 0; t < T_cur; t++)
+                se_pool[c] += h_tdnn2[c * T_cur + t];
+            se_pool[c] /= T_cur;
+        }
         // conv1: 1024→128 + ReLU
-        ggml_tensor* se1 = build_conv1d_k1(ctx0, se_pool,
-                                            G(bp + ".se_block.conv1.conv.weight"),
-                                            G(bp + ".se_block.conv1.conv.bias"));
-        se1 = ggml_relu(ctx0, se1);
+        std::vector<float> se1(128, 0);
+        for (int i = 0; i < 128; i++) {
+            double s = blk.se.conv1.conv_b.empty() ? 0 : blk.se.conv1.conv_b[i];
+            for (int k = 0; k < C; k++)
+                s += se_pool[k] * blk.se.conv1.conv_w[i * C + k];
+            se1[i] = std::max((float)s, 0.0f);
+        }
         // conv2: 128→1024 + sigmoid
-        ggml_tensor* se2 = build_conv1d_k1(ctx0, se1,
-                                            G(bp + ".se_block.conv2.conv.weight"),
-                                            G(bp + ".se_block.conv2.conv.bias"));
-        se2 = ggml_sigmoid(ctx0, se2);
-
-        // Scale: h2 * se2 (broadcast se2 over time)
-        h = ggml_mul(ctx0, h2, se2);
+        std::vector<float> se2(C, 0);
+        for (int i = 0; i < C; i++) {
+            double s = blk.se.conv2.conv_b.empty() ? 0 : blk.se.conv2.conv_b[i];
+            for (int k = 0; k < 128; k++)
+                s += se1[k] * blk.se.conv2.conv_w[i * 128 + k];
+            se2[i] = 1.0f / (1.0f + expf(-(float)s));
+        }
+        // Scale tdnn2 output
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < T_cur; t++)
+                h_tdnn2[c * T_cur + t] *= se2[c];
 
         // Residual
-        h = ggml_add(ctx0, h, residual);
-        block_outputs.push_back(h);
-    }
-
-    // MFA: concatenate block1-3 outputs + Conv1d(3072→3072, k=1) + ReLU + BN
-    ggml_tensor* mfa_in = ggml_concat(ctx0, block_outputs[0], block_outputs[1], 1);
-    mfa_in = ggml_concat(ctx0, mfa_in, block_outputs[2], 1);
-    ggml_tensor* mfa = build_conv1d_k1(ctx0, mfa_in, G("emb.mfa.conv.weight"), G("emb.mfa.conv.bias"));
-    mfa = ggml_relu(ctx0, mfa);
-    mfa = build_bn(ctx0, mfa, G("emb.mfa.bn.weight"), G("emb.mfa.bn.bias"),
-                   G("emb.mfa.bn.running_mean"), G("emb.mfa.bn.running_var"), eps_t);
-
-    // ASP: Attentive Statistical Pooling
-    // h_mean, h_std over time → cat with mfa → TDNN → tanh → conv → softmax → weighted mean+std
-    // This is complex for ggml — mark mfa as output and do ASP + classifier on CPU
-    ggml_set_name(mfa, "mfa_out");
-    ggml_set_output(mfa);
-    ggml_build_forward_expand(gf, mfa);
-
-    // Allocate and compute graph
-    ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
-        fprintf(stderr, "ecapa_lid: graph alloc failed\n");
-        ggml_free(ctx0);
-        return nullptr;
-    }
-
-    // Set input — ggml tensor [T, n_mels] is column-major: data[ic * T + t]
-    // x_data is [n_mels, T] row-major: x_data[c * T + t]
-    // For ggml column-major [ne[0]=T, ne[1]=IC]: data[ic * T + t] = x_data[ic * T + t]
-    // They're the SAME layout! Just copy directly.
-    std::vector<float>& x_t = x_data; // no transpose needed!
-    ggml_backend_tensor_set(inp, x_t.data(), 0, m.n_mels * T * sizeof(float));
-    fprintf(stderr, "ecapa_lid: inp ne=[%lld,%lld], x_t[:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
-            (long long)inp->ne[0], (long long)inp->ne[1],
-            x_t[0], x_t[1], x_t[2], x_t[3], x_t[4]);
-    fflush(stderr);
-    float eps_val = 1e-5f;
-    ggml_backend_tensor_set(eps_t, &eps_val, 0, sizeof(float));
-
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
-        fprintf(stderr, "ecapa_lid: graph compute failed\n");
-        ggml_free(ctx0);
-        return nullptr;
-    }
-
-    // Debug: read block0 output
-    {
-        ggml_tensor* pre = ggml_graph_get_tensor(gf, "block0_pre_relu");
-        ggml_tensor* out = ggml_graph_get_tensor(gf, "block0_out");
-        if (pre && out) {
-            float buf[10];
-            ggml_backend_tensor_get(pre, buf, 0, 10 * sizeof(float));
-            fprintf(stderr, "ecapa_lid: block0 pre_relu ne=[%lld,%lld], data[:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
-                    (long long)pre->ne[0], (long long)pre->ne[1], buf[0], buf[1], buf[2], buf[3], buf[4]);
-            ggml_backend_tensor_get(out, buf, 0, 10 * sizeof(float));
-            fprintf(stderr, "ecapa_lid: block0 out ne=[%lld,%lld], data[:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
-                    (long long)out->ne[0], (long long)out->ne[1], buf[0], buf[1], buf[2], buf[3], buf[4]);
+        for (int i = 0; i < C * T_cur; i++)
+            h_tdnn2[i] += cur[i];
+        if (bi == 0) {
+            fprintf(stderr, "  B1 output: h[:3,0]=[%.4f,%.4f,%.4f], mean=%.6f\n",
+                    h_tdnn2[0*T_cur], h_tdnn2[1*T_cur], h_tdnn2[2*T_cur],
+                    [&]{float s=0; for(int i=0;i<C*T_cur;i++) s+=h_tdnn2[i]; return s/(C*T_cur);}());
+            fflush(stderr);
         }
+
+        cur = h_tdnn2;
+        block_outputs.push_back(cur); // save for MFA
     }
 
-    // Read MFA output: [T, 3072] in ggml
-    ggml_tensor* mfa_t = ggml_graph_get_tensor(gf, "mfa_out");
-    int T_mfa = (int)mfa_t->ne[0];
-    int C_mfa = (int)mfa_t->ne[1]; // 3072
-    std::vector<float> mfa_data(T_mfa * C_mfa);
-    ggml_backend_tensor_get(mfa_t, mfa_data.data(), 0, T_mfa * C_mfa * sizeof(float));
-    ggml_free(ctx0);
+    // 5. MFA: concatenate block outputs [3 × 1024, T] → [3072, T]
+    int C_mfa = 3072;
+    std::vector<float> mfa_in(C_mfa * T_cur);
+    for (int bi = 0; bi < 3; bi++)
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < T_cur; t++)
+                mfa_in[(bi * C + c) * T_cur + t] = block_outputs[bi][c * T_cur + t];
 
-    // Transpose MFA to [C_mfa, T] for CPU ASP
-    std::vector<float> mfa_ct(C_mfa * T_mfa);
-    for (int c = 0; c < C_mfa; c++)
-        for (int t = 0; t < T_mfa; t++)
-            mfa_ct[c * T_mfa + t] = mfa_data[t * C_mfa + c];
+    // MFA conv(3072→3072, k=1) + BN + ReLU
+    std::vector<float> mfa_out(C_mfa * T_cur);
+    int T_mfa = 0;
+    conv1d(mfa_in.data(), C_mfa, T_cur, m.mfa.conv_w.data(), m.mfa.conv_b.data(), C_mfa, 1, 1, 1, mfa_out.data(),
+           T_mfa);
+    relu_inplace(mfa_out.data(), C_mfa * T_cur);
+    batchnorm1d(mfa_out.data(), C_mfa, T_cur, m.mfa.bn.weight.data(), m.mfa.bn.bias.data(), m.mfa.bn.mean.data(),
+                m.mfa.bn.var.data());
 
-    // ASP on CPU (small computation, not worth ggml overhead)
+    // 6. ASP: attentive statistical pooling
+    // Concatenate mfa_out [3072, T] with mfa_out [3072, T] × 3 (for context) → actually just [3072, T]
+    // The ASP first maps via TDNN: [3072*3=9216, T]→[128, T] ... wait, the input is 9216?
+    // Actually: ASP input is concat of mfa_out repeated 3 times (global context)
+    // Let me check: asp.tdnn.conv.weight is [128, 9216, 1]
+    // 9216 = 3072 * 3 — global mean appended, or 3072 * T collapsed...
+    // Actually for ASP: input = cat(h, mean.expand, std.expand) where mean/std are per-channel
+    // h=[3072,T], mean=[3072] expanded to [3072,T], std=[3072] expanded to [3072,T]
+    // → input = [9216, T]
     std::vector<float> h_mean(C_mfa, 0), h_std(C_mfa, 0);
     for (int c = 0; c < C_mfa; c++) {
         float sum = 0, sum2 = 0;
-        for (int t = 0; t < T_mfa; t++) {
-            float v = mfa_ct[c * T_mfa + t];
-            sum += v; sum2 += v * v;
+        for (int t = 0; t < T_cur; t++) {
+            float v = mfa_out[c * T_cur + t];
+            sum += v;
+            sum2 += v * v;
         }
-        h_mean[c] = sum / T_mfa;
-        h_std[c] = sqrtf(std::max(sum2 / T_mfa - h_mean[c] * h_mean[c], 1e-10f));
+        h_mean[c] = sum / T_cur;
+        float var = sum2 / T_cur - h_mean[c] * h_mean[c];
+        h_std[c] = sqrtf(std::max(var, 1e-10f));
     }
 
-    // ASP input: [9216, T] = cat(mfa, mean_expanded, std_expanded)
-    auto read_f32 = [](ggml_tensor* t, std::vector<float>& out) {
-        if (!t) { out.clear(); return; }
-        int n = (int)ggml_nelements(t);
-        out.resize(n);
-        if (t->type == GGML_TYPE_F32)
-            ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
-        else if (t->type == GGML_TYPE_F16) {
-            std::vector<uint16_t> tmp(n);
-            ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(uint16_t));
-            ggml_fp16_to_fp32_row((const ggml_fp16_t*)tmp.data(), out.data(), n);
-        }
-    };
-
-    // ASP TDNN + attention + pooling
-    std::vector<float> asp_tdnn_w, asp_tdnn_b, asp_bn_w, asp_bn_b, asp_bn_m, asp_bn_v;
-    read_f32(G("emb.asp.tdnn.conv.weight"), asp_tdnn_w);
-    read_f32(G("emb.asp.tdnn.conv.bias"), asp_tdnn_b);
-    read_f32(G("emb.asp.tdnn.bn.weight"), asp_bn_w);
-    read_f32(G("emb.asp.tdnn.bn.bias"), asp_bn_b);
-    read_f32(G("emb.asp.tdnn.bn.running_mean"), asp_bn_m);
-    read_f32(G("emb.asp.tdnn.bn.running_var"), asp_bn_v);
-
-    // TDNN: [9216→128, k=1]
-    std::vector<float> asp_h(128 * T_mfa, 0);
-    for (int i = 0; i < 128; i++) {
-        for (int t = 0; t < T_mfa; t++) {
-            double s = asp_tdnn_b.empty() ? 0 : asp_tdnn_b[i];
-            for (int c = 0; c < C_mfa; c++) {
-                s += mfa_ct[c * T_mfa + t] * asp_tdnn_w[i * 9216 + c];
-                s += h_mean[c] * asp_tdnn_w[i * 9216 + C_mfa + c];
-                s += h_std[c] * asp_tdnn_w[i * 9216 + 2 * C_mfa + c];
-            }
-            asp_h[i * T_mfa + t] = (float)s;
+    std::vector<float> asp_in(9216 * T_cur);
+    for (int t = 0; t < T_cur; t++) {
+        for (int c = 0; c < C_mfa; c++) {
+            asp_in[(c) * T_cur + t] = mfa_out[c * T_cur + t];
+            asp_in[(C_mfa + c) * T_cur + t] = h_mean[c];
+            asp_in[(2 * C_mfa + c) * T_cur + t] = h_std[c];
         }
     }
-    // BN + tanh
-    for (int c = 0; c < 128; c++) {
-        float scale = asp_bn_w[c] / sqrtf(asp_bn_v[c] + 1e-5f);
-        float shift = asp_bn_b[c] - asp_bn_m[c] * scale;
-        for (int t = 0; t < T_mfa; t++)
-            asp_h[c * T_mfa + t] = tanhf(asp_h[c * T_mfa + t] * scale + shift);
-    }
 
-    // Attention conv: [128→3072, k=1]
-    std::vector<float> asp_conv_w, asp_conv_b;
-    read_f32(G("emb.asp.conv.weight"), asp_conv_w);
-    read_f32(G("emb.asp.conv.bias"), asp_conv_b);
+    // ASP TDNN: [9216→128, k=1] + BN + tanh
+    std::vector<float> asp_h(128 * T_cur);
+    int T_asp = 0;
+    conv1d(asp_in.data(), 9216, T_cur, m.asp_tdnn.conv_w.data(), m.asp_tdnn.conv_b.data(), 128, 1, 1, 1,
+           asp_h.data(), T_asp);
+    batchnorm1d(asp_h.data(), 128, T_cur, m.asp_tdnn.bn.weight.data(), m.asp_tdnn.bn.bias.data(),
+                m.asp_tdnn.bn.mean.data(), m.asp_tdnn.bn.var.data());
+    // tanh
+    for (int i = 0; i < 128 * T_cur; i++)
+        asp_h[i] = tanhf(asp_h[i]);
 
-    std::vector<float> attn(C_mfa * T_mfa, 0);
+    // ASP attention: [128→3072, k=1] → softmax over time
+    std::vector<float> attn(C_mfa * T_cur);
+    conv1d(asp_h.data(), 128, T_cur, m.asp_conv_w.data(), m.asp_conv_b.data(), C_mfa, 1, 1, 1, attn.data(), T_asp);
+
+    // Softmax over time dimension for each channel
     for (int c = 0; c < C_mfa; c++) {
-        for (int t = 0; t < T_mfa; t++) {
-            double s = asp_conv_b.empty() ? 0 : asp_conv_b[c];
-            for (int k = 0; k < 128; k++)
-                s += asp_h[k * T_mfa + t] * asp_conv_w[c * 128 + k];
-            attn[c * T_mfa + t] = (float)s;
-        }
-    }
-    // Softmax over time
-    for (int c = 0; c < C_mfa; c++) {
-        float mx = attn[c * T_mfa];
-        for (int t = 1; t < T_mfa; t++) if (attn[c * T_mfa + t] > mx) mx = attn[c * T_mfa + t];
+        float mx = attn[c * T_cur];
+        for (int t = 1; t < T_cur; t++)
+            if (attn[c * T_cur + t] > mx)
+                mx = attn[c * T_cur + t];
         float sum = 0;
-        for (int t = 0; t < T_mfa; t++) { attn[c * T_mfa + t] = expf(attn[c * T_mfa + t] - mx); sum += attn[c * T_mfa + t]; }
-        for (int t = 0; t < T_mfa; t++) attn[c * T_mfa + t] /= sum;
+        for (int t = 0; t < T_cur; t++) {
+            attn[c * T_cur + t] = expf(attn[c * T_cur + t] - mx);
+            sum += attn[c * T_cur + t];
+        }
+        for (int t = 0; t < T_cur; t++)
+            attn[c * T_cur + t] /= sum;
     }
 
-    // Weighted mean + std
+    // Weighted mean and std
     std::vector<float> w_mean(C_mfa, 0), w_std(C_mfa, 0);
     for (int c = 0; c < C_mfa; c++) {
         float wm = 0, wm2 = 0;
-        for (int t = 0; t < T_mfa; t++) {
-            float a = attn[c * T_mfa + t], v = mfa_ct[c * T_mfa + t];
-            wm += a * v; wm2 += a * v * v;
+        for (int t = 0; t < T_cur; t++) {
+            float a = attn[c * T_cur + t];
+            float v = mfa_out[c * T_cur + t];
+            wm += a * v;
+            wm2 += a * v * v;
         }
         w_mean[c] = wm;
-        w_std[c] = sqrtf(std::max(wm2 - wm * wm, 1e-10f));
+        float var = wm2 - wm * wm;
+        w_std[c] = sqrtf(std::max(var, 1e-10f));
     }
 
-    // Pool: [6144] = cat(w_mean, w_std)
+    // Concatenate [w_mean, w_std] → [6144]
     std::vector<float> pool(6144);
-    for (int c = 0; c < C_mfa; c++) { pool[c] = w_mean[c]; pool[C_mfa + c] = w_std[c]; }
+    for (int c = 0; c < C_mfa; c++) {
+        pool[c] = w_mean[c];
+        pool[C_mfa + c] = w_std[c];
+    }
 
-    // ASP BN
-    std::vector<float> aspbn_w, aspbn_b, aspbn_m, aspbn_v;
-    read_f32(G("emb.asp_bn.norm.weight"), aspbn_w);
-    read_f32(G("emb.asp_bn.norm.bias"), aspbn_b);
-    read_f32(G("emb.asp_bn.norm.running_mean"), aspbn_m);
-    read_f32(G("emb.asp_bn.norm.running_var"), aspbn_v);
+    // 7. ASP BN + FC(6144→256)
+    // BN on [6144, 1]
     for (int c = 0; c < 6144; c++)
-        pool[c] = (pool[c] - aspbn_m[c]) / sqrtf(aspbn_v[c] + 1e-5f) * aspbn_w[c] + aspbn_b[c];
+        pool[c] = (pool[c] - m.asp_bn.mean[c]) / sqrtf(m.asp_bn.var[c] + 1e-5f) * m.asp_bn.weight[c] +
+                  m.asp_bn.bias[c];
 
-    // FC: Linear(6144→256)
-    std::vector<float> fc_w, fc_b;
-    read_f32(G("emb.fc.conv.weight"), fc_w);
-    read_f32(G("emb.fc.conv.bias"), fc_b);
+    // FC: linear 6144→256
     std::vector<float> emb(256, 0);
     for (int i = 0; i < 256; i++) {
-        double s = fc_b.empty() ? 0 : fc_b[i];
-        for (int k = 0; k < 6144; k++) s += pool[k] * fc_w[i * 6144 + k];
+        double s = m.fc_b.empty() ? 0 : m.fc_b[i];
+        for (int k = 0; k < 6144; k++)
+            s += pool[k] * m.fc_w[i * 6144 + k];
         emb[i] = (float)s;
     }
 
-    // Classifier: BN(256) → Linear(256→512) + BN + LeakyReLU → Linear(512→107)
-    std::vector<float> cls_bn_w, cls_bn_b, cls_bn_m, cls_bn_v;
-    read_f32(G("cls.bn.weight"), cls_bn_w);
-    read_f32(G("cls.bn.bias"), cls_bn_b);
-    read_f32(G("cls.bn.running_mean"), cls_bn_m);
-    read_f32(G("cls.bn.running_var"), cls_bn_v);
+    // 8. Classifier: BN(256) → Linear(256→512) + BN + LeakyReLU → Linear(512→107)
+    // BN(256)
     for (int c = 0; c < 256; c++)
-        emb[c] = (emb[c] - cls_bn_m[c]) / sqrtf(cls_bn_v[c] + 1e-5f) * cls_bn_w[c] + cls_bn_b[c];
+        emb[c] = (emb[c] - m.cls_bn.mean[c]) / sqrtf(m.cls_bn.var[c] + 1e-5f) * m.cls_bn.weight[c] +
+                 m.cls_bn.bias[c];
 
-    std::vector<float> cls_w1, cls_b1;
-    read_f32(G("cls.DNN.block_0.linear.weight"), cls_w1);
-    read_f32(G("cls.DNN.block_0.linear.bias"), cls_b1);
+    // Linear(256→512)
     std::vector<float> h1(512, 0);
     for (int i = 0; i < 512; i++) {
-        double s = cls_b1[i];
-        for (int k = 0; k < 256; k++) s += emb[k] * cls_w1[i * 256 + k];
+        double s = m.cls_b1[i];
+        for (int k = 0; k < 256; k++)
+            s += emb[k] * m.cls_w1[i * 256 + k];
         h1[i] = (float)s;
     }
 
-    std::vector<float> cls_bn1_w, cls_bn1_b, cls_bn1_m, cls_bn1_v;
-    read_f32(G("cls.DNN.block_0.bn.weight"), cls_bn1_w);
-    read_f32(G("cls.DNN.block_0.bn.bias"), cls_bn1_b);
-    read_f32(G("cls.DNN.block_0.bn.running_mean"), cls_bn1_m);
-    read_f32(G("cls.DNN.block_0.bn.running_var"), cls_bn1_v);
-    for (int c = 0; c < 512; c++) {
-        h1[c] = (h1[c] - cls_bn1_m[c]) / sqrtf(cls_bn1_v[c] + 1e-5f) * cls_bn1_w[c] + cls_bn1_b[c];
-        h1[c] = h1[c] > 0 ? h1[c] : 0.01f * h1[c]; // LeakyReLU
-    }
+    // BN(512)
+    for (int c = 0; c < 512; c++)
+        h1[c] = (h1[c] - m.cls_bn1.mean[c]) / sqrtf(m.cls_bn1.var[c] + 1e-5f) * m.cls_bn1.weight[c] +
+                m.cls_bn1.bias[c];
 
-    std::vector<float> cls_w2, cls_b2;
-    read_f32(G("cls.out.w.weight"), cls_w2);
-    read_f32(G("cls.out.w.bias"), cls_b2);
+    // LeakyReLU(0.01)
+    for (int i = 0; i < 512; i++)
+        h1[i] = h1[i] > 0 ? h1[i] : 0.01f * h1[i];
+
+    // Linear(512→107)
     std::vector<float> logits(m.n_classes, 0);
     for (int i = 0; i < m.n_classes; i++) {
-        double s = cls_b2[i];
-        for (int k = 0; k < 512; k++) s += h1[k] * cls_w2[i * 512 + k];
+        double s = m.cls_b2[i];
+        for (int k = 0; k < 512; k++)
+            s += h1[k] * m.cls_w2[i * 512 + k];
         logits[i] = (float)s;
     }
 
     // Softmax + argmax
-    float mx = *std::max_element(logits.begin(), logits.end());
+    float mx = logits[0];
+    for (int i = 1; i < m.n_classes; i++)
+        if (logits[i] > mx)
+            mx = logits[i];
     float sum = 0;
-    for (auto& v : logits) { v = expf(v - mx); sum += v; }
-    int best = 0; float best_conf = logits[0] / sum;
+    for (int i = 0; i < m.n_classes; i++) {
+        logits[i] = expf(logits[i] - mx);
+        sum += logits[i];
+    }
+    int best = 0;
+    float best_conf = logits[0] / sum;
     for (int i = 1; i < m.n_classes; i++) {
         float p = logits[i] / sum;
-        if (p > best_conf) { best_conf = p; best = i; }
+        if (p > best_conf) {
+            best_conf = p;
+            best = i;
+        }
     }
 
-    if (confidence) *confidence = best_conf;
+    if (confidence)
+        *confidence = best_conf;
+
     if (best >= 0 && best < (int)m.labels.size()) {
         ctx->last_result = m.labels[best];
         return ctx->last_result.c_str();
     }
+
     return nullptr;
 }
