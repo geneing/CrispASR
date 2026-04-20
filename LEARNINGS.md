@@ -1277,3 +1277,31 @@ All 6 bugs were found by comparing at each sub-module boundary:
 Without the stage-by-stage protocol, these bugs would have been
 invisible — the model runs without errors in all cases, just produces
 wrong text.
+
+## FireRedVAD: FSMN Conv1d replication
+
+### Manual conv index arithmetic vs PyTorch Conv1d
+
+The FSMN uses lookback and lookahead depthwise Conv1d with specific
+padding and dilation. Manually computing `x[t - n*stride]` does NOT
+match PyTorch's `Conv1d(padding=P, dilation=D)` because:
+
+1. Conv1d pads BOTH sides, then applies the kernel
+2. The output is then trimmed/sliced in the FSMN code
+3. Manual indexing skips the padding step entirely
+
+**Fix:** Replicate the EXACT Conv1d operation — pad the input, apply
+kernel with stride/dilation, then apply the same trim/slice as Python:
+- Lookback: `conv[:,:,:-(N1-1)*S1]` (trim right)
+- Lookahead: `F.pad(conv[:,:,N2*S2:], (0, S2))` (skip left, pad right)
+
+### int16 vs float32 fbank scaling
+
+Kaldi-based models (FireRedVAD, FireRedASR) train on int16 audio
+input to `kaldi_native_fbank`. The log-mel features differ by a
+constant `2*log(32768) ≈ 20.79` vs float32 (-1..1) input. The CMVN
+absorbs this offset, but if CMVN was trained on int16 features and
+you feed float32 features, the normalization is wrong.
+
+**Fix:** Scale float32 input by 32768 before fbank computation:
+`frame[i] = pcm[i] * 32768.0f`
