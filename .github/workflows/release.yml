@@ -114,48 +114,17 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.tag || github.ref }}
 
+      # Uses the well-maintained Jimver action (v0.2.19, widely used
+      # upstream). Previous approach of hand-rolled curl + choco-installed
+      # unzip hit chocolatey.org 504 gateway timeouts on 2026-04-20 and
+      # failed the v0.4.12 release build — action handles retries +
+      # partial downloads itself.
       - name: Install CUDA Toolkit 12.4.0
-        shell: pwsh
-        run: |
-          $CUDA_VERSION = "12.4.0"
-          $CUDA_TOOLKIT_DIR = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$CUDA_VERSION"
-          $CUDA_DOWNLOAD = "https://developer.download.nvidia.com/compute/cuda/redist"
-
-          $CUDART_VER   = "12.4.127"
-          $NVCC_VER     = "12.4.131"
-          $NVRTC_VER    = "12.4.127"
-          $CUBLAS_VER   = "12.4.5.8"
-          $NVTX_VER     = "12.4.127"
-          $PROFILER_VER = "12.4.127"
-          $VS_VER       = "12.4.127"
-          $CCCL_VER     = "12.4.127"
-
-          New-Item -ItemType Directory -Force -Path $CUDA_TOOLKIT_DIR | Out-Null
-          choco install unzip -y
-
-          curl -O "$CUDA_DOWNLOAD/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-${CUDART_VER}-archive.zip"
-          curl -O "$CUDA_DOWNLOAD/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${NVCC_VER}-archive.zip"
-          curl -O "$CUDA_DOWNLOAD/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-${NVRTC_VER}-archive.zip"
-          curl -O "$CUDA_DOWNLOAD/libcublas/windows-x86_64/libcublas-windows-x86_64-${CUBLAS_VER}-archive.zip"
-          curl -O "$CUDA_DOWNLOAD/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-${NVTX_VER}-archive.zip"
-          curl -O "$CUDA_DOWNLOAD/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-${PROFILER_VER}-archive.zip"
-          curl -O "$CUDA_DOWNLOAD/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-${VS_VER}-archive.zip"
-          curl -O "$CUDA_DOWNLOAD/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-${CCCL_VER}-archive.zip"
-
-          unzip -q '*.zip' -d $CUDA_TOOLKIT_DIR
-
-          xcopy "$CUDA_TOOLKIT_DIR\cuda_cudart-windows-x86_64-${CUDART_VER}-archive\*"           "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvcc-windows-x86_64-${NVCC_VER}-archive\*"               "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvrtc-windows-x86_64-${NVRTC_VER}-archive\*"             "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-          xcopy "$CUDA_TOOLKIT_DIR\libcublas-windows-x86_64-${CUBLAS_VER}-archive\*"             "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvtx-windows-x86_64-${NVTX_VER}-archive\*"               "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-          xcopy "$CUDA_TOOLKIT_DIR\cuda_profiler_api-windows-x86_64-${PROFILER_VER}-archive\*"   "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-          xcopy "$CUDA_TOOLKIT_DIR\cuda_cccl-windows-x86_64-${CCCL_VER}-archive\*"               "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-          xcopy "$CUDA_TOOLKIT_DIR\visual_studio_integration-windows-x86_64-${VS_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
-
-          echo "$CUDA_TOOLKIT_DIR\bin"      | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          echo "$CUDA_TOOLKIT_DIR\libnvvp"  | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          echo "CUDA_PATH=$CUDA_TOOLKIT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "nvtx", "cuda_profiler_api", "visual_studio_integration"]'
 
       - name: Build
         shell: cmd
