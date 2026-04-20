@@ -275,6 +275,24 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             params.use_gpu = false;
         } else if (arg == "-dev" || arg == "--device") {
             params.gpu_device = std::stoi(ARGV_NEXT);
+            // Also steer ggml's Vulkan/CUDA backend enumeration so non-whisper
+            // backends (parakeet, cohere, voxtral, …) pick the same device
+            // without having to plumb gpu_device through each one. Set both
+            // vars defensively — whichever backend actually loads reads its
+            // matching var. Set only if the user hasn't already overridden.
+            {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%d", params.gpu_device);
+#if defined(_WIN32)
+                if (!std::getenv("GGML_VK_VISIBLE_DEVICES"))
+                    _putenv_s("GGML_VK_VISIBLE_DEVICES", buf);
+                if (!std::getenv("CUDA_VISIBLE_DEVICES"))
+                    _putenv_s("CUDA_VISIBLE_DEVICES", buf);
+#else
+                setenv("GGML_VK_VISIBLE_DEVICES", buf, 0);
+                setenv("CUDA_VISIBLE_DEVICES", buf, 0);
+#endif
+            }
         } else if (arg == "--gpu-backend") {
             params.gpu_backend = ARGV_NEXT;
         } else if (arg == "-fa" || arg == "--flash-attn") {

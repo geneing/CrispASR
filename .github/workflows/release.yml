@@ -77,8 +77,18 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Build
+        # -DGGML_NATIVE=OFF + explicit AVX2/FMA/F16C: the CI runner's CPU may
+        # have AVX-512 / AVX10, and GGML_NATIVE=ON emits instructions for the
+        # host CPU. That produces prebuilts that silently SIGILL
+        # (STATUS_ILLEGAL_INSTRUCTION → process terminates with no output)
+        # on older consumer CPUs. AVX2 is the right compat baseline — every
+        # x86-64 CPU since ~2013 (Haswell / Excavator) supports it.
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+          cmake -S . -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DGGML_NATIVE=OFF `
+            -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON
           cmake --build build --config Release --target whisper-cli crispasr-quantize -j $env:NUMBER_OF_PROCESSORS
 
       - name: Package
@@ -86,7 +96,7 @@ jobs:
           New-Item -ItemType Directory -Force release\crispasr-windows-x86_64-cpu
           Copy-Item build\bin\Release\crispasr.exe release\crispasr-windows-x86_64-cpu\
           Copy-Item build\bin\Release\crispasr-quantize.exe release\crispasr-windows-x86_64-cpu\
-          Compress-Archive -Path release\crispasr-windows-x86_64-cpu -DestinationPath release\crispasr-windows-x86_64-cpu.zip
+          Compress-Archive -Path release\crispasr-windows-x86_64-cpu -DestinationPath release\crispasr-windows-x86_64-cpu.zip -CompressionLevel Optimal
 
       - uses: actions/upload-artifact@v4
         with:
@@ -159,15 +169,27 @@ jobs:
           cmake -S . -B build -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_CUDA=ON ^
-            -DCMAKE_CUDA_ARCHITECTURES="75-real;86-real;89-real"
+            -DCMAKE_CUDA_ARCHITECTURES="75-real;86-real;89-real" ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON
           cmake --build build --target whisper-cli crispasr-quantize -j %NUMBER_OF_PROCESSORS%
 
       - name: Package (binary + DLLs + CUDA runtime)
         shell: pwsh
-        # cublasLt64 is NOT needed — dumpbin / PE-import scan on ggml-cuda.dll
-        # confirms it only imports cublas64 + cudart64 + the driver loader DLLs
-        # (cuda.dll / nvcuda.dll) which ship with every NVIDIA install.
-        # Skipping cublasLt alone saves ~470 MB uncompressed.
+        # CUDA DLL chain on Windows (confirmed via PE import scan on v0.4.10
+        # artifact after it silently failed to launch):
+        #
+        #   crispasr.exe
+        #     └─ ggml-cuda.dll   imports  cublas64_12.dll + cudart64_12.dll + nvcuda.dll
+        #     └─ cublas64_12.dll imports  cublasLt64_12.dll + nvcuda.dll   ← trap
+        #     └─ cublasLt64_12.dll  (474 MB, but transitively required)
+        #
+        # ggml-cuda.dll's own imports don't list cublasLt, so we skipped it in
+        # the initial trim attempt. But cublas64 itself DOES need cublasLt,
+        # and Windows fails the whole exe at load time with a silent
+        # STATUS_DLL_NOT_FOUND. Upstream ggml comment explicitly notes
+        # "As of 12.3.1 CUDA Toolkit for Windows does not offer a static
+        # cublas library", so we can't side-step this via static linking.
         run: |
           New-Item -ItemType Directory -Force release\crispasr-windows-x86_64-cuda | Out-Null
           Copy-Item build\bin\crispasr.exe          release\crispasr-windows-x86_64-cuda\
@@ -176,9 +198,10 @@ jobs:
           # Catch2*.dll which the transcribe CLI never loads.
           Get-ChildItem build\bin\*.dll | Where-Object { $_.Name -notlike 'Catch2*' } |
             Copy-Item -Destination release\crispasr-windows-x86_64-cuda\
-          # CUDA runtime DLLs ggml-cuda.dll actually imports (see comment above).
-          Copy-Item "$env:CUDA_PATH\bin\cudart64_*.dll" release\crispasr-windows-x86_64-cuda\ -ErrorAction SilentlyContinue
-          Copy-Item "$env:CUDA_PATH\bin\cublas64_*.dll" release\crispasr-windows-x86_64-cuda\ -ErrorAction SilentlyContinue
+          # CUDA runtime DLLs — cublasLt is not optional on Windows, see comment above.
+          Copy-Item "$env:CUDA_PATH\bin\cudart64_*.dll"   release\crispasr-windows-x86_64-cuda\ -ErrorAction SilentlyContinue
+          Copy-Item "$env:CUDA_PATH\bin\cublas64_*.dll"   release\crispasr-windows-x86_64-cuda\ -ErrorAction SilentlyContinue
+          Copy-Item "$env:CUDA_PATH\bin\cublasLt64_*.dll" release\crispasr-windows-x86_64-cuda\ -ErrorAction SilentlyContinue
           Compress-Archive -Path release\crispasr-windows-x86_64-cuda -DestinationPath release\crispasr-windows-x86_64-cuda.zip -CompressionLevel Optimal
 
       - uses: actions/upload-artifact@v4
@@ -214,7 +237,9 @@ jobs:
           cmake -S . -B build -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_VULKAN=ON ^
-            -DGGML_CUDA=OFF
+            -DGGML_CUDA=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON
           cmake --build build --target whisper-cli crispasr-quantize -j %NUMBER_OF_PROCESSORS%
 
       - name: Package (binary + DLLs)
