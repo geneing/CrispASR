@@ -649,6 +649,7 @@ boundary. The `Session` API is safe (C-ABI wrapper catches exceptions).
 | **Pending** | #22 Stream + audio decoder in wrappers | Expose `crispasr_audio_decode_*` + streaming session through Dart/Python/Rust bindings | ~150 LOC each |
 | **Pending** | #23 Diarization + LID + align in CrisperWeaver | Swap the MFCC/k-means stopgap for the lib path; wire LID for auto-language; add forced-aligner for LLM backends | ~250 LOC |
 | **Done** | #27 Kyutai STT (13th backend) | Mimi neural audio codec + causal LM, novel codec-based architecture | ~900 LOC |
+| **Done** | #28 FireRedASR2-AED (14th backend) | Conformer encoder with rel-PE + CTC, Mandarin/English/20+ Chinese dialects | ~1200 LOC |
 
 ## 27. Kyutai STT — DONE
 
