@@ -270,7 +270,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "firered-asr";
             else if (a == "moonshine" || a == "moonshine-tiny" || a == "moonshine-base")
                 result = "moonshine";
-            else if (a == "omniasr-ctc" || a == "omniasr_ctc" || a == "omniasr")
+            else if (a == "omniasr-ctc" || a == "omniasr_ctc" || a == "omniasr" || a == "omniasr-llm" ||
+                     a == "omniasr_llm")
                 result = "omniasr";
         }
     }

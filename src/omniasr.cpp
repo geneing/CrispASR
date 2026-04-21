@@ -26,6 +26,7 @@
 // ===========================================================================
 
 struct omniasr_hparams {
+    // Encoder
     int d_model = 1024;
     int d_ffn = 4096;
     int n_heads = 16;
@@ -37,6 +38,14 @@ struct omniasr_hparams {
     int pad_id = 1;
     int unk_id = 3;
     int head_dim = 64;
+    // Decoder (LLM only)
+    int model_type = 0; // 0=CTC, 1=LLM
+    int d_dec = 4096;
+    int d_ffn_dec = 2816;
+    int n_heads_dec = 8;
+    int n_dec = 12;
+    int head_dim_dec = 512;
+    int n_langs = 0;
 };
 
 struct omniasr_model {
@@ -53,6 +62,13 @@ struct omniasr_context {
     ggml_backend_buffer_t buf = nullptr;
     ggml_backend_sched_t sched = nullptr;
     ggml_context* weight_ctx = nullptr;
+    // KV cache for LLM decoder
+    ggml_context* kv_ctx = nullptr;
+    ggml_backend_buffer_t kv_buf = nullptr;
+    ggml_tensor* kv_k = nullptr; // [head_dim, max_ctx, n_heads, n_layers]
+    ggml_tensor* kv_v = nullptr;
+    int kv_max_ctx = 0;
+    int kv_n_used = 0;
 };
 
 // ===========================================================================
@@ -60,7 +76,11 @@ struct omniasr_context {
 // ===========================================================================
 
 extern "C" struct omniasr_context_params omniasr_context_default_params(void) {
-    return {/*.n_threads=*/4, /*.verbosity=*/1};
+    omniasr_context_params p;
+    p.n_threads = 4;
+    p.verbosity = 1;
+    p.language = nullptr;
+    return p;
 }
 
 // ===========================================================================
@@ -169,6 +189,13 @@ extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model
     hp.pad_id = core_gguf::kv_u32(gctx, "omniasr.pad_id", 1);
     hp.unk_id = core_gguf::kv_u32(gctx, "omniasr.unk_id", 3);
     hp.head_dim = hp.d_model / hp.n_heads;
+    hp.model_type = core_gguf::kv_u32(gctx, "omniasr.model_type", 0);
+    hp.d_dec = core_gguf::kv_u32(gctx, "omniasr.d_dec", 4096);
+    hp.d_ffn_dec = core_gguf::kv_u32(gctx, "omniasr.d_ffn_dec", 2816);
+    hp.n_heads_dec = core_gguf::kv_u32(gctx, "omniasr.n_heads_dec", 8);
+    hp.n_dec = core_gguf::kv_u32(gctx, "omniasr.n_dec_layers", 12);
+    hp.head_dim_dec = core_gguf::kv_u32(gctx, "omniasr.head_dim_dec", 512);
+    hp.n_langs = core_gguf::kv_u32(gctx, "omniasr.n_langs", 0);
 
     // CNN strides
     int stride_key = gguf_find_key(gctx, "omniasr.cnn_strides");
@@ -195,8 +222,11 @@ extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model
     gguf_free(gctx);
 
     if (params.verbosity >= 1) {
-        fprintf(stderr, "omniasr: d=%d, ffn=%d, heads=%d, enc=%d, cnn=%d, vocab=%d\n", hp.d_model, hp.d_ffn, hp.n_heads,
-                hp.n_enc, hp.n_cnn, hp.vocab_size);
+        const char* type_str = hp.model_type == 1 ? "LLM" : "CTC";
+        fprintf(stderr, "omniasr-%s: enc=%dL d=%d, ", type_str, hp.n_enc, hp.d_model);
+        if (hp.model_type == 1)
+            fprintf(stderr, "dec=%dL d=%d ffn=%d heads=%d, ", hp.n_dec, hp.d_dec, hp.d_ffn_dec, hp.n_heads_dec);
+        fprintf(stderr, "cnn=%d, vocab=%d\n", hp.n_cnn, hp.vocab_size);
     }
 
     // Load weights
@@ -229,6 +259,10 @@ extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model
 extern "C" void omniasr_free(struct omniasr_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
+    if (ctx->kv_buf)
+        ggml_backend_buffer_free(ctx->kv_buf);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
     if (ctx->weight_ctx)
@@ -239,6 +273,55 @@ extern "C" void omniasr_free(struct omniasr_context* ctx) {
         ggml_backend_free(ctx->backend);
     delete ctx;
 }
+
+// ===========================================================================
+// LLM KV cache
+// ===========================================================================
+
+static bool omniasr_alloc_kv_cache(omniasr_context* ctx, int max_ctx) {
+    auto& hp = ctx->model.hp;
+    int hd = hp.head_dim_dec;
+    int nh = hp.n_heads_dec;
+    int nl = hp.n_dec;
+
+    // Create context for KV tensors
+    size_t mem = 2 * ggml_tensor_overhead() + 64;
+    struct ggml_init_params kv_params = {mem, nullptr, true};
+    ctx->kv_ctx = ggml_init(kv_params);
+
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nh, nl);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nh, nl);
+    ggml_set_name(ctx->kv_k, "kv_k");
+    ggml_set_name(ctx->kv_v, "kv_v");
+
+    size_t kbytes = ggml_nbytes(ctx->kv_k);
+    size_t vbytes = ggml_nbytes(ctx->kv_v);
+    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kbytes + vbytes + 64);
+    if (!ctx->kv_buf) {
+        fprintf(stderr, "omniasr-llm: failed to allocate KV cache (%zu MB)\n", (kbytes + vbytes) / (1024 * 1024));
+        return false;
+    }
+
+    uint8_t* base = (uint8_t*)ggml_backend_buffer_get_base(ctx->kv_buf);
+    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base);
+    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_v, base + kbytes);
+
+    ctx->kv_max_ctx = max_ctx;
+    ctx->kv_n_used = 0;
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr-llm: KV cache: %d ctx, %zu MB\n", max_ctx, (kbytes + vbytes) / (1024 * 1024));
+    return true;
+}
+
+// (ggml decoder graph builder — TODO: optimize with ggml after CPU version verified)
+
+// ===========================================================================
+// LLM transcribe
+// ===========================================================================
+
+static char* omniasr_transcribe_llm(omniasr_context* ctx, const float* samples, int n_samples,
+                                     const std::vector<float>& encoder_out, int d_enc, int T_enc);
 
 // ===========================================================================
 // Transcribe
@@ -485,15 +568,23 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
                     G(p + ".ffn.up.bias"), G(p + ".ffn.down.weight"), G(p + ".ffn.down.bias"), hp.n_heads, hp.head_dim);
             }
 
-            // Final LayerNorm + CTC head
+            // Final LayerNorm
             h = build_ln(ctx0, h, G("enc_ln.weight"), G("enc_ln.bias"));
-            h = ggml_mul_mat(ctx0, ctc_w, h);
-            if (ctc_b)
-                h = ggml_add(ctx0, h, ctc_b);
 
-            ggml_set_name(h, "logits");
-            ggml_set_output(h);
-            ggml_build_forward_expand(gf, h);
+            if (hp.model_type == 1) {
+                // LLM: mark encoder output, skip CTC head
+                ggml_set_name(h, "enc_out");
+                ggml_set_output(h);
+                ggml_build_forward_expand(gf, h);
+            } else {
+                // CTC: apply CTC head
+                h = ggml_mul_mat(ctx0, ctc_w, h);
+                if (ctc_b)
+                    h = ggml_add(ctx0, h, ctc_b);
+                ggml_set_name(h, "logits");
+                ggml_set_output(h);
+                ggml_build_forward_expand(gf, h);
+            }
 
             // Allocate Graph 2
             ggml_backend_sched_reset(ctx->sched);
@@ -514,6 +605,21 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
                 fprintf(stderr, "omniasr: graph 2 compute failed\n");
                 ggml_free(ctx0);
                 return nullptr;
+            }
+
+            // LLM branch: read encoder output and run decoder
+            if (hp.model_type == 1) {
+                ggml_tensor* enc_out_t = ggml_graph_get_tensor(gf, "enc_out");
+                int d_e = (int)enc_out_t->ne[0];
+                int T_e = (int)enc_out_t->ne[1];
+                std::vector<float> enc_out_data(d_e * T_e);
+                ggml_backend_tensor_get(enc_out_t, enc_out_data.data(), 0, d_e * T_e * sizeof(float));
+                ggml_free(ctx0);
+
+                if (ctx->params.verbosity >= 1)
+                    fprintf(stderr, "omniasr-llm: encoder done [%d, %d], running decoder...\n", d_e, T_e);
+
+                return omniasr_transcribe_llm(ctx, samples, n_samples, enc_out_data, d_e, T_e);
             }
 
             // Skip the original single-graph path below
@@ -653,6 +759,360 @@ read_logits:
 
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "omniasr: decoded %d tokens → %zu chars\n", (int)tokens.size(), result.size());
+
+    // Trim
+    while (!result.empty() && result.front() == ' ')
+        result.erase(result.begin());
+    while (!result.empty() && result.back() == ' ')
+        result.pop_back();
+
+    if (result.empty())
+        return nullptr;
+
+    char* out = (char*)malloc(result.size() + 1);
+    memcpy(out, result.c_str(), result.size());
+    out[result.size()] = '\0';
+    return out;
+}
+
+// ===========================================================================
+// LLM decoder implementation (CPU for correctness, optimize later)
+// ===========================================================================
+
+static char* omniasr_transcribe_llm(omniasr_context* ctx, const float* /*samples*/, int /*n_samples*/,
+                                     const std::vector<float>& encoder_out, int d_enc, int T_enc) {
+    auto& m = ctx->model;
+    auto& hp = m.hp;
+    auto& ts = m.tensors;
+
+    auto G = [&](const std::string& name) -> ggml_tensor* {
+        auto it = ts.find(name);
+        return it != ts.end() ? it->second : nullptr;
+    };
+
+    // Helper to read tensor to CPU
+    auto read_f32 = [](ggml_tensor* t, std::vector<float>& out) {
+        if (!t) { out.clear(); return; }
+        int n = (int)ggml_nelements(t);
+        out.resize(n);
+        if (t->type == GGML_TYPE_F32)
+            ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
+        else if (t->type == GGML_TYPE_F16) {
+            std::vector<uint16_t> tmp(n);
+            ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(uint16_t));
+            ggml_fp16_to_fp32_row((const ggml_fp16_t*)tmp.data(), out.data(), n);
+        }
+    };
+
+    int dd = hp.d_dec;       // 4096
+    int ffn_d = hp.d_ffn_dec; // 2816
+    int nh = hp.n_heads_dec;  // 8
+    int hd = hp.head_dim_dec; // 512
+
+    // 1. Project encoder output: enc_proj(encoder_out)
+    // encoder_out: [d_enc, T_enc] col-major → enc_proj_w [d_enc, dd] → [dd, T_enc]
+    std::vector<float> enc_proj_w_data, enc_proj_b_data;
+    read_f32(G("enc_proj.weight"), enc_proj_w_data);
+    read_f32(G("enc_proj.bias"), enc_proj_b_data);
+
+    std::vector<float> audio_embs(dd * T_enc);
+    for (int t = 0; t < T_enc; t++) {
+        for (int i = 0; i < dd; i++) {
+            double s = enc_proj_b_data.empty() ? 0 : enc_proj_b_data[i];
+            for (int k = 0; k < d_enc; k++)
+                s += encoder_out[t * d_enc + k] * enc_proj_w_data[i * d_enc + k];
+            audio_embs[t * dd + i] = (float)s;
+        }
+    }
+
+    if (ctx->params.verbosity >= 2)
+        fprintf(stderr, "  enc_proj done: [%d, %d]\n", dd, T_enc);
+
+    // 2. Build prefix: [BOS_emb, lang_emb, audio_embs...]
+    // BOS embedding from tok_emb
+    std::vector<float> tok_emb_data;
+    read_f32(G("tok_emb.weight"), tok_emb_data);
+    int tok_emb_size = (int)tok_emb_data.size() / dd; // 9813
+
+    // Language embedding
+    std::vector<float> lang_emb_data;
+    read_f32(G("lang_emb.weight"), lang_emb_data);
+    int lang_id = 414; // eng_Latn default (list_index + 1, per factory.py convention)
+    // Factory: lang_mapping = {lang.lower(): parquet_index + 1}
+    // Index 0 reserved for no-language/dropout
+    // Common: eng_Latn=414, deu_Latn=365, fra_Latn=499, spa_Latn=1448
+    // TODO: parse ctx->params.language to look up lang_id dynamically
+
+    bool use_lang = (hp.n_langs > 0 && !lang_emb_data.empty());
+    // Sequence: [audio_embs...] [lid_marker_emb] [lang_emb] [BOS_emb] [generated...]
+    // lid_marker is special token at index vocab_size (9812) in text_frontend
+    int lid_marker_id = hp.vocab_size; // 9812 — the extra token in tok_emb (size 9813)
+    int n_lang_tokens = use_lang ? 2 : 0; // lid_marker + lang_emb
+    int prefix_len = T_enc + n_lang_tokens + 1; // audio + [lid_marker + lang] + BOS
+    std::vector<float> prefix(prefix_len * dd);
+
+    int pos = 0;
+    // Audio embeddings first
+    memcpy(prefix.data(), audio_embs.data(), T_enc * dd * sizeof(float));
+    pos += T_enc;
+
+    // Language conditioning: lid_marker + lang_emb
+    if (use_lang && lang_id >= 0 && lang_id < hp.n_langs && lid_marker_id < tok_emb_size) {
+        // lid_marker token embedding
+        for (int i = 0; i < dd; i++)
+            prefix[pos * dd + i] = tok_emb_data[lid_marker_id * dd + i];
+        pos++;
+        // Language embedding
+        for (int i = 0; i < dd; i++)
+            prefix[pos * dd + i] = lang_emb_data[lang_id * dd + i];
+        pos++;
+    }
+
+    // BOS embedding
+    for (int i = 0; i < dd; i++)
+        prefix[pos * dd + i] = tok_emb_data[hp.bos_id * dd + i];
+    pos++;
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr-llm: prefix len=%d (%d audio%s + BOS), lang_id=%d, d=%d\n", prefix_len, T_enc,
+                use_lang ? " + lid + lang" : "", lang_id, dd);
+
+    // 3. Read all decoder weights to CPU
+    struct dec_layer_weights {
+        std::vector<float> attn_ln_w;
+        std::vector<float> q_w, k_w, v_w, o_w;
+        std::vector<float> ffn_ln_w;
+        std::vector<float> gate_w, up_w, down_w;
+    };
+    std::vector<dec_layer_weights> layers(hp.n_dec);
+    for (int i = 0; i < hp.n_dec; i++) {
+        std::string p = "dec." + std::to_string(i);
+        auto& L = layers[i];
+        read_f32(G(p + ".attn_ln.weight"), L.attn_ln_w);
+        read_f32(G(p + ".attn.q_proj.weight"), L.q_w);
+        read_f32(G(p + ".attn.k_proj.weight"), L.k_w);
+        read_f32(G(p + ".attn.v_proj.weight"), L.v_w);
+        read_f32(G(p + ".attn.out.weight"), L.o_w);
+        read_f32(G(p + ".ffn_ln.weight"), L.ffn_ln_w);
+        read_f32(G(p + ".ffn.gate.weight"), L.gate_w);
+        read_f32(G(p + ".ffn.up.weight"), L.up_w);
+        read_f32(G(p + ".ffn.down.weight"), L.down_w);
+    }
+    std::vector<float> dec_ln_w;
+    read_f32(G("dec_ln.weight"), dec_ln_w);
+    std::vector<float> lm_head_w;
+    read_f32(G("lm_head.weight"), lm_head_w);
+
+    if (ctx->params.verbosity >= 2)
+        fprintf(stderr, "  decoder weights loaded (%d layers)\n", hp.n_dec);
+
+    // 4. CPU-based autoregressive decoding
+    // KV cache: per layer, K and V of shape [total_ctx, nh * hd]
+    int max_gen = 512;
+    int max_ctx = prefix_len + max_gen;
+    std::vector<std::vector<float>> kv_k(hp.n_dec), kv_v(hp.n_dec);
+    for (int i = 0; i < hp.n_dec; i++) {
+        kv_k[i].resize(max_ctx * dd, 0);
+        kv_v[i].resize(max_ctx * dd, 0);
+    }
+
+    // Helper: RMSNorm on a single vector
+    auto rms_norm = [](const float* x, const float* w, float* out, int d) {
+        float ss = 0;
+        for (int i = 0; i < d; i++) ss += x[i] * x[i];
+        float scale = 1.0f / sqrtf(ss / d + 1e-5f);
+        for (int i = 0; i < d; i++) out[i] = x[i] * scale * w[i];
+    };
+
+    // Helper: matmul x[d_in] @ w[d_out, d_in] → out[d_out]
+    auto matvec = [](const float* w, const float* x, float* out, int d_out, int d_in) {
+        #pragma omp parallel for
+        for (int i = 0; i < d_out; i++) {
+            double s = 0;
+            for (int k = 0; k < d_in; k++)
+                s += x[k] * w[i * d_in + k];
+            out[i] = (float)s;
+        }
+    };
+
+    // Helper: RoPE on a single position (interleaved/NORMAL mode — fairseq2 convention)
+    // Pairs adjacent dims: (x[2i], x[2i+1]) rotated by angle[i]
+    auto apply_rope = [](float* x, int pos, int head_dim, float theta = 10000.0f) {
+        int half = head_dim / 2;
+        for (int i = 0; i < half; i++) {
+            float freq = 1.0f / powf(theta, 2.0f * i / head_dim);
+            float angle = pos * freq;
+            float cos_a = cosf(angle), sin_a = sinf(angle);
+            float x0 = x[2 * i], x1 = x[2 * i + 1];
+            x[2 * i] = x0 * cos_a - x1 * sin_a;
+            x[2 * i + 1] = x0 * sin_a + x1 * cos_a;
+        }
+    };
+
+    // Helper: SiLU
+    auto silu = [](float x) -> float { return x / (1.0f + expf(-x)); };
+
+    // Autoregressive generation
+    std::vector<int> output_tokens;
+    std::vector<float> cur_hidden(dd);   // current token hidden state
+    std::vector<float> tmp(std::max(dd, ffn_d));
+    std::vector<float> tmp2(std::max(dd, ffn_d));
+    std::vector<float> tmp3(std::max(dd, ffn_d));
+    std::vector<float> q_buf(dd), k_buf(dd), v_buf(dd);
+    std::vector<float> attn_scores; // dynamically sized
+    std::vector<float> logits(hp.vocab_size);
+
+    // Process one token at a time (prefix tokens first, then generated)
+    int n_past = 0;
+    int cur_token = -1; // -1 means use prefix embedding
+
+    for (int step = 0; step < prefix_len + max_gen; step++) {
+        // Get input embedding for this step
+        if (step < prefix_len) {
+            // Prefix: use pre-computed embedding
+            memcpy(cur_hidden.data(), prefix.data() + step * dd, dd * sizeof(float));
+        } else {
+            // Generated token: look up embedding
+            if (cur_token < 0 || cur_token >= tok_emb_size) break;
+            memcpy(cur_hidden.data(), tok_emb_data.data() + cur_token * dd, dd * sizeof(float));
+        }
+
+        // Run through decoder layers
+        for (int il = 0; il < hp.n_dec; il++) {
+            auto& L = layers[il];
+
+            // RMSNorm
+            rms_norm(cur_hidden.data(), L.attn_ln_w.data(), tmp.data(), dd);
+
+            // Q, K, V
+            matvec(L.q_w.data(), tmp.data(), q_buf.data(), dd, dd);
+            matvec(L.k_w.data(), tmp.data(), k_buf.data(), dd, dd);
+            matvec(L.v_w.data(), tmp.data(), v_buf.data(), dd, dd);
+
+            // Apply RoPE to Q and K (per head)
+            for (int h = 0; h < nh; h++) {
+                apply_rope(q_buf.data() + h * hd, n_past, hd);
+                apply_rope(k_buf.data() + h * hd, n_past, hd);
+            }
+
+            // Store K, V in cache
+            memcpy(kv_k[il].data() + n_past * dd, k_buf.data(), dd * sizeof(float));
+            memcpy(kv_v[il].data() + n_past * dd, v_buf.data(), dd * sizeof(float));
+
+            // Compute attention: Q @ K^T / sqrt(hd), then softmax, then @ V
+            int ctx_len = n_past + 1;
+            attn_scores.resize(ctx_len);
+
+            // Multi-head attention
+            // For each head: score = q[hd] @ k_cache[ctx_len, hd]^T / sqrt(hd)
+            // Then softmax over ctx_len, then weighted sum of v_cache
+            std::fill(tmp.begin(), tmp.begin() + dd, 0.0f);
+            float inv_sqrt_hd = 1.0f / sqrtf((float)hd);
+            for (int h = 0; h < nh; h++) {
+                float* q_h = q_buf.data() + h * hd;
+                // Compute scores
+                for (int t = 0; t < ctx_len; t++) {
+                    float* k_t = kv_k[il].data() + t * dd + h * hd;
+                    float s = 0;
+                    for (int j = 0; j < hd; j++)
+                        s += q_h[j] * k_t[j];
+                    attn_scores[t] = s * inv_sqrt_hd;
+                }
+                // Causal mask not needed (we only attend to past + current)
+                // Softmax
+                float mx = *std::max_element(attn_scores.begin(), attn_scores.begin() + ctx_len);
+                float sum = 0;
+                for (int t = 0; t < ctx_len; t++) {
+                    attn_scores[t] = expf(attn_scores[t] - mx);
+                    sum += attn_scores[t];
+                }
+                for (int t = 0; t < ctx_len; t++)
+                    attn_scores[t] /= sum;
+                // Weighted sum of V
+                for (int t = 0; t < ctx_len; t++) {
+                    float a = attn_scores[t];
+                    float* v_t = kv_v[il].data() + t * dd + h * hd;
+                    for (int j = 0; j < hd; j++)
+                        tmp[h * hd + j] += a * v_t[j];
+                }
+            }
+
+            // Output projection
+            matvec(L.o_w.data(), tmp.data(), tmp2.data(), dd, dd);
+
+            // Residual
+            for (int i = 0; i < dd; i++)
+                cur_hidden[i] += tmp2[i];
+
+            // FFN: RMSNorm → SwiGLU
+            rms_norm(cur_hidden.data(), L.ffn_ln_w.data(), tmp.data(), dd);
+            // gate and up projections
+            matvec(L.gate_w.data(), tmp.data(), tmp2.data(), ffn_d, dd);
+            matvec(L.up_w.data(), tmp.data(), tmp3.data(), ffn_d, dd);
+            // SwiGLU: silu(gate) * up
+            for (int i = 0; i < ffn_d; i++)
+                tmp2[i] = silu(tmp2[i]) * tmp3[i];
+            // down projection
+            // tmp3 is only dd-sized, use tmp for output
+            std::vector<float> ffn_out(dd);
+            matvec(L.down_w.data(), tmp2.data(), ffn_out.data(), dd, ffn_d);
+            // Residual
+            for (int i = 0; i < dd; i++)
+                cur_hidden[i] += ffn_out[i];
+        }
+
+        n_past++;
+
+        // Only generate after prefix
+        if (step >= prefix_len - 1) {
+            // Final RMSNorm + LM head
+            rms_norm(cur_hidden.data(), dec_ln_w.data(), tmp.data(), dd);
+            matvec(lm_head_w.data(), tmp.data(), logits.data(), hp.vocab_size, dd);
+
+            // Greedy argmax
+            int best = 0;
+            float best_val = logits[0];
+            for (int i = 1; i < hp.vocab_size; i++) {
+                if (logits[i] > best_val) {
+                    best_val = logits[i];
+                    best = i;
+                }
+            }
+
+            if (ctx->params.verbosity >= 2 && step < prefix_len + 5)
+                fprintf(stderr, "  step %d: token=%d (%s) logit=%.4f\n", step, best,
+                        best < (int)m.vocab.size() ? m.vocab[best].c_str() : "?", best_val);
+
+            if (best == hp.eos_id) break;
+
+            output_tokens.push_back(best);
+            cur_token = best;
+
+            if ((int)output_tokens.size() >= max_gen) break;
+        }
+    }
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr-llm: generated %d tokens\n", (int)output_tokens.size());
+
+    // Detokenize (same as CTC)
+    std::string result;
+    for (int tid : output_tokens) {
+        if (tid == hp.bos_id || tid == hp.eos_id || tid == hp.pad_id || tid == hp.unk_id)
+            continue;
+        if (tid < (int)m.vocab.size()) {
+            std::string piece = m.vocab[tid];
+            for (size_t i = 0; i < piece.size(); i++) {
+                if ((unsigned char)piece[i] == 0xE2 && i + 2 < piece.size() && (unsigned char)piece[i + 1] == 0x96 &&
+                    (unsigned char)piece[i + 2] == 0x81) {
+                    result += ' ';
+                    i += 2;
+                } else {
+                    result += piece[i];
+                }
+            }
+        }
+    }
 
     // Trim
     while (!result.empty() && result.front() == ' ')

@@ -430,6 +430,9 @@ set_target_properties(omniasr PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(omniasr PUBLIC .)
 target_compile_features   (omniasr PUBLIC cxx_std_17)
 target_link_libraries     (omniasr PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(omniasr PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 # ---------------------------------------------------------------------------
 # ecapa-lid — ECAPA-TDNN language identification (107 languages, 43 MB)
