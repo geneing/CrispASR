@@ -29,6 +29,8 @@
 
 struct ecapa_model {
     int n_mels = 60, n_classes = 107, n_fft_orig = 400, fbank_bins = 201;
+    int cls_type = 0;       // 0=DNN (VoxLingua107), 1=cosine (CommonLanguage)
+    int lin_neurons = 256;  // FC output dim (256 for VoxLingua107, 192 for CommonLanguage)
     std::vector<float> mel_fb_embedded;
     std::vector<std::string> labels;
     std::map<std::string, ggml_tensor*> tensors; // all weight tensors by name
@@ -48,9 +50,9 @@ struct ecapa_lid_context {
 // Fbank (60-dim, 512-point FFT with bin interpolation to 400-point grid)
 // ===========================================================================
 
-static void compute_fbank60(const float* pcm, int n_samples, std::vector<float>& features, int& n_frames,
-                            const std::vector<float>& mel_fb_override, int n_fft_target) {
-    const int sr = 16000, n_mels = 60, win_len = 400, hop = 160;
+static void compute_fbank(const float* pcm, int n_samples, std::vector<float>& features, int& n_frames,
+                          const std::vector<float>& mel_fb_override, int n_fft_target, int n_mels_param) {
+    const int sr = 16000, n_mels = n_mels_param, win_len = 400, hop = 160;
     const int N = n_fft_target, N_fft = 512;
     const float low_freq = 0.0f, high_freq = (float)sr / 2;
 
@@ -237,6 +239,8 @@ extern "C" struct ecapa_lid_context* ecapa_lid_init(const char* model_path, int 
     m.n_classes = core_gguf::kv_u32(gctx, "ecapa.n_classes", 107);
     m.n_fft_orig = core_gguf::kv_u32(gctx, "ecapa.n_fft", 400);
     m.fbank_bins = core_gguf::kv_u32(gctx, "ecapa.fbank_bins", 201);
+    m.cls_type = core_gguf::kv_u32(gctx, "ecapa.cls_type", 0);
+    m.lin_neurons = core_gguf::kv_u32(gctx, "ecapa.lin_neurons", 256);
     const int tok_key = gguf_find_key(gctx, "tokenizer.ggml.tokens");
     if (tok_key >= 0) {
         int n = gguf_get_arr_n(gctx, tok_key);
@@ -249,7 +253,8 @@ extern "C" struct ecapa_lid_context* ecapa_lid_init(const char* model_path, int 
     }
     gguf_free(gctx);
 
-    fprintf(stderr, "ecapa_lid: %d mels, %d classes, %zu labels\n", m.n_mels, m.n_classes, m.labels.size());
+    fprintf(stderr, "ecapa_lid: %d mels, %d classes, %d emb_dim, cls_type=%d, %zu labels\n", m.n_mels, m.n_classes,
+            m.lin_neurons, m.cls_type, m.labels.size());
 
     ctx->backend = ggml_backend_init_best();
     if (!ctx->backend) {
@@ -323,7 +328,7 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
     // 1. Fbank on CPU
     std::vector<float> fbank;
     int T = 0;
-    compute_fbank60(samples, n_samples, fbank, T, m.mel_fb_embedded, m.n_fft_orig);
+    compute_fbank(samples, n_samples, fbank, T, m.mel_fb_embedded, m.n_fft_orig, m.n_mels);
     if (T <= 0)
         return nullptr;
 
@@ -621,57 +626,81 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
     for (int c = 0; c < 6144; c++)
         pool[c] = (pool[c] - aspbn_m[c]) / sqrtf(aspbn_v[c] + 1e-5f) * aspbn_w[c] + aspbn_b[c];
 
-    // FC: Linear(6144→256)
+    // FC: Linear(6144→lin_neurons)
+    int lin_n = m.lin_neurons;
     std::vector<float> fc_w, fc_b;
     read_f32(G("emb.fc.conv.weight"), fc_w);
     read_f32(G("emb.fc.conv.bias"), fc_b);
-    std::vector<float> emb(256, 0);
-    for (int i = 0; i < 256; i++) {
+    std::vector<float> emb(lin_n, 0);
+    for (int i = 0; i < lin_n; i++) {
         double s = fc_b.empty() ? 0 : fc_b[i];
         for (int k = 0; k < 6144; k++)
             s += pool[k] * fc_w[i * 6144 + k];
         emb[i] = (float)s;
     }
 
-    // Classifier: BN(256) → Linear(256→512) + BN + LeakyReLU → Linear(512→107)
-    std::vector<float> cls_bn_w, cls_bn_b, cls_bn_m, cls_bn_v;
-    read_f32(G("cls.bn.weight"), cls_bn_w);
-    read_f32(G("cls.bn.bias"), cls_bn_b);
-    read_f32(G("cls.bn.running_mean"), cls_bn_m);
-    read_f32(G("cls.bn.running_var"), cls_bn_v);
-    for (int c = 0; c < 256; c++)
-        emb[c] = (emb[c] - cls_bn_m[c]) / sqrtf(cls_bn_v[c] + 1e-5f) * cls_bn_w[c] + cls_bn_b[c];
-
-    std::vector<float> cls_w1, cls_b1;
-    read_f32(G("cls.DNN.block_0.linear.weight"), cls_w1);
-    read_f32(G("cls.DNN.block_0.linear.bias"), cls_b1);
-    std::vector<float> h1(512, 0);
-    for (int i = 0; i < 512; i++) {
-        double s = cls_b1[i];
-        for (int k = 0; k < 256; k++)
-            s += emb[k] * cls_w1[i * 256 + k];
-        h1[i] = (float)s;
-    }
-
-    std::vector<float> cls_bn1_w, cls_bn1_b, cls_bn1_m, cls_bn1_v;
-    read_f32(G("cls.DNN.block_0.bn.weight"), cls_bn1_w);
-    read_f32(G("cls.DNN.block_0.bn.bias"), cls_bn1_b);
-    read_f32(G("cls.DNN.block_0.bn.running_mean"), cls_bn1_m);
-    read_f32(G("cls.DNN.block_0.bn.running_var"), cls_bn1_v);
-    for (int c = 0; c < 512; c++) {
-        h1[c] = (h1[c] - cls_bn1_m[c]) / sqrtf(cls_bn1_v[c] + 1e-5f) * cls_bn1_w[c] + cls_bn1_b[c];
-        h1[c] = h1[c] > 0 ? h1[c] : 0.01f * h1[c]; // LeakyReLU
-    }
-
-    std::vector<float> cls_w2, cls_b2;
-    read_f32(G("cls.out.w.weight"), cls_w2);
-    read_f32(G("cls.out.w.bias"), cls_b2);
+    // Classifier — two types:
+    // Type 0 (DNN/VoxLingua107): BN → Linear → BN → LeakyReLU → Linear
+    // Type 1 (Cosine/CommonLanguage): normalize(emb) @ normalize(weight)^T
+    int emb_dim = (int)emb.size();
     std::vector<float> logits(m.n_classes, 0);
-    for (int i = 0; i < m.n_classes; i++) {
-        double s = cls_b2[i];
-        for (int k = 0; k < 512; k++)
-            s += h1[k] * cls_w2[i * 512 + k];
-        logits[i] = (float)s;
+
+    if (m.cls_type == 1) {
+        // Cosine classifier: F.linear(F.normalize(emb), F.normalize(weight))
+        std::vector<float> cls_w;
+        read_f32(G("cls.weight"), cls_w); // [n_classes, emb_dim]
+        // L2 normalize emb
+        float emb_norm = 0;
+        for (float v : emb) emb_norm += v * v;
+        emb_norm = 1.0f / (sqrtf(emb_norm) + 1e-12f);
+        for (float& v : emb) v *= emb_norm;
+        // Cosine similarity with each class weight
+        for (int i = 0; i < m.n_classes; i++) {
+            float w_norm = 0;
+            for (int k = 0; k < emb_dim; k++) w_norm += cls_w[i * emb_dim + k] * cls_w[i * emb_dim + k];
+            w_norm = 1.0f / (sqrtf(w_norm) + 1e-12f);
+            double s = 0;
+            for (int k = 0; k < emb_dim; k++)
+                s += emb[k] * cls_w[i * emb_dim + k] * w_norm;
+            logits[i] = (float)s;
+        }
+    } else {
+        // DNN classifier: BN(emb) → Linear(emb→512) → BN → LeakyReLU → Linear(512→n_classes)
+        std::vector<float> cls_bn_w, cls_bn_b, cls_bn_m, cls_bn_v;
+        read_f32(G("cls.bn.weight"), cls_bn_w);
+        read_f32(G("cls.bn.bias"), cls_bn_b);
+        read_f32(G("cls.bn.running_mean"), cls_bn_m);
+        read_f32(G("cls.bn.running_var"), cls_bn_v);
+        for (int c = 0; c < emb_dim; c++)
+            emb[c] = (emb[c] - cls_bn_m[c]) / sqrtf(cls_bn_v[c] + 1e-5f) * cls_bn_w[c] + cls_bn_b[c];
+
+        std::vector<float> cls_w1, cls_b1;
+        read_f32(G("cls.DNN.block_0.linear.weight"), cls_w1);
+        read_f32(G("cls.DNN.block_0.linear.bias"), cls_b1);
+        int hidden = (int)cls_b1.size(); // 512
+        std::vector<float> h1(hidden, 0);
+        for (int i = 0; i < hidden; i++) {
+            double s = cls_b1[i];
+            for (int k = 0; k < emb_dim; k++) s += emb[k] * cls_w1[i * emb_dim + k];
+            h1[i] = (float)s;
+        }
+        std::vector<float> cls_bn1_w, cls_bn1_b, cls_bn1_m, cls_bn1_v;
+        read_f32(G("cls.DNN.block_0.bn.weight"), cls_bn1_w);
+        read_f32(G("cls.DNN.block_0.bn.bias"), cls_bn1_b);
+        read_f32(G("cls.DNN.block_0.bn.running_mean"), cls_bn1_m);
+        read_f32(G("cls.DNN.block_0.bn.running_var"), cls_bn1_v);
+        for (int c = 0; c < hidden; c++) {
+            h1[c] = (h1[c] - cls_bn1_m[c]) / sqrtf(cls_bn1_v[c] + 1e-5f) * cls_bn1_w[c] + cls_bn1_b[c];
+            h1[c] = h1[c] > 0 ? h1[c] : 0.01f * h1[c];
+        }
+        std::vector<float> cls_w2, cls_b2;
+        read_f32(G("cls.out.w.weight"), cls_w2);
+        read_f32(G("cls.out.w.bias"), cls_b2);
+        for (int i = 0; i < m.n_classes; i++) {
+            double s = cls_b2[i];
+            for (int k = 0; k < hidden; k++) s += h1[k] * cls_w2[i * hidden + k];
+            logits[i] = (float)s;
+        }
     }
 
     // Softmax + argmax

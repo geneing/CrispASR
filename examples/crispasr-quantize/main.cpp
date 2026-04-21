@@ -145,7 +145,9 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
         bool quantize = ggml_is_quantized(qtype) && (type == GGML_TYPE_F32 || type == GGML_TYPE_F16) && ok_dims &&
                         is_weight && (sname.find("norm") == std::string::npos) &&
                         // Skip projector tensors (Granite Speech: precision-sensitive)
-                        (sname.find("proj.") != 0);
+                        (sname.find("proj.") != 0) &&
+                        // Skip small classifier heads (ECAPA cosine: 45x192, precision-critical)
+                        !(sname.find("cls.") == 0 && ggml_nelements(t) < 65536);
 
         const int64_t ncols = t->ne[0];
         ggml_type qtype_used = qtype;

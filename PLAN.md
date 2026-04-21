@@ -722,7 +722,12 @@ TODO: decoder performance optimization (ggml for matmuls).
 ### ECAPA-TDNN LID — DONE
 
 `models/convert-ecapa-tdnn-lid-to-gguf.py`, `src/ecapa_lid.{h,cpp}`.
-43 MB F16 GGUF, 107 languages, Apache-2.0 (SpeechBrain VoxLingua107).
+Two model variants supported:
+- **VoxLingua107**: 43 MB F16, 107 languages, 60 mels, DNN classifier
+  HF: `cstr/ecapa-lid-107-GGUF`
+- **CommonLanguage**: 40 MB F16, 45 languages, 80 mels, cosine classifier
+  HF: `cstr/ecapa-lid-commonlanguage-GGUF`
+
 CLI: `--lid-backend ecapa` (method=3). Integrated into all 3 wrappers.
 
 **5 bugs found and fixed:**
@@ -735,6 +740,10 @@ CLI: `--lid-backend ecapa` (method=3). Integrated into all 3 wrappers.
 Embedded SpeechBrain filterbank matrix in GGUF for exact mel computation.
 400-point naive DFT (matching SpeechBrain's n_fft=400), center=True
 with reflect padding, Hann window (periodic).
+
+Converter auto-detects n_mels, lin_neurons, classifier type, and label format.
+Runtime handles both DNN and cosine classifiers dynamically.
+Quantization NOT viable — even Q8_0 breaks accuracy (see LEARNINGS.md).
 
 Accuracy: ~100% on 12-language edge-tts benchmark (en/de/fr/es/ja/zh etc.)
 MMS-LID (CC-BY-NC) deprioritized due to license.
@@ -955,4 +964,12 @@ with Python reference (fairseq2 inference).
 16th backend working! 194 MB Q4_K, 1600+ languages.
 JFK: "en so my tonek n what yor campri kand fur yo s watyukandfur yor kontry"
 Key: input layer_norm, CTC blank=0, pos conv padding=K//2.
-TODO: upload to HF, convert 1B/3B/7B, grouped conv precision.
+
+**Two GGUF formats exist:**
+- fairseq2-converted (`omniasr-ctc-300m.gguf`) — uses our omniasr runtime
+  tensor names: `cnn.0.ln.weight`, `enc.0.attn_ln.weight`, `ctc.weight`
+- HF-native (aadel4 wav2vec2 conversion) — different names, `general.architecture: wav2vec2`
+  potentially usable with existing wav2vec2 backend
+
+TODO: upload to HF, convert 1B/3B/7B, improve grouped conv precision,
+investigate HF-native path via wav2vec2 backend.

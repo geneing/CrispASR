@@ -1711,3 +1711,52 @@ typical attention window limits.
 fairseq2's Python package requires `fairseq2n` C++ extension which is
 compiled for specific Python/CUDA combos. Not available for Python 3.13
 or CPU-only setups via pip. Our manual forward pass serves as reference.
+
+### ECAPA-TDNN: two model variants (VoxLingua107 vs CommonLanguage)
+
+SpeechBrain has two ECAPA-TDNN LID models with different hyperparameters:
+
+| | VoxLingua107 | CommonLanguage |
+|---|---|---|
+| n_mels | 60 | 80 |
+| lin_neurons | 256 | 192 |
+| Classifier | DNN (BN→Linear→BN→LeakyReLU→Linear) | Cosine (normalize(emb) @ normalize(weight)) |
+| Labels | ISO codes (en, de, ...) | Full names (English, German, ...) |
+| Languages | 107 | 45 |
+
+The converter auto-detects these from `hyperparams.yaml` and `classifier.ckpt`
+structure, storing `ecapa.cls_type` (0=DNN, 1=cosine) and `ecapa.lin_neurons`
+in the GGUF metadata.
+
+**Cosine classifier**: `F.linear(F.normalize(emb), F.normalize(weight))` — each
+class output is the cosine similarity between the normalized embedding and the
+normalized class weight vector. Scores are in [-1, 1], not softmax probabilities.
+
+### ECAPA-TDNN: quantization destroys accuracy
+
+ECAPA-TDNN cannot be meaningfully quantized. Even Q8_0 produces all-wrong
+predictions (always returns "ms" regardless of input). Root causes:
+
+1. **Small conv1d kernels**: The res2net conv weights are `[128, 128, 3]` (49K elements).
+   Q8_0 block size 32 doesn't divide K=3, so ggml skips them — but the tdnn1/tdnn2
+   weights `[1024, 1024]` ARE quantized, which corrupts the embedding.
+2. **ggml_conv_1d + quantized weights**: The conv1d op may not properly dequantize
+   weight tensors during computation, producing garbage output.
+3. **Cosine classifier sensitivity**: Even small perturbations in the 192-dim
+   embedding space flip the argmax due to narrow angular margins between classes.
+
+**Conclusion**: Ship ECAPA-TDNN as F16 only. At 40-43 MB it's small enough
+that quantization savings (14 MB Q4_K) aren't worth the accuracy loss.
+
+### OmniASR-CTC: two GGUF formats (fairseq2 vs HF-native)
+
+The fairseq2-converted GGUF (`omniasr-ctc-300m.gguf`) uses tensor names like:
+- `cnn.0.ln.weight`, `enc.0.attn_ln.weight`, `enc.0.attn.q_proj.weight`
+- `enc.0.ffn.up.weight`, `enc_ln.weight`, `ctc.weight`, `proj.weight`
+
+The HF-native conversion (aadel4/omniASR-CTC-300M-v2) uses wav2vec2 names:
+- `cnn.0.norm.weight`, `enc.0.ln1.weight`, `enc.0.attn.q.weight`
+- `enc.0.ffn.fc1.weight`, `lm_head.weight`, `feat_proj.weight`
+
+Our omniasr runtime expects the fairseq2 format. The HF-native model can
+potentially be used with the existing wav2vec2 backend instead.

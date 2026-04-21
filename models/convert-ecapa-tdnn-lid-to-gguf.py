@@ -167,9 +167,9 @@ def main():
 
         # Store norms/biases as F32, weights as F16
         if "bn." in gguf_name or "bias" in name or len(t.shape) <= 1:
-            data = f32(tensor)
+            data = t.astype(np.float32)
         else:
-            data = f16(tensor)
+            data = t.astype(np.float16)
 
         writer.add_tensor(gguf_name, data)
         tensor_count += 1
