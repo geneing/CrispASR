@@ -110,6 +110,43 @@ extern "C" struct omniasr_context_params omniasr_context_default_params(void) {
 }
 
 // ===========================================================================
+// Debug: dump ggml tensor to binary file for comparison with Python reference
+// ===========================================================================
+
+static void dump_tensor(ggml_tensor* t, const char* name, const char* dir) {
+    if (!dir || !dir[0] || !t) return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    int n = (int)ggml_nelements(t);
+    std::vector<float> data(n);
+    if (t->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(t, data.data(), 0, n * sizeof(float));
+    } else if (t->type == GGML_TYPE_F16) {
+        std::vector<uint16_t> tmp(n);
+        ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(uint16_t));
+        ggml_fp16_to_fp32_row((const ggml_fp16_t*)tmp.data(), data.data(), n);
+    }
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fwrite(data.data(), sizeof(float), n, f);
+        fclose(f);
+        fprintf(stderr, "  DUMP: %s [%lld,%lld] → %s\n", name, (long long)t->ne[0], (long long)t->ne[1], path);
+    }
+}
+
+static void dump_cpu(const float* data, int n, const char* name, const char* dir) {
+    if (!dir || !dir[0]) return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fwrite(data, sizeof(float), n, f);
+        fclose(f);
+        fprintf(stderr, "  DUMP: %s [%d] → %s\n", name, n, path);
+    }
+}
+
+// ===========================================================================
 // ggml graph helpers
 // ===========================================================================
 
@@ -404,6 +441,8 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
     ggml_context* ctx0 = ggml_init(gp);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
 
+    const char* dump_dir = getenv("OMNIASR_DUMP_DIR");
+
     // Input normalization: layer_norm(waveform) — zero mean, unit variance
     // This is a wav2vec2 convention, required for OmniASR.
     std::vector<float> pcm_norm(n_samples);
@@ -420,6 +459,7 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
         for (int i = 0; i < n_samples; i++)
             pcm_norm[i] = (samples[i] - (float)mean) * inv_std;
     }
+    dump_cpu(pcm_norm.data(), n_samples, "pcm_norm", dump_dir);
 
     // Input: normalized PCM [n_samples, 1]
     ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_samples, 1);
@@ -472,8 +512,13 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
     h = ggml_cont(ctx0, ggml_transpose(ctx0, h)); // [512, T]
 
     // Post-extract LayerNorm (on 512-dim CNN output)
-    ggml_tensor* pe_ln_w = G("encoder_frontend.post_extract_ln.weight");
-    ggml_tensor* pe_ln_b = G("encoder_frontend.post_extract_ln.bias");
+    // Try both shortened and long names (LLM converter shortens, CTC keeps long)
+    ggml_tensor* pe_ln_w = G("post_extract_ln.weight");
+    ggml_tensor* pe_ln_b = G("post_extract_ln.bias");
+    if (!pe_ln_w) {
+        pe_ln_w = G("encoder_frontend.post_extract_ln.weight");
+        pe_ln_b = G("encoder_frontend.post_extract_ln.bias");
+    }
     if (pe_ln_w)
         h = build_ln(ctx0, h, pe_ln_w, pe_ln_b);
 
@@ -533,13 +578,21 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
                 return nullptr;
             }
 
-            // Read h_pre_pos: [d_model, T] col-major = data[t * d + c]... no:
-            // ggml [d_model, T] with ne[0]=d_model, ne[1]=T: data[t * d_model + c]
+            // Dump CNN output if available
+            {
+                ggml_tensor* cnn_t = ggml_graph_get_tensor(gf, "cnn_out");
+                if (cnn_t) dump_tensor(cnn_t, "cnn_out", dump_dir);
+                ggml_tensor* proj_t = ggml_graph_get_tensor(gf, "proj_out");
+                if (proj_t) dump_tensor(proj_t, "proj_out_graph1", dump_dir);
+            }
+
+            // Read h_pre_pos: [d_model, T] ggml col-major: data[t * d_model + c]
             ggml_tensor* h_cpu_t = ggml_graph_get_tensor(gf, "h_pre_pos");
             int d = (int)h_cpu_t->ne[0];     // 1024
             int T_pos = (int)h_cpu_t->ne[1]; // 549
             std::vector<float> h_cpu(d * T_pos);
             ggml_backend_tensor_get(h_cpu_t, h_cpu.data(), 0, d * T_pos * sizeof(float));
+            dump_cpu(h_cpu.data(), d * T_pos, "h_pre_pos", dump_dir);
 
             if (ctx->params.verbosity >= 2)
                 fprintf(stderr, "  pos_encoder: d=%d, T=%d, K=%d, groups=%d\n", d, T_pos, K_pos, groups);
@@ -591,6 +644,7 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
             // Add pos to h: h = h + pos
             for (int i = 0; i < d * T_pos; i++)
                 h_cpu[i] += pos[i];
+            dump_cpu(h_cpu.data(), d * T_pos, "pos_conv_out", dump_dir);
 
             // Now rebuild Graph 2: transformer + CTC using h_cpu as input
             ggml_free(ctx0);
@@ -671,6 +725,7 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
                 int T_e = (int)enc_out_t->ne[1];
                 std::vector<float> enc_out_data(d_e * T_e);
                 ggml_backend_tensor_get(enc_out_t, enc_out_data.data(), 0, d_e * T_e * sizeof(float));
+                dump_cpu(enc_out_data.data(), d_e * T_e, "encoder_output", dump_dir);
                 ggml_free(ctx0);
 
                 if (ctx->params.verbosity >= 1)
@@ -1007,6 +1062,7 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const float* /*samples
 
     if (ctx->params.verbosity >= 2)
         fprintf(stderr, "  enc_proj done: [%d, %d]\n", dd, T_enc);
+    dump_cpu(audio_embs.data(), dd * T_enc, "enc_proj_output", getenv("OMNIASR_DUMP_DIR"));
 
     // 2. Build prefix: [BOS_emb, lang_emb, audio_embs...]
     // BOS embedding from tok_emb
