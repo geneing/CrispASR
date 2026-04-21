@@ -986,8 +986,15 @@ SwiGLU FFN d_ffn=2816, RMSNorm, RoPE interleaved).
 - Language ID = list_index + 1 (factory.py convention, index 0 = no-language)
 - CPU decoder works but slow (~3s/token, single-core matmul 4096×4096)
 
-**Status:** Generating tokens, quality needs debugging. With eng_Latn=414 gets "mm"
-for 0.5s audio (stops early). Testing with longer audio. Need to compare against
-Python reference for accuracy verification.
+**Status:** ggml graph decoder optimized — 552-token prefill + generation in 70s
+(was >10 min with CPU matmul). Uses `core_attn::kv_self_attn` + `core_ffn::swiglu`.
 
-TODO: ggml graph decoder optimization, reference comparison, beam search.
+v2 model (10288 vocab) produces English output with lang_id=417 (eng_Latn):
+- 0.5s JFK → "and we were going to do" (correct language, hallucinated content)
+- 5s JFK → "it sounded to make it but" (wrong transcription)
+- 11s JFK → "it sounded to one and..." (wrong transcription)
+
+Short audio works, longer audio degrades. The encoder output quality is the bottleneck
+(same issue as CTC variant — grouped pos_conv precision or transformer issues).
+
+TODO: debug encoder accuracy against Python reference, beam search, dynamic lang selection.
