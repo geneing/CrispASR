@@ -1001,4 +1001,70 @@ match Python reference (cos>0.9999).
 11s JFK result: "and so my palamericas is not what your country can do for
 you is what you can do for your country" — correct structure, most words right.
 
-TODO: beam search, dynamic lang selection, quantization, HF upload.
+Quantized: Q4_K (1.1 GB), Q8_0 (1.8 GB) — identical output to F16.
+Key: skip bridging tensors (enc_proj, lm_head, tok_emb, lang_emb).
+HF: `cstr/omniasr-llm-300m-v2-GGUF`
+
+TODO: beam search, dynamic lang selection from parquet.
+
+---
+
+## 30. PazaBench model coverage assessment
+
+Assessed 16 ASR model families from [PazaBench](https://github.com/microsoft/PazaBench)
+against CrispASR's current 17 backends. Only open-weight, commercially-licensed
+models considered (MIT, Apache-2.0). CC-BY-NC models postponed.
+
+### Already covered by CrispASR
+
+| PazaBench family | CrispASR backend | Notes |
+|---|---|---|
+| OpenAI Whisper | `whisper` | All sizes (tiny→large-v3-turbo) |
+| NVIDIA NeMo (canary, parakeet) | `canary`, `parakeet` | canary-1b-v2, parakeet-tdt-0.6b-v3 |
+| IBM Granite Speech | `granite` | 3.2-8b, 3.3-2b, 3.3-8b |
+| Kyutai STT | `kyutai-stt` | stt-1b-en, stt-2.6b-en |
+| Moonshine | `moonshine` | tiny, base |
+| Facebook OmniASR | `omniasr` | CTC-300M + LLM-300M-v2 |
+| Facebook Wav2Vec2 | `wav2vec2` | Any Wav2Vec2ForCTC model |
+
+### Easy wins — likely work with existing backends (try first)
+
+| Model | License | Approach | Effort |
+|---|---|---|---|
+| **Distil Whisper** (distil-large-v2/v3) | MIT | Same arch as whisper → should work via `whisper` backend with standard GGUF | Trivial — test only |
+| **Lite ASR / EfficientSpeech** (lite-whisper-*) | Apache-2.0 | Whisper distillation → may work with `whisper` backend | Trivial — test, may need minor tweaks |
+| **Data2Vec Audio** (data2vec-audio-base/large) | Apache-2.0 | Wav2Vec2ForCTC architecture → should work via `wav2vec2` backend | Low — convert + test |
+| **HuBERT** (hubert-large-ls960-ft) | Apache-2.0 | Wav2Vec2ForCTC compatible → should work via `wav2vec2` backend | Low — convert + test |
+
+### Medium effort — new converter, possibly minor runtime changes
+
+| Model | License | Architecture | Effort | Priority |
+|---|---|---|---|---|
+| **Wav2Vec2 Conformer** | Apache-2.0 | Conformer attention (conv + self-attn) vs vanilla transformer in wav2vec2. Relative/rotary positional encoding. | Medium — needs conformer attention in encoder | Medium |
+| **Qwen2-Audio** (7B) | Apache-2.0 | Whisper encoder + Qwen2 7B LLM. Similar pattern to qwen3-asr but different LLM architecture (GQA, SwiGLU). Large model (7B). | Medium — encoder reuse, new LLM decoder | Medium |
+| **OmniASR larger variants** (CTC-1B/3B/7B, LLM-1B/3B/7B) | Apache-2.0 | Same arch as 300M, just bigger. Converter handles it. May need memory optimizations. | Low-Medium — convert + test | High |
+
+### Complex — significant new runtime needed
+
+| Model | License | Architecture | Effort | Priority |
+|---|---|---|---|---|
+| **Paza** (Phi-4 multimodal) | MIT | Phi-4 14B with audio adapter. Multimodal (image+audio+text). Very large. | High — needs Phi-4 LLM runtime | Low |
+| **Phi-4 Multimodal** | MIT | Same as Paza but vanilla Phi-4. 14B params, multimodal. Already in llama.cpp. | High — better to use llama.cpp directly | Low |
+| **NeMo Canary-Qwen-2.5b** | Apache-2.0 | NeMo FastConformer + Qwen2.5 decoder. Different from canary-1b. | Medium-High — new decoder type | Medium |
+
+### Postponed — non-commercial license
+
+| Model | License | Reason |
+|---|---|---|
+| **Facebook MMS** (mms-1b-all, mms-1b-fl102) | CC-BY-NC 4.0 | Non-commercial only. Covers 1100+ languages but license prohibits commercial use. |
+| **OmniASR-LLM-7B-ZS** | Apache-2.0 (model) but impractical | Zero-shot variant needs 10 context examples per inference — too complex for our use case |
+
+### Recommended priority order
+
+1. **OmniASR larger variants** (CTC-1B, LLM-1B) — same code, just bigger models. High impact.
+2. **Data2Vec + HuBERT** — likely work with wav2vec2 backend. Quick wins for benchmark coverage.
+3. **Distil Whisper + Lite ASR** — test with existing whisper backend. Free coverage.
+4. **Wav2Vec2 Conformer** — needs conformer attention, moderate effort.
+5. **Qwen2-Audio** — medium effort, good multilingual + audio understanding.
+6. **NeMo Canary-Qwen-2.5b** — if NeMo ecosystem is a priority.
+7. **Paza / Phi-4** — defer to llama.cpp multimodal tooling.
