@@ -1068,3 +1068,98 @@ models considered (MIT, Apache-2.0). CC-BY-NC models postponed.
 5. **Qwen2-Audio** — medium effort, good multilingual + audio understanding.
 6. **NeMo Canary-Qwen-2.5b** — if NeMo ecosystem is a priority.
 7. **Paza / Phi-4** — defer to llama.cpp multimodal tooling.
+
+---
+
+## 31. Language detection info in JSON output (issue #17)
+
+**Request**: CrispStrobe/CrispASR#17 — expose detected language + confidence
+in structured output (JSON/SRT/VTT), not just stderr.
+
+**Current state**: When `-l auto` is used, `CrispasrLidResult` (lang_code,
+confidence, source) is populated in the CLI pipeline but only printed to
+stderr. The JSON/SRT/VTT formatters don't include it.
+
+**Implementation**:
+
+1. `examples/cli/cli.cpp` — after LID runs, store the result in a struct
+   accessible to the output formatters. Currently the result is consumed
+   inline and discarded.
+
+2. JSON output (`-oj`): add top-level fields before segments array:
+   ```json
+   {
+     "language": "en",
+     "language_confidence": 0.98,
+     "language_source": "ecapa",
+     "segments": [...]
+   }
+   ```
+
+3. SRT/VTT: optionally add a comment line at the top:
+   ```
+   NOTE Language: en (confidence: 0.98, source: ecapa)
+   ```
+
+4. For per-segment LID (multilingual audio): run LID on each VAD segment
+   and annotate each segment with its language. This requires changes to
+   the segment loop in `cli.cpp` — each chunk would call
+   `crispasr_detect_language()` independently. Adds latency but enables
+   correct transcription of code-switched audio.
+
+**Files**:
+- `examples/cli/cli.cpp` — LID result propagation + JSON/SRT/VTT output
+- `examples/cli/whisper_params.h` — add `lid_result` field to params or
+  a separate output struct
+
+**Effort**: Low (JSON field) to Medium (per-segment LID).
+
+---
+
+## 32. Upload CUDA artifact to v0.4.14 release
+
+The v0.4.14 release at https://github.com/CrispStrobe/CrispASR/releases/tag/v0.4.14
+was published with 6 of 7 artifacts (CUDA still building). When the CUDA build
+from run 24748094665 completes:
+
+```bash
+# Download CUDA artifact
+CUDA_ID=$(gh api repos/CrispStrobe/CrispASR/actions/runs/24748094665/artifacts \
+  -q '.artifacts[] | select(.name=="crispasr-windows-x86_64-cuda") | .id')
+gh api repos/CrispStrobe/CrispASR/actions/artifacts/$CUDA_ID/zip > /tmp/cuda.zip
+cd /tmp && unzip -o cuda.zip && rm cuda.zip
+
+# Upload to release
+UPLOAD_URL=$(gh api repos/CrispStrobe/CrispASR/releases/311957303 \
+  -q '.upload_url' | sed 's/{.*//')
+curl -X POST \
+  -H "Authorization: token $(gh auth token)" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @/tmp/crispasr-windows-x86_64-cuda.zip \
+  "${UPLOAD_URL}?name=crispasr-windows-x86_64-cuda.zip"
+
+# Update release notes to remove "building..." line
+gh api repos/CrispStrobe/CrispASR/releases/311957303 -X PATCH \
+  -f body="<updated notes with CUDA row>"
+```
+
+---
+
+## 33. OmniASR-LLM remaining optimizations
+
+**Beam search**: Currently greedy-only. The reference pipeline uses
+`Wav2Vec2LlamaBeamSearchSeq2SeqGenerator` with `nbest=1`. Adding beam
+search (even beam=2) would improve quality. Implementation: keep N
+hypothesis KV caches, expand candidates at each step, prune.
+
+**Dynamic language selection**: Currently hardcoded `eng_Latn=417`. Need to:
+1. Embed the `languges_lookup_table.parquet` mapping in the GGUF as a
+   string array (lang codes) with matching indices.
+2. Parse `ctx->params.language` at runtime to look up the embedding index.
+3. Map CrispASR's ISO 639-1 codes (en, de, fr) to FLORES-200 codes
+   (eng_Latn, deu_Latn, fra_Latn) using a static table.
+
+**Encoder accuracy**: The encoder produces cos>0.9999 vs Python reference
+on all stages (verified). Remaining transcription errors ("palamericas"
+vs "fellow Americans") are model-level limitations of the 300M encoder,
+not implementation bugs. Larger variants (1B, 3B) should be better.
