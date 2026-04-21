@@ -260,6 +260,7 @@ struct KvSelfAttnParams {
     float attn_scale;     // usually 1/sqrt(head_dim); granite uses µP scale
     float qk_norm_eps;    // RMSNorm epsilon for optional Q/K norm (qwen3); unused otherwise
     GqaMode gqa_mode;
+    int rope_type = GGML_ROPE_TYPE_NEOX; // NEOX for most models, NORMAL for fairseq2/omniasr
 };
 
 // KV-cached self-attention. Writes the new K/V into the persistent cache
@@ -312,11 +313,11 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
         K = ggml_mul(ctx0, K, k_norm_w);
     }
 
-    // ---- NEOX RoPE ----
-    Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX, p.n_ctx_orig, p.rope_theta,
+    // ---- RoPE (NEOX for most models, NORMAL for fairseq2/omniasr) ----
+    Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, p.rope_type, p.n_ctx_orig, p.rope_theta,
                       /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f,
                       /*attn_factor*/ 1.0f, p.rope_beta_fast, p.rope_beta_slow);
-    K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX, p.n_ctx_orig, p.rope_theta, 1.0f, 0.0f,
+    K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, p.rope_type, p.n_ctx_orig, p.rope_theta, 1.0f, 0.0f,
                       1.0f, p.rope_beta_fast, p.rope_beta_slow);
 
     // ---- Permute new K/V to (hd, T, n_kv) for cache write ----
