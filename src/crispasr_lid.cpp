@@ -215,6 +215,11 @@ bool crispasr_detect_language(const float* samples, int n_samples, const Crispas
                               CrispasrLidResult& out) {
     if (!samples || n_samples <= 0)
         return false;
+    // Truncate to 15 s — LID models don't benefit from longer audio, and
+    // processing the full file wastes time on long recordings.
+    constexpr int kLidMaxSamples = 16000 * 15;
+    if (n_samples > kLidMaxSamples)
+        n_samples = kLidMaxSamples;
     switch (opts.method) {
     case CrispasrLidMethod::Whisper:
         return detect_whisper(samples, n_samples, opts, out);

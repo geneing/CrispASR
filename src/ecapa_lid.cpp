@@ -315,7 +315,9 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
     auto& m = ctx->model;
     auto& ts = m.tensors;
 
-    constexpr int kMaxSamples = 16000 * 5;
+    // ECAPA-TDNN works well with 3–15 s of audio. The caller
+    // (crispasr_detect_language) already truncates to 15 s.
+    constexpr int kMaxSamples = 16000 * 15;
     if (n_samples > kMaxSamples)
         n_samples = kMaxSamples;
 
