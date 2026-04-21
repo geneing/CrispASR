@@ -126,7 +126,7 @@ jobs:
           name: crispasr-macos
           path: release/crispasr-macos.tar.gz
 
-  # ── Windows CPU (static, portable — no GPU driver required) ─────────────────
+  # ── Windows CPU (AVX2 — Haswell/2013+ baseline) ──────────────────────────────
   build-windows-cpu:
     runs-on: windows-latest
     steps:
@@ -155,6 +155,40 @@ jobs:
         with:
           name: crispasr-windows-x86_64-cpu
           path: release/crispasr-windows-x86_64-cpu.zip
+
+  # ── Windows CPU legacy (SSE4.2 — Sandy Bridge/2011+, no AVX2/FMA/F16C) ───────
+  # For CPUs that predate Haswell: Ivy Bridge (i5-3xxx, i7-3xxx), Sandy Bridge,
+  # AMD pre-Excavator. Symptoms of using the wrong build: silent instant exit
+  # (STATUS_ILLEGAL_INSTRUCTION) with no error message.
+  build-windows-cpu-legacy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Build
+        run: |
+          cmake -S . -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DGGML_NATIVE=OFF `
+            -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF `
+            -DGGML_AVX=ON
+          cmake --build build --config Release --target whisper-cli crispasr-quantize -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force release\crispasr-windows-x86_64-cpu-legacy
+          Copy-Item build\bin\Release\crispasr.exe release\crispasr-windows-x86_64-cpu-legacy\
+          Copy-Item build\bin\Release\crispasr-quantize.exe release\crispasr-windows-x86_64-cpu-legacy\
+          Compress-Archive -Path release\crispasr-windows-x86_64-cpu-legacy -DestinationPath release\crispasr-windows-x86_64-cpu-legacy.zip -CompressionLevel Optimal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-windows-x86_64-cpu-legacy
+          path: release/crispasr-windows-x86_64-cpu-legacy.zip
 
   # ── Windows CUDA (dynamic, requires NVIDIA driver on target machine) ─────────
   build-windows-cuda:
@@ -252,7 +286,7 @@ jobs:
           path: release/crispasr-windows-x86_64-vulkan.zip
 
   publish:
-    needs: [build-linux, build-python-linux, build-macos, build-windows-cpu, build-windows-cuda, build-windows-vulkan]
+    needs: [build-linux, build-python-linux, build-macos, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -268,6 +302,7 @@ jobs:
             artifacts/crispasr-python-linux-x86_64/crispasr-python-linux-x86_64.tar.gz
             artifacts/crispasr-macos/crispasr-macos.tar.gz
             artifacts/crispasr-windows-x86_64-cpu/crispasr-windows-x86_64-cpu.zip
+            artifacts/crispasr-windows-x86_64-cpu-legacy/crispasr-windows-x86_64-cpu-legacy.zip
             artifacts/crispasr-windows-x86_64-cuda/crispasr-windows-x86_64-cuda.zip
             artifacts/crispasr-windows-x86_64-vulkan/crispasr-windows-x86_64-vulkan.zip
           generate_release_notes: true
