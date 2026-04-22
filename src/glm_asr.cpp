@@ -818,7 +818,10 @@ static ggml_cgraph* glm_build_encoder(glm_asr_context* ctx, int T_mel) {
     cur = ggml_add(ctx0, cur, bias_1d(m.audio.conv2_b));
     cur = ggml_gelu_erf(ctx0, cur);
 
-    const int T_enc = (T_mel + 1) / 2; // stride 2
+    // ggml_conv_1d with k=3, s=2, p=1 produces floor(T/2) frames for odd
+    // lengths in the unbatched (T, C) path used here. Using ceil(T/2) causes
+    // the first post-conv reshape to overrun by one frame on odd T_mel.
+    const int T_enc = T_mel / 2;
     cur = ggml_reshape_2d(ctx0, cur, T_enc, d);
     cur = ggml_cont(ctx0, ggml_transpose(ctx0, cur)); // (d, T_enc)
 
@@ -940,7 +943,7 @@ extern "C" float* glm_asr_run_encoder(struct glm_asr_context* ctx, const float* 
         return nullptr;
 
     const auto& hp = ctx->model.hp;
-    const int T_enc = (T_mel + 1) / 2;
+    const int T_enc = T_mel / 2;
     const int T_proj = T_enc / 4;
     const int llm_d = hp.llm_hidden; // 2048
 

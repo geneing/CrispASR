@@ -957,6 +957,29 @@ full RoPE), so the attention is implemented inline.
 using RoPE helpers. If it's not 1.0, split-apply-concat is required.
 The same pattern appears in Gemma, Phi, and other recent architectures.
 
+### GLM-ASR-Nano: stride-2 conv length is floor(T/2), not ceil(T/2)
+
+GLM-ASR's encoder stem uses `ggml_conv_1d` with `k=3, s=2, p=1`, then
+immediately reshapes the result to `(T_enc, d)`. I initially used
+`T_enc = (T_mel + 1) / 2`, which matches the textbook convolution size
+formula for this kernel setup, but not the actual ggml tensor layout in
+the unbatched `(T, C)` path used here.
+
+On odd `T_mel`, ggml produced `floor(T_mel / 2)` frames, so the reshape
+asked for one frame too many and hit:
+
+`GGML_ASSERT(ggml_nelements(a) == ne0*ne1)`
+
+This showed up immediately on real GLM-ASR inference with odd-length mel
+sequences, while even-length samples hid the bug.
+
+**Fix:** Use `T_enc = T_mel / 2` consistently in both the encoder graph
+builder and the output-shape calculation in `glm_asr_run_encoder()`.
+
+**Lesson:** For ggml conv outputs, trust the runtime tensor shape or a
+known-good in-repo precedent over the paper formula, especially when the
+input is using an implicit unbatched layout.
+
 ### FFT size must be power of 2 for radix-2
 
 `core_mel::compute()` calls `fft(data, n_fft, output)` where `n_fft`
