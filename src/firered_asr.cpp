@@ -728,6 +728,17 @@ static void cpu_softmax_rows(float* x, int rows, int cols) {
     }
 }
 
+static void firered_debug_dump_vec(const char* name, const std::vector<float>& v, int max_items) {
+    fprintf(stderr, "firered_asr[%s]: [", name);
+    int n = (int)v.size() < max_items ? (int)v.size() : max_items;
+    for (int i = 0; i < n; i++) {
+        if (i)
+            fprintf(stderr, ",");
+        fprintf(stderr, "%.4f", v[i]);
+    }
+    fprintf(stderr, "]\n");
+}
+
 // ===========================================================================
 // CPU encoder: full Conformer encoder computed on CPU
 // ===========================================================================
@@ -1637,6 +1648,12 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         int d = hp.d_model;
         int odim = hp.odim;
         const bool use_gpu_decoder_proj = !ggml_backend_is_cpu(ctx->backend);
+        int debug_dec_step = -1;
+        int debug_dec_layer = -1;
+        if (const char* env = std::getenv("FIRERED_DEBUG_DECODER_STEP"))
+            debug_dec_step = atoi(env);
+        if (const char* env = std::getenv("FIRERED_DEBUG_DECODER_LAYER"))
+            debug_dec_layer = atoi(env);
 
         // Cache all decoder layer weights ONCE before the loop
         struct dec_layer_cache {
@@ -1833,6 +1850,9 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
 
                 for (int li = 0; li < hp.n_layers_dec; li++) {
                     auto& c = dec_cache[li];
+                    // Enable trace by env var only; the CLI only has a single -v flag.
+                    const bool debug_dec_here =
+                        (debug_dec_step >= 0 && debug_dec_layer >= 0 && step == debug_dec_step && li == debug_dec_layer);
 
                     // === Self-attention (causal, attend to history) ===
                     {
@@ -1880,6 +1900,8 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                                 sa_out[h * hd_dec + dd] = (float)s;
                             }
                         }
+                        if (debug_dec_here)
+                            firered_debug_dump_vec("greedy.sa_out", sa_out, 8);
 
                         std::vector<float> sa_fc(d, 0);
                         for (int i = 0; i < d; i++) {
@@ -1923,6 +1945,10 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                             attn_out[h * hd_dec + dd] = (float)s;
                         }
                     }
+                    if (debug_dec_here) {
+                        firered_debug_dump_vec("greedy.qx", Qx, 8);
+                        firered_debug_dump_vec("greedy.attn_out", attn_out, 8);
+                    }
 
                     std::vector<float> fc_out(d, 0);
                     for (int i = 0; i < d; i++) {
@@ -1952,6 +1978,10 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         for (int k = 0; k < c.di; k++)
                             s += h_up[k] * c.mlp_w2[i * c.di + k];
                         mlp_out[i] = (float)s + (c.mlp_b2.empty() ? 0 : c.mlp_b2[i]);
+                    }
+                    if (debug_dec_here) {
+                        firered_debug_dump_vec("greedy.fc_out", fc_out, 8);
+                        firered_debug_dump_vec("greedy.mlp_out", mlp_out, 8);
                     }
                     for (int i = 0; i < d; i++)
                         x[i] += mlp_out[i];
