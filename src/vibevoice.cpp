@@ -197,7 +197,7 @@ extern "C" void vibevoice_free(struct vibevoice_context* ctx) {
 // ===========================================================================
 
 // ConvRMSNorm: operates on [C, T] (ne[0]=C), normalizes over C per time step
-static ggml_tensor* build_conv_rms_norm(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, float eps = 1e-6f) {
+static ggml_tensor* build_conv_rms_norm(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, float eps = 1e-5f) {
     // x: [C, T], w: [C]. ggml_rms_norm normalizes over ne[0]=C. Good.
     // ggml_mul(x, w): x=[C,T], w=[C]. w broadcasts over T. OK.
     x = ggml_rms_norm(ctx, x, eps);
@@ -371,6 +371,11 @@ static ggml_cgraph* build_tokenizer_encoder_graph(vibevoice_context* ctx, const 
         // Stage blocks
         int n_blocks = (si < (int)hp.encoder_depths.size()) ? hp.encoder_depths[si] : 3;
         for (int bi = 0; bi < n_blocks; bi++) {
+            // Mark first block of stage 0 for debugging
+            if (si == 0 && bi == 0) {
+                ggml_set_name(h, "s0_pre_block_0");
+                ggml_set_output(h);
+            }
             char base[128];
             snprintf(base, sizeof(base), "%s.s.%d.%d", prefix, si, bi);
 
@@ -385,6 +390,13 @@ static ggml_cgraph* build_tokenizer_encoder_graph(vibevoice_context* ctx, const 
                               G(std::string(base) + ".ffn.down.weight"),
                               G(std::string(base) + ".ffn.down.bias"),
                               G(std::string(base) + ".ffn_gamma"));
+            // Mark stage 0 block outputs
+            if (si == 0) {
+                char bname[64];
+                snprintf(bname, sizeof(bname), "s0_post_block_%d", bi);
+                ggml_set_name(h, bname);
+                ggml_set_output(h);
+            }
         }
     }
 
@@ -472,6 +484,26 @@ extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float
     // Dump per-stage intermediates for reference comparison
     const char* dump_dir = getenv("VIBEVOICE_DUMP_DIR");
     if (dump_dir && dump_dir[0]) {
+        // Dump stage intermediates
+        auto dump_graph_tensor = [&](const char* tname) {
+            ggml_tensor* t = ggml_graph_get_tensor(gf_at, tname);
+            if (!t) return;
+            int n = (int)ggml_nelements(t);
+            std::vector<float> d(n);
+            ggml_backend_tensor_get(t, d.data(), 0, n * sizeof(float));
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s.bin", dump_dir, tname);
+            FILE* f = fopen(path, "wb");
+            if (f) { fwrite(d.data(), sizeof(float), n, f); fclose(f); }
+            fprintf(stderr, "  DUMP: %s [%lld,%lld] → %s\n", tname, (long long)t->ne[0], (long long)t->ne[1], path);
+        };
+        // Block outputs
+        dump_graph_tensor("s0_pre_block_0");
+        for (int bi = 0; bi < 3; bi++) {
+            char bname[64];
+            snprintf(bname, sizeof(bname), "s0_post_block_%d", bi);
+            dump_graph_tensor(bname);
+        }
         for (int si = 0; si < hp.n_encoder_stages; si++) {
             char tname[64], path[512];
             snprintf(tname, sizeof(tname), "at_ds_%d", si);
