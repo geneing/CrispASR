@@ -833,6 +833,31 @@ slow" are likely observing this CPU decoder bottleneck rather than a
 simple GPU selection bug. The real fix is a GPU-resident decoder graph
 or at least ggml graphs for decoder matmuls with minimal readback.
 
+**Update (2026-04-23):** FireRed decoder speed work made real progress:
+
+- `abc5c35` added a dedicated greedy fast path (`beam_size == 1`)
+- `2526417` trimmed remaining greedy decoder overhead
+- `a7ece2f` moved decoder cross-attention encoder-side `K/V` precompute
+  and final vocab projection onto ggml/GPU
+
+Current measured result on `issue19-5s.wav` with `-t 8 -l en`:
+
+- greedy `-bs 1`: `26.86s -> 8.68s` (~`3.1x` faster)
+- beam `-bs 3`: `29.59s -> 19.02s` (~`1.56x` faster)
+
+Just as important: several smaller ideas were tested and reverted
+because they regressed speed:
+
+- scratch-buffer reuse inside the decoder loop
+- per-call ggml graphs for small MLP projections
+- parallel `gemv` helper for small decoder vector-matrix products
+
+This narrowed the next step substantially: the remaining useful work is
+**persistent larger decoder graphs**, not more CPU micro-optimizations.
+The next concrete target is a reused greedy decoder subgraph per layer
+or per token step so more of self-attn / cross-attn / MLP can stay on
+ggml with less scheduler overhead.
+
 **Subtitle timing:** Parakeet remains the recommended timestamp-critical
 backend because it has native word timestamps. For LLM/no-native-timestamp
 backends, recommend `--vad -am <ctc-aligner.gguf> -osrt --split-on-punct`;

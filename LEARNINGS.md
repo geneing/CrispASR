@@ -1881,3 +1881,53 @@ to propagate that intent into its own backend picker.
 - Root cause: `examples/cli/cli.cpp` called `ggml_backend_load_all()` before parsing CLI flags, and `src/cohere.cpp` also loaded all backends unconditionally. That dynamic registration path probes CUDA as soon as the CUDA backend is loaded.
 - Fix: parse CLI args first, then call `ggml_backend_load_all()` only when `params.use_gpu` is true and `params.gpu_backend != "cpu"`. Any backend with its own unconditional `ggml_backend_load_all()` must apply the same guard.
 - Result: CPU-forced runs stop triggering global CUDA discovery just to select a CPU backend.
+
+## 2026-04-23 - FireRed decoder optimization triage
+
+### What actually helped
+
+On the FireRed AED decoder, the wins came from moving **large, reused**
+decoder matmuls onto ggml/GPU and from removing unnecessary beam work:
+
+- Copy-on-write beam KV history instead of deep-copying `sa_k` / `sa_v`
+  on every beam fork
+- Dedicated greedy path for `beam_size == 1`
+- Removing unused log-softmax bookkeeping from the greedy path
+- Moving cross-attention encoder-side `K/V` precompute onto ggml/GPU
+- Moving final decoder vocab projection onto ggml/GPU
+
+Measured on `issue19-5s.wav` (`-t 8 -l en`) on the RTX A1000 laptop:
+
+- Original baseline, `-bs 1`: `26.86s`
+- Current best, `-bs 1`: `8.68s`
+- Original baseline, `-bs 3`: `29.59s`
+- Current best, `-bs 3`: `19.02s`
+
+So the current FireRed decoder is about:
+
+- `3.1x` faster for greedy decode
+- `1.56x` faster for beam size 3
+
+### What did not help
+
+Several intuitive CPU-side micro-optimizations were regressions and were
+reverted:
+
+- Per-call scratch-buffer reuse inside the decoder loop
+- Streaming logsumexp / top-k rewrite for the vocab projection
+- Parallel `gemv` helper for small decoder vector-by-matrix products
+- Per-call ggml graphs for small decoder MLP projections
+
+The common pattern: **small per-step graphs or tiny parallel regions lose
+to their own launch/alloc/scheduling overhead**. The decoder only speeds
+up when the moved work is both substantial and reused.
+
+### FireRed decoder strategy going forward
+
+The remaining useful path is **larger persistent decoder subgraphs**, not
+more loop-level CPU tuning. In particular:
+
+1. Keep shared heavy decoder work on ggml/GPU (`K/V` precompute, logits).
+2. Avoid one-graph-per-small-matmul designs.
+3. Next meaningful step is a reused greedy decoder subgraph per layer or
+   per token step, not isolated ggml calls for single projections.
