@@ -6,7 +6,7 @@ RUN apt-get update && \
   rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 ARG CRISPASR_REPO=https://github.com/CrispStrobe/CrispASR
-ARG CRISPASR_REF=faf0d1f
+ARG CRISPASR_REF=faf0d1fd38103b072b520803bb0409d92c0c48aa
 
 RUN git clone --depth 1 "${CRISPASR_REPO}" /src/CrispASR && \
   git -C /src/CrispASR fetch --depth 1 origin "${CRISPASR_REF}" && \
