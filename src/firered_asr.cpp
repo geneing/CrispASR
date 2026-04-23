@@ -208,7 +208,7 @@ struct firered_asr_context {
 // ===========================================================================
 
 extern "C" struct firered_asr_context_params firered_asr_context_default_params(void) {
-    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true};
+    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true, /*beam_size=*/3};
 }
 
 // --- Tensor loading helpers ---
@@ -1632,7 +1632,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         // the first token after SOS is the language. Full ASR needs longer sequences.
         const bool is_lid = (hp.odim <= 256);
         int max_len = is_lid ? 2 : std::min(T_sub * 2, 300);
-        int beam_size_effective = is_lid ? 1 : 3; // greedy for LID, beam for ASR
+        int beam_size_effective = is_lid ? 1 : std::max(1, ctx->params.beam_size);
         int d = hp.d_model;
         int odim = hp.odim;
 
@@ -1718,6 +1718,10 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
             b.tokens.push_back(hp.sos_id);
             b.sa_k.resize(hp.n_layers_dec);
             b.sa_v.resize(hp.n_layers_dec);
+            for (int li = 0; li < hp.n_layers_dec; li++) {
+                b.sa_k[li].reserve((size_t)max_len * d);
+                b.sa_v[li].reserve((size_t)max_len * d);
+            }
             b.score = 0;
         }
         // Only beam 0 starts active; others start with -inf score
@@ -1737,12 +1741,14 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
             if (all_done)
                 break;
 
-            // Collect logits for each active beam
-            struct beam_logits {
-                int bi;
-                std::vector<float> logits;
+            // Beam pruning candidates collected directly from each beam's
+            // logits pass to avoid storing full-vocab logits for every beam.
+            struct candidate {
+                int src_beam, token;
+                float score;
             };
-            std::vector<beam_logits> all_logits;
+            std::vector<candidate> cands;
+            cands.reserve(beam_size * beam_size + beam_size);
 
             for (int bi = 0; bi < beam_size; bi++) {
                 if (beams[bi].finished)
@@ -1901,35 +1907,40 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                     logits[i] = (float)s;
                 }
 
-                all_logits.push_back({bi, std::move(logits)});
+                float mx = logits[0];
+                for (int i = 1; i < odim; i++)
+                    if (logits[i] > mx)
+                        mx = logits[i];
+
+                float lse = 0.0f;
+                for (int i = 0; i < odim; i++)
+                    lse += expf(logits[i] - mx);
+                lse = mx + logf(lse);
+
+                std::vector<int> top_idx(beam_size, -1);
+                std::vector<float> top_score(beam_size, -1e30f);
+                for (int i = 0; i < odim; i++) {
+                    const float lp = logits[i] - lse;
+                    for (int k = 0; k < beam_size; k++) {
+                        if (lp > top_score[k]) {
+                            for (int j = beam_size - 1; j > k; j--) {
+                                top_score[j] = top_score[j - 1];
+                                top_idx[j] = top_idx[j - 1];
+                            }
+                            top_score[k] = lp;
+                            top_idx[k] = i;
+                            break;
+                        }
+                    }
+                }
+
+                for (int k = 0; k < beam_size; k++) {
+                    if (top_idx[k] >= 0) {
+                        cands.push_back({bi, top_idx[k], beams[bi].score + top_score[k]});
+                    }
+                }
             } // end per-beam computation
 
-            // Beam pruning: find top beam_size candidates
-            struct candidate {
-                int src_beam, token;
-                float score;
-            };
-            std::vector<candidate> cands;
-            for (auto& bl : all_logits) {
-                // Log-softmax
-                float mx = *std::max_element(bl.logits.begin(), bl.logits.end());
-                float lse = 0;
-                for (auto& v : bl.logits)
-                    lse += expf(v - mx);
-                lse = mx + logf(lse);
-                // Top-B tokens
-                std::vector<float> lsm(bl.logits.size());
-                for (int i = 0; i < odim; i++)
-                    lsm[i] = bl.logits[i] - lse;
-                for (int b = 0; b < beam_size; b++) {
-                    int best = 0;
-                    for (int i = 1; i < odim; i++)
-                        if (lsm[i] > lsm[best])
-                            best = i;
-                    cands.push_back({bl.bi, best, beams[bl.bi].score + lsm[best]});
-                    lsm[best] = -1e9f;
-                }
-            }
             for (int bi = 0; bi < beam_size; bi++)
                 if (beams[bi].finished)
                     cands.push_back({bi, hp.eos_id, beams[bi].score});

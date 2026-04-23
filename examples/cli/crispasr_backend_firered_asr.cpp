@@ -16,13 +16,14 @@ public:
 
     const char* name() const override { return "firered-asr"; }
 
-    uint32_t capabilities() const override { return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD; }
+    uint32_t capabilities() const override { return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_BEAM_SEARCH; }
 
     bool init(const whisper_params& params) override {
         firered_asr_context_params cp = firered_asr_context_default_params();
         cp.n_threads = params.n_threads;
         cp.verbosity = params.no_prints ? 0 : 1;
         cp.use_gpu = crispasr_backend_should_use_gpu(params);
+        cp.beam_size = params.beam_size > 0 ? params.beam_size : 3;
         ctx_ = firered_asr_init_from_file(params.model.c_str(), cp);
         return ctx_ != nullptr;
     }

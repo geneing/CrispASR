@@ -24,6 +24,7 @@ struct firered_asr_context_params {
     int n_threads;
     int verbosity; // 0=silent 1=normal 2=verbose
     bool use_gpu;  // false => force CPU backend
+    int beam_size; // ASR beam width (ignored for LID; clamped to >= 1)
 };
 
 struct firered_asr_context_params firered_asr_context_default_params(void);

@@ -813,6 +813,18 @@ as an optional backend-agnostic punctuation/casing pass. This is more
 correct than ad-hoc capitalization rules, especially for Chinese/English
 mixed text.
 
+Source inspection notes:
+- FireRedPunc is a **BERT token-classification model** over `chinese-lert-base`
+  plus a linear classifier head (`fireredpunc_bert.py` in FireRedASR2S).
+- The runtime applies punctuation per token, then does a rule-based text fix
+  pass for English spacing/capitalization (`RuleBaedTxtFix` in `punc.py`).
+- This means the native port can be split cleanly into:
+  1. converter (`model.pth.tar` + `chinese-lert-base` + output labels → GGUF)
+  2. BERT encoder + token-classifier runtime
+  3. lightweight post-processing for spacing/casing
+- It is feasible, but it is a **new model family**, not a tiny patch to
+  `firered_asr.cpp`.
+
 **FireRedASR2 GPU speed:** The implementation is still hybrid. The
 encoder uses ggml/GPU for many matmuls, but the AED decoder/beam loop
 is CPU-side (`src/firered_asr.cpp`), including per-step self-attention,
@@ -837,11 +849,13 @@ new cross-backend feature. Candidate implementation paths:
 - **Fun-ASR-Nano-2512**: 800M, ~2 GB HF repo, supports low-latency ASR
   and hotwords through its Python/FunASR API. Not a quick GGUF drop-in:
   checkpoint is PyTorch/custom code, so it needs a converter and native
-  runtime work.
+  runtime work. The model card still lists **timestamps as TODO**, so it is
+  not currently a better subtitle-timing backend than parakeet/canary-align.
 - **VibeVoice-ASR**: 9B BF16, ~17 GB HF repo, MIT license, Transformers
   support, long-form 60-minute input, diarization, timestamps, hotwords,
   and 50+ languages. High feature value but a major backend effort due
-  to size and architecture.
+  to size and architecture. This is better framed as a heavyweight
+  external-runtime or future major-backend project, not a near-term ggml port.
 
 ### VAD alternatives to evaluate:
 - TEN-VAD, FunASR-VAD, WebRTC-VAD — compare accuracy/latency vs our Silero VAD
