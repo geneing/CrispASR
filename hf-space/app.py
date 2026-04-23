@@ -117,7 +117,15 @@ def load_model(choice: str, language: str):
     backend, model, default_language = MODEL_CHOICES.get(choice, MODEL_CHOICES["Whisper base multilingual (~147 MB)"])
     language = language or default_language
     log(f"load_model: choice={choice} backend={backend} model={model} language={language}")
-    response = _request("POST", "/load", data={"backend": backend, "model": model, "language": language})
+    response = _request(
+        "POST",
+        "/load",
+        files={
+            "backend": (None, backend),
+            "model": (None, model),
+            "language": (None, language),
+        },
+    )
     if response.status_code >= 400:
         log(f"load_model: error status={response.status_code} body={response.text[:400]}")
         raise gr.Error(f"{response.status_code}: {response.text}")

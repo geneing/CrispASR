@@ -91,11 +91,16 @@ static std::string write_temp_audio(const char* data, size_t size) {
 #endif
 }
 
-// Read a multipart form field as a trimmed string, or return a default.
+// Read a form field as a trimmed string, or return a default.
 static std::string form_string(const httplib::Request& req, const std::string& key, const std::string& def = "") {
-    if (!req.has_file(key))
+    std::string v;
+    if (req.has_file(key)) {
+        v = req.get_file_value(key).content;
+    } else if (req.has_param(key)) {
+        v = req.get_param_value(key);
+    } else {
         return def;
-    std::string v = req.get_file_value(key).content;
+    }
     // Trim whitespace.
     while (!v.empty() && (v.front() == ' ' || v.front() == '\t'))
         v.erase(v.begin());
@@ -106,9 +111,9 @@ static std::string form_string(const httplib::Request& req, const std::string& k
 
 // Parse a form field as float, returning `def` on missing or parse error.
 static float form_float(const httplib::Request& req, const std::string& key, float def) {
-    if (!req.has_file(key))
+    if (!req.has_file(key) && !req.has_param(key))
         return def;
-    const std::string& v = req.get_file_value(key).content;
+    const std::string v = req.has_file(key) ? req.get_file_value(key).content : req.get_param_value(key);
     try {
         size_t pos = 0;
         float f = std::stof(v, &pos);
