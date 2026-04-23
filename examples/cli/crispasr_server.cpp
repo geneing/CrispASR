@@ -109,6 +109,58 @@ static std::string form_string(const httplib::Request& req, const std::string& k
     return v.empty() ? def : v;
 }
 
+static std::string trim_copy(std::string v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t' || v.front() == '\r' || v.front() == '\n'))
+        v.erase(v.begin());
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r' || v.back() == '\n'))
+        v.pop_back();
+    return v;
+}
+
+static std::vector<std::string> split_api_keys(const std::string& csv) {
+    std::vector<std::string> keys;
+    std::stringstream ss(csv);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        item = trim_copy(item);
+        if (!item.empty())
+            keys.push_back(item);
+    }
+    return keys;
+}
+
+static bool fixed_time_equal(const std::string& a, const std::string& b) {
+    unsigned char diff = (unsigned char)(a.size() ^ b.size());
+    const size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (size_t i = 0; i < n; ++i)
+        diff |= (unsigned char)(a[i] ^ b[i]);
+    return diff == 0 && a.size() == b.size();
+}
+
+static std::string request_api_key(const httplib::Request& req) {
+    if (req.has_header("Authorization")) {
+        const std::string value = trim_copy(req.get_header_value("Authorization"));
+        const std::string prefix = "Bearer ";
+        if (value.rfind(prefix, 0) == 0)
+            return trim_copy(value.substr(prefix.size()));
+    }
+    if (req.has_header("X-API-Key"))
+        return trim_copy(req.get_header_value("X-API-Key"));
+    return "";
+}
+
+static bool is_authorized(const httplib::Request& req, const std::vector<std::string>& api_keys) {
+    if (api_keys.empty())
+        return true;
+    const std::string key = request_api_key(req);
+    if (key.empty())
+        return false;
+    for (const std::string& expected : api_keys)
+        if (fixed_time_equal(key, expected))
+            return true;
+    return false;
+}
+
 // Parse a form field as float, returning `def` on missing or parse error.
 static float form_float(const httplib::Request& req, const std::string& key, float def) {
     if (!req.has_file(key) && !req.has_param(key))
@@ -131,6 +183,13 @@ static void json_error(httplib::Response& res, int status, const std::string& me
     res.status = status;
     res.set_content("{\"error\": {\"message\": \"" + crispasr_json_escape(message) +
                         "\", \"type\": \"invalid_request_error\"}}",
+                    "application/json");
+}
+
+static void auth_error(httplib::Response& res) {
+    res.status = 401;
+    res.set_header("WWW-Authenticate", "Bearer");
+    res.set_content("{\"error\": {\"message\": \"invalid or missing API key\", \"type\": \"invalid_api_key\"}}",
                     "application/json");
 }
 
@@ -193,6 +252,12 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
 int crispasr_run_server(whisper_params& params, const std::string& host, int port) {
     using namespace httplib;
 
+    std::vector<std::string> api_keys = split_api_keys(params.server_api_keys);
+    if (const char* env_keys = getenv("CRISPASR_API_KEYS")) {
+        std::vector<std::string> more = split_api_keys(env_keys);
+        api_keys.insert(api_keys.end(), more.begin(), more.end());
+    }
+
     std::unique_ptr<CrispasrBackend> backend;
     std::mutex model_mutex;
     std::atomic<bool> ready{false};
@@ -237,10 +302,19 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
     Server svr;
 
+    auto require_auth = [&](const Request& req, Response& res) -> bool {
+        if (is_authorized(req, api_keys))
+            return true;
+        auth_error(res);
+        return false;
+    };
+
     // -----------------------------------------------------------------------
     // POST /inference — native CrispASR transcription endpoint
     // -----------------------------------------------------------------------
     svr.Post("/inference", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
         if (!ready.load()) {
             json_error(res, 503, "model loading");
             return;
@@ -284,6 +358,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     //   timestamp_granularities[] (optional) — word|segment (verbose_json)
     // -----------------------------------------------------------------------
     svr.Post("/v1/audio/transcriptions", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
         if (!ready.load()) {
             json_error(res, 503, "model is still loading");
             return;
@@ -351,6 +427,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     // POST /load — hot-swap model
     // -----------------------------------------------------------------------
     svr.Post("/load", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
         std::lock_guard<std::mutex> lock(model_mutex);
         ready.store(false);
 
@@ -421,7 +499,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     // -----------------------------------------------------------------------
     // GET /backends
     // -----------------------------------------------------------------------
-    svr.Get("/backends", [&](const Request&, Response& res) {
+    svr.Get("/backends", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
         auto names = crispasr_list_backends();
         std::ostringstream js;
         js << "{\"backends\": [";
@@ -437,7 +517,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     // -----------------------------------------------------------------------
     // GET /v1/models — OpenAI-compatible model list
     // -----------------------------------------------------------------------
-    svr.Get("/v1/models", [&](const Request&, Response& res) {
+    svr.Get("/v1/models", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
         std::ostringstream js;
         js << "{\"object\": \"list\", \"data\": [{";
         js << "\"id\": \"" << crispasr_json_escape(params.model) << "\", ";
@@ -458,6 +540,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     fprintf(stderr, "  GET  /health                     — server status\n");
     fprintf(stderr, "  GET  /backends                   — list backends\n");
     fprintf(stderr, "  GET  /v1/models                  — model info\n\n");
+    if (!api_keys.empty())
+        fprintf(stderr, "crispasr-server: API key authentication enabled\n");
 
     svr.listen(host, port);
     return 0;

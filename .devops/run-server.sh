@@ -44,6 +44,7 @@ BACKEND="${CRISPASR_BACKEND:-}"
 AUTO_DOWNLOAD="${CRISPASR_AUTO_DOWNLOAD:-0}"
 CACHE_DIR="${CRISPASR_CACHE_DIR:-/cache}"
 EXTRA_ARGS="${CRISPASR_EXTRA_ARGS:-}"
+API_KEYS="${CRISPASR_API_KEYS:-}"
 
 ensure_writable_dir "$CACHE_DIR" "cache"
 
@@ -75,10 +76,26 @@ if [[ -n "$LANGUAGE" ]]; then
     args+=(-l "$LANGUAGE")
 fi
 
+if [[ -n "$API_KEYS" ]]; then
+    args+=(--api-keys "$API_KEYS")
+fi
+
 if [[ -n "$EXTRA_ARGS" ]]; then
     eval "args+=($EXTRA_ARGS)"
 fi
 
+display_args=("${args[@]}")
+if [[ -n "$API_KEYS" ]]; then
+    for i in "${!display_args[@]}"; do
+        if [[ "${display_args[$i]}" == "--api-keys" && $((i + 1)) -lt ${#display_args[@]} ]]; then
+            display_args[$((i + 1))]="(redacted)"
+        fi
+    done
+fi
+
 log "server_host=$SERVER_HOST server_port=$SERVER_PORT backend=${BACKEND:-default} language=${LANGUAGE:-default} auto_download=$AUTO_DOWNLOAD cache_dir=$CACHE_DIR"
-log "launching: ${args[*]}"
+if [[ -n "$API_KEYS" ]]; then
+    log "api_keys=enabled"
+fi
+log "launching: ${display_args[*]}"
 exec "${args[@]}"

@@ -189,6 +189,7 @@ struct whisper_params {
     bool server = false;
     std::string server_host = "127.0.0.1";
     int32_t server_port = 8080;
+    std::string server_api_keys;
     int32_t stream_step_ms = 3000;    // chunk size in ms (default 3s)
     int32_t stream_length_ms = 10000; // context window in ms (default 10s)
     int32_t stream_keep_ms = 200;     // overlap to keep between chunks

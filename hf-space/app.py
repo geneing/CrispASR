@@ -11,6 +11,7 @@ SERVER_URL = os.environ.get("CRISPASR_SERVER_URL", "http://127.0.0.1:8080").rstr
 SPACE_TITLE = os.environ.get("CRISPASR_SPACE_TITLE", "CrispASR")
 DEFAULT_LANGUAGE = os.environ.get("CRISPASR_LANGUAGE", "en")
 DEFAULT_MODEL = os.environ.get("CRISPASR_MODEL", "auto")
+API_KEY = next((key.strip() for key in os.environ.get("CRISPASR_API_KEYS", "").split(",") if key.strip()), "")
 
 MODEL_CHOICES = {
     "Whisper base multilingual (~147 MB)": ("whisper", "auto", "en"),
@@ -25,6 +26,10 @@ def log(message: str):
 
 
 def _request(method: str, path: str, **kwargs):
+    if API_KEY:
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers.setdefault("Authorization", f"Bearer {API_KEY}")
+        kwargs["headers"] = headers
     return requests.request(method, f"{SERVER_URL}{path}", timeout=300, **kwargs)
 
 

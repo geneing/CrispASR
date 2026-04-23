@@ -20,6 +20,7 @@ This folder contains a Hugging Face Docker Space wrapper for CrispASR:
 - `CRISPASR_LANGUAGE=en`
 - `CRISPASR_AUTO_DOWNLOAD=1`
 - `CRISPASR_CACHE_DIR=/cache`
+- `CRISPASR_API_KEYS=` optional comma-separated API keys for the local CrispASR server
 - `CRISPASR_EXTRA_ARGS=`
 
 ## Local build

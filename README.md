@@ -379,6 +379,16 @@ curl http://localhost:8080/backends
 
 The server loads the model once at startup and keeps it in memory. Subsequent `/inference` requests reuse the loaded model with no reload overhead. Requests are mutex-serialized. Use `--host 0.0.0.0` to accept remote connections.
 
+To require API keys, pass a comma-separated list with `--api-keys` or set `CRISPASR_API_KEYS`. Protected endpoints accept either `Authorization: Bearer <key>` or `X-API-Key: <key>`. `/health` remains public for container health checks.
+
+```bash
+crispasr --server -m model.gguf --api-keys key-one,key-two
+
+curl -H "Authorization: Bearer key-one" \
+  -F "file=@audio.wav" \
+  http://localhost:8080/v1/audio/transcriptions
+```
+
 ### Docker Compose
 
 The repo includes a root-level [`docker-compose.yml`](docker-compose.yml) for running the persistent HTTP server against a mounted model directory.
@@ -394,6 +404,7 @@ curl http://localhost:8080/health
 
 # OpenAI-compatible transcription API
 curl http://localhost:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $CRISPASR_API_KEY" \
   -F "file=@audio.wav" \
   -F "response_format=verbose_json"
 ```
@@ -445,6 +456,7 @@ You can override the loaded model and startup flags through `.env`:
 - `CRISPASR_LANGUAGE=auto`
 - `CRISPASR_AUTO_DOWNLOAD=1`
 - `CRISPASR_CACHE_DIR=/cache`
+- `CRISPASR_API_KEYS=key-one,key-two`
 - `CRISPASR_EXTRA_ARGS=--no-punctuation`
 
 The service is configured to avoid serving as root by default:
@@ -458,12 +470,14 @@ The server exposes `POST /v1/audio/transcriptions`, a drop-in replacement for th
 ```bash
 # Same curl syntax as the OpenAI API:
 curl http://localhost:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $CRISPASR_API_KEY" \
   -F "file=@audio.wav" \
   -F "response_format=json"
 # {"text": "And so, my fellow Americans, ask not what your country can do for you..."}
 
 # Verbose JSON with per-segment timestamps (matches OpenAI's format):
 curl http://localhost:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $CRISPASR_API_KEY" \
   -F "file=@audio.wav" \
   -F "response_format=verbose_json"
 # {"task": "transcribe", "language": "en", "duration": 11.0, "text": "...", "segments": [...]}

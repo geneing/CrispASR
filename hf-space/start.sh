@@ -17,6 +17,7 @@ BACKEND="${CRISPASR_BACKEND:-whisper}"
 AUTO_DOWNLOAD="${CRISPASR_AUTO_DOWNLOAD:-1}"
 CACHE_DIR="${CRISPASR_CACHE_DIR:-/cache}"
 EXTRA_ARGS="${CRISPASR_EXTRA_ARGS:-}"
+API_KEYS="${CRISPASR_API_KEYS:-}"
 
 ensure_writable_dir() {
     local dir="$1"
@@ -49,8 +50,21 @@ if [[ -n "$BACKEND" ]]; then
     cmd+=(--backend "$BACKEND")
 fi
 
+if [[ -n "$API_KEYS" ]]; then
+    cmd+=(--api-keys "$API_KEYS")
+fi
+
 if [[ -n "$EXTRA_ARGS" ]]; then
     eval "cmd+=($EXTRA_ARGS)"
+fi
+
+display_cmd=("${cmd[@]}")
+if [[ -n "$API_KEYS" ]]; then
+    for i in "${!display_cmd[@]}"; do
+        if [[ "${display_cmd[$i]}" == "--api-keys" && $((i + 1)) -lt ${#display_cmd[@]} ]]; then
+            display_cmd[$((i + 1))]="(redacted)"
+        fi
+    done
 fi
 
 log "startup"
@@ -63,7 +77,10 @@ fi
 if [[ -n "$EXTRA_ARGS" ]]; then
     log "extra_args=$EXTRA_ARGS"
 fi
-log "launching crispasr server: ${cmd[*]}"
+if [[ -n "$API_KEYS" ]]; then
+    log "api_keys=enabled"
+fi
+log "launching crispasr server: ${display_cmd[*]}"
 
 "${cmd[@]}" &
 server_pid=$!
