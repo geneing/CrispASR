@@ -1636,6 +1636,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         int beam_size_effective = is_lid ? 1 : std::max(1, ctx->params.beam_size);
         int d = hp.d_model;
         int odim = hp.odim;
+        const bool use_gpu_decoder_proj = !ggml_backend_is_cpu(ctx->backend);
 
         // Cache all decoder layer weights ONCE before the loop
         struct dec_layer_cache {
@@ -1695,16 +1696,85 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
             auto& c = dec_cache[li];
             K_enc[li].resize(T_sub * d);
             V_enc[li].resize(T_sub * d);
-            cpu_matmul_bt(enc_output.data(), c.xattn_w_ks.data(), K_enc[li].data(), T_sub, d, d);
-            cpu_matmul_bt(enc_output.data(), c.xattn_w_vs.data(), V_enc[li].data(), T_sub, d, d);
-            if (!c.xattn_w_vs_b.empty())
-                for (int t = 0; t < T_sub; t++)
-                    for (int i = 0; i < d; i++)
-                        V_enc[li][t * d + i] += c.xattn_w_vs_b[i];
+            bool kv_done = false;
+
+            if (!ggml_backend_is_cpu(ctx->backend)) {
+                size_t mem = ggml_tensor_overhead() * 32 + ggml_graph_overhead_custom(256, false);
+                struct ggml_init_params gp = {mem, nullptr, true};
+                ggml_context* ctx0 = ggml_init(gp);
+                if (ctx0) {
+                    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 256, false);
+                    ggml_tensor* enc_inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T_sub);
+                    ggml_set_input(enc_inp);
+
+                    ggml_tensor* k_proj = ggml_mul_mat(ctx0, m.dec.blocks[li].xattn.w_ks, enc_inp);
+                    ggml_set_name(k_proj, "firered_dec_k_proj");
+                    ggml_set_output(k_proj);
+                    ggml_build_forward_expand(gf, k_proj);
+
+                    ggml_tensor* v_proj = ggml_mul_mat(ctx0, m.dec.blocks[li].xattn.w_vs, enc_inp);
+                    if (m.dec.blocks[li].xattn.w_vs_b)
+                        v_proj = ggml_add(ctx0, v_proj, m.dec.blocks[li].xattn.w_vs_b);
+                    ggml_set_name(v_proj, "firered_dec_v_proj");
+                    ggml_set_output(v_proj);
+                    ggml_build_forward_expand(gf, v_proj);
+
+                    ggml_backend_sched_reset(ctx->sched);
+                    if (ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+                        ggml_backend_tensor_set(enc_inp, enc_output.data(), 0, T_sub * d * sizeof(float));
+                        if (ggml_backend_sched_graph_compute(ctx->sched, gf) == GGML_STATUS_SUCCESS) {
+                            ggml_backend_tensor_get(k_proj, K_enc[li].data(), 0, T_sub * d * sizeof(float));
+                            ggml_backend_tensor_get(v_proj, V_enc[li].data(), 0, T_sub * d * sizeof(float));
+                            kv_done = true;
+                        }
+                    }
+                    ggml_free(ctx0);
+                }
+            }
+
+            if (!kv_done) {
+                cpu_matmul_bt(enc_output.data(), c.xattn_w_ks.data(), K_enc[li].data(), T_sub, d, d);
+                cpu_matmul_bt(enc_output.data(), c.xattn_w_vs.data(), V_enc[li].data(), T_sub, d, d);
+                if (!c.xattn_w_vs_b.empty())
+                    for (int t = 0; t < T_sub; t++)
+                        for (int i = 0; i < d; i++)
+                            V_enc[li][t * d + i] += c.xattn_w_vs_b[i];
+            }
         }
 
         if (ctx->params.verbosity >= 1)
             fprintf(stderr, "firered_asr: decoder weights cached, K/V pre-computed\n");
+
+        auto project_decoder_logits = [&](const float* xn, std::vector<float>& logits_out) -> bool {
+            if (!use_gpu_decoder_proj)
+                return false;
+
+            size_t mem = ggml_tensor_overhead() * 16 + ggml_graph_overhead_custom(128, false);
+            struct ggml_init_params gp = {mem, nullptr, true};
+            ggml_context* ctx0 = ggml_init(gp);
+            if (!ctx0)
+                return false;
+
+            ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 128, false);
+            ggml_tensor* dec_inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, 1);
+            ggml_set_input(dec_inp);
+            ggml_tensor* logits = ggml_mul_mat(ctx0, m.dec.prj_w, dec_inp);
+            ggml_set_output(logits);
+            ggml_build_forward_expand(gf, logits);
+
+            bool ok = false;
+            ggml_backend_sched_reset(ctx->sched);
+            if (ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+                ggml_backend_tensor_set(dec_inp, xn, 0, d * sizeof(float));
+                if (ggml_backend_sched_graph_compute(ctx->sched, gf) == GGML_STATUS_SUCCESS) {
+                    logits_out.resize(odim);
+                    ggml_backend_tensor_get(logits, logits_out.data(), 0, odim * sizeof(float));
+                    ok = true;
+                }
+            }
+            ggml_free(ctx0);
+            return ok;
+        };
 
         // Beam search state
         int beam_size = beam_size_effective;
@@ -1886,18 +1956,23 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                 std::vector<float> xn(d);
                 cpu_layernorm(x.data(), norm_w.data(), norm_b.data(), xn.data(), 1, d);
 
-                int best_token = -1;
-                float best_logit = -1e30f;
-                for (int i = 0; i < odim; i++) {
-                    double s = 0;
-                    for (int k = 0; k < d; k++)
-                        s += xn[k] * prj_w[i * d + k];
-                    const float logit = (float)s;
-                    if (logit > best_logit) {
-                        best_logit = logit;
-                        best_token = i;
+                std::vector<float> logits;
+                if (!project_decoder_logits(xn.data(), logits)) {
+                    logits.resize(odim);
+                    for (int i = 0; i < odim; i++) {
+                        double s = 0;
+                        for (int k = 0; k < d; k++)
+                            s += xn[k] * prj_w[i * d + k];
+                        logits[i] = (float)s;
                     }
                 }
+                int best_token = 0;
+                float best_logit = logits[0];
+                for (int i = 1; i < odim; i++)
+                    if (logits[i] > best_logit) {
+                        best_logit = logits[i];
+                        best_token = i;
+                    }
 
                 if (best_token == hp.eos_id)
                     beam.finished = true;
@@ -2072,11 +2147,13 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                 std::vector<float> xn(d);
                 cpu_layernorm(x.data(), norm_w.data(), norm_b.data(), xn.data(), 1, d);
                 std::vector<float> logits(odim);
-                for (int i = 0; i < odim; i++) {
-                    double s = 0;
-                    for (int k = 0; k < d; k++)
-                        s += xn[k] * prj_w[i * d + k];
-                    logits[i] = (float)s;
+                if (!project_decoder_logits(xn.data(), logits)) {
+                    for (int i = 0; i < odim; i++) {
+                        double s = 0;
+                        for (int k = 0; k < d; k++)
+                            s += xn[k] * prj_w[i * d + k];
+                        logits[i] = (float)s;
+                    }
                 }
 
                 float mx = logits[0];
