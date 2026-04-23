@@ -8,7 +8,9 @@ RUN apt-get update && \
 ARG CRISPASR_REPO=https://github.com/CrispStrobe/CrispASR
 ARG CRISPASR_REF=faf0d1f
 
-RUN git clone --depth 1 --branch "${CRISPASR_REF}" "${CRISPASR_REPO}" /src/CrispASR
+RUN git clone --depth 1 "${CRISPASR_REPO}" /src/CrispASR && \
+  git -C /src/CrispASR fetch --depth 1 origin "${CRISPASR_REF}" && \
+  git -C /src/CrispASR checkout --detach FETCH_HEAD
 RUN cmake -B build -DWHISPER_BUILD_TESTS=OFF && \
   cmake --build build -j"$(nproc)" --target whisper-cli
 
