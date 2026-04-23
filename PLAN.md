@@ -893,6 +893,70 @@ new cross-backend feature. Candidate implementation paths:
 - **VibeVoice-ASR** — issue #22 candidate; hotwords + timestamps +
   diarization, but 9B/17 GB makes it a large-backend project
 
+---
+
+## 34. VibeVoice-ASR-1.5B — DETAILED ARCHITECTURE ANALYSIS
+
+**Model**: `microsoft/VibeVoice-1.5B` (MIT license, 5.2 GB safetensors)
+
+Architecture has 5 components (for ASR only, skip audio decoder):
+
+### 1. Acoustic Tokenizer Encoder (276 tensors)
+σ-VAE encoder with ConvNeXt-like blocks:
+- 7 downsample layers (Conv1d stride=[8,5,5,4,2,2] + 1 initial = 3200x total)
+- 7 stages with depths=[3,3,3,3,3,3,8] blocks per stage
+- Each block: `depthwise_conv → RMSNorm → FFN(linear1→SiLU→linear2) → layer_scale`
+- Base filters: 32, scaling up through stages
+- Input: 24kHz audio (NOT 16kHz)
+- Output: σ-VAE latent codes at ~7.5 tokens/sec
+
+### 2. Semantic Tokenizer Encoder (276 tensors)
+Same ConvNeXt architecture as acoustic tokenizer.
+Extracts content-aligned features parallel to acoustic path.
+
+### 3. Connectors (2×5 = 10 tensors)
+`FC1 → RMSNorm → FC2` — projects tokenizer output to LM hidden dim (1536).
+
+### 4. Language Model (338 tensors)
+Qwen2-1.5B decoder:
+- 28 layers, d=1536, 12 query heads, 2 KV heads (GQA 6:1)
+- FFN: SwiGLU (gate+up→down), intermediate=8960
+- RoPE theta=1000000.0, head_dim=128
+- vocab_size=151936
+
+### 5. Prediction Head (26 tensors)
+Converts LM hidden states to text tokens.
+
+### Feasibility Assessment
+**All ops are standard**: Conv1d, linear, RMSNorm, depthwise_conv, SiLU/GELU.
+No custom ops, no attention in tokenizers.
+
+**Reusable components**:
+- LM decoder: reuse our Qwen-style kv_self_attn + SwiGLU (from qwen3-asr)
+- Conv blocks: similar to our CNN frontends
+- Connectors: trivial linear projections
+
+**Challenges**:
+1. 24kHz input (all our models use 16kHz) — need resampling or new mel
+2. σ-VAE encoder is novel — no existing reference in our codebase
+3. Two parallel tokenizer paths (acoustic + semantic)
+4. 926 tensors for ASR path alone
+5. 5.2 GB model — needs aggressive quantization
+
+**Work items**:
+1. Write converter: `models/convert-vibevoice-to-gguf.py` — 926 tensors
+2. Implement σ-VAE encoder runtime: ConvNeXt blocks with depthwise conv
+3. Implement semantic tokenizer runtime (same architecture)
+4. Wire connectors + Qwen2 decoder (reuse kv_self_attn infrastructure)
+5. Handle 24kHz input (resample from 16kHz or accept 24kHz natively)
+6. Reference diff-testing against Python HF implementation
+
+**Estimated effort**: 2-3 sessions. The tokenizers are the hard part;
+the LM decoder is well-understood from qwen3-asr/omniasr-llm.
+
+**Priority**: HIGH — only model with native timestamps + diarization +
+hotwords + 50+ languages. MIT license. 1.5B variant is manageable size.
+
 ## 25. Montreal Forced Aligner evaluation — NOT PLANNED
 
 MFA uses Kaldi + OpenFST + Pynini (heavy C++ dependencies, ~500MB).
