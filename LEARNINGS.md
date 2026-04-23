@@ -1931,3 +1931,34 @@ more loop-level CPU tuning. In particular:
 2. Avoid one-graph-per-small-matmul designs.
 3. Next meaningful step is a reused greedy decoder subgraph per layer or
    per token step, not isolated ggml calls for single projections.
+
+### Data2Vec / HuBERT: three architecture traps when reusing wav2vec2 backend
+
+Data2Vec and HuBERT share wav2vec2's CNN frontend + transformer encoder +
+CTC head, but differ in three subtle ways that each cause complete failure
+if wrong:
+
+1. **Multi-layer positional convolution**: Data2Vec has 5 layers of
+   `Conv1d(K=19, groups=16) + LayerNorm(no_affine) + GELU`, not 1 layer
+   like wav2vec2. Only storing the first layer's weights causes the pos_conv
+   output to diverge entirely (cos=0.08). Fix: store all N layers in GGUF
+   as `pos_conv.{i}.weight/bias` and run them sequentially in C++.
+
+2. **Global encoder LN placement**: Data2Vec applies the global encoder
+   LayerNorm **BEFORE** the transformer layers, then uses post-norm inside
+   each layer. wav2vec2 and HuBERT apply the global LN **AFTER** all layers.
+   This is unique to Data2Vec and requires a separate flag
+   (`global_ln_before_encoder=1`). Getting it wrong amplifies logits ~46x.
+
+3. **Post-norm despite LayerNorm CNN**: Data2Vec uses LayerNorm in ALL CNN
+   layers (like HuBERT) but uses **post-norm** in the encoder (unlike HuBERT
+   which uses pre-norm). The encoder layer does `attn→add→LN→FFN+add→LN`.
+   Setting `do_stable_layer_norm=1` (pre-norm) produces complete garbage.
+
+Each bug was caught by systematic stage-by-stage diff against Python ref:
+- CNN output: cos=0.999997 (correct from the start)
+- feat_proj: cos=0.999968 (correct)
+- pos_conv layers 0-4: cos>0.999961 (after multi-layer fix)
+- after_global_ln: cos=0.999946 (after LN placement fix)
+- **logits: cos=0.999972** (after post-norm fix)
+- C++ decode matches Python exactly: "AND SO A MY FELLOW AMERICANS..."
