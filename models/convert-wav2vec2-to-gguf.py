@@ -166,17 +166,20 @@ def write_pos_conv(w: gguf.GGUFWriter, sd: dict, model) -> None:
         w.add_tensor("pos_conv.bias", pos_b.numpy().astype(np.float32))
         print(f"  pos_conv: {tuple(pos_w.shape)}")
     elif hasattr(pce, "layers"):
-        # Data2Vec/HuBERT: pos_conv_embed.layers[i].conv
-        # Our runtime only supports a single pos_conv. Use the first layer
-        # (the main one — later layers are typically identity or small).
-        conv = pce.layers[0].conv
-        pos_w = conv.weight.detach().float()
-        pos_b = conv.bias.detach().float()
-        w.add_tensor("pos_conv.weight", pos_w.numpy().astype(np.float32))
-        w.add_tensor("pos_conv.bias", pos_b.numpy().astype(np.float32))
+        # Data2Vec/HuBERT: pos_conv_embed.layers[i].conv — store ALL layers
         n_pos_layers = len(pce.layers)
         w.add_uint32(f"{ARCH}.num_pos_conv_layers", n_pos_layers)
-        print(f"  pos_conv: {tuple(pos_w.shape)} ({n_pos_layers} layers, using first)")
+        for li, layer in enumerate(pce.layers):
+            conv = layer.conv
+            pos_w = conv.weight.detach().float()
+            pos_b = conv.bias.detach().float()
+            w.add_tensor(f"pos_conv.{li}.weight", pos_w.numpy().astype(np.float32))
+            w.add_tensor(f"pos_conv.{li}.bias", pos_b.numpy().astype(np.float32))
+            if li == 0:
+                # Also store as pos_conv.weight for backward compat with single-layer models
+                w.add_tensor("pos_conv.weight", pos_w.numpy().astype(np.float32))
+                w.add_tensor("pos_conv.bias", pos_b.numpy().astype(np.float32))
+            print(f"  pos_conv.{li}: {tuple(pos_w.shape)} groups={conv.groups}")
 
 
 def write_encoder_global_ln(w: gguf.GGUFWriter, sd: dict) -> None:

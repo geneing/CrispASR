@@ -165,6 +165,17 @@ bool wav2vec2_load(const char* fname, wav2vec2_model& model) {
     model.fp_b = get("feat_proj.bias");
     model.pos_conv_w = get("pos_conv.weight");
     model.pos_conv_b = get("pos_conv.bias");
+    // Multi-layer pos_conv (Data2Vec/HuBERT)
+    model.n_pos_conv_layers = 1;
+    for (int li = 0; li < 8; li++) {
+        char wn[64], bn[64];
+        snprintf(wn, sizeof(wn), "pos_conv.%d.weight", li);
+        snprintf(bn, sizeof(bn), "pos_conv.%d.bias", li);
+        model.pos_conv_layers[li].w = try_get(wn);
+        model.pos_conv_layers[li].b = try_get(bn);
+        if (model.pos_conv_layers[li].w)
+            model.n_pos_conv_layers = li + 1;
+    }
     model.enc_ln_w = get("enc.ln.weight");
     model.enc_ln_b = get("enc.ln.bias");
 
@@ -421,6 +432,16 @@ static ggml_cgraph* wav2vec2_build_transformer_graph(const wav2vec2_model& m,
 
     const bool pre_norm = (hp.do_stable_layer_norm != 0);
 
+    // Data2Vec/HuBERT (pre_norm): apply global encoder LN BEFORE transformer layers.
+    // wav2vec2 (post-norm): global LN is applied AFTER all layers instead.
+    if (pre_norm) {
+        cur = ggml_norm(ctx0, cur, ln_eps);
+        cur = ggml_mul(ctx0, cur, m.enc_ln_w);
+        cur = ggml_add(ctx0, cur, m.enc_ln_b);
+        ggml_set_name(cur, "after_global_ln");
+        ggml_set_output(cur);
+    }
+
     // ---- L × Transformer layers ----
     // pre_norm  (stable/large): LN → attn → add → LN → FFN → add
     // post_norm (standard/base): attn → add → LN → FFN → add → LN
@@ -497,10 +518,12 @@ static ggml_cgraph* wav2vec2_build_transformer_graph(const wav2vec2_model& m,
         }
     }
 
-    // ---- Global LayerNorm ----
-    cur = ggml_norm(ctx0, cur, ln_eps);
-    cur = ggml_mul(ctx0, cur, m.enc_ln_w);
-    cur = ggml_add(ctx0, cur, m.enc_ln_b);
+    // ---- Global LayerNorm (post-norm only — pre-norm applied it before the loop) ----
+    if (!pre_norm) {
+        cur = ggml_norm(ctx0, cur, ln_eps);
+        cur = ggml_mul(ctx0, cur, m.enc_ln_w);
+        cur = ggml_add(ctx0, cur, m.enc_ln_b);
+    }
 
     // ---- LM head: Linear(H → V) ----
     cur = ggml_mul_mat(ctx0, m.lm_w, cur);
@@ -925,38 +948,112 @@ std::vector<float> wav2vec2_compute_logits_graph(const wav2vec2_model& m, const 
     }
 
     // ---- 3. Positional conv (manual — grouped conv is hard in ggml) ----
+    // Single-layer (wav2vec2): one grouped conv + gelu, then add residual
+    // Multi-layer (Data2Vec): N grouped conv layers, each with gelu, then add residual
     {
         std::vector<float> hcf(H * T);
         for (int t = 0; t < T; t++)
             for (int h = 0; h < H; h++)
                 hcf[h * T + t] = hidden[t * H + h];
 
-        std::vector<float> pos_out(H * T);
         int K_pos = (int)hp.num_conv_pos_embeddings;
         int G_pos = (int)hp.num_conv_pos_embedding_groups;
+        int n_layers = m.n_pos_conv_layers;
 
-        std::vector<float> pw_buf;
-        const float* pw;
-        size_t pos_w_n = (size_t)H * (H / G_pos) * K_pos;
-        if (m.pos_conv_w->type == GGML_TYPE_F16) {
-            pw_buf.resize(pos_w_n);
-            const ggml_fp16_t* p16 = (const ggml_fp16_t*)m.pos_conv_w->data;
-            for (size_t i = 0; i < pos_w_n; i++)
-                pw_buf[i] = ggml_fp16_to_fp32(p16[i]);
-            pw = pw_buf.data();
-        } else if (m.pos_conv_w->type == GGML_TYPE_F32) {
-            pw = (const float*)m.pos_conv_w->data;
-        } else {
-            fprintf(stderr, "[wav2vec2] pos_conv.weight unsupported type\n");
-            return {};
+        // For multi-layer: each layer's output feeds into the next (with gelu)
+        for (int li = 0; li < n_layers; li++) {
+            ggml_tensor* w_tensor = (li == 0 && m.pos_conv_w) ? m.pos_conv_w : m.pos_conv_layers[li].w;
+            ggml_tensor* b_tensor = (li == 0 && m.pos_conv_b) ? m.pos_conv_b : m.pos_conv_layers[li].b;
+            if (!w_tensor) {
+                fprintf(stderr, "[wav2vec2] pos_conv layer %d weight missing\n", li);
+                break;
+            }
+
+            // Read K from weight shape (may differ from metadata for multi-layer)
+            int K_this = (int)w_tensor->ne[0]; // ggml: [K, C_per_g, C_out]
+            // ne[0] for conv weight stored by our converter: in GGUF it's [Cout, Cin/G, K]
+            // Actually converter stores as numpy [Cout, Cin/G, K] → ggml reverses: [K, Cin/G, Cout]
+            // So ne[0]=K for 3D weights
+            if (ggml_n_dims(w_tensor) == 3) {
+                K_this = (int)w_tensor->ne[0];
+            } else {
+                K_this = K_pos; // fallback
+            }
+
+            std::vector<float> pw_buf;
+            const float* pw;
+            size_t pw_n = (size_t)ggml_nelements(w_tensor);
+            if (w_tensor->type == GGML_TYPE_F16) {
+                pw_buf.resize(pw_n);
+                const ggml_fp16_t* p16 = (const ggml_fp16_t*)w_tensor->data;
+                for (size_t i = 0; i < pw_n; i++)
+                    pw_buf[i] = ggml_fp16_to_fp32(p16[i]);
+                pw = pw_buf.data();
+            } else {
+                pw = (const float*)w_tensor->data;
+            }
+            const float* pb = b_tensor ? (const float*)b_tensor->data : nullptr;
+
+            std::vector<float> pos_out(H * T, 0.0f);
+            grouped_conv1d_same(hcf.data(), pw, pb, pos_out.data(), H, H, K_this, G_pos, T);
+
+            // Multi-layer (Data2Vec): LayerNorm (no affine) + GELU after each conv
+            // Single-layer (wav2vec2): just GELU
+            if (n_layers > 1) {
+                // LayerNorm over channels (no affine params): [C, T] → normalize each time step
+                for (int t = 0; t < T; t++) {
+                    double sum = 0, sq = 0;
+                    for (int h = 0; h < H; h++) {
+                        float v = pos_out[h * T + t];
+                        sum += v;
+                        sq += (double)v * v;
+                    }
+                    float mean = (float)(sum / H);
+                    float var = (float)(sq / H) - mean * mean;
+                    float inv = 1.0f / sqrtf(var + hp.layer_norm_eps);
+                    for (int h = 0; h < H; h++)
+                        pos_out[h * T + t] = (pos_out[h * T + t] - mean) * inv;
+                }
+            }
+
+            // GELU activation
+            for (auto& v : pos_out)
+                v = gelu(v);
+
+            // Dump per-layer output
+            {
+                const char* dump = getenv("WAV2VEC2_DUMP_DIR");
+                if (dump && dump[0]) {
+                    char path[512];
+                    snprintf(path, sizeof(path), "%s/pos_layer_%d.bin", dump, li);
+                    FILE* f = fopen(path, "wb");
+                    if (f) { fwrite(pos_out.data(), sizeof(float), H * T, f); fclose(f); }
+                    fprintf(stderr, "  DUMP: pos_layer_%d [%d,%d] → %s\n", li, H, T, path);
+                }
+            }
+
+            // For multi-layer: output becomes input for next layer
+            if (li < n_layers - 1) {
+                std::swap(hcf, pos_out);
+            } else {
+                // Final layer: add residual to hidden
+                for (int t = 0; t < T; t++)
+                    for (int h = 0; h < H; h++)
+                        hidden[t * H + h] += pos_out[h * T + t];
+            }
         }
-        const float* pb = (const float*)m.pos_conv_b->data;
+    }
 
-        grouped_conv1d_same(hcf.data(), pw, pb, pos_out.data(), H, H, K_pos, G_pos, T);
-
-        for (int t = 0; t < T; t++)
-            for (int h = 0; h < H; h++)
-                hidden[t * H + h] += gelu(pos_out[h * T + t]);
+    // Dump after pos_conv
+    {
+        const char* dump = getenv("WAV2VEC2_DUMP_DIR");
+        if (dump && dump[0]) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/after_pos_conv.bin", dump);
+            FILE* f = fopen(path, "wb");
+            if (f) { fwrite(hidden.data(), sizeof(float), T * H, f); fclose(f); }
+            fprintf(stderr, "  DUMP: after_pos_conv [%d,%d] → %s\n", T, H, path);
+        }
     }
 
     // ---- 4. Transformer + LN + LM head via ggml graph ----
@@ -1039,12 +1136,42 @@ std::vector<float> wav2vec2_compute_logits_graph(const wav2vec2_model& m, const 
                 if (inp) {
                     ggml_backend_tensor_set(inp, hidden_ht.data(), 0, H * T * sizeof(float));
                     if (ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS) {
+                        // Dump after_global_ln if available
+                        {
+                            const char* dump = getenv("WAV2VEC2_DUMP_DIR");
+                            ggml_tensor* gln = ggml_graph_get_tensor(gf, "after_global_ln");
+                            if (dump && dump[0] && gln) {
+                                int ne = (int)ggml_nelements(gln);
+                                std::vector<float> d(ne);
+                                ggml_backend_tensor_get(gln, d.data(), 0, ne * sizeof(float));
+                                char path[512];
+                                snprintf(path, sizeof(path), "%s/after_global_ln.bin", dump);
+                                FILE* f = fopen(path, "wb");
+                                if (f) { fwrite(d.data(), sizeof(float), ne, f); fclose(f); }
+                                fprintf(stderr, "  DUMP: after_global_ln [%lld,%lld] → %s\n",
+                                        (long long)gln->ne[0], (long long)gln->ne[1], path);
+                            }
+                        }
                         ggml_tensor* out = ggml_graph_get_tensor(gf, "logits");
                         if (out) {
                             int V_out = (int)out->ne[0];
                             int T_out = (int)out->ne[1];
                             std::vector<float> logits_tv(V_out * T_out);
                             ggml_backend_tensor_get(out, logits_tv.data(), 0, logits_tv.size() * sizeof(float));
+                            // Dump logits
+                            {
+                                const char* dump = getenv("WAV2VEC2_DUMP_DIR");
+                                if (dump && dump[0]) {
+                                    char path[512];
+                                    snprintf(path, sizeof(path), "%s/logits.bin", dump);
+                                    FILE* f = fopen(path, "wb");
+                                    if (f) {
+                                        fwrite(logits_tv.data(), sizeof(float), logits_tv.size(), f);
+                                        fclose(f);
+                                    }
+                                    fprintf(stderr, "  DUMP: logits [%d,%d] → %s\n", V_out, T_out, path);
+                                }
+                            }
                             ggml_backend_sched_free(sched);
                             return logits_tv;
                         }
