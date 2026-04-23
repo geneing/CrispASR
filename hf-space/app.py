@@ -12,6 +12,13 @@ SPACE_TITLE = os.environ.get("CRISPASR_SPACE_TITLE", "CrispASR")
 DEFAULT_LANGUAGE = os.environ.get("CRISPASR_LANGUAGE", "en")
 DEFAULT_MODEL = os.environ.get("CRISPASR_MODEL", "auto")
 
+MODEL_CHOICES = {
+    "Whisper base multilingual (~147 MB)": ("whisper", "auto", "en"),
+    "Parakeet TDT 0.6B v3 Q4_K (~467 MB)": ("parakeet", "auto", "en"),
+    "Qwen3 ASR 0.6B Q4_K (~500 MB)": ("qwen3", "auto", "en"),
+    "Cohere Transcribe Q4_K (~550 MB)": ("cohere", "auto", "en"),
+}
+
 
 def log(message: str):
     print(f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] hf-space-app: {message}", flush=True)
@@ -106,6 +113,19 @@ def transcribe(audio_path: str, language: str, prompt: str, temperature: float, 
     return text, text
 
 
+def load_model(choice: str, language: str):
+    backend, model, default_language = MODEL_CHOICES.get(choice, MODEL_CHOICES["Whisper base multilingual (~147 MB)"])
+    language = language or default_language
+    log(f"load_model: choice={choice} backend={backend} model={model} language={language}")
+    response = _request("POST", "/load", data={"backend": backend, "model": model, "language": language})
+    if response.status_code >= 400:
+        log(f"load_model: error status={response.status_code} body={response.text[:400]}")
+        raise gr.Error(f"{response.status_code}: {response.text}")
+    status, health, models = fetch_status()
+    log(f"load_model: ok backend={backend}")
+    return status, health, models, language
+
+
 with gr.Blocks(title=SPACE_TITLE) as demo:
     gr.Markdown(
         f"""# {SPACE_TITLE}
@@ -124,6 +144,10 @@ Offline speech transcription via CrispASR's OpenAI-compatible server.
     refresh = gr.Button("Refresh server status")
 
     with gr.Row():
+        model_choice = gr.Dropdown(list(MODEL_CHOICES.keys()), value="Whisper base multilingual (~147 MB)", label="Model")
+        load = gr.Button("Load selected model")
+
+    with gr.Row():
         audio = gr.Audio(label="Audio", type="filepath", sources=["upload", "microphone"])
         with gr.Column():
             language = gr.Textbox(value=DEFAULT_LANGUAGE, label="Language", placeholder="auto or ISO-639-1 code")
@@ -138,6 +162,7 @@ Offline speech transcription via CrispASR's OpenAI-compatible server.
     raw = gr.Code(label="Raw response", language="json")
 
     refresh.click(fetch_status, outputs=[status, health, models])
+    load.click(load_model, inputs=[model_choice, language], outputs=[status, health, models, language])
     submit.click(
         transcribe,
         inputs=[audio, language, prompt, temperature, response_format],

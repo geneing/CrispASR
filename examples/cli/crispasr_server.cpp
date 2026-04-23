@@ -362,24 +362,42 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         if (new_backend.empty())
             new_backend = crispasr_detect_backend_from_gguf(new_model);
 
+        const bool new_model_is_auto = new_model == "auto" || new_model == "default";
+        if (new_backend.empty() && new_model_is_auto)
+            new_backend = "whisper";
+        if (new_backend.empty()) {
+            ready.store(true);
+            json_error(res, 400, "cannot detect backend for model '" + new_model + "'");
+            return;
+        }
+
+        const std::string resolved_model =
+            crispasr_resolve_model_cli(new_model, new_backend, params.no_prints, params.cache_dir,
+                                       params.auto_download || new_model_is_auto);
+        if (resolved_model.empty()) {
+            ready.store(true);
+            json_error(res, 500, "failed to resolve model '" + new_model + "' for backend '" + new_backend + "'");
+            return;
+        }
+
         whisper_params np = params;
-        np.model = new_model;
+        np.model = resolved_model;
         np.backend = new_backend;
 
         auto nb = crispasr_create_backend(new_backend);
         if (!nb || !nb->init(np)) {
             ready.store(true); // keep old model
-            json_error(res, 500, "failed to load model '" + new_model + "' with backend '" + new_backend + "'");
+            json_error(res, 500, "failed to load model '" + resolved_model + "' with backend '" + new_backend + "'");
             return;
         }
 
         backend = std::move(nb);
         backend_name = new_backend;
-        params.model = new_model;
+        params.model = resolved_model;
         ready.store(true);
 
         fprintf(stderr, "crispasr-server: hot-swapped to '%s' backend, model '%s'\n", new_backend.c_str(),
-                new_model.c_str());
+                resolved_model.c_str());
         res.set_content("{\"status\": \"ok\", \"backend\": \"" + crispasr_json_escape(new_backend) + "\"}",
                         "application/json");
     });
