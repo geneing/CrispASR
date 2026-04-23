@@ -14,7 +14,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/* /var/tmp/*
 
-COPY .. .
+COPY . .
 # Enable muBLAS
 RUN make base.en CMAKE_ARGS="-DGGML_MUSA=1"
 

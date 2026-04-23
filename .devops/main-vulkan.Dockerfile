@@ -5,7 +5,7 @@ RUN apt-get update && \
   apt-get install -y build-essential wget cmake git libvulkan-dev glslc \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-COPY .. .
+COPY . .
 RUN make base.en CMAKE_ARGS="-DGGML_VULKAN=1"
 
 FROM ubuntu:24.04 AS runtime

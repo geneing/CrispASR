@@ -23,7 +23,7 @@ RUN apt-get update && \
 ENV CUDA_MAIN_VERSION=13.0
 ENV LD_LIBRARY_PATH /usr/local/cuda-${CUDA_MAIN_VERSION}/compat:$LD_LIBRARY_PATH
 
-COPY .. .
+COPY . .
 # Enable cuBLAS
 RUN make base.en CMAKE_ARGS="-DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES='75;80;86;90'"
 

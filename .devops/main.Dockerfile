@@ -5,7 +5,7 @@ RUN apt-get update && \
   apt-get install -y build-essential wget cmake git \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-COPY .. .
+COPY . .
 RUN make base.en
 
 FROM ubuntu:22.04 AS runtime

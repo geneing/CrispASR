@@ -1,0 +1,35 @@
+services:
+  crispasr:
+    image: ${CRISPASR_IMAGE:-ghcr.io/crispstrobe/crispasr:main}
+    build:
+      context: .
+      dockerfile: .devops/main.Dockerfile
+    ports:
+      - "${CRISPASR_PORT:-8080}:8080"
+    volumes:
+      - ./models:/models
+      - ./cache:/cache
+    environment:
+      CRISPASR_MODEL: ${CRISPASR_MODEL:-/models/model.gguf}
+      CRISPASR_BACKEND: ${CRISPASR_BACKEND:-}
+      CRISPASR_LANGUAGE: ${CRISPASR_LANGUAGE:-auto}
+      CRISPASR_PORT: ${CRISPASR_PORT:-8080}
+      CRISPASR_AUTO_DOWNLOAD: ${CRISPASR_AUTO_DOWNLOAD:-0}
+      CRISPASR_EXTRA_ARGS: ${CRISPASR_EXTRA_ARGS:-}
+    command: >-
+      '
+      set -e;
+      args=(crispasr --server --host 0.0.0.0 --port "${CRISPASR_PORT}" -m "${CRISPASR_MODEL}" --cache-dir /cache);
+      if [ -n "${CRISPASR_BACKEND}" ]; then args+=(--backend "${CRISPASR_BACKEND}"); fi;
+      if [ -n "${CRISPASR_LANGUAGE}" ]; then args+=(-l "${CRISPASR_LANGUAGE}"); fi;
+      if [ "${CRISPASR_AUTO_DOWNLOAD}" = "1" ]; then args+=(--auto-download); fi;
+      if [ -n "${CRISPASR_EXTRA_ARGS}" ]; then args+=(${CRISPASR_EXTRA_ARGS}); fi;
+      exec "${args[@]}"
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${CRISPASR_PORT:-8080}/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped

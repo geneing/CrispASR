@@ -7,7 +7,7 @@ RUN apt-get update && \
     apt-get install -y build-essential libsdl2-dev wget cmake git \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-COPY .. .
+COPY . .
 # Enable SYCL
 ARG GGML_SYCL_F16=OFF
 RUN if [ "${GGML_SYCL_F16}" = "ON" ]; then \

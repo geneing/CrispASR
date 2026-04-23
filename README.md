@@ -379,6 +379,44 @@ curl http://localhost:8080/backends
 
 The server loads the model once at startup and keeps it in memory. Subsequent `/inference` requests reuse the loaded model with no reload overhead. Requests are mutex-serialized. Use `--host 0.0.0.0` to accept remote connections.
 
+### Docker Compose
+
+The repo includes a root-level [`docker-compose.yml`](docker-compose.yml) for running the persistent HTTP server against a mounted model directory.
+
+```bash
+cp .env.example .env
+# Edit CRISPASR_MODEL to point at a file mounted under ./models
+
+docker compose up --build
+
+# Health check
+curl http://localhost:8080/health
+
+# OpenAI-compatible transcription API
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "response_format=verbose_json"
+```
+
+By default the compose stack:
+- builds from `.devops/main.Dockerfile`
+- mounts `./models` into `/models`
+- mounts `./cache` into `/cache`
+- serves on `http://localhost:8080`
+
+For CUDA builds, use the override file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+```
+
+You can override the loaded model and startup flags through `.env`:
+- `CRISPASR_MODEL=/models/parakeet-tdt-0.6b-v2.gguf`
+- `CRISPASR_BACKEND=parakeet`
+- `CRISPASR_LANGUAGE=auto`
+- `CRISPASR_AUTO_DOWNLOAD=1`
+- `CRISPASR_EXTRA_ARGS=--no-punctuation`
+
 ### OpenAI-compatible API
 
 The server exposes `POST /v1/audio/transcriptions`, a drop-in replacement for the [OpenAI Whisper API](https://platform.openai.com/docs/api-reference/audio/createTranscription). Any tool that speaks the OpenAI transcription protocol (LiteLLM, LangChain, custom clients) can point at CrispASR with zero code changes.
