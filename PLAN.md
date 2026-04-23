@@ -957,6 +957,17 @@ the LM decoder is well-understood from qwen3-asr/omniasr-llm.
 **Priority**: HIGH — only model with native timestamps + diarization +
 hotwords + 50+ languages. MIT license. 1.5B variant is manageable size.
 
+### Current progress (April 2026):
+- Converter: `models/convert-vibevoice-to-gguf.py` — 928 ASR tensors, 4.72 GB F16
+- Header + stub runtime: `src/vibevoice.{h,cpp}` — compiles, CMake wired
+- Python reference: acoustic_mean [83,64], semantic_mean [83,128],
+  features [83,1536] verified on JFK at 24kHz
+- Key discovery: `ggml_conv_1d_dw` exists for depthwise conv (critical for Block1D)
+- Architecture fully mapped: Block1D = RMSNorm→dw_conv→gamma→residual + RMSNorm→FFN→gamma→residual
+- Qwen2 decoder reusable from OmniASR-LLM infrastructure
+
+**Next**: implement ConvNeXt encoder graph → connectors → Qwen2 decoder → diff-test.
+
 ## 25. Montreal Forced Aligner evaluation — NOT PLANNED
 
 MFA uses Kaldi + OpenFST + Pynini (heavy C++ dependencies, ~500MB).
