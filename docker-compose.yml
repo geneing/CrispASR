@@ -20,7 +20,6 @@ services:
       CRISPASR_AUTO_DOWNLOAD: ${CRISPASR_AUTO_DOWNLOAD:-0}
       CRISPASR_CACHE_DIR: ${CRISPASR_CACHE_DIR:-/cache}
       CRISPASR_EXTRA_ARGS: ${CRISPASR_EXTRA_ARGS:-}
-    command: bash /app/.devops/run-server.sh
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${CRISPASR_PORT:-8080}/health >/dev/null"]
       interval: 30s

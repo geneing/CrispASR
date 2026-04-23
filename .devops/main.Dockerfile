@@ -25,5 +25,4 @@ RUN useradd -m -u 1000 crispasr && \
 ENV PATH=/app/build/bin:$PATH
 ENV CRISPASR_CACHE_DIR=/cache
 USER crispasr
-ENTRYPOINT [ "bash", "-c" ]
-CMD [ "bash /app/.devops/run-server.sh" ]
+ENTRYPOINT [ "bash", "/app/.devops/run-server.sh" ]
