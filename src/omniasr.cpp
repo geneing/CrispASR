@@ -151,29 +151,6 @@ static void dump_cpu(const float* data, int n, const char* name, const char* dir
     }
 }
 
-static bool read_tensor_row_f32(ggml_tensor* t, int row, int width, std::vector<float>& out) {
-    if (!t || row < 0 || width <= 0 || width > t->ne[0] || row >= t->ne[1]) {
-        out.clear();
-        return false;
-    }
-
-    out.resize(width);
-    const size_t offset = (size_t)row * t->nb[1];
-    if (t->type == GGML_TYPE_F32) {
-        ggml_backend_tensor_get(t, out.data(), offset, (size_t)width * sizeof(float));
-        return true;
-    }
-    if (t->type == GGML_TYPE_F16) {
-        std::vector<uint16_t> tmp(width);
-        ggml_backend_tensor_get(t, tmp.data(), offset, (size_t)width * sizeof(uint16_t));
-        ggml_fp16_to_fp32_row((const ggml_fp16_t*)tmp.data(), out.data(), width);
-        return true;
-    }
-
-    out.clear();
-    return false;
-}
-
 // ===========================================================================
 // ggml graph helpers
 // ===========================================================================
@@ -806,86 +783,14 @@ read_logits:
 // LLM decoder — ggml graph with KV cache (like voxtral4b)
 // ===========================================================================
 
-static bool omniasr_run_enc_proj(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
-                                 std::vector<float>& audio_embs) {
-    auto& hp = ctx->model.hp;
-    const int dd = hp.d_dec;
-
-    if (!ctx->enc_proj_w || d_enc <= 0 || T_enc <= 0) {
-        audio_embs.clear();
-        return false;
-    }
-
-    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
-    ggml_context* ctx0 = ggml_init(ip);
-    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 1024, false);
-
-    ggml_tensor* enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d_enc, T_enc);
-    ggml_set_name(enc, "encoder_out");
-    ggml_set_input(enc);
-
-    ggml_tensor* out = ggml_mul_mat(ctx0, ctx->enc_proj_w, enc);
-    if (ctx->enc_proj_b)
-        out = ggml_add(ctx0, out, ctx->enc_proj_b);
-    ggml_set_name(out, "audio_embs");
-    ggml_set_output(out);
-    ggml_build_forward_expand(gf, out);
-
-    ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
-        fprintf(stderr, "omniasr-llm: enc_proj graph alloc failed\n");
-        ggml_free(ctx0);
-        return false;
-    }
-
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "encoder_out"), encoder_out.data(), 0,
-                            (size_t)d_enc * T_enc * sizeof(float));
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
-        fprintf(stderr, "omniasr-llm: enc_proj graph compute failed\n");
-        ggml_free(ctx0);
-        return false;
-    }
-
-    ggml_tensor* out_t = ggml_graph_get_tensor(gf, "audio_embs");
-    if (!out_t || out_t->ne[0] != dd || out_t->ne[1] != T_enc) {
-        fprintf(stderr, "omniasr-llm: enc_proj output shape mismatch\n");
-        ggml_free(ctx0);
-        audio_embs.clear();
-        return false;
-    }
-
-    audio_embs.resize((size_t)dd * T_enc);
-    ggml_backend_tensor_get(out_t, audio_embs.data(), 0, (size_t)dd * T_enc * sizeof(float));
-    ggml_free(ctx0);
-    return true;
-}
-
-// Build decoder graph for n_tokens at position n_past
-static ggml_cgraph* omniasr_build_dec_graph(omniasr_context* ctx, int n_past, int n_tokens) {
+static ggml_tensor* omniasr_build_dec_body(omniasr_context* ctx, ggml_context* ctx0, ggml_cgraph* gf,
+                                           ggml_tensor* cur, ggml_tensor* positions, ggml_tensor* causal_mask,
+                                           int n_past, int n_tokens) {
     auto& hp = ctx->model.hp;
     int dd = hp.d_dec;
     int nh = hp.n_heads_dec;
     int hd = hp.head_dim_dec;
     int n_layers = hp.n_dec;
-
-    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
-    ggml_context* ctx0 = ggml_init(ip);
-    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
-
-    ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dd, n_tokens);
-    ggml_set_name(embeds, "dec_input");
-    ggml_set_input(embeds);
-
-    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
-    ggml_set_name(positions, "positions");
-    ggml_set_input(positions);
-
-    ggml_tensor* causal_mask = nullptr;
-    if (n_tokens > 1) {
-        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_past + n_tokens, n_tokens);
-        ggml_set_name(causal_mask, "causal_mask");
-        ggml_set_input(causal_mask);
-    }
 
     const core_attn::KvSelfAttnParams kvp = {
         /*n_heads*/ nh,
@@ -902,21 +807,17 @@ static ggml_cgraph* omniasr_build_dec_graph(omniasr_context* ctx, int n_past, in
         /*rope_type*/ GGML_ROPE_TYPE_NORMAL, // fairseq2 interleaved
     };
 
-    ggml_tensor* cur = embeds;
     for (int il = 0; il < n_layers; il++) {
         auto& b = ctx->dec_blocks[il];
         ggml_tensor* residual = cur;
 
-        // Pre-RMSNorm
         cur = ggml_rms_norm(ctx0, cur, 1e-5f);
         cur = ggml_mul(ctx0, cur, b.attn_ln_w);
 
-        // KV-cached self-attention
         ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, cur, b.q_w, b.k_w, b.v_w, b.o_w, nullptr, nullptr,
                                                     positions, causal_mask, ctx->kv_k, ctx->kv_v, il, n_past, kvp);
         cur = ggml_add(ctx0, residual, attn);
 
-        // FFN: RMSNorm + SwiGLU
         residual = cur;
         cur = ggml_rms_norm(ctx0, cur, 1e-5f);
         cur = ggml_mul(ctx0, cur, b.ffn_ln_w);
@@ -924,16 +825,52 @@ static ggml_cgraph* omniasr_build_dec_graph(omniasr_context* ctx, int n_past, in
         cur = ggml_add(ctx0, residual, ffn);
     }
 
-    // Final RMSNorm + LM head
     cur = ggml_rms_norm(ctx0, cur, 1e-5f);
     cur = ggml_mul(ctx0, cur, ctx->dec_ln_w);
 
-    // Only compute logits for last token during prefill
     if (n_tokens > 1) {
         cur = ggml_view_1d(ctx0, cur, dd, (size_t)(n_tokens - 1) * dd * sizeof(float));
         cur = ggml_reshape_2d(ctx0, cur, dd, 1);
     }
-    cur = ggml_mul_mat(ctx0, ctx->lm_head_w, cur);
+
+    return ggml_mul_mat(ctx0, ctx->lm_head_w, cur);
+}
+
+// Build decoder graph for n_tokens at position n_past. Prefill uses F32 embeddings;
+// single-token decode can use token IDs and backend get_rows to avoid CPU embedding copies.
+static ggml_cgraph* omniasr_build_dec_graph(omniasr_context* ctx, int n_past, int n_tokens, bool input_ids_mode) {
+    auto& hp = ctx->model.hp;
+    int dd = hp.d_dec;
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
+
+    ggml_tensor* cur = nullptr;
+    if (input_ids_mode) {
+        ggml_tensor* input_ids = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+        ggml_set_name(input_ids, "input_ids");
+        ggml_set_input(input_ids);
+        cur = ggml_get_rows(ctx0, ctx->tok_emb_w, input_ids);
+    } else {
+        ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dd, n_tokens);
+        ggml_set_name(embeds, "dec_input");
+        ggml_set_input(embeds);
+        cur = embeds;
+    }
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+
+    ggml_tensor* causal_mask = nullptr;
+    if (n_tokens > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_past + n_tokens, n_tokens);
+        ggml_set_name(causal_mask, "causal_mask");
+        ggml_set_input(causal_mask);
+    }
+
+    cur = omniasr_build_dec_body(ctx, ctx0, gf, cur, positions, causal_mask, n_past, n_tokens);
 
     ggml_set_name(cur, "logits");
     ggml_set_output(cur);
@@ -941,50 +878,124 @@ static ggml_cgraph* omniasr_build_dec_graph(omniasr_context* ctx, int n_past, in
     return gf;
 }
 
-// Run decoder graph for n_tokens, read logits
-static bool omniasr_run_dec(omniasr_context* ctx, const float* embeds, int n_tokens, int n_past,
-                            std::vector<float>& logits) {
+static bool omniasr_run_dec_token(omniasr_context* ctx, int token_id, int n_past, std::vector<float>& logits) {
+    int32_t input_id = token_id;
+    int32_t position = n_past;
+
+    ggml_cgraph* gf = omniasr_build_dec_graph(ctx, n_past, 1, true);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "omniasr-llm: token decoder graph alloc failed\n");
+        return false;
+    }
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "input_ids"), &input_id, 0, sizeof(input_id));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), &position, 0, sizeof(position));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "omniasr-llm: token decoder graph compute failed\n");
+        return false;
+    }
+
+    ggml_tensor* lt = ggml_graph_get_tensor(gf, "logits");
+    int V = (int)lt->ne[0];
+    logits.resize(V);
+    ggml_backend_tensor_get(lt, logits.data(), 0, V * sizeof(float));
+    return true;
+}
+
+static ggml_cgraph* omniasr_build_prefill_graph(omniasr_context* ctx, int d_enc, int T_enc, bool use_lang,
+                                                int prefix_len) {
     auto& hp = ctx->model.hp;
     int dd = hp.d_dec;
 
-    // Positions
-    std::vector<int32_t> positions(n_tokens);
-    for (int i = 0; i < n_tokens; i++)
-        positions[i] = n_past + i;
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
 
-    // Causal mask (only for prefill)
-    std::vector<ggml_fp16_t> mask;
-    if (n_tokens > 1) {
-        int Lk = n_past + n_tokens;
-        mask.resize((size_t)n_tokens * Lk, ggml_fp32_to_fp16(0.0f));
-        ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
-        for (int q = 0; q < n_tokens; q++)
-            for (int k = 0; k < Lk; k++)
-                if (k > n_past + q)
-                    mask[(size_t)q * Lk + k] = neg_inf;
+    ggml_tensor* enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d_enc, T_enc);
+    ggml_set_name(enc, "encoder_out");
+    ggml_set_input(enc);
+
+    ggml_tensor* cur = ggml_mul_mat(ctx0, ctx->enc_proj_w, enc);
+    if (ctx->enc_proj_b)
+        cur = ggml_add(ctx0, cur, ctx->enc_proj_b);
+
+    if (use_lang) {
+        ggml_tensor* lid_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+        ggml_set_name(lid_id, "lid_id");
+        ggml_set_input(lid_id);
+        cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->tok_emb_w, lid_id), 1);
+
+        ggml_tensor* lang_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+        ggml_set_name(lang_id, "lang_id");
+        ggml_set_input(lang_id);
+        cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->lang_emb_w, lang_id), 1);
     }
 
-    ggml_cgraph* gf = omniasr_build_dec_graph(ctx, n_past, n_tokens);
+    ggml_tensor* bos_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+    ggml_set_name(bos_id, "bos_id");
+    ggml_set_input(bos_id);
+    cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->tok_emb_w, bos_id), 1);
+    GGML_ASSERT(cur->ne[0] == dd && cur->ne[1] == prefix_len);
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, prefix_len);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+
+    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, prefix_len, prefix_len);
+    ggml_set_name(causal_mask, "causal_mask");
+    ggml_set_input(causal_mask);
+
+    cur = omniasr_build_dec_body(ctx, ctx0, gf, cur, positions, causal_mask, 0, prefix_len);
+    ggml_set_name(cur, "logits");
+    ggml_set_output(cur);
+    ggml_build_forward_expand(gf, cur);
+    return gf;
+}
+
+static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
+                                bool use_lang, int lang_id, int lid_marker_id, int prefix_len,
+                                std::vector<float>& logits) {
+    std::vector<int32_t> positions(prefix_len);
+    for (int i = 0; i < prefix_len; i++)
+        positions[i] = i;
+
+    std::vector<ggml_fp16_t> mask((size_t)prefix_len * prefix_len, ggml_fp32_to_fp16(0.0f));
+    ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+    for (int q = 0; q < prefix_len; q++)
+        for (int k = 0; k < prefix_len; k++)
+            if (k > q)
+                mask[(size_t)q * prefix_len + k] = neg_inf;
+
+    int32_t lid = lid_marker_id;
+    int32_t lang = lang_id;
+    int32_t bos = ctx->model.hp.bos_id;
+
+    ggml_cgraph* gf = omniasr_build_prefill_graph(ctx, d_enc, T_enc, use_lang, prefix_len);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
-        fprintf(stderr, "omniasr-llm: decoder graph alloc failed\n");
+        fprintf(stderr, "omniasr-llm: prefill graph alloc failed\n");
         return false;
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dec_input"), embeds, 0, (size_t)dd * n_tokens * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "encoder_out"), encoder_out.data(), 0,
+                            (size_t)d_enc * T_enc * sizeof(float));
+    if (use_lang) {
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "lid_id"), &lid, 0, sizeof(lid));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "lang_id"), &lang, 0, sizeof(lang));
+    }
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bos_id"), &bos, 0, sizeof(bos));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
                             positions.size() * sizeof(int32_t));
-    if (n_tokens > 1) {
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
-                                mask.size() * sizeof(ggml_fp16_t));
-    }
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
+                            mask.size() * sizeof(ggml_fp16_t));
 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
-        fprintf(stderr, "omniasr-llm: decoder graph compute failed\n");
+        fprintf(stderr, "omniasr-llm: prefill graph compute failed\n");
         return false;
     }
 
-    // Read logits (always 1 token's worth — last token for prefill)
     ggml_tensor* lt = ggml_graph_get_tensor(gf, "logits");
     int V = (int)lt->ne[0];
     logits.resize(V);
@@ -999,21 +1010,6 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const float* /*samples
 
     int dd = hp.d_dec; // 4096
 
-    // 1. Project encoder output via backend graph: enc_proj(encoder_out) → [dd, T_enc].
-    // This avoids re-reading projection weights and running a large CPU matmul per utterance.
-    std::vector<float> audio_embs;
-    const int64_t t_proj0 = ggml_time_us();
-    if (!omniasr_run_enc_proj(ctx, encoder_out, d_enc, T_enc, audio_embs)) {
-        fprintf(stderr, "omniasr-llm: enc_proj failed\n");
-        return nullptr;
-    }
-    const int64_t t_proj1 = ggml_time_us();
-
-    if (ctx->params.verbosity >= 2)
-        fprintf(stderr, "  enc_proj done: [%d, %d] %.1f ms\n", dd, T_enc, (t_proj1 - t_proj0) / 1e3);
-    dump_cpu(audio_embs.data(), dd * T_enc, "enc_proj_output", getenv("OMNIASR_DUMP_DIR"));
-
-    // 2. Build prefix without reading the full token embedding table to CPU.
     const int tok_emb_size = ctx->tok_emb_w ? (int)ctx->tok_emb_w->ne[1] : 0;
     int lang_id = 417; // eng_Latn default (parquet_index=416, +1 per factory.py)
     // Factory: lang_mapping = {lang.lower(): parquet_index + 1}
@@ -1026,44 +1022,10 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const float* /*samples
     // Sequence: [audio_embs...] [lid_marker_emb] [lang_emb] [BOS_emb] [generated...]
     // lid_marker is special token at index vocab_size (9812) in text_frontend
     int lid_marker_id = hp.vocab_size;          // 9812 — the extra token in tok_emb (size 9813)
+    if (lang_id < 0 || lang_id >= hp.n_langs || lid_marker_id >= tok_emb_size)
+        use_lang = false;
     int n_lang_tokens = use_lang ? 2 : 0;       // lid_marker + lang_emb
     int prefix_len = T_enc + n_lang_tokens + 1; // audio + [lid_marker + lang] + BOS
-    std::vector<float> prefix(prefix_len * dd);
-
-    int pos = 0;
-    // Audio embeddings first
-    memcpy(prefix.data(), audio_embs.data(), T_enc * dd * sizeof(float));
-    pos += T_enc;
-
-    // Language conditioning: lid_marker + lang_emb
-    std::vector<float> row;
-    if (use_lang && lang_id >= 0 && lang_id < hp.n_langs && lid_marker_id < tok_emb_size &&
-        read_tensor_row_f32(ctx->tok_emb_w, lid_marker_id, dd, row)) {
-        memcpy(prefix.data() + (size_t)pos * dd, row.data(), (size_t)dd * sizeof(float));
-        pos++;
-        if (read_tensor_row_f32(ctx->lang_emb_w, lang_id, dd, row)) {
-            memcpy(prefix.data() + (size_t)pos * dd, row.data(), (size_t)dd * sizeof(float));
-            pos++;
-        } else {
-            use_lang = false;
-            pos--;
-        }
-    } else {
-        use_lang = false;
-    }
-
-    // BOS embedding
-    if (!read_tensor_row_f32(ctx->tok_emb_w, hp.bos_id, dd, row)) {
-        fprintf(stderr, "omniasr-llm: failed to read BOS embedding\n");
-        return nullptr;
-    }
-    memcpy(prefix.data() + (size_t)pos * dd, row.data(), (size_t)dd * sizeof(float));
-    pos++;
-
-    if (pos != prefix_len) {
-        prefix_len = pos;
-        prefix.resize((size_t)prefix_len * dd);
-    }
 
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "omniasr-llm: prefix len=%d (%d audio%s + BOS), lang_id=%d, d=%d\n", prefix_len, T_enc,
@@ -1090,7 +1052,7 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const float* /*samples
     ctx->kv_n_used = 0;
     // 4. Prefill decoder with entire prefix
     std::vector<float> logits;
-    if (!omniasr_run_dec(ctx, prefix.data(), prefix_len, 0, logits)) {
+    if (!omniasr_run_prefill(ctx, encoder_out, d_enc, T_enc, use_lang, lang_id, lid_marker_id, prefix_len, logits)) {
         fprintf(stderr, "omniasr-llm: prefill failed\n");
         return nullptr;
     }
@@ -1122,14 +1084,12 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const float* /*samples
 
     // 6. Autoregressive generation: one token at a time
     for (int step = 0; (int)output_tokens.size() < max_gen && cur_token != hp.eos_id; step++) {
-        // Look up only the current token row; do not pull the whole embedding table.
-        std::vector<float> tok_emb(dd);
-        if (cur_token < 0 || cur_token >= tok_emb_size || !read_tensor_row_f32(ctx->tok_emb_w, cur_token, dd, tok_emb)) {
+        if (cur_token < 0 || cur_token >= tok_emb_size) {
             break; // Invalid token
         }
 
         int n_past = prefix_len + step;
-        if (!omniasr_run_dec(ctx, tok_emb.data(), 1, n_past, logits)) {
+        if (!omniasr_run_dec_token(ctx, cur_token, n_past, logits)) {
             fprintf(stderr, "omniasr-llm: decode step %d failed\n", step);
             break;
         }
