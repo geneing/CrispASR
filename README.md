@@ -410,6 +410,20 @@ For CUDA builds, use the override file:
 docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
 ```
 
+### Hugging Face Space wrapper
+
+There is also a Gradio-based Hugging Face Space wrapper under [`hf-space/`](hf-space/README.md). It starts the CrispASR HTTP server inside the container and provides a small browser UI on top of the OpenAI-compatible transcription endpoint.
+
+Build it locally with:
+
+```bash
+docker build -f hf-space/Dockerfile -t crispasr-hf-space .
+docker run --rm -p 7860:7860 -p 8080:8080 \
+  -e CRISPASR_MODEL=/models/ggml-base.en.bin \
+  -v "$PWD/models:/models" \
+  crispasr-hf-space
+```
+
 The compose files default to local image tags (`crispasr-local:*`) so they don't depend on pulling a published registry image first.
 
 You can override the loaded model and startup flags through `.env`:

@@ -7,6 +7,7 @@ on:
       - "docker-compose*.yml"
       - ".dockerignore"
       - ".env.example"
+      - "hf-space/**"
       - ".github/workflows/docker-smoke.yml"
       - "README.md"
       - "CMakeLists.txt"
@@ -21,6 +22,7 @@ on:
       - "docker-compose*.yml"
       - ".dockerignore"
       - ".env.example"
+      - "hf-space/**"
       - ".github/workflows/docker-smoke.yml"
       - "README.md"
       - "CMakeLists.txt"
@@ -78,3 +80,13 @@ jobs:
       - name: Stop stack
         if: always()
         run: docker compose down -v
+
+  hf-space-build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Build Hugging Face Space image
+        run: docker build -f hf-space/Dockerfile -t crispasr-hf-space .
