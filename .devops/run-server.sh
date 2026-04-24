@@ -76,22 +76,15 @@ if [[ -n "$LANGUAGE" ]]; then
     args+=(-l "$LANGUAGE")
 fi
 
-if [[ -n "$API_KEYS" ]]; then
-    args+=(--api-keys "$API_KEYS")
-fi
+# API keys are read from CRISPASR_API_KEYS env var directly by the server
+# binary — do NOT pass as --api-keys CLI arg (visible in ps/top, issue #28).
+# The env var is already set by docker-compose.yml from the .env file.
 
 if [[ -n "$EXTRA_ARGS" ]]; then
     eval "args+=($EXTRA_ARGS)"
 fi
 
 display_args=("${args[@]}")
-if [[ -n "$API_KEYS" ]]; then
-    for i in "${!display_args[@]}"; do
-        if [[ "${display_args[$i]}" == "--api-keys" && $((i + 1)) -lt ${#display_args[@]} ]]; then
-            display_args[$((i + 1))]="(redacted)"
-        fi
-    done
-fi
 
 log "server_host=$SERVER_HOST server_port=$SERVER_PORT backend=${BACKEND:-default} language=${LANGUAGE:-default} auto_download=$AUTO_DOWNLOAD cache_dir=$CACHE_DIR"
 if [[ -n "$API_KEYS" ]]; then

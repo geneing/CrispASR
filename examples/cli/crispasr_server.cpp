@@ -252,14 +252,21 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
             result.segs = backend->transcribe(pcmf32.data(), n_samples, 0, rp);
         } else {
             // Chunk long audio into fixed segments
-            if (rp.verbose)
-                fprintf(stderr, "crispasr-server: chunking %.1fs audio into %ds segments\n", result.duration_s,
-                        rp.chunk_seconds);
+            int n_chunks = (n_samples + max_chunk_samples - 1) / max_chunk_samples;
+            fprintf(stderr, "crispasr-server: chunking %.1fs audio into %d × %ds segments\n", result.duration_s,
+                    n_chunks, rp.chunk_seconds);
+            int chunk_idx = 0;
             for (int offset = 0; offset < n_samples; offset += max_chunk_samples) {
                 int chunk_len = std::min(max_chunk_samples, n_samples - offset);
                 int64_t t_offset_cs = (int64_t)((double)offset / SR * 100.0);
+                auto tc0 = std::chrono::steady_clock::now();
                 auto chunk_segs = backend->transcribe(pcmf32.data() + offset, chunk_len, t_offset_cs, rp);
+                auto tc1 = std::chrono::steady_clock::now();
+                double chunk_s = std::chrono::duration<double>(tc1 - tc0).count();
                 result.segs.insert(result.segs.end(), chunk_segs.begin(), chunk_segs.end());
+                chunk_idx++;
+                fprintf(stderr, "crispasr-server: chunk %d/%d done (%.1fs audio in %.1fs)\n", chunk_idx, n_chunks,
+                        chunk_len / (double)SR, chunk_s);
             }
         }
 
