@@ -667,13 +667,26 @@ static void read_f32_vec(ggml_tensor* t, std::vector<float>& out) {
 // CPU matmul: C = A @ B^T where A is [M,K], B is [N,K] → C is [M,N]
 // (B stored as [N,K] row-major, like ggml weight [K,N] with ne[0]=K)
 static void cpu_matmul_bt(const float* A, const float* B, float* C, int M, int K, int N) {
+    if (M == 1) {
+        // Single-vector × matrix: parallelize over output dimension N.
+        // This is the decoder hot path (one token per step).
 #pragma omp parallel for schedule(static)
-    for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
-            double s = 0; // double precision accumulator for accuracy
+            double s = 0;
+            const float* brow = B + n * K;
             for (int k = 0; k < K; k++)
-                s += (double)A[m * K + k] * (double)B[n * K + k];
-            C[m * N + n] = (float)s;
+                s += (double)A[k] * (double)brow[k];
+            C[n] = (float)s;
+        }
+    } else {
+#pragma omp parallel for schedule(static)
+        for (int m = 0; m < M; m++) {
+            for (int n = 0; n < N; n++) {
+                double s = 0;
+                for (int k = 0; k < K; k++)
+                    s += (double)A[m * K + k] * (double)B[n * K + k];
+                C[m * N + n] = (float)s;
+            }
         }
     }
 }
@@ -1859,24 +1872,17 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         std::vector<float> xn(d);
                         cpu_layernorm(x.data(), c.sattn_norm_w.data(), c.sattn_norm_b.data(), xn.data(), 1, d);
 
-                        std::vector<float> Q_sa(d, 0);
-                        for (int i = 0; i < d; i++) {
-                            double s = 0;
-                            for (int k = 0; k < d; k++)
-                                s += xn[k] * c.sattn_w_qs[i * d + k];
-                            Q_sa[i] = (float)s + (c.sattn_w_qs_b.empty() ? 0 : c.sattn_w_qs_b[i]);
-                        }
-
-                        std::vector<float> K_cur(d, 0), V_cur(d, 0);
-                        for (int i = 0; i < d; i++) {
-                            double sk = 0, sv = 0;
-                            for (int k = 0; k < d; k++) {
-                                sk += xn[k] * c.sattn_w_ks[i * d + k];
-                                sv += xn[k] * c.sattn_w_vs[i * d + k];
-                            }
-                            K_cur[i] = (float)sk;
-                            V_cur[i] = (float)sv + (c.sattn_w_vs_b.empty() ? 0 : c.sattn_w_vs_b[i]);
-                        }
+                        // Q/K/V projections via parallelized matmul (M=1 path)
+                        std::vector<float> Q_sa(d), K_cur(d), V_cur(d);
+                        cpu_matmul_bt(xn.data(), c.sattn_w_qs.data(), Q_sa.data(), 1, d, d);
+                        if (!c.sattn_w_qs_b.empty())
+                            for (int i = 0; i < d; i++)
+                                Q_sa[i] += c.sattn_w_qs_b[i];
+                        cpu_matmul_bt(xn.data(), c.sattn_w_ks.data(), K_cur.data(), 1, d, d);
+                        cpu_matmul_bt(xn.data(), c.sattn_w_vs.data(), V_cur.data(), 1, d, d);
+                        if (!c.sattn_w_vs_b.empty())
+                            for (int i = 0; i < d; i++)
+                                V_cur[i] += c.sattn_w_vs_b[i];
                         auto& sa_k_hist = *beam.sa_k[li];
                         auto& sa_v_hist = *beam.sa_v[li];
                         sa_k_hist.insert(sa_k_hist.end(), K_cur.begin(), K_cur.end());
@@ -1903,28 +1909,21 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         if (debug_dec_here)
                             firered_debug_dump_vec("greedy.sa_out", sa_out, 8);
 
-                        std::vector<float> sa_fc(d, 0);
-                        for (int i = 0; i < d; i++) {
-                            double s = 0;
-                            for (int k = 0; k < d; k++)
-                                s += sa_out[k] * c.sattn_fc_w[i * d + k];
-                            sa_fc[i] = (float)s + (c.sattn_fc_b.empty() ? 0 : c.sattn_fc_b[i]);
-                        }
+                        std::vector<float> sa_fc(d);
+                        cpu_matmul_bt(sa_out.data(), c.sattn_fc_w.data(), sa_fc.data(), 1, d, d);
                         for (int i = 0; i < d; i++)
-                            x[i] += sa_fc[i];
+                            x[i] += sa_fc[i] + (c.sattn_fc_b.empty() ? 0 : c.sattn_fc_b[i]);
                     }
 
                     // === Cross-attention: attend to encoder output (pre-computed K/V) ===
                     std::vector<float> xn(d);
                     cpu_layernorm(x.data(), c.xattn_norm_w.data(), c.xattn_norm_b.data(), xn.data(), 1, d);
 
-                    std::vector<float> Qx(d, 0);
-                    for (int i = 0; i < d; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += xn[k] * c.xattn_w_qs[i * d + k];
-                        Qx[i] = (float)s + (c.xattn_w_qs_b.empty() ? 0 : c.xattn_w_qs_b[i]);
-                    }
+                    std::vector<float> Qx(d);
+                    cpu_matmul_bt(xn.data(), c.xattn_w_qs.data(), Qx.data(), 1, d, d);
+                    if (!c.xattn_w_qs_b.empty())
+                        for (int i = 0; i < d; i++)
+                            Qx[i] += c.xattn_w_qs_b[i];
 
                     int nh_dec = hp.n_head_dec;
                     int hd_dec = d / nh_dec;
@@ -1950,35 +1949,26 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         firered_debug_dump_vec("greedy.attn_out", attn_out, 8);
                     }
 
-                    std::vector<float> fc_out(d, 0);
-                    for (int i = 0; i < d; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += attn_out[k] * c.xattn_fc_w[i * d + k];
-                        fc_out[i] = (float)s + (c.xattn_fc_b.empty() ? 0 : c.xattn_fc_b[i]);
-                    }
+                    std::vector<float> fc_out(d);
+                    cpu_matmul_bt(attn_out.data(), c.xattn_fc_w.data(), fc_out.data(), 1, d, d);
                     for (int i = 0; i < d; i++)
-                        x[i] += fc_out[i];
+                        x[i] += fc_out[i] + (c.xattn_fc_b.empty() ? 0 : c.xattn_fc_b[i]);
 
                     cpu_layernorm(x.data(), c.mlp_norm_w.data(), c.mlp_norm_b.data(), xn.data(), 1, d);
-                    std::vector<float> h_up(c.di, 0);
-                    for (int i = 0; i < c.di; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += xn[k] * c.mlp_w1[i * d + k];
-                        h_up[i] = (float)s + (c.mlp_b1.empty() ? 0 : c.mlp_b1[i]);
-                    }
+                    std::vector<float> h_up(c.di);
+                    cpu_matmul_bt(xn.data(), c.mlp_w1.data(), h_up.data(), 1, d, c.di);
+                    if (!c.mlp_b1.empty())
+                        for (int i = 0; i < c.di; i++)
+                            h_up[i] += c.mlp_b1[i];
                     for (int i = 0; i < c.di; i++) {
                         float v = h_up[i];
                         h_up[i] = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));
                     }
-                    std::vector<float> mlp_out(d, 0);
-                    for (int i = 0; i < d; i++) {
-                        double s = 0;
-                        for (int k = 0; k < c.di; k++)
-                            s += h_up[k] * c.mlp_w2[i * c.di + k];
-                        mlp_out[i] = (float)s + (c.mlp_b2.empty() ? 0 : c.mlp_b2[i]);
-                    }
+                    std::vector<float> mlp_out(d);
+                    cpu_matmul_bt(h_up.data(), c.mlp_w2.data(), mlp_out.data(), 1, c.di, d);
+                    if (!c.mlp_b2.empty())
+                        for (int i = 0; i < d; i++)
+                            mlp_out[i] += c.mlp_b2[i];
                     if (debug_dec_here) {
                         firered_debug_dump_vec("greedy.fc_out", fc_out, 8);
                         firered_debug_dump_vec("greedy.mlp_out", mlp_out, 8);
@@ -1993,12 +1983,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                 std::vector<float> logits;
                 if (!project_decoder_logits(xn.data(), logits)) {
                     logits.resize(odim);
-                    for (int i = 0; i < odim; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += xn[k] * prj_w[i * d + k];
-                        logits[i] = (float)s;
-                    }
+                    cpu_matmul_bt(xn.data(), prj_w.data(), logits.data(), 1, d, odim);
                 }
                 int best_token = 0;
                 float best_logit = logits[0];
@@ -2046,26 +2031,17 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         std::vector<float> xn(d);
                         cpu_layernorm(x.data(), c.sattn_norm_w.data(), c.sattn_norm_b.data(), xn.data(), 1, d);
 
-                        // Q for current token
-                        std::vector<float> Q_sa(d, 0);
-                        for (int i = 0; i < d; i++) {
-                            double s = 0;
-                            for (int k = 0; k < d; k++)
-                                s += xn[k] * c.sattn_w_qs[i * d + k];
-                            Q_sa[i] = (float)s + (c.sattn_w_qs_b.empty() ? 0 : c.sattn_w_qs_b[i]);
-                        }
-
-                        // K, V for current token → append to cache
-                        std::vector<float> K_cur(d, 0), V_cur(d, 0);
-                        for (int i = 0; i < d; i++) {
-                            double sk = 0, sv = 0;
-                            for (int k = 0; k < d; k++) {
-                                sk += xn[k] * c.sattn_w_ks[i * d + k];
-                                sv += xn[k] * c.sattn_w_vs[i * d + k];
-                            }
-                            K_cur[i] = (float)sk;
-                            V_cur[i] = (float)sv + (c.sattn_w_vs_b.empty() ? 0 : c.sattn_w_vs_b[i]);
-                        }
+                        // Q/K/V projections via parallelized matmul
+                        std::vector<float> Q_sa(d), K_cur(d), V_cur(d);
+                        cpu_matmul_bt(xn.data(), c.sattn_w_qs.data(), Q_sa.data(), 1, d, d);
+                        if (!c.sattn_w_qs_b.empty())
+                            for (int i = 0; i < d; i++)
+                                Q_sa[i] += c.sattn_w_qs_b[i];
+                        cpu_matmul_bt(xn.data(), c.sattn_w_ks.data(), K_cur.data(), 1, d, d);
+                        cpu_matmul_bt(xn.data(), c.sattn_w_vs.data(), V_cur.data(), 1, d, d);
+                        if (!c.sattn_w_vs_b.empty())
+                            for (int i = 0; i < d; i++)
+                                V_cur[i] += c.sattn_w_vs_b[i];
                         if (!beams[bi].sa_k[li].unique())
                             beams[bi].sa_k[li] = std::make_shared<std::vector<float>>(*beams[bi].sa_k[li]);
                         if (!beams[bi].sa_v[li].unique())
@@ -2097,31 +2073,22 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         }
 
                         // FC + residual
-                        std::vector<float> sa_fc(d, 0);
-                        for (int i = 0; i < d; i++) {
-                            double s = 0;
-                            for (int k = 0; k < d; k++)
-                                s += sa_out[k] * c.sattn_fc_w[i * d + k];
-                            sa_fc[i] = (float)s + (c.sattn_fc_b.empty() ? 0 : c.sattn_fc_b[i]);
-                        }
+                        std::vector<float> sa_fc(d);
+                        cpu_matmul_bt(sa_out.data(), c.sattn_fc_w.data(), sa_fc.data(), 1, d, d);
                         for (int i = 0; i < d; i++)
-                            x[i] += sa_fc[i];
+                            x[i] += sa_fc[i] + (c.sattn_fc_b.empty() ? 0 : c.sattn_fc_b[i]);
                     }
 
                     // === Cross-attention: attend to encoder output (pre-computed K/V) ===
                     std::vector<float> xn(d);
                     cpu_layernorm(x.data(), c.xattn_norm_w.data(), c.xattn_norm_b.data(), xn.data(), 1, d);
 
-                    // Q = xn @ W_q + b_q [d]
-                    std::vector<float> Qx(d, 0);
-                    for (int i = 0; i < d; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += xn[k] * c.xattn_w_qs[i * d + k];
-                        Qx[i] = (float)s + (c.xattn_w_qs_b.empty() ? 0 : c.xattn_w_qs_b[i]);
-                    }
+                    std::vector<float> Qx(d);
+                    cpu_matmul_bt(xn.data(), c.xattn_w_qs.data(), Qx.data(), 1, d, d);
+                    if (!c.xattn_w_qs_b.empty())
+                        for (int i = 0; i < d; i++)
+                            Qx[i] += c.xattn_w_qs_b[i];
 
-                    // Multi-head attention over pre-computed K_enc/V_enc
                     int nh_dec = hp.n_head_dec;
                     int hd_dec = d / nh_dec;
                     std::vector<float> attn_out(d, 0);
@@ -2143,36 +2110,27 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                     }
 
                     // FC output projection + residual
-                    std::vector<float> fc_out(d, 0);
-                    for (int i = 0; i < d; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += attn_out[k] * c.xattn_fc_w[i * d + k];
-                        fc_out[i] = (float)s + (c.xattn_fc_b.empty() ? 0 : c.xattn_fc_b[i]);
-                    }
+                    std::vector<float> fc_out(d);
+                    cpu_matmul_bt(attn_out.data(), c.xattn_fc_w.data(), fc_out.data(), 1, d, d);
                     for (int i = 0; i < d; i++)
-                        x[i] += fc_out[i];
+                        x[i] += fc_out[i] + (c.xattn_fc_b.empty() ? 0 : c.xattn_fc_b[i]);
 
                     // MLP: LN → Linear(d→4d) → GELU → Linear(4d→d) + residual
                     cpu_layernorm(x.data(), c.mlp_norm_w.data(), c.mlp_norm_b.data(), xn.data(), 1, d);
-                    std::vector<float> h_up(c.di, 0);
-                    for (int i = 0; i < c.di; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += xn[k] * c.mlp_w1[i * d + k];
-                        h_up[i] = (float)s + (c.mlp_b1.empty() ? 0 : c.mlp_b1[i]);
-                    }
+                    std::vector<float> h_up(c.di);
+                    cpu_matmul_bt(xn.data(), c.mlp_w1.data(), h_up.data(), 1, d, c.di);
+                    if (!c.mlp_b1.empty())
+                        for (int i = 0; i < c.di; i++)
+                            h_up[i] += c.mlp_b1[i];
                     for (int i = 0; i < c.di; i++) {
                         float v = h_up[i];
                         h_up[i] = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));
                     }
-                    std::vector<float> mlp_out(d, 0);
-                    for (int i = 0; i < d; i++) {
-                        double s = 0;
-                        for (int k = 0; k < c.di; k++)
-                            s += h_up[k] * c.mlp_w2[i * c.di + k];
-                        mlp_out[i] = (float)s + (c.mlp_b2.empty() ? 0 : c.mlp_b2[i]);
-                    }
+                    std::vector<float> mlp_out(d);
+                    cpu_matmul_bt(h_up.data(), c.mlp_w2.data(), mlp_out.data(), 1, c.di, d);
+                    if (!c.mlp_b2.empty())
+                        for (int i = 0; i < d; i++)
+                            mlp_out[i] += c.mlp_b2[i];
                     for (int i = 0; i < d; i++)
                         x[i] += mlp_out[i];
                 }
@@ -2181,14 +2139,8 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                 std::vector<float> xn(d);
                 cpu_layernorm(x.data(), norm_w.data(), norm_b.data(), xn.data(), 1, d);
                 std::vector<float> logits(odim);
-                if (!project_decoder_logits(xn.data(), logits)) {
-                    for (int i = 0; i < odim; i++) {
-                        double s = 0;
-                        for (int k = 0; k < d; k++)
-                            s += xn[k] * prj_w[i * d + k];
-                        logits[i] = (float)s;
-                    }
-                }
+                if (!project_decoder_logits(xn.data(), logits))
+                    cpu_matmul_bt(xn.data(), prj_w.data(), logits.data(), 1, d, odim);
 
                 float mx = logits[0];
                 for (int i = 1; i < odim; i++)
