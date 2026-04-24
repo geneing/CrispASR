@@ -39,7 +39,7 @@ if [ $# -eq 0 ]; then
 fi
 
 model=$1
-main="../build/bin/whisper-cli"
+main="../build/bin/crispasr"
 
 threads=""
 if [ $# -eq 2 ]; then

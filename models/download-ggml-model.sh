@@ -135,12 +135,12 @@ if [ $? -ne 0 ]; then
 fi
 
 # Check if 'whisper-cli' is available in the system PATH
-if command -v whisper-cli >/dev/null 2>&1; then
+if command -v crispasr >/dev/null 2>&1; then
     # If found, use 'whisper-cli' (relying on PATH resolution)
-    whisper_cmd="whisper-cli"
+    whisper_cmd="crispasr"
 else
     # If not found, use the local build version
-    whisper_cmd="./build/bin/whisper-cli"
+    whisper_cmd="./build/bin/crispasr"
 fi
 
 printf "Done! Model '%s' saved in '%s/ggml-%s.bin'\n" "$model" "$models_path" "$model"

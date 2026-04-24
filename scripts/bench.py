@@ -151,7 +151,7 @@ for model in filtered_models:
         for processor_count in processors:
             # Construct the command to run
             cmd = [
-                "./build/bin/whisper-cli",
+                "./build/bin/crispasr",
                 "-m",
                 f"models/{model}",
                 "-t",

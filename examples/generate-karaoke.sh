@@ -11,7 +11,7 @@
 # Press Ctrl+C to stop recording
 #
 
-executable="./build/bin/whisper-cli"
+executable="./build/bin/crispasr"
 model="base.en"
 model_path="models/ggml-$model.bin"
 

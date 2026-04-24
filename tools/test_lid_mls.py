@@ -27,7 +27,7 @@ def main():
     models = sys.argv[1:]
     if not models:
         models = ["/tmp/lid-4L-last-q2k.gguf"]
-    cli = "./build/bin/whisper-cli"
+    cli = "./build/bin/crispasr"
 
     for model_path in models:
         sz = os.path.getsize(model_path) / 1e6

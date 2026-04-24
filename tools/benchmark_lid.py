@@ -116,7 +116,7 @@ async def generate_samples():
     return samples
 
 
-def run_benchmark(model_path, samples, cli="./build/bin/whisper-cli"):
+def run_benchmark(model_path, samples, cli="./build/bin/crispasr"):
     """Run LID on all samples and return (correct, total, elapsed)."""
     correct = total = 0
     details = []
@@ -149,9 +149,9 @@ def main():
         print("Usage: python tools/benchmark_lid.py model1.gguf [model2.gguf ...]")
         sys.exit(1)
 
-    cli = "./build/bin/whisper-cli"
+    cli = "./build/bin/crispasr"
     if not os.path.exists(cli):
-        cli = "whisper-cli"
+        cli = "crispasr"
 
     print("Generating TTS samples...")
     samples = asyncio.run(generate_samples())
