@@ -163,7 +163,7 @@ No response. HF model card has no license field.
 | O11 | wav2vec2 CNN → ggml | wav2vec2 family | **10.8x** | **DONE** |
 | O9/#44 | FireRed ggml Q4_K decoder | firered-asr | **6.3x** | **DONE** |
 | O10 | Sliding window attention | voxtral4b | Already implemented | **DONE** |
-| O2 | Fused QKV pre-merge | LLM decoders | ~10-15% attn | TODO |
+| O2 | Fused QKV pre-merge | LLM decoders | ~10-15% attn | API ready, needs per-backend wiring |
 | O3 | Temperature sampling | glm-asr, kyutai-stt | Feature parity | **DONE** |
 | O5 | Pipelined mel+encode | LLM backends, CPU | ~15-20% | TODO |
 | O4 | Beam search for LLMs | Audio-LLM backends | Quality | TODO |
