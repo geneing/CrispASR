@@ -331,3 +331,31 @@ Moved here once shipped. See git history for code diffs.
 - **#25 Montreal Forced Aligner** — NOT PLANNED (too heavy, external tool).
 - **Qwen Omni ASR** — NOT PLANNED (split GGUF, too large, already in llama.cpp).
 - **#30 PazaBench assessment** — 16 model families assessed. 7 already covered, 4 easy wins identified.
+
+### v0.5.0 (April 2026)
+
+**Features:**
+- **#36** ASCII punc mapping — auto-detect Latin script, map `，。？！` → `, . ? !`
+- **#37** Progressive SRT (`--flush-after N`) — streaming subtitles for media players
+- **#38** Fullstop-punc multilingual — XLM-RoBERTa-large, MIT, EN/DE/FR/IT. HF: `cstr/fullstop-punc-multilang-GGUF`
+- **#39** Session API — all 18 backends wired in C-ABI + Python/Rust/Dart
+- **#15** CMake rename — whisper-cli → crispasr in CMake, CI, Dockerfiles, scripts
+- **#18** Aligner LIS — Longest Increasing Subsequence monotonicity fix
+- **#40** Moonshine converter — multilingual variants (ja, ko, zh, ar, vi, uk)
+
+**Optimizations:**
+- **#44** FireRed ggml decoder — native Q4_K matmuls: 123s → 19s (**6.3x**)
+- **O11** wav2vec2 CNN → ggml F32 im2col + OpenMP pos_conv: 108s → 10s (**10.8x**)
+- **O1** ggml_soft_max_ext fusion — saves one op per attention layer (-10% wav2vec2)
+- GPU auto-detect for all 18 backends + aux models
+
+**Server:**
+- Auto-chunking for long audio (#27) — prevents OOM
+- Verbose logging + chunk progress (#26)
+- API keys via env only, not CLI arg (#28)
+- JSON error bodies + 404 handler
+
+**Docker:**
+- GHCR publishing (main, cuda, vulkan, intel, musa)
+- passwd fix for ubuntu:24.04 images
+- Standardized run-server.sh entrypoint

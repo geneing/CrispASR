@@ -11,103 +11,23 @@ post-processor, C-ABI + Python/Rust/Dart wrappers, CI on 6 platforms.
 
 ## Priority ordering
 
-| Priority | Item | Impact | Effort | Status |
-|---|---|---|---|---|
-| ~~HIGH~~ | ~~#36 ASCII punc mapping~~ | | | **DONE** |
-| ~~HIGH~~ | ~~#37 Progressive SRT (#24)~~ | | | **DONE** |
-| ~~MEDIUM~~ | ~~#38 Fullstop-punc multilingual~~ | | | **DONE** |
-| ~~MEDIUM~~ | ~~#39 Session API backends~~ | | | **DONE** |
-| ~~LOW~~ | ~~#15 CMake rename~~ | | | **DONE** |
-| ~~LOW~~ | ~~#18 Aligner LIS~~ | | | **DONE** |
-| ~~MEDIUM~~ | ~~#40 Moonshine variants~~ | Converter added | | **DONE** (non-streaming) |
-| **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Test infra completeness | Medium | |
-| **LOW** | #41 Moonshine IPA / phoneme | Niche | High | Deferred — needs moonshine G2P stack |
-| **LOW** | #40b Moonshine streaming | Different architecture | High | Deferred — needs new runtime |
-| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | Complex, niche | High | |
-| **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Small gain | Medium | |
-| **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | Needs new dep | High | |
-| **LOW** | [#16 Shaw RPE](#16-shaw-rpe-for-granite-graph) | Accuracy edge case | Medium | |
-| **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | Needs ≥16 GB RAM | High | |
-| **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | License unclear | Medium | |
+| Priority | Item | Effort | Status |
+|---|---|---|---|
+| **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Medium | |
+| **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
+| **LOW** | #40b Moonshine streaming | High | Deferred |
+| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | |
+| **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
+| **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
+| **LOW** | [#16 Shaw RPE](#16-shaw-rpe-for-granite-graph) | Medium | |
+| **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
+| **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | License unclear |
 
 ---
 
-## 36. ASCII punctuation mapping
 
-**Problem:** FireRedPunc outputs Chinese full-width marks (`，` `。` `？` `！`)
-even for English text.
 
-**Fix:** Auto-detect Latin-script input → map to ASCII (`, . ? !`).
 
-**Files:** `src/fireredpunc.cpp` — 4 string replacements after BERT pass.
-
-**Effort:** Trivial (~10 LOC).
-
----
-
-## 37. Progressive SRT output (issue #24)
-
-**Problem:** Non-whisper backends buffer all segments and flush stdout at
-the end. 30-minute files produce nothing until fully processed. Media
-players (PotPlayer) need progressive SRT for real-time subtitle display.
-
-**Approach:** `--flush-after N` flag (default: 0 = all-at-end). N=1 means
-print each SRT entry as its VAD slice finishes.
-
-**Implementation:**
-- Per-slice loop in `crispasr_run.cpp`: after `transcribe()`, immediately
-  format + print SRT entries.
-- Post-processing (punc, strip) runs per-slice.
-- Diarization: skip or defer when progressive (needs full context).
-- Maintain SRT index counter across slices.
-
-**Files:** `examples/cli/crispasr_run.cpp`, `whisper_params.h`, `cli.cpp`.
-
-**Effort:** Medium (~100 LOC).
-
----
-
-## 38. Fullstop-punctuation-multilingual
-
-**Model:** `oliverguhr/fullstop-punctuation-multilang-large` (MIT)
-
-**Architecture:** XLM-RoBERTa-large (560M params). Token classification
-with 6 classes (`. , ? - :` + no-punc). Includes truecasing.
-
-**Languages:** English, German, French, Italian.
-
-**Differences from FireRedPunc:**
-- RoBERTa (no token_type_embeddings, different LN order)
-- 250K SentencePiece vocab (vs 21K WordPiece)
-- 6 classes (vs 5), ASCII punctuation output
-
-**Approach:** Extend `fireredpunc.cpp` to detect model type from GGUF
-metadata and handle both BERT and RoBERTa. Or create separate runtime.
-
-**Other candidates:**
-- `felflare/bert-restore-punctuation` (MIT, BERT-base, English, truecasing)
-- `xashru/punctuation-restoration` (Apache-2.0, XLM-RoBERTa, 40+ langs)
-
-**Size:** ~1.1 GB F16, ~300 MB Q4_K.
-
-**Effort:** Medium (~200 LOC converter + ~100 LOC runtime).
-
----
-
-## 39. Session API for remaining backends
-
-**Problem:** C-ABI session API missing cases for glm-asr, kyutai-stt,
-firered-asr, moonshine, omniasr. These work via CLI but not via
-Python/Rust/Dart wrappers.
-
-**Fix:** Add switch cases in `crispasr_c_api.cpp` for open/transcribe/close.
-Context struct pointers already exist.
-
-**Files:** `src/crispasr_c_api.cpp` (~30 LOC per backend × 5).
-
-**Effort:** Low-Medium (~150 LOC).
-
----
 
 ## 40. More Moonshine model variants
 
@@ -173,12 +93,6 @@ support WebSocket — need custom protocol or library.
 
 ---
 
-## 15. CMake target rename
-
-Rename `whisper-cli` → `crispasr` across CMake/CI/tests/scripts (~50 refs).
-Keep backward-compat symlink.
-
----
 
 ## 16. Shaw RPE for granite graph
 
@@ -190,14 +104,6 @@ softmax + V matmul.
 
 ---
 
-## 18. Qwen3 aligner accuracy
-
-Add full LIS (longest increasing subsequence) monotonicity fix and
-language-specific word tokenization (CJK, nagisa for Japanese).
-
-**Effort:** ~80 LOC.
-
----
 
 ## 42. VibeVoice-ASR 7B
 
@@ -219,24 +125,6 @@ No response. HF model card has no license field.
 
 ---
 
-## 44. FireRed decoder ggml graph — skip weight dequant
-
-**Status:** Profiled. Weight dequantization (Q4_K → F32) takes 23.6s = 41% of
-total 57.8s. The remaining 18.2s is 28 decode steps at ~650ms each.
-
-**Approach:** Replace `read_f32_vec` + `cpu_matmul_bt` with `ggml_mul_mat`
-using the original Q4_K weight tensors. A `ggml_matmul_vec` helper was
-prototyped — creates a tiny ggml graph per matmul call with native Q4_K
-support. This eliminates the 23.6s init cost.
-
-**Estimated result:** 23.6s saved → total ~34s (0.3x RT). With further
-per-step graph consolidation (one graph for all 8 matmuls per layer),
-scheduling overhead drops further → ~25s (0.4x RT).
-
-**Effort:** Medium. Both greedy and beam paths need updating. The beam
-path's variable-history attention scoring stays CPU.
-
----
 
 ## Ecosystem expansion (lower priority)
 
