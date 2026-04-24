@@ -895,9 +895,13 @@ new cross-backend feature. Candidate implementation paths:
 
 ---
 
-## 34. VibeVoice-ASR-1.5B — DETAILED ARCHITECTURE ANALYSIS
+## 34. VibeVoice-ASR — DETAILED ARCHITECTURE ANALYSIS
 
-**Model**: `microsoft/VibeVoice-1.5B` (MIT license, 5.2 GB safetensors)
+**CRITICAL**: `microsoft/VibeVoice-1.5B` is a TTS model, NOT ASR!
+The ASR model is `microsoft/VibeVoice-ASR` (7B, ~17 GB, MIT license).
+Architecture class: `VibeVoiceForASRTraining`.
+
+**Model**: `microsoft/VibeVoice-ASR` (7B, MIT license, ~17 GB safetensors)
 
 Architecture has 5 components (for ASR only, skip audio decoder):
 
@@ -966,7 +970,68 @@ hotwords + 50+ languages. MIT license. 1.5B variant is manageable size.
 - Architecture fully mapped: Block1D = RMSNorm→dw_conv→gamma→residual + RMSNorm→FFN→gamma→residual
 - Qwen2 decoder reusable from OmniASR-LLM infrastructure
 
-**Next**: implement ConvNeXt encoder graph → connectors → Qwen2 decoder → diff-test.
+### Updated progress (April 2026):
+
+**C++ runtime (`src/vibevoice.cpp`) — COMPLETE pipeline, working end-to-end:**
+- ConvNeXt encoder: 7 stages, 29 Block1D blocks (RMSNorm→dw_conv→gamma→residual + RMSNorm→FFN→gamma→residual)
+- Semantic encoder: same architecture, separate tensor prefix
+- Connectors: FC1→RMSNorm→FC2 (no activation — verified against Python)
+- Feature combination: acoustic + semantic (element-wise sum, no scaling for ASR variant)
+- Prompt construction: Qwen2 chat template with speech token insertion + assistant prefix
+- Qwen2 decoder: 28L with KV cache, GQA, inline Q/K bias, SwiGLU FFN, RoPE
+- Vocab: 151665+ tokens embedded in GGUF for decoding (no tiktoken needed)
+- Debug: `VIBEVOICE_REF_FEATURES` env var to inject Python reference features
+- Debug: `VIBEVOICE_DUMP_DIR` env var for per-stage intermediate dumps
+
+**What was wrong with the 1.5B test:**
+The `microsoft/VibeVoice-1.5B` model is TTS-only. Its HF model card explicitly
+says "Use to generate any text transcript" is OUT OF SCOPE. The Python reference
+with 1.5B also produces garbage (`<|vision_pad|>` tokens). The correct ASR model
+is `microsoft/VibeVoice-ASR` (7B).
+
+**Architecture differences (1.5B TTS vs 7B ASR):**
+| | VibeVoice-1.5B (TTS) | VibeVoice-ASR (7B) |
+|---|---|---|
+| Purpose | Text-to-speech | Speech-to-text |
+| Architecture class | `VibeVoiceForConditionalGeneration` | `VibeVoiceForASRTraining` |
+| Decoder d_model | 1536 | 3584 |
+| Decoder heads | 12 (2 KV) | 28 (4 KV) |
+| Decoder FFN | 8960 | 18944 |
+| Vocab | 151936 | 152064 |
+| Encoder | Same (vae_dim=64, ratios=[8,5,5,4,2,2]) | Same |
+
+**Known issues:**
+1. **F16 im2col precision**: ggml_conv_1d_dw forces F16 intermediates through
+   im2col. With 29 ConvNeXt blocks, cosine drops to 0.7-0.8 vs Python F32.
+   Python F16 gives cos=0.999 — the loss is ggml-specific. Fix: implement
+   CPU depthwise conv without im2col, or modify ggml to use F32 im2col.
+
+2. **Memory**: The 7B ASR model needs ~14 GB RAM for F32, ~7 GB for F16.
+   Convert to Q4_K (~4 GB) for inference on limited-RAM machines.
+   The converter itself OOMs on 8 GB RAM due to Qwen2.5-7B embedding
+   (152064 × 3584 = 2.1 GB as F32). Fix: convert tensors one at a time
+   using safetensors.safe_open (reads individual tensors without full load).
+
+3. **Causal padding**: Fixed — uses `(K-1)*dilation - (stride-1)` formula
+   plus `get_extra_padding_for_conv1d` for stride alignment.
+
+4. **Audio normalization**: The preprocessor config specifies `db_normalize=true`,
+   `target_dB_FS=-25`. Our C++ doesn't normalize audio — need to add this.
+
+**Next steps (on a machine with ≥16 GB RAM or GPU):**
+1. Fix converter to not OOM: use `safe_open` per-tensor, write vocab from
+   tokenizer separately, process large embedding in chunks
+2. Convert VibeVoice-ASR 7B → GGUF → Q4_K
+3. Run Python reference on 7B to get ground truth transcription
+4. Test C++ pipeline with the ASR model weights
+5. Fix encoder precision (CPU depthwise conv or ggml F32 im2col)
+6. Quantize, test, upload to HF
+
+**TTS support (future):**
+Keep TTS as a module within CrispASR (not a separate project). The σ-VAE
+decoder (276 tensors, transposed ConvNeXt) shares the same GGUF and runtime.
+Add `vibevoice_synthesize()` alongside `vibevoice_transcribe()`.
+CLI: `crispasr --tts "text" -o output.wav`.
 
 ## 25. Montreal Forced Aligner evaluation — NOT PLANNED
 
