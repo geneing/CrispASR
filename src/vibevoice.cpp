@@ -660,7 +660,312 @@ extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float
         fprintf(stderr, "  DUMP: connector outputs saved\n");
     }
 
-    // TODO: 4. Build LM prefix and run autoregressive Qwen2 decoder
-    fprintf(stderr, "vibevoice: encoders + connectors done. LM decoder not yet implemented.\n");
-    return nullptr;
+    // 4. Combine acoustic + semantic features (element-wise sum)
+    if (T_audio != T_sem) {
+        fprintf(stderr, "vibevoice: frame mismatch: acoustic=%d, semantic=%d\n", T_audio, T_sem);
+        return nullptr;
+    }
+    std::vector<float> speech_features(T_audio * hp.d_lm);
+    for (int i = 0; i < T_audio * hp.d_lm; i++)
+        speech_features[i] = acoustic_features[i] + semantic_features[i];
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "vibevoice: speech features combined: [%d, %d]\n", T_audio, hp.d_lm);
+
+    // 5. Build prompt: system_tokens + <speech_start> + speech_pad × T + <speech_end> + suffix
+    // Token IDs from VibeVoice processor (Qwen2 tokenizer with special tokens)
+    const int SPEECH_START = 151646;
+    const int SPEECH_PAD   = 151648;
+    const int SPEECH_END   = 151647;
+    const int EOS_TOKEN    = 151643;
+    const int IM_START     = 151644;
+    // const int IM_END       = 151645;
+
+    // System prompt tokens (hardcoded from processor output)
+    // "You are a helpful assistant that transcribes speech audio into structured text."
+    std::vector<int> system_tokens = {
+        IM_START, 8948, 198, 2610, 525, 264, 10950, 17847, 429, 1356, 55136,
+        7699, 1946, 1119, 1467, 2550, 304, 4718, 3561, 13, 198,
+        151645, 198, IM_START, 872, 198
+    };
+    // After speech: "\nThis is a XX.XX seconds audio, please transcribe it with these keys: Start time, End time, Speaker ID, Content"
+    // For simplicity, use a minimal suffix
+    std::vector<int> suffix_tokens = {
+        198, 1986, 374, 264, 7510, 11, 4587, 38840, 432, 449,
+        1493, 7039, 25, 5765, 882, 11, 4060, 882, 11, 27657, 3034, 11, 9059, 198,
+        151645, 198, IM_START, 77091, 198
+    };
+
+    // Build full token sequence
+    std::vector<int> prompt_tokens;
+    prompt_tokens.insert(prompt_tokens.end(), system_tokens.begin(), system_tokens.end());
+    prompt_tokens.push_back(SPEECH_START);
+    int speech_start_pos = (int)prompt_tokens.size();
+    for (int i = 0; i < T_audio; i++)
+        prompt_tokens.push_back(SPEECH_PAD);
+    prompt_tokens.push_back(SPEECH_END);
+    prompt_tokens.insert(prompt_tokens.end(), suffix_tokens.begin(), suffix_tokens.end());
+    int prefix_len = (int)prompt_tokens.size();
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "vibevoice: prompt: %d tokens (speech at %d-%d)\n",
+                prefix_len, speech_start_pos, speech_start_pos + T_audio - 1);
+
+    // 6. Embed all tokens, then replace speech positions with speech features
+    // Read token embeddings from model
+    std::vector<float> tok_emb_data;
+    read_f32(G("lm.tok_emb.weight"), tok_emb_data);
+    int tok_emb_vocab = (int)(tok_emb_data.size() / hp.d_lm);
+
+    std::vector<float> prefix_embeds(prefix_len * hp.d_lm);
+    for (int i = 0; i < prefix_len; i++) {
+        int tid = prompt_tokens[i];
+        if (tid < tok_emb_vocab) {
+            memcpy(prefix_embeds.data() + i * hp.d_lm,
+                   tok_emb_data.data() + tid * hp.d_lm,
+                   hp.d_lm * sizeof(float));
+        }
+    }
+    // Replace speech positions with combined features
+    // speech_features * scaling_factor + speech_bias_factor
+    // Read scaling/bias factors
+    float speech_scale = 1.0f, speech_bias = 0.0f;
+    {
+        ggml_tensor* sf = G("speech_scaling_factor");
+        ggml_tensor* bf = G("speech_bias_factor");
+        if (sf) ggml_backend_tensor_get(sf, &speech_scale, 0, sizeof(float));
+        if (bf) ggml_backend_tensor_get(bf, &speech_bias, 0, sizeof(float));
+    }
+    for (int i = 0; i < T_audio; i++) {
+        int pos = speech_start_pos + i;
+        for (int d = 0; d < hp.d_lm; d++)
+            prefix_embeds[pos * hp.d_lm + d] = speech_features[i * hp.d_lm + d] * speech_scale + speech_bias;
+    }
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "vibevoice: prefix embedded (%d tokens), scale=%.4f, bias=%.4f\n",
+                prefix_len, speech_scale, speech_bias);
+
+    // 7. Allocate KV cache for Qwen2 decoder
+    int max_gen = ctx->params.max_new_tokens > 0 ? ctx->params.max_new_tokens : 512;
+    int max_ctx = prefix_len + max_gen;
+    if (!ctx->kv_k) {
+        int hd = hp.head_dim;
+        int nkv = hp.n_kv_heads;
+        int nl = hp.n_lm_layers;
+        size_t k_size = (size_t)ggml_type_size(GGML_TYPE_F16) * hd * max_ctx * nkv * nl;
+        ggml_init_params kp = {2 * ggml_tensor_overhead(), nullptr, true};
+        ctx->kv_ctx = ggml_init(kp);
+        ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
+        ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
+        ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, 2 * k_size);
+        uint8_t* base = (uint8_t*)ggml_backend_buffer_get_base(ctx->kv_buf);
+        ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base);
+        ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_v, base + k_size);
+        ctx->kv_max_ctx = max_ctx;
+        if (ctx->params.verbosity >= 1)
+            fprintf(stderr, "vibevoice: KV cache: %d ctx, %zu MB\n", max_ctx, 2 * k_size / (1024 * 1024));
+    }
+    ggml_backend_buffer_clear(ctx->kv_buf, 0);
+    ctx->kv_n_used = 0;
+
+    // 8. Build Qwen2 decoder graph (prefill + generate)
+    auto build_decoder_graph = [&](int n_tokens, int n_past) -> ggml_cgraph* {
+        size_t mem = ctx->compute_meta.size();
+        ggml_init_params ip = {mem, ctx->compute_meta.data(), true};
+        ggml_context* ctx0 = ggml_init(ip);
+        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
+
+        ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hp.d_lm, n_tokens);
+        ggml_set_name(embeds, "dec_input");
+        ggml_set_input(embeds);
+
+        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+        ggml_set_name(positions, "positions");
+        ggml_set_input(positions);
+
+        ggml_tensor* causal_mask = nullptr;
+        if (n_tokens > 1) {
+            causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_past + n_tokens, n_tokens);
+            ggml_set_name(causal_mask, "causal_mask");
+            ggml_set_input(causal_mask);
+        }
+
+        const core_attn::KvSelfAttnParams kvp = {
+            /*n_heads*/ hp.n_heads,
+            /*n_kv_heads*/ hp.n_kv_heads,
+            /*head_dim*/ hp.head_dim,
+            /*n_kv_grp*/ hp.n_heads / hp.n_kv_heads,
+            /*n_ctx_orig*/ 0,
+            /*rope_theta*/ hp.rope_theta,
+            /*rope_beta_fast*/ 0.0f,
+            /*rope_beta_slow*/ 0.0f,
+            /*attn_scale*/ 1.0f / sqrtf((float)hp.head_dim),
+            /*qk_norm_eps*/ 0.0f,
+            /*gqa_mode*/ core_attn::GQA_NATIVE,
+            /*rope_type*/ GGML_ROPE_TYPE_NEOX, // Qwen2 uses NEOX RoPE
+        };
+
+        ggml_tensor* cur = embeds;
+        for (int il = 0; il < hp.n_lm_layers; il++) {
+            char p[64];
+            snprintf(p, sizeof(p), "lm.layers.%d", il);
+            ggml_tensor* residual = cur;
+
+            // Pre-RMSNorm
+            cur = ggml_rms_norm(ctx0, cur, 1e-6f);
+            cur = ggml_mul(ctx0, cur, G(std::string(p) + ".attn_ln.weight"));
+
+            // KV-cached GQA self-attention
+            ggml_tensor* attn = core_attn::kv_self_attn(
+                ctx0, gf, cur,
+                G(std::string(p) + ".attn.q_proj.weight"),
+                G(std::string(p) + ".attn.k_proj.weight"),
+                G(std::string(p) + ".attn.v_proj.weight"),
+                G(std::string(p) + ".attn.o_proj.weight"),
+                nullptr, nullptr, // no Q/K norm
+                positions, causal_mask,
+                ctx->kv_k, ctx->kv_v, il, n_past, kvp);
+
+            // Add Q/K bias if present
+            // Qwen2 has bias on Q and K projections — handled inside kv_self_attn? No.
+            // Actually kv_self_attn does Q = mul_mat(q_w, x), no bias addition.
+            // For Qwen2, biases exist but are on Q and K only (not V and O).
+            // The core_attn helper doesn't support per-projection biases.
+            // TODO: add Q/K bias support to kv_self_attn or handle externally.
+
+            cur = ggml_add(ctx0, residual, attn);
+
+            // FFN: RMSNorm + SwiGLU
+            residual = cur;
+            cur = ggml_rms_norm(ctx0, cur, 1e-6f);
+            cur = ggml_mul(ctx0, cur, G(std::string(p) + ".ffn_ln.weight"));
+            ggml_tensor* ffn = core_ffn::swiglu(
+                ctx0, cur,
+                G(std::string(p) + ".ffn.gate.weight"),
+                G(std::string(p) + ".ffn.up.weight"),
+                G(std::string(p) + ".ffn.down.weight"));
+            cur = ggml_add(ctx0, residual, ffn);
+        }
+
+        // Final RMSNorm
+        cur = ggml_rms_norm(ctx0, cur, 1e-6f);
+        cur = ggml_mul(ctx0, cur, G("lm.norm.weight"));
+
+        // LM head (lm.tok_emb.weight is tied — no separate lm_head)
+        if (n_tokens > 1) {
+            cur = ggml_view_1d(ctx0, cur, hp.d_lm, (size_t)(n_tokens - 1) * hp.d_lm * sizeof(float));
+            cur = ggml_reshape_2d(ctx0, cur, hp.d_lm, 1);
+        }
+        cur = ggml_mul_mat(ctx0, G("lm.tok_emb.weight"), cur); // tied weights
+
+        ggml_set_name(cur, "logits");
+        ggml_set_output(cur);
+        ggml_build_forward_expand(gf, cur);
+        return gf;
+    };
+
+    auto run_decoder = [&](const float* embeds, int n_tokens, int n_past, std::vector<float>& logits) -> bool {
+        std::vector<int32_t> positions(n_tokens);
+        for (int i = 0; i < n_tokens; i++)
+            positions[i] = n_past + i;
+
+        std::vector<ggml_fp16_t> mask;
+        if (n_tokens > 1) {
+            int Lk = n_past + n_tokens;
+            mask.resize((size_t)n_tokens * Lk, ggml_fp32_to_fp16(0.0f));
+            ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+            for (int q = 0; q < n_tokens; q++)
+                for (int k = 0; k < Lk; k++)
+                    if (k > n_past + q)
+                        mask[(size_t)q * Lk + k] = neg_inf;
+        }
+
+        ggml_cgraph* gf = build_decoder_graph(n_tokens, n_past);
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return false;
+
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dec_input"), embeds, 0,
+                                (size_t)hp.d_lm * n_tokens * sizeof(float));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
+                                positions.size() * sizeof(int32_t));
+        if (n_tokens > 1)
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
+                                    mask.size() * sizeof(ggml_fp16_t));
+
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return false;
+
+        ggml_tensor* lt = ggml_graph_get_tensor(gf, "logits");
+        int V = (int)lt->ne[0];
+        logits.resize(V);
+        ggml_backend_tensor_get(lt, logits.data(), 0, V * sizeof(float));
+        return true;
+    };
+
+    // 9. Prefill
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "vibevoice: prefilling %d tokens...\n", prefix_len);
+
+    std::vector<float> logits;
+    if (!run_decoder(prefix_embeds.data(), prefix_len, 0, logits)) {
+        fprintf(stderr, "vibevoice: prefill failed\n");
+        return nullptr;
+    }
+    ctx->kv_n_used = prefix_len;
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "vibevoice: prefill done\n");
+
+    // 10. Autoregressive generation
+    auto argmax = [](const std::vector<float>& lg) -> int {
+        int best = 0;
+        for (int i = 1; i < (int)lg.size(); i++)
+            if (lg[i] > lg[best]) best = i;
+        return best;
+    };
+
+    std::vector<int> output_tokens;
+    int cur_token = argmax(logits);
+    if (cur_token != EOS_TOKEN)
+        output_tokens.push_back(cur_token);
+
+    if (ctx->params.verbosity >= 2)
+        fprintf(stderr, "  prefill → token=%d\n", cur_token);
+
+    for (int step = 0; step < max_gen && cur_token != EOS_TOKEN; step++) {
+        // Embed token
+        std::vector<float> tok_emb(hp.d_lm);
+        if (cur_token < tok_emb_vocab)
+            memcpy(tok_emb.data(), tok_emb_data.data() + cur_token * hp.d_lm, hp.d_lm * sizeof(float));
+
+        int n_past = prefix_len + step;
+        if (!run_decoder(tok_emb.data(), 1, n_past, logits)) break;
+
+        cur_token = argmax(logits);
+        if (cur_token == EOS_TOKEN) break;
+        output_tokens.push_back(cur_token);
+
+        if (ctx->params.verbosity >= 2 && step < 5)
+            fprintf(stderr, "  gen %d: token=%d\n", step, cur_token);
+    }
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "vibevoice: generated %d tokens\n", (int)output_tokens.size());
+
+    // 11. Detokenize — for now just dump raw token IDs
+    // Qwen2 tokenizer is BPE with 151936 tokens — we'd need the full tokenizer.
+    // For now, output raw token IDs as comma-separated
+    std::string result;
+    for (int tid : output_tokens) {
+        if (!result.empty()) result += ",";
+        result += std::to_string(tid);
+    }
+
+    if (result.empty())
+        return nullptr;
+
+    char* out = (char*)malloc(result.size() + 1);
+    memcpy(out, result.c_str(), result.size());
+    out[result.size()] = '\0';
+    return out;
 }
