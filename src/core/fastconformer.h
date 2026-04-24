@@ -234,8 +234,7 @@ static inline ggml_tensor* build_block(ggml_context* ctx0, ggml_tensor* cur, ggm
     ggml_tensor* BD = rel_shift(ctx0, BD_raw);
 
     ggml_tensor* scores = ggml_add(ctx0, AC, BD);
-    scores = ggml_scale(ctx0, scores, 1.0f / sqrtf((float)head_dim));
-    scores = ggml_soft_max(ctx0, scores);
+    scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f / sqrtf((float)head_dim), 0.0f);
 
     ggml_tensor* V3 = ggml_reshape_3d(ctx0, V, head_dim, n_heads, T);
     ggml_tensor* V_t = ggml_permute(ctx0, V3, 1, 2, 0, 3);
