@@ -2021,5 +2021,17 @@ reference features (cos=1.0) produces the same wrong output.
 4. **Q/K bias interaction with RoPE**: bias is added before RoPE, which is correct
    in Python but might interact differently with ggml_rope_ext.
 
-**Next step**: dump decoder layer 0 hidden states from both Python and C++
-and compare. This will immediately pinpoint which operation diverges.
+**Critical discovery**: the standalone Qwen2 decoder (loaded from VibeVoice
+weights) produces `<|vision_pad|>` even in Python with correct features.
+The full VibeVoice forward pass (`model.generate` with internal encode_speech)
+is required — the speech features get special handling inside the model's
+forward method that a standalone Qwen2 forward doesn't replicate.
+
+**Model variant concern**: `microsoft/VibeVoice-1.5B` might not be the primary
+ASR model. The documented ASR model is `microsoft/VibeVoice-ASR` (7B) or
+`microsoft/VibeVoice-ASR-HF`. The 1.5B variant produced garbage on 2s of
+mostly-silent audio. Need to verify with actual speech content before further
+C++ debugging.
+
+**Next step**: run full Python VibeVoice inference on non-silent audio to
+verify the model produces useful output, then replicate in C++.
