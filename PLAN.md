@@ -13,21 +13,22 @@ post-processor, C-ABI + Python/Rust/Dart wrappers, CI on 6 platforms.
 
 | Priority | Item | Impact | Effort | Status |
 |---|---|---|---|---|
-| ~~HIGH~~ | ~~#36 ASCII punc mapping~~ | ~~Fix English output~~ | ~~Trivial~~ | **DONE** |
-| ~~HIGH~~ | ~~#37 Progressive SRT (#24)~~ | ~~Streaming subtitles~~ | ~~Medium~~ | **DONE** |
-| ~~MEDIUM~~ | ~~#38 Fullstop-punc multilingual~~ | ~~DE/FR/IT punc~~ | ~~Medium~~ | **DONE** |
-| ~~MEDIUM~~ | ~~#39 Session API backends~~ | ~~5 backends wired~~ | ~~Low-Med~~ | **DONE** |
-| **MEDIUM** | [#40 Moonshine variants](#40-more-moonshine-model-variants) | Easy model uploads | Trivial | Needs ext converter |
-| **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Test infra completeness | Medium |
-| **LOW** | [#41 Moonshine IPA](#41-moonshine-phoneme--ipa-output) | Niche (phoneme output) | Medium-High |
-| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | Complex, niche | High |
-| **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Small gain (encoder dominates) | Medium |
-| **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | Needs new dependency | High |
-| **LOW** | [#16 Shaw RPE](#16-shaw-rpe-for-granite-graph) | Accuracy edge case | Medium |
-| **LOW** | [#15 CMake rename](#15-cmake-target-rename) | Cosmetic | Low |
-| **LOW** | [#18 Aligner LIS](#18-qwen3-aligner-accuracy) | Niche improvement | Low |
-| **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | Needs ≥16 GB RAM | High |
-| **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | License unclear | Medium |
+| ~~HIGH~~ | ~~#36 ASCII punc mapping~~ | | | **DONE** |
+| ~~HIGH~~ | ~~#37 Progressive SRT (#24)~~ | | | **DONE** |
+| ~~MEDIUM~~ | ~~#38 Fullstop-punc multilingual~~ | | | **DONE** |
+| ~~MEDIUM~~ | ~~#39 Session API backends~~ | | | **DONE** |
+| ~~LOW~~ | ~~#15 CMake rename~~ | | | **DONE** |
+| ~~LOW~~ | ~~#18 Aligner LIS~~ | | | **DONE** |
+| ~~MEDIUM~~ | ~~#40 Moonshine variants~~ | Converter added | | **DONE** (non-streaming) |
+| **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Test infra completeness | Medium | |
+| **LOW** | #41 Moonshine IPA / phoneme | Niche | High | Deferred — needs moonshine G2P stack |
+| **LOW** | #40b Moonshine streaming | Different architecture | High | Deferred — needs new runtime |
+| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | Complex, niche | High | |
+| **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Small gain | Medium | |
+| **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | Needs new dep | High | |
+| **LOW** | [#16 Shaw RPE](#16-shaw-rpe-for-granite-graph) | Accuracy edge case | Medium | |
+| **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | Needs ≥16 GB RAM | High | |
+| **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | License unclear | Medium | |
 
 ---
 
