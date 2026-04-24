@@ -2033,16 +2033,16 @@ ASR model. The documented ASR model is `microsoft/VibeVoice-ASR` (7B) or
 mostly-silent audio. Need to verify with actual speech content before further
 C++ debugging.
 
-**CONFIRMED**: `microsoft/VibeVoice-1.5B` does NOT produce valid ASR output
-even in full Python pipeline on CPU. Tested with 3s of actual JFK speech
-(rms=0.1141) — generates `<|vision_start|>+<|vision_pad|>` garbage, empty text.
+**CRITICAL**: `microsoft/VibeVoice-1.5B` is a **TTS model**, NOT ASR!
+The HF model card explicitly says "Use to generate any text transcript"
+is OUT OF SCOPE. We were using the WRONG model variant.
 
-The documented working ASR model is `microsoft/VibeVoice-ASR` (7B, ~14 GB).
-Our C++ pipeline is architecturally correct (encoder + connector + Qwen2
-decoder all run) — it just needs the right model weights (7B ASR variant).
+The correct ASR model is `microsoft/VibeVoice-ASR` (7B):
+- Architecture: `VibeVoiceForASRTraining`
+- Decoder: d=3584, 28 layers, 28 heads, 4 KV heads (bigger than 1.5B TTS)
+- Same encoder: vae_dim=64, ratios=[8,5,5,4,2,2]
+- Vocab: 152064 (slightly different from 1.5B's 151936)
 
-**Options for proceeding:**
-1. Download and convert `microsoft/VibeVoice-ASR` (7B) — needs ~14 GB disk + RAM
-2. Try `microsoft/VibeVoice-Realtime-0.5B` — smaller, streaming-focused
-3. Try `microsoft/VibeVoice-ASR-HF` — HF-native 7B, might be simpler to port
-4. Deprioritize VibeVoice and focus on other models
+Our C++ pipeline (encoder + connectors + Qwen2 decoder) has the right
+architecture — just needs the correct 7B ASR weights. The converter
+handles different decoder dimensions automatically.
