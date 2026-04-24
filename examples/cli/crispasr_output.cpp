@@ -49,9 +49,27 @@ std::string crispasr_make_out_path(const std::string& audio, const std::string& 
 // Display segment builder
 // ---------------------------------------------------------------------------
 
-// Check if a character is sentence-ending punctuation.
-static bool is_sentence_end(char c) {
-    return c == '.' || c == '!' || c == '?';
+// Check if position i in text is a sentence-ending punctuation.
+// Handles ASCII (. ! ?) and full-width CJK punctuation (。？！).
+// Returns the byte length of the punctuation mark (1 for ASCII, 3 for UTF-8 CJK).
+static int is_sentence_end_at(const std::string& text, size_t i) {
+    char c = text[i];
+    // ASCII sentence enders
+    if (c == '.' || c == '!' || c == '?')
+        return 1;
+    // Full-width CJK: 。(E3 80 82), ？(EF BC 9F), ！(EF BC 81), ．(EF BC 8E)
+    if (i + 2 < text.size()) {
+        unsigned char b0 = (unsigned char)text[i];
+        unsigned char b1 = (unsigned char)text[i + 1];
+        unsigned char b2 = (unsigned char)text[i + 2];
+        if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x82)
+            return 3; // 。
+        if (b0 == 0xEF && b1 == 0xBC && b2 == 0x9F)
+            return 3; // ？
+        if (b0 == 0xEF && b1 == 0xBC && b2 == 0x81)
+            return 3; // ！
+    }
+    return 0;
 }
 
 // Split a long text into sentences at punctuation boundaries.
@@ -62,8 +80,11 @@ static std::vector<std::pair<std::string, float>> split_text_at_punct(const std:
     size_t len = text.size();
 
     for (size_t i = 0; i < len; i++) {
-        // Check for sentence end: punctuation followed by space or end of text
-        if (is_sentence_end(text[i]) && (i + 1 >= len || text[i + 1] == ' ')) {
+        int plen = is_sentence_end_at(text, i);
+        // Sentence end: punctuation followed by space, next char, or end of text.
+        // For CJK, no space is needed — the punctuation mark itself is the boundary.
+        if (plen > 0 && (i + plen >= len || text[i + plen] == ' ' || plen == 3)) {
+            i += plen - 1; // advance past the punctuation bytes
             size_t end = i + 1;
             std::string sentence = text.substr(start, end - start);
             // Trim leading whitespace
@@ -152,7 +173,9 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
             // cur.t1 so the flushed sentence keeps its last word's end time,
             // not the next word's end time.
             const bool at_sentence_end =
-                split_on_punct && !cur.text.empty() && !w.text.empty() && is_sentence_end(cur.text.back());
+                split_on_punct && !cur.text.empty() && !w.text.empty() &&
+                (cur.text.size() >= 1 && is_sentence_end_at(cur.text, cur.text.size() - 1) == 1 ||
+                 cur.text.size() >= 3 && is_sentence_end_at(cur.text, cur.text.size() - 3) == 3);
 
             if (would_overflow || at_sentence_end) {
                 flush();

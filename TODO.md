@@ -25,6 +25,7 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 
 - **WebSocket streaming server** — `/ws` endpoint for real-time transcription
 - **Audio format support** — fix `.m4a`/`.mp4`/`.webm` crash in ffmpeg path
+- ~~**Japanese punctuation split (#29)** — `--split-on-punct` now handles `。？！`~~ FIXED
 - **Moonshine streaming** — different architecture, needs new runtime
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
 
