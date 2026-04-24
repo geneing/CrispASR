@@ -964,7 +964,7 @@ std::vector<float> wav2vec2_compute_logits_graph(const wav2vec2_model& m, const 
         } else {
             // Fallback to manual C++ (shouldn't happen on CPU backend)
             if (bench)
-                fprintf(stderr, "wav2vec2: CNN layer %d ggml failed, manual fallback\n", li);
+                fprintf(stderr, "wav2vec2: CNN layer %u ggml failed, manual fallback\n", li);
             std::vector<float> cf(C_cur * L_cur), co(C_out * ((L_cur - K) / S + 1));
             for (uint32_t t2 = 0; t2 < L_cur; t2++)
                 for (uint32_t c = 0; c < C_cur; c++)
