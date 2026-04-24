@@ -191,25 +191,25 @@ bool diarizeSegments({
   // int64 t0_cs, int64 t1_cs, int32 speaker, int32 _pad. 24 bytes each.
   final segsPtr = calloc<Uint8>(24 * segs.length);
   for (var i = 0; i < segs.length; i++) {
-    final base = segsPtr.elementAt(i * 24);
+    final base = segsPtr + i * 24;
     base.cast<Int64>().value = (segs[i].t0 * 100).round();
-    base.elementAt(8).cast<Int64>().value = (segs[i].t1 * 100).round();
-    base.elementAt(16).cast<Int32>().value = segs[i].speaker;
-    base.elementAt(20).cast<Int32>().value = 0;
+    (base + 8).cast<Int64>().value = (segs[i].t1 * 100).round();
+    (base + 16).cast<Int32>().value = segs[i].speaker;
+    (base + 20).cast<Int32>().value = 0;
   }
 
   // ABI opts: int32 method, int32 n_threads, int64 slice_t0_cs, const char*.
   // 4+4+8+8 = 24 bytes on 64-bit. We write each field explicitly.
   final optsPtr = calloc<Uint8>(24);
   optsPtr.cast<Int32>().value = method.index;
-  optsPtr.elementAt(4).cast<Int32>().value = nThreads;
-  optsPtr.elementAt(8).cast<Int64>().value = (sliceT0 * 100).round();
+  (optsPtr + 4).cast<Int32>().value = nThreads;
+  (optsPtr + 8).cast<Int64>().value = (sliceT0 * 100).round();
   final pathPtr = (method == DiarizeMethod.pyannote &&
           pyannoteModelPath != null &&
           pyannoteModelPath.isNotEmpty)
       ? pyannoteModelPath.toNativeUtf8()
       : nullptr;
-  optsPtr.elementAt(16).cast<IntPtr>().value = pathPtr.address;
+  (optsPtr + 16).cast<IntPtr>().value = pathPtr.address;
 
   final fn = lib.lookupFunction<
       Int32 Function(Pointer<Float>, Pointer<Float>, Int32, Int32,
@@ -220,7 +220,7 @@ bool diarizeSegments({
 
   if (rc == 0) {
     for (var i = 0; i < segs.length; i++) {
-      segs[i].speaker = segsPtr.elementAt(i * 24 + 16).cast<Int32>().value;
+      segs[i].speaker = (segsPtr + i * 24 + 16).cast<Int32>().value;
     }
   }
 
@@ -707,9 +707,6 @@ typedef _VadFree       = void Function(Pointer<Float>);
 typedef _LangStrNative = Pointer<Utf8> Function(Int32);
 typedef _LangStr       = Pointer<Utf8> Function(int);
 
-typedef _LangIdNative = Int32 Function(Pointer<Utf8>);
-typedef _LangId       = int   Function(Pointer<Utf8>);
-
 typedef _IntNative  = Int32 Function();
 typedef _IntFn      = int   Function();
 
@@ -793,7 +790,6 @@ class CrispASR {
   _VadFree?     _vadFree;
 
   _LangStr?     _langStr;
-  _LangId?      _langId;
   _IntFn?       _langMaxId;
 
   _StreamOpen?    _streamOpen;
@@ -928,9 +924,6 @@ class CrispASR {
 
     if (_lib.providesSymbol('whisper_lang_str')) {
       _langStr = _lib.lookupFunction<_LangStrNative, _LangStr>('whisper_lang_str');
-    }
-    if (_lib.providesSymbol('whisper_lang_id')) {
-      _langId = _lib.lookupFunction<_LangIdNative, _LangId>('whisper_lang_id');
     }
     if (_lib.providesSymbol('whisper_lang_max_id')) {
       _langMaxId = _lib.lookupFunction<_IntNative, _IntFn>('whisper_lang_max_id');
@@ -1586,7 +1579,7 @@ class CrispasrSession {
     // float threshold + 5 x int32 = 24 bytes.
     final optsPtr = calloc<Uint8>(24);
     optsPtr.cast<Float>().value = options.threshold;
-    final intView = optsPtr.elementAt(4).cast<Int32>();
+    final intView = (optsPtr + 4).cast<Int32>();
     intView[0] = options.minSpeechDurationMs;
     intView[1] = options.minSilenceDurationMs;
     intView[2] = options.speechPadMs;
