@@ -58,6 +58,9 @@ public:
 
         std::string text = wav2vec2_greedy_decode(*model_, logits.data(), T);
 
+        if (getenv("WAV2VEC2_BENCH"))
+            fprintf(stderr, "wav2vec2: decoded %d frames → %zu chars\n", T, text.size());
+
         crispasr_segment seg;
         seg.t0 = t_offset_cs;
         seg.t1 = t_offset_cs + (int64_t)((double)n_samples / 16000.0 * 100.0);
