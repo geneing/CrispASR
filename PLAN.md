@@ -197,3 +197,61 @@ No response. HF model card has no license field.
 - **OmniASR-LLM beam search** — beam=2+ with N hypothesis KV caches
 - **TTS module** — VibeVoice-1.5B σ-VAE decoder for text-to-speech
 - **ggml_conv_1d_dw F16 im2col fix** — CPU depthwise conv without im2col for VibeVoice precision
+
+---
+
+## Publish language wrappers to package registries
+
+Today the Rust, Dart, and Python wrappers all live in this repo and (for
+Python) require a `pip install -e .` from a clone. Move all three onto
+their language-native registries so users can install with one command.
+
+**Status:** Rust `crispasr` v0.1.7 + `crispasr-sys`, Dart `crispasr` v0.4.9,
+and Python `crispasr` v0.4.9 are versioned but **none are published yet**
+to crates.io / pub.dev / PyPI.
+
+### Pattern (matches whisper.cpp approach)
+
+All three wrappers are thin FFI/ctypes shims over the C ABI in
+`src/crispasr_c_api.cpp`. They do **not** bundle the native library — the
+user must have `libcrispasr.{so,dylib,dll}` installed (Homebrew, apt, or
+built from source). This keeps the wheels/crates/pub packages tiny and
+avoids a per-platform build matrix on every release.
+
+| Wrapper | Registry | Effort | Notes |
+|---|---|---|---|
+| Python | PyPI | Low | Add `python/pyproject.toml`; pure-Python wheel; `_helpers.c` builds at install if a C toolchain is present, else falls back to ctypes-only path |
+| Rust   | crates.io | Low | `crispasr-sys` then `crispasr` (two `cargo publish` calls); already has `Cargo.toml` |
+| Dart   | pub.dev | Low | `flutter pub publish --dry-run` then `flutter pub publish`; already has `pubspec.yaml` |
+
+### Library discovery (Python)
+
+Update `_find_lib()` in `python/crispasr/_binding.py` to probe, in order:
+1. `$CRISPASR_LIB_PATH` env var (explicit override)
+2. `sys.prefix/lib/` (system or virtualenv install)
+3. Standard Homebrew/Linux paths (`/opt/homebrew/lib`, `/usr/local/lib`, `/usr/lib`)
+4. Existing repo-relative fallbacks (for `pip install -e .` from a clone)
+
+If none found, raise `RuntimeError` with a helpful message linking to
+install docs (the same pattern Tesseract / faster-whisper use).
+
+### Release automation
+
+Add a tag-triggered workflow `.github/workflows/release-wrappers.yml`
+that, on `v*` tags, runs in parallel:
+- `python -m build && twine upload` (PyPI, OIDC trusted-publishing — no API token)
+- `cargo publish -p crispasr-sys && cargo publish -p crispasr` (crates.io, `CARGO_REGISTRY_TOKEN` secret)
+- `dart pub publish --force` (pub.dev, OIDC publishing)
+
+Trigger only on tag push, not on every commit. Version bumps stay
+manual — bump `pyproject.toml` / `Cargo.toml` / `pubspec.yaml` together
+in the same commit that creates the tag.
+
+### Future: bundled wheels for Python
+
+After the pure-Python release is out, add a follow-up release pipeline
+using `cibuildwheel` to produce manylinux2014 + macOS arm64/x64 +
+Windows wheels with `libcrispasr.*` bundled inside via `auditwheel` /
+`delocate` / `delvewheel`. Same for Rust if we ever want
+`crispasr-sys` to vendor the native build like `tch-rs` /
+`onnxruntime-sys` do. Defer until pure-Python wheel is out and stable.

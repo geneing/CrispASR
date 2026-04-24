@@ -25,13 +25,26 @@ class Segment:
 
 
 def _find_lib():
-    """Find the crispasr / whisper shared library.
+    """Locate the crispasr / whisper shared library.
 
-    As of CrispASR 0.4.0 the build produces both `libcrispasr.*`
-    (preferred — all 10 backends linked) and the historical
-    `libwhisper.*` (alias). We probe candidates in order so any build
-    layout is picked up transparently.
+    The wheel is pure-Python and does not bundle the native library —
+    matches whisper.cpp's binding pattern. The user is expected to have
+    `libcrispasr.{so,dylib,dll}` on their system, either installed by
+    a package manager (Homebrew, apt) or built from source.
+
+    Probe order:
+      1. $CRISPASR_LIB_PATH (explicit override — full path to the .so/.dylib/.dll)
+      2. sys.prefix/lib (pip install --user, virtualenv, conda)
+      3. Standard install prefixes (Homebrew arm64/x64, /usr/local, /usr)
+      4. Repo-relative `build/` paths (for `pip install -e .` from a clone)
+      5. The bare filename (lets the loader use $LD_LIBRARY_PATH /
+         $DYLD_LIBRARY_PATH / PATH and the system loader cache)
+
+    Both `libcrispasr.*` (preferred — all backends) and the legacy
+    `libwhisper.*` alias are accepted at every step.
     """
+    import sys
+
     system = platform.system()
     if system == "Darwin":
         candidates = ["libcrispasr.dylib", "libwhisper.dylib"]
@@ -40,7 +53,19 @@ def _find_lib():
     else:
         candidates = ["libcrispasr.so", "libwhisper.so"]
 
+    override = os.environ.get("CRISPASR_LIB_PATH")
+    if override and Path(override).exists():
+        return override
+
     search = [
+        Path(sys.prefix) / "lib",
+        Path("/opt/homebrew/lib"),  # macOS arm64 Homebrew
+        Path("/usr/local/lib"),     # macOS x64 Homebrew, /usr/local installs
+        Path("/usr/lib"),           # apt, dnf
+        Path("/usr/lib/x86_64-linux-gnu"),  # Debian/Ubuntu multiarch
+        Path("/usr/lib/aarch64-linux-gnu"),
+        # Repo-relative — last so `pip install crispasr` doesn't accidentally
+        # pick up an old build/ from cwd.
         Path(__file__).parent,
         Path(__file__).parent.parent.parent / "build",
         Path(__file__).parent.parent.parent / "build" / "src",
@@ -53,6 +78,7 @@ def _find_lib():
             p = d / name
             if p.exists():
                 return str(p)
+    # Fall back to bare name; ctypes will use the system loader path.
     return candidates[0]
 
 

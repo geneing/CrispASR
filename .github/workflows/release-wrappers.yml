@@ -1,0 +1,102 @@
+name: Release language wrappers
+
+# Publishes the Python, Rust, and Dart wrappers to their language-native
+# registries on every `v*` tag push. The native library is *not* bundled —
+# wrappers are thin FFI/ctypes shims over the C ABI in `src/crispasr_c_api.cpp`,
+# matching whisper.cpp's binding pattern. Users install `libcrispasr` separately
+# (Homebrew, apt, or build from source).
+#
+# Prerequisites (one-time setup before the first tag):
+#   - PyPI:     configure a trusted publisher at
+#               https://pypi.org/manage/account/publishing/ pointing to this repo
+#               + workflow file + the `pypi` environment.
+#   - crates.io: add `CARGO_REGISTRY_TOKEN` repo secret (cargo login token).
+#   - pub.dev:  configure automated publishing at
+#               https://pub.dev/packages/crispasr/admin pointing to this repo
+#               + tag pattern `v{{version}}`.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.5.1)'
+        required: true
+        type: string
+
+jobs:
+  publish-pypi:
+    name: Publish Python wrapper to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/crispasr
+    permissions:
+      id-token: write  # for PyPI trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist + wheel
+        run: |
+          cd python
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist/
+
+  publish-crates-io:
+    name: Publish Rust wrapper to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # crispasr-sys must be on crates.io before crispasr can resolve its
+      # path dependency. We rewrite the path dep to a version dep before
+      # publishing the high-level crate.
+      - name: Publish crispasr-sys
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --manifest-path crispasr-sys/Cargo.toml --allow-dirty
+
+      - name: Wait for crispasr-sys to index
+        run: sleep 30
+
+      - name: Publish crispasr
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --manifest-path crispasr/Cargo.toml --allow-dirty
+
+  publish-pub-dev:
+    name: Publish Dart wrapper to pub.dev
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # for pub.dev OIDC publishing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Publish
+        working-directory: flutter/crispasr
+        run: |
+          dart pub get
+          dart pub publish --force
