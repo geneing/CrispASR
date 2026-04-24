@@ -1993,18 +1993,65 @@ extern "C" int qwen3_asr_align_words(struct qwen3_asr_context* ctx, const float*
         return -7;
     }
 
-    // 6b. Fix timestamp monotonicity.
-    // The reference Qwen3-ForcedAligner uses a LIS (longest increasing
-    // subsequence) algorithm to correct out-of-order timestamps. We use
-    // a simpler forward clamp: each timestamp must be >= the previous one.
-    // This handles the common case of small local inversions without the
-    // complexity of full LIS + interpolation.
-    for (size_t i = 1; i < ts_classes.size(); i++) {
-        if (ts_classes[i] < ts_classes[i - 1])
-            ts_classes[i] = ts_classes[i - 1];
+    // 6b. Fix timestamp monotonicity via LIS (longest increasing subsequence).
+    // The reference Qwen3-ForcedAligner uses LIS to find the longest monotone
+    // chain, then interpolates outliers. This is more robust than a simple
+    // forward clamp for cases where large inversions occur mid-sequence.
+    {
+        const int M = (int)ts_classes.size();
+        // O(n log n) LIS — find indices of the longest non-decreasing subsequence
+        std::vector<int> dp;     // dp[i] = smallest tail value for IS of length i+1
+        std::vector<int> parent(M, -1);
+        std::vector<int> idx_map; // which index produced each dp entry
+
+        for (int i = 0; i < M; i++) {
+            int val = ts_classes[i];
+            // Binary search for first dp entry > val (upper_bound for non-decreasing)
+            auto it = std::upper_bound(dp.begin(), dp.end(), val);
+            int pos = (int)(it - dp.begin());
+            if (pos == (int)dp.size()) {
+                dp.push_back(val);
+                idx_map.push_back(i);
+            } else {
+                dp[pos] = val;
+                idx_map[pos] = i;
+            }
+            parent[i] = (pos > 0) ? idx_map[pos - 1] : -1;
+        }
+
+        // Traceback: find which indices are in the LIS
+        std::vector<bool> in_lis(M, false);
+        int k = idx_map.back();
+        while (k >= 0) {
+            in_lis[k] = true;
+            k = parent[k];
+        }
+
+        // Interpolate outliers: for each non-LIS element, set it to the
+        // value of the nearest LIS neighbor (linear interpolation between
+        // the previous and next LIS values).
+        int prev_lis = -1;
+        int prev_val = 0;
+        for (int i = 0; i < M; i++) {
+            if (in_lis[i]) {
+                // Fill any gap between prev_lis and i
+                if (prev_lis >= 0) {
+                    for (int j = prev_lis + 1; j < i; j++) {
+                        // Linear interpolation
+                        float frac = (float)(j - prev_lis) / (float)(i - prev_lis);
+                        ts_classes[j] = prev_val + (int)(frac * (float)(ts_classes[i] - prev_val));
+                    }
+                }
+                prev_lis = i;
+                prev_val = ts_classes[i];
+            }
+        }
+        // Fill trailing non-LIS elements
+        for (int j = prev_lis + 1; j < M; j++)
+            ts_classes[j] = prev_val;
     }
 
-    // Additionally, ensure each word's end >= start.
+    // Ensure each word's end >= start.
     for (int w = 0; w < n_words; w++) {
         if (ts_classes[2 * w + 1] < ts_classes[2 * w])
             ts_classes[2 * w + 1] = ts_classes[2 * w];
