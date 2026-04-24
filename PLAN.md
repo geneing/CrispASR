@@ -248,9 +248,38 @@ No response. HF model card has no license field.
 | bert-restore-punctuation | MIT | BERT punct+truecase (en) | Medium |
 | xashru/punctuation | Apache-2.0 | XLM-R+BiLSTM-CRF (40+ langs) | Low |
 
+### Optimizations (cross-cutting, from survey + CrispEmbed comparison)
+
+| # | Optimization | Applies to | Expected gain | Effort |
+|---|---|---|---|---|
+| O1 | `ggml_soft_max_ext` with baked scale | All attention layers (all backends) | ~5% attn (saves 1 op/layer) | Low |
+| O2 | Fused QKV pre-merge (single matmul) | LLM decoders (voxtral, qwen3, granite, glm, omniasr-llm) | ~10-15% attn | Medium |
+| O3 | Temperature sampling for more backends | glm-asr, kyutai-stt, moonshine, omniasr-LLM | Feature parity | Low |
+| O4 | Beam search for LLM backends | All Audio-LLM backends (via core_greedy_decode) | Quality improvement | High |
+| O5 | Pipelined mel+encode threading | LLM backends on multi-core CPU | ~15-20% | Medium |
+| O6 | Batched encoder (GPU) | All backends with GPU support | 3-5x on GPU | High |
+| O7 | Speculative decoding | LLM backends | 2-4x decode speed | High |
+| O8 | GPU offload for CPU-only backends | parakeet, granite, voxtral4b, firered, moonshine, omniasr | Varies | Medium |
+| O9 | FireRedASR persistent decoder graph | firered-asr | ~2x decode | Medium |
+| O10 | Chunked window attention | voxtral4b (SWA=750), long audio | O(N*W) vs O(N²) | Medium |
+
+**From COMPARISON.md (llama.cpp patterns):**
+- `ggml_soft_max_ext` with baked scale (O1) — already in llama.cpp, saves one `ggml_scale` op per attention layer
+- Chunked window attention (O10) — llama.cpp uses for Gemma4A Conformer
+- Conv2d subsampling via ggml ops — llama.cpp does this for Qwen3-ASR encoder
+
+**From CrispEmbed (shared core patterns):**
+- Fused QKV (O2) — CrispEmbed pre-merges Q/K/V weights at init, one matmul instead of 3
+- SentencePiece Viterbi DP tokenizer — CrispEmbed has proper optimal tokenization
+- Lazy graph allocation (`no_alloc=true` + scheduler) — reduces memory churn
+
+**From LEARNINGS.md (FireRed decoder triage):**
+- Small per-step ggml graphs are SLOWER than CPU loops (scheduling overhead)
+- Only move LARGE, REUSED matmuls onto ggml/GPU
+- Persistent subgraphs per decode step > one-off graphs
+
 ### Other
 
-- **FireRedASR GPU decoder** — persistent ggml graph for self-attn/cross-attn/MLP per decode step
 - **OmniASR-LLM beam search** — beam=2+ with N hypothesis KV caches
 - **TTS module** — VibeVoice-1.5B σ-VAE decoder for text-to-speech
 - **ggml_conv_1d_dw F16 im2col fix** — CPU depthwise conv without im2col for VibeVoice precision
