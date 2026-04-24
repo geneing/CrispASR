@@ -325,10 +325,12 @@ struct moonshine_context* moonshine_init_with_params(struct moonshine_init_param
         return nullptr;
     }
 
-    // 7. Initialize CPU backend for compute
-    ctx->backend = ggml_backend_cpu_init();
+    // 7. Initialize backend (GPU if available, CPU fallback)
+    ctx->backend = ggml_backend_init_best();
+    if (!ctx->backend)
+        ctx->backend = ggml_backend_cpu_init();
     if (!ctx->backend) {
-        fprintf(stderr, "%s: failed to init CPU backend\n", __func__);
+        fprintf(stderr, "%s: failed to init any backend\n", __func__);
         delete ctx;
         return nullptr;
     }

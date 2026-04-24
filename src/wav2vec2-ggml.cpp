@@ -115,9 +115,13 @@ bool wav2vec2_load(const char* fname, wav2vec2_model& model) {
     // Phase 2: load tensors via core_gguf (backend-buffer-backed)
     // This puts all weights in a ggml_backend_buffer so the graph
     // scheduler can reference them without cross-context issues.
-    model.backend = ggml_backend_cpu_init();
+    // Try GPU first (CUDA/Metal/Vulkan), fall back to CPU.
+    model.backend = ggml_backend_init_best();
     if (!model.backend) {
-        fprintf(stderr, "[wav2vec2] failed to init CPU backend\n");
+        model.backend = ggml_backend_cpu_init();
+    }
+    if (!model.backend) {
+        fprintf(stderr, "[wav2vec2] failed to init any backend\n");
         return false;
     }
     core_gguf::WeightLoad wl;
