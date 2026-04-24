@@ -1962,3 +1962,40 @@ Each bug was caught by systematic stage-by-stage diff against Python ref:
 - after_global_ln: cos=0.999946 (after LN placement fix)
 - **logits: cos=0.999972** (after post-norm fix)
 - C++ decode matches Python exactly: "AND SO A MY FELLOW AMERICANS..."
+
+### VibeVoice-ASR-1.5B: σ-VAE + Qwen2 hybrid architecture
+
+VibeVoice uses a novel pipeline: two parallel σ-VAE CNN encoders (acoustic +
+semantic) → linear connectors → Qwen2-1.5B autoregressive decoder.
+
+**Key architecture findings:**
+1. **Encoders are ConvNeXt-style**: 7 stages of `downsample_conv → N × Block1D`.
+   Block1D = `RMSNorm → depthwise_conv → gamma_scale → residual + RMSNorm → FFN → gamma_scale → residual`.
+2. **Depthwise conv via ggml_conv_1d_dw**: works but forces F16 im2col
+   internally, causing cumulative precision loss (cos=0.7 after 29 blocks;
+   Python F16 gives cos=0.999, so it's ggml-specific).
+3. **Causal padding**: `padding_total = (K-1)*dilation - (stride-1)`, NOT `K-1`.
+   Plus `get_extra_padding_for_conv1d` for stride alignment on the right side.
+4. **Connectors**: simple `FC1 → RMSNorm → FC2` (NO activation, no SiLU).
+5. **Scaling factors**: `speech_scaling_factor/speech_bias_factor` are for the
+   base TTS model, NOT the ASR variant. ASR uses raw features directly.
+6. **σ-VAE sampling**: ASR calls `.sample(dist_type='gaussian')` which adds
+   noise. For deterministic C++ inference, using `.mean` (mode) is fine.
+7. **Prompt template**: Qwen2 chat format with `<|object_ref_start|>` as
+   speech_start, `<|box_start|>` as speech_pad, `<|object_ref_end|>` as
+   speech_end. These repurpose existing Qwen2 special tokens.
+8. **Qwen2 Q/K bias**: unlike most LLMs, Qwen2 has bias on Q and K projections
+   (but not V and O). The `core_attn::kv_self_attn` helper doesn't support
+   per-projection biases — needs inline attention implementation.
+
+**For decoding (tokens → text)**: no tiktoken/BPE library needed. Just embed the
+151665-token Qwen2 vocab as `tokenizer.ggml.tokens` in the GGUF and do
+`vocab[token_id]` lookup. BPE merge rules are only needed for encoding
+(text → tokens), which we don't do for ASR inference.
+
+**ggml precision issue**: `ggml_conv_1d_dw` (line 4494 in ggml.c) creates
+im2col with `GGML_TYPE_F16` regardless of input type. Through 29 ConvNeXt
+blocks, each with a depthwise conv, this accumulates precision loss. Fix options:
+1. CPU depthwise conv (simple loop, avoids im2col entirely)
+2. Modify ggml to use F32 im2col when input is F32
+3. Accept lower precision and rely on LM decoder robustness
