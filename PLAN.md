@@ -219,6 +219,25 @@ No response. HF model card has no license field.
 
 ---
 
+## 44. FireRed decoder ggml graph — skip weight dequant
+
+**Status:** Profiled. Weight dequantization (Q4_K → F32) takes 23.6s = 41% of
+total 57.8s. The remaining 18.2s is 28 decode steps at ~650ms each.
+
+**Approach:** Replace `read_f32_vec` + `cpu_matmul_bt` with `ggml_mul_mat`
+using the original Q4_K weight tensors. A `ggml_matmul_vec` helper was
+prototyped — creates a tiny ggml graph per matmul call with native Q4_K
+support. This eliminates the 23.6s init cost.
+
+**Estimated result:** 23.6s saved → total ~34s (0.3x RT). With further
+per-step graph consolidation (one graph for all 8 matmuls per layer),
+scheduling overhead drops further → ~25s (0.4x RT).
+
+**Effort:** Medium. Both greedy and beam paths need updating. The beam
+path's variable-history attention scoring stays CPU.
+
+---
+
 ## Ecosystem expansion (lower priority)
 
 ### New backends from PazaBench assessment (see HISTORY.md #30)
