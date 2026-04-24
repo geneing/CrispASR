@@ -16,6 +16,7 @@
 #include "crispasr_aligner_cli.h"
 #include "crispasr_lid_cli.h"
 #include "crispasr_diarize_cli.h"
+#include "crispasr_mem.h"
 #include "whisper_params.h"
 #include "fireredpunc.h"
 
@@ -123,6 +124,13 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, wh
     if (!read_audio_data(fname_inp, samples, stereo, want_stereo)) {
         fprintf(stderr, "crispasr: error: failed to read audio '%s'\n", fname_inp.c_str());
         return 20;
+    }
+    crispasr_log_mem(params.verbose, "after audio decode");
+    if (params.verbose) {
+        double dur = (double)samples.size() / 16000.0;
+        double est = crispasr_estimate_mem_mb(dur, backend.name());
+        fprintf(stderr, "crispasr[verbose]: audio %.1fs (%zu samples, %.1f MB PCM), est encoder mem ~%.0f MB\n",
+                dur, samples.size(), samples.size() * 4.0 / 1e6, est);
     }
     bool have_stereo = want_stereo && stereo.size() == 2 && !stereo[0].empty() && stereo[0].size() == stereo[1].size();
     if (have_stereo) {
