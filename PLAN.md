@@ -182,6 +182,13 @@ No response. HF model card has no license field.
 
 **From LEARNINGS.md (FireRed decoder triage):**
 - Small per-step ggml graphs are SLOWER than CPU loops (scheduling overhead)
+- BUT: native Q4_K matmuls via ggml are 9.3x faster than F32 OpenMP (lesson: never dequant)
+
+### Audio format support
+
+- `.m4a`, `.mp4`, `.webm` crash with upstream ffmpeg integration — needs fix or robust fallback
+- `.aiff`, `.wma`, raw PCM not supported without pre-conversion
+- Consider bundling a lightweight M4A/AAC decoder or improving the ffmpeg path
 - Only move LARGE, REUSED matmuls onto ggml/GPU
 - Persistent subgraphs per decode step > one-off graphs
 

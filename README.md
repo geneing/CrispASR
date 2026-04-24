@@ -1,8 +1,8 @@
 # CrispASR
 
-**One C++ binary, twelve ASR model families, zero Python dependencies.**
+**One C++ binary, eighteen ASR backends, zero Python dependencies.**
 
-CrispASR is a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that extends the familiar `whisper-cli` interface into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR architectures. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
+CrispASR is a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) that extends it into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR architectures. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
 
 ```console
 $ crispasr -m ggml-base.en.bin          -f samples/jfk.wav        # OpenAI Whisper
@@ -119,31 +119,7 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 
 **Voice activity detection**: `--vad` uses the default Silero VAD (~885 KB, auto-downloaded). Each VAD segment is transcribed independently, producing separate SRT/VTT entries with correct timestamps. Use `--vad --split-on-punct` for best subtitle output. Pass `--vad-model <path>` to use an alternative model — if the filename contains "firered-vad", FireRedVAD (DFSMN, 2.4 MB) is used automatically.
 
-**Punctuation restoration** (`--punc-model`): CTC-based backends (wav2vec2, omniasr, fastconformer-ctc, firered-asr) output **lowercase text without punctuation**. Add `--punc-model <model>.gguf` to restore punctuation and capitalization via a BERT-based post-processor. Works with **all** backends — LLM backends already produce punctuated output, so the punc model is a no-op for those. Two models are supported:
-
-| Model | License | Languages | Size (Q4_K) | HuggingFace |
-|---|---|---|---|---|
-| **FireRedPunc** | Apache-2.0 | Chinese + English | 56 MB (Q4_K) / 104 MB (Q8_0) | [`cstr/fireredpunc-GGUF`](https://huggingface.co/cstr/fireredpunc-GGUF) |
-| **fullstop-punctuation-multilingual** | MIT | English, German, French, Italian | 254 MB (Q4_K) | [`cstr/fullstop-punc-multilang-GGUF`](https://huggingface.co/cstr/fullstop-punc-multilang-GGUF) |
-
-FireRedPunc uses BERT-base (12L, d=768, 5 classes: comma/period/question/exclamation). Fullstop uses XLM-RoBERTa-large (24L, d=1024, 6 classes including dash and colon). Both auto-detect Latin script and output ASCII punctuation for English/European text.
-
-```bash
-# CTC backend + punc model → proper output
-crispasr --backend wav2vec2 -m wav2vec2.gguf --punc-model fireredpunc-q8_0.gguf -f audio.wav
-# Output: "And so my fellow americans, ask not what your country can do for you."
-
-# Multilingual punc (German/French/Italian)
-crispasr --backend omniasr -m omniasr.gguf --punc-model fullstop-punc-q4_k.gguf -f audio_de.wav
-```
-
-Also available via the Python/Rust/Dart wrappers:
-```python
-import crispasr
-with crispasr.PuncModel("fireredpunc-q8_0.gguf") as punc:
-    text = punc.process("and so my fellow americans ask not")
-    # -> "And so my fellow americans, ask not..."
-```
+**Punctuation restoration** (`--punc-model`): CTC-based backends output lowercase without punctuation. Add `--punc-model fireredpunc-q8_0.gguf` (or `fullstop-punc-q4_k.gguf` for DE/FR/IT) to restore punctuation and capitalization. See the post-processing table above for model details. Also available via Python/Rust/Dart wrappers (`crispasr.PuncModel`).
 
 <details>
 <summary>Which backends produce punctuation natively?</summary>
@@ -198,14 +174,17 @@ crispasr --backend parakeet -m parakeet.gguf --vad --flush-after 1 -osrt -f long
 |---|---|
 | Battle-tested, all features exposed | **whisper** |
 | Lowest English WER | **cohere** |
-| Multilingual + word timestamps + small + fast | **parakeet** |
+| **Fastest** (16x realtime on CPU) | **moonshine** (tiny), **fc-ctc** (10x) |
+| Multilingual + word timestamps + fast | **parakeet** (2.9x RT) |
 | Multilingual with **explicit language control** | **canary** |
-| **Speech translation** (X→en or en→X) | **canary** |
+| **Speech translation** (X→en or en→X) | **canary**, **voxtral**, **qwen3** |
 | **30 languages + Chinese dialects** | **qwen3** |
+| **1600+ languages** | **omniasr** (CTC or LLM) |
 | **Realtime streaming ASR** (<500 ms latency) | **voxtral4b** |
 | Highest-quality offline speech-LLM | **voxtral** |
-| Apache-licensed speech-LLM | **granite**, **voxtral**, **voxtral4b**, **qwen3** |
-| **Lightweight CTC-only** (single-language, no LLM) | **wav2vec2**, **fc-ctc** |
+| Apache-licensed speech-LLM | **granite**, **voxtral**, **qwen3**, **omniasr-llm** |
+| **Lightweight CTC-only** (fast, no decoder) | **wav2vec2**, **fc-ctc**, **data2vec**, **omniasr** |
+| **Mandarin + Chinese dialects** | **firered-asr**, **qwen3**, **glm-asr** |
 
 ### Language detection for backends that don't do it natively
 
@@ -261,10 +240,10 @@ git clone https://github.com/CrispStrobe/CrispASR
 cd CrispASR
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc) --target whisper-cli
+cmake --build build -j$(nproc) --target crispasr
 ```
 
-The target is named `whisper-cli` for CMake compatibility; the produced binary is `build/bin/crispasr` with a `build/bin/whisper-cli` alias next to it. Either name works.
+The produced binary is `build/bin/crispasr` with a `build/bin/whisper-cli` backward-compatibility alias.
 
 ### Windows (convenience scripts)
 
@@ -335,7 +314,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON    # Apple Silicon
 #   apt install libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
 
 cmake -B build-ffmpeg -DCMAKE_BUILD_TYPE=Release -DWHISPER_FFMPEG=ON
-cmake --build build-ffmpeg -j$(nproc) --target whisper-cli
+cmake --build build-ffmpeg -j$(nproc) --target crispasr
 ```
 
 > **Upstream bug warning.** `.m4a` / `.mp4` / `.webm` containers currently crash `whisper.cpp`'s ffmpeg integration. For those formats, pre-convert to WAV:
@@ -447,7 +426,7 @@ crispasr --live --monitor -m model.gguf
 crispasr -m model.gguf -f audio.wav --alt
 ```
 
-Streaming works with all 11 backends. The `--stream-step` (default 3s), `--stream-length` (default 10s), and `--stream-keep` (default 200ms overlap) flags control the sliding window.
+Streaming works with all backends. The `--stream-step` (default 3s), `--stream-length` (default 10s), and `--stream-keep` (default 200ms overlap) flags control the sliding window.
 
 ### Server mode (persistent model, HTTP API)
 
@@ -473,10 +452,10 @@ curl http://localhost:8080/backends
 
 The server loads the model once at startup and keeps it in memory. Subsequent `/inference` requests reuse the loaded model with no reload overhead. Requests are mutex-serialized. Use `--host 0.0.0.0` to accept remote connections.
 
-To require API keys, pass a comma-separated list with `--api-keys` or set `CRISPASR_API_KEYS`. Protected endpoints accept either `Authorization: Bearer <key>` or `X-API-Key: <key>`. `/health` remains public for container health checks.
+To require API keys, set the `CRISPASR_API_KEYS` env var (comma-separated). **Do not** pass keys as CLI arguments — they would be visible in `ps`/`top`. Protected endpoints accept either `Authorization: Bearer <key>` or `X-API-Key: <key>`. `/health` remains public for container health checks.
 
 ```bash
-crispasr --server -m model.gguf --api-keys key-one,key-two
+CRISPASR_API_KEYS=key-one,key-two crispasr --server -m model.gguf
 
 curl -H "Authorization: Bearer key-one" \
   -F "file=@audio.wav" \
@@ -922,7 +901,7 @@ presentation + UX policy.
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │ examples/cli/cli.cpp (the crispasr binary)                        │
-│   Parses whisper-cli args, dispatches to backend when --backend   │
+│   Parses CLI args, dispatches to backend when --backend   │
 │   is set or GGUF arch is non-whisper; otherwise runs whisper_full │
 │   unchanged                                                        │
 ├───────────────────────────────────────────────────────────────────┤
@@ -976,9 +955,9 @@ all consume the same symbols.
 
 | File | Role |
 |---|---|
-| `cli.cpp` | whisper-cli entry point, extended with `--backend` dispatch branch. |
+| `cli.cpp` | crispasr entry point, extended with `--backend` dispatch branch. |
 | `crispasr_backend.{h,cpp}` | `CrispasrBackend` abstract class, capability bitmask, factory, GGUF auto-detect. |
-| `crispasr_backend_{parakeet,canary,cohere,granite,voxtral,voxtral4b,qwen3,fastconformer_ctc,wav2vec2}.cpp` | Per-backend thin wrapper over each model's C API. |
+| `crispasr_backend_{parakeet,canary,cohere,granite,voxtral,voxtral4b,qwen3,fastconformer_ctc,wav2vec2,glm_asr,kyutai_stt,firered_asr,moonshine,omniasr,vibevoice}.cpp` | Per-backend thin wrapper over each model's C API. |
 | `crispasr_output.{h,cpp}` | TXT / SRT / VTT / CSV / JSON / LRC writers on `crispasr_segment`. |
 | `crispasr_vad_cli.{h,cpp}` | Delegates to `src/crispasr_vad`; adds auto-download for the Silero GGUF. |
 | `crispasr_lid_cli.{h,cpp}` | Delegates to `src/crispasr_lid`; adds auto-download + sherpa-ONNX subprocess fallback. |
@@ -1146,7 +1125,7 @@ If your model has a canonical Q4_K HuggingFace release, add it to `crispasr_mode
 ```bash
 ./build/bin/crispasr --backend yourmodel -m model.gguf -f samples/jfk.wav -np > before.txt
 # ... make changes ...
-cmake --build build --target whisper-cli
+cmake --build build --target crispasr
 ./build/bin/crispasr --backend yourmodel -m model.gguf -f samples/jfk.wav -np > after.txt
 diff before.txt after.txt && echo BIT-IDENTICAL
 ```
@@ -1236,39 +1215,7 @@ It is a model-agnostic tool that iterates through the GGUF tensor list and re-qu
 
 ## Branch state & roadmap
 
-### What's done
-
-- **Ten backends shipped, all runtime-ready** through the unified `crispasr_session_*` C-ABI: whisper, parakeet, canary, cohere, granite, fastconformer-ctc, canary_ctc, voxtral (3B), voxtral4b, qwen3, wav2vec2.
-- **Unified language bindings** — Dart (`package:crispasr` 0.4.x), Python (`crispasr.Session`), Rust (`crispasr::Session`). One C-ABI, three wrappers, all 10 backends reachable from each.
-- **Cross-platform audio decoding** via `crispasr_audio_load` (embedded miniaudio + stb_vorbis). WAV / MP3 / FLAC / OGG Vorbis without an ffmpeg dependency; same loader used from CLI, server, and all language bindings.
-- **`src/core/` shared library** (`crispasr-core`) —
-  - `core/mel` ✅ all non-whisper models migrated (including granite's stacked-2-frame variant)
-  - `core/ffn` ✅ all 4 SwiGLU consumers migrated
-  - `core/gguf_loader` ✅ all non-whisper models migrated
-  - `core/attention` ✅ `encoder_self_attn()` shared; voxtral + voxtral4b migrated, qwen3/granite remaining
-  - `core/greedy_decode` ✅ all 4 LLM backends migrated
-- **Ground-truth diff infrastructure** — `tools/dump_reference.py` plug-in Python modules (qwen3, voxtral, voxtral4b, granite) + `crispasr_diff::Ref` C++ loader + `crispasr-diff` CLI. Bit-identical regression on `samples/jfk.wav` gates every commit.
-- **HTTP server** with persistent model, hot-swap, streaming, mic input, per-token alternatives.
-- **OpenAI-compatible API** — `POST /v1/audio/transcriptions` with all five response formats, drop-in replacement for the OpenAI Whisper API.
-- **Reference Flutter app** — [CrisperWeaver](https://github.com/CrispStrobe/CrisperWeaver), cross-platform desktop/mobile transcription app built on `package:crispasr`.
-- **VAD stitching** — Silero VAD segments are stitched into a single buffer with timestamp remapping (matching whisper.cpp's internal approach). Short segments merged, oversized segments split.
-- **Best-of-N sampling** — all 4 LLM backends (voxtral, voxtral4b, qwen3, granite) support `--best-of N` with temperature sampling.
-- **Audio Q&A** — voxtral 3B supports `--ask "question"` for audio understanding beyond transcription.
-- **Integration test suites** — Python (13 tests), Rust (5 tests), Dart (9 tests) covering Session API, transcription, timestamps, edge cases.
-- **Performance**: 3.8x faster than [antirez/voxtral.c](https://github.com/antirez/voxtral.c) on the same CPU for Voxtral 4B. See `PERFORMANCE.md` for benchmarks.
-
-### Near-term
-
-- CMake target rename: `whisper-cli` → `crispasr` across CI/tests/scripts (~50 references).
-- Shaw relative position embeddings for granite encoder graph (currently uses block mask only).
-- Full LIS monotonicity fix for qwen3 forced aligner (currently forward-clamp only).
-- Chunk-overlap experiments for fixed chunking (VAD is the recommended path, but the fixed-chunk fallback could benefit from 2s overlap like Susurrus does).
-
-### Long-term
-
-- WebSocket streaming mode for real-time transcription over HTTP.
-- Model-agnostic batch processing with a progress bar.
-- TTS subcommand (`crispasr speak …`) via voxtral-rs.
+**18 ASR backends** + 2 punctuation models + VAD/LID/diarization/alignment — all through a unified C-ABI with Python/Rust/Dart wrappers. See [PLAN.md](PLAN.md) for the roadmap, [HISTORY.md](HISTORY.md) for completed milestones, and [PERFORMANCE.md](PERFORMANCE.md) for benchmarks (moonshine 16.8x RT, parakeet 2.9x RT, wav2vec2 1.1x RT on CPU).
 
 ---
 
