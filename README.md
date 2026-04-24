@@ -107,7 +107,21 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 
 **Language identification** for backends without native LID: `--lid-backend whisper` (default, 75 MB ggml-tiny.bin), `--lid-backend silero` (native GGUF, 16 MB, 95 languages), or `--lid-backend firered` (FireRedLID, 1.7 GB, 120 languages — Conformer encoder + Transformer decoder).
 
-**Voice activity detection**: `--vad` uses the default Silero VAD (~885 KB, auto-downloaded). Pass `--vad-model <path>` to use an alternative model — if the filename contains "firered-vad", FireRedVAD (DFSMN, 2.4 MB) is used automatically.
+**Voice activity detection**: `--vad` uses the default Silero VAD (~885 KB, auto-downloaded). Each VAD segment is transcribed independently, producing separate SRT/VTT entries with correct timestamps. Use `--vad --split-on-punct` for best subtitle output. Pass `--vad-model <path>` to use an alternative model — if the filename contains "firered-vad", FireRedVAD (DFSMN, 2.4 MB) is used automatically.
+
+**JSON output with language detection**: When using `-l auto -oj`, the JSON output includes detected language info:
+```json
+{
+  "crispasr": {
+    "backend": "cohere",
+    "language": "en",
+    "language_detected": "en",
+    "language_confidence": 0.977,
+    "language_source": "ecapa"
+  },
+  "transcription": [...]
+}
+```
 
 ### Which backend should I pick?
 
