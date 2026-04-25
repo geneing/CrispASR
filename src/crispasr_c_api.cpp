@@ -927,7 +927,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     }
 #endif
 #ifdef CA_HAVE_GLMASR
-    if (s->backend == "glm-asr" || s->backend == "glmasr") {
+    if (s->backend == "glm-asr" || s->backend == "glmasr" || s->backend == "glm" || s->backend == "glm_asr") {
         glm_asr_context_params p = glm_asr_context_default_params();
         p.n_threads = s->n_threads;
         s->glmasr_ctx = glm_asr_init_from_file(model_path, p);
@@ -1482,7 +1482,7 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         char* text = nullptr;
         bool need_free = true;
 #ifdef CA_HAVE_GLMASR
-        if ((s->backend == "glm-asr" || s->backend == "glmasr") && s->glmasr_ctx)
+        if ((s->backend == "glm-asr" || s->backend == "glmasr" || s->backend == "glm" || s->backend == "glm_asr") && s->glmasr_ctx)
             text = glm_asr_transcribe((glm_asr_context*)s->glmasr_ctx, pcm, n_samples);
 #endif
 #ifdef CA_HAVE_KYUTAI

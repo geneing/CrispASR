@@ -59,7 +59,7 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_wav2vec2_backend();
     if (name == "vibevoice")
         return crispasr_make_vibevoice_backend();
-    if (name == "glm-asr" || name == "glmasr")
+    if (name == "glm-asr" || name == "glmasr" || name == "glm" || name == "glm_asr")
         return crispasr_make_glm_asr_backend();
     if (name == "kyutai-stt" || name == "kyutai" || name == "moshi-stt")
         return crispasr_make_kyutai_stt_backend();
