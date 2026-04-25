@@ -212,7 +212,9 @@ jobs:
       # up to sm_90, so RTX 5060/5070/5080/5090 fail at runtime with
       # 'no kernel image is available'.
       - name: Install CUDA Toolkit 12.8.0
-        uses: Jimver/cuda-toolkit@v0.2.19
+        # v0.2.19 only knows up to CUDA 12.4; v0.2.35 added 12.8 + 12.9
+        # support. Required for sm_120 (RTX 50xx, Blackwell consumer) builds.
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.8.0'
           method: 'network'

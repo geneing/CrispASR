@@ -633,6 +633,7 @@ jobs:
           cmake -S . -B ./build -A ${{ matrix.arch }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build }}
           -DBUILD_SHARED_LIBS=ON
+          -DWHISPER_BUILD_TESTS=OFF
           -DWHISPER_SDL2=${{ matrix.sdl2 }}
 
       - name: Build
@@ -746,6 +747,7 @@ jobs:
           -DGGML_BLAS_VENDOR=OpenBLAS
           -DBLAS_LIBRARIES="$env:GITHUB_WORKSPACE/OpenBLAS-${{matrix.blasver}}/lib/libopenblas.lib"
           -DBLAS_INCLUDE_DIRS="$env:GITHUB_WORKSPACE/OpenBLAS-${{matrix.blasver}}/include"
+          -DWHISPER_BUILD_TESTS=OFF
           -DWHISPER_SDL2=${{ matrix.sdl2 }}
 
       - name: Build
@@ -950,6 +952,7 @@ jobs:
           cmake -S . -B build -G "Ninja Multi-Config" ^
             -DCMAKE_BUILD_TYPE=${{ matrix.build }} ^
             -DGGML_CUDA=${{ matrix.cublas }} ^
+            -DWHISPER_BUILD_TESTS=OFF ^
             -DWHISPER_SDL2=${{ matrix.sdl2 }} ^
             -DSDL2_DIR="%SDL2_DIR%" ^
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
