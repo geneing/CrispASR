@@ -126,9 +126,17 @@ public:
         // ggml-silero-v5.1.2.bin to the cache, matching the non-whisper
         // backends' UX (#33). The resolved path must outlive the whisper
         // call, so we hold it on the stack here.
-        const std::string vad_path = crispasr_resolve_vad_model(p);
-        wp.vad = p.vad;
+        //
+        // FireRedVAD (GGUF format) is NOT supported by whisper's internal
+        // Silero-only VAD loader (#34). When FireRed is detected, disable
+        // whisper-internal VAD — the CLI dispatch layer will handle it via
+        // crispasr_compute_audio_slices() before calling transcribe().
+        const bool firered = crispasr_vad_is_firered(p);
+        const std::string vad_path = firered ? "" : crispasr_resolve_vad_model(p);
+        wp.vad = firered ? false : p.vad;
         wp.vad_model_path = vad_path.c_str();
+        if (firered && !p.no_prints)
+            fprintf(stderr, "crispasr[whisper]: FireRedVAD detected — using external VAD dispatch\n");
         wp.vad_params.threshold = p.vad_threshold;
         wp.vad_params.min_speech_duration_ms = p.vad_min_speech_duration_ms;
         wp.vad_params.min_silence_duration_ms = p.vad_min_silence_duration_ms;

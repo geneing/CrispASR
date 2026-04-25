@@ -31,6 +31,11 @@ struct whisper_params; // fwd decl
 // (which everything else uses).
 std::string crispasr_resolve_vad_model(const whisper_params& p);
 
+// Returns true if the resolved VAD model is a FireRedVAD model (not Silero).
+// The whisper backend needs this to avoid passing FireRed GGUF to whisper's
+// Silero-only VAD loader.
+bool crispasr_vad_is_firered(const whisper_params& p);
+
 // Build the list of audio slices for a CLI invocation.
 //
 // If `params.vad` or `params.vad_model` is set, resolves the VAD model

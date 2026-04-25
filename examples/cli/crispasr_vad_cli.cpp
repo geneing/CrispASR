@@ -22,6 +22,18 @@ constexpr const char* kVadDefaultUrl =
 constexpr const char* kVadDefaultFile = "ggml-silero-v5.1.2.bin";
 } // namespace
 
+// Check if a path refers to a FireRedVAD model (by filename pattern).
+static bool is_firered_vad_path(const std::string& path) {
+    auto pos = path.find_last_of("/\\");
+    std::string basename = (pos != std::string::npos) ? path.substr(pos + 1) : path;
+    // Case-insensitive check for "firered" + "vad"
+    std::string lo;
+    lo.reserve(basename.size());
+    for (char c : basename)
+        lo += (char)std::tolower((unsigned char)c);
+    return lo.find("firered") != std::string::npos && lo.find("vad") != std::string::npos;
+}
+
 std::string crispasr_resolve_vad_model(const whisper_params& p) {
     const std::string& v = p.vad_model;
     const bool want_vad = p.vad || !v.empty();
@@ -31,6 +43,11 @@ std::string crispasr_resolve_vad_model(const whisper_params& p) {
         return v;
     return crispasr_cache::ensure_cached_file(kVadDefaultFile, kVadDefaultUrl, p.no_prints, "crispasr[vad]",
                                               p.cache_dir);
+}
+
+bool crispasr_vad_is_firered(const whisper_params& p) {
+    std::string path = crispasr_resolve_vad_model(p);
+    return !path.empty() && is_firered_vad_path(path);
 }
 
 std::vector<crispasr_audio_slice> crispasr_compute_audio_slices(const float* samples, int n_samples, int sample_rate,

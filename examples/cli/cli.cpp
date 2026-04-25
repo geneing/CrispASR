@@ -1655,9 +1655,18 @@ int main(int argc, char** argv) {
             // use — matches the auto-cache UX of every non-whisper
             // backend (#33). Path must outlive whisper_full(); kept on
             // this stack frame.
-            const std::string resolved_vad_path = crispasr_resolve_vad_model(params);
-            wparams.vad = params.vad;
+            // FireRedVAD (GGUF) is not compatible with whisper's internal
+            // Silero-only VAD loader (#34). Detect and warn.
+            const bool firered_vad = crispasr_vad_is_firered(params);
+            const std::string resolved_vad_path = firered_vad ? "" : crispasr_resolve_vad_model(params);
+            wparams.vad = firered_vad ? false : params.vad;
             wparams.vad_model_path = resolved_vad_path.c_str();
+            if (firered_vad) {
+                fprintf(stderr, "crispasr: warning: FireRedVAD is not supported in the legacy whisper path.\n"
+                                "  Use --backend whisper (unified dispatch) or a non-whisper backend:\n"
+                                "  crispasr --backend whisper --vad --vad-model firered-vad.gguf ...\n"
+                                "  crispasr -m parakeet.gguf --vad --vad-model firered-vad.gguf ...\n");
+            }
 
             wparams.vad_params.threshold = params.vad_threshold;
             wparams.vad_params.min_speech_duration_ms = params.vad_min_speech_duration_ms;
