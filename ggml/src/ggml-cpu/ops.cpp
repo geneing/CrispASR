@@ -5917,6 +5917,109 @@ void ggml_compute_forward_rope_back(
     }
 }
 
+// ggml_compute_forward_conv_1d_cf — channels-first 1D convolution (F32 direct)
+//
+// Regular mode (params[3]==0):
+//   src0 (kernel): [K, C_in, C_out]
+//   src1 (data):   [C_in, T]
+//   dst:           [C_out, T_out]
+//
+// Depthwise mode (params[3]==1):
+//   src0 (kernel): [K, 1, C]
+//   src1 (data):   [C, T]
+//   dst:           [C, T_out]
+//
+// Threading: parallelize over output channels (regular) or channels (depthwise).
+
+// Helper: read kernel weight at flat index, handling F16/F32
+static inline float conv1d_cf_kernel_val(const ggml_tensor * src0, int64_t idx) {
+    if (src0->type == GGML_TYPE_F32) {
+        return ((const float *)src0->data)[idx];
+    } else if (src0->type == GGML_TYPE_F16) {
+        return ggml_fp16_to_fp32(((const ggml_fp16_t *)src0->data)[idx]);
+    } else if (src0->type == GGML_TYPE_BF16) {
+        return ggml_bf16_to_fp32(((const ggml_bf16_t *)src0->data)[idx]);
+    }
+    GGML_ABORT("unsupported kernel type for conv_1d_cf");
+}
+
+void ggml_compute_forward_conv_1d_cf(
+        const ggml_compute_params * params,
+              ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0]; // kernel
+    const ggml_tensor * src1 = dst->src[1]; // data
+
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+
+    const int32_t s0        = ((const int32_t *)(dst->op_params))[0]; // stride
+    const int32_t p0        = ((const int32_t *)(dst->op_params))[1]; // padding
+    const int32_t d0        = ((const int32_t *)(dst->op_params))[2]; // dilation
+    const int32_t depthwise = ((const int32_t *)(dst->op_params))[3];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t K    = src0->ne[0];
+    const int64_t C_in = src1->ne[0];
+    const int64_t T    = src1->ne[1];
+
+    const int64_t C_out = dst->ne[0];
+    const int64_t T_out = dst->ne[1];
+
+    const float * data = (const float *)src1->data;
+    float * out = (float *)dst->data;
+
+    if (depthwise) {
+        // Depthwise: kernel [K, 1, C], data [C, T] → out [C, T_out]
+        // data is channels-first: element [c, t] at offset c + t * C
+        const int64_t C = C_in;
+        GGML_ASSERT(C_out == C);
+
+        // Pre-dequantize kernel per channel for inner loop efficiency
+        // K is typically small (7), so a stack buffer suffices
+        float kbuf[64]; // supports kernel up to size 64
+        GGML_ASSERT(K <= 64);
+
+        for (int64_t c = ith; c < C; c += nth) {
+            // Dequantize kernel for this channel once
+            for (int64_t k = 0; k < K; k++) {
+                kbuf[k] = conv1d_cf_kernel_val(src0, k + c * K);
+            }
+
+            for (int64_t t = 0; t < T_out; t++) {
+                float sum = 0.0f;
+                for (int64_t k = 0; k < K; k++) {
+                    const int64_t t_in = t * s0 + k * d0 - p0;
+                    if (t_in >= 0 && t_in < T) {
+                        sum += kbuf[k] * data[c + t_in * C_in];
+                    }
+                }
+                out[c + t * C_out] = sum;
+            }
+        }
+    } else {
+        // Regular: kernel [K, C_in, C_out], data [C_in, T] → out [C_out, T_out]
+
+        for (int64_t co = ith; co < C_out; co += nth) {
+            for (int64_t t = 0; t < T_out; t++) {
+                float sum = 0.0f;
+                for (int64_t ci = 0; ci < C_in; ci++) {
+                    for (int64_t k = 0; k < K; k++) {
+                        const int64_t t_in = t * s0 + k * d0 - p0;
+                        if (t_in >= 0 && t_in < T) {
+                            sum += conv1d_cf_kernel_val(src0, k + ci * K + co * K * C_in)
+                                 * data[ci + t_in * C_in];
+                        }
+                    }
+                }
+                out[co + t * C_out] = sum;
+            }
+        }
+    }
+}
+
 // ggml_compute_forward_conv_transpose_1d
 
 static void ggml_compute_forward_conv_transpose_1d_f16_f32(

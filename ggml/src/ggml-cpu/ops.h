@@ -64,6 +64,7 @@ void ggml_compute_forward_rope(const struct ggml_compute_params * params, struct
 void ggml_compute_forward_rope_back(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_clamp(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_conv_transpose_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_conv_1d_cf(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_im2col(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_im2col_back_f32(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_im2col_3d(const struct ggml_compute_params * params, struct ggml_tensor * dst);

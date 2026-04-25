@@ -1005,6 +1005,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "ROPE_BACK",
     "CLAMP",
     "CONV_TRANSPOSE_1D",
+    "CONV_1D_CF",
     "IM2COL",
     "IM2COL_BACK",
     "IM2COL_3D",
@@ -1057,7 +1058,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
+static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 96");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1115,6 +1116,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rope_back(x)",
     "clamp(x)",
     "conv_transpose_1d(x)",
+    "conv_1d_cf(x)",
     "im2col(x)",
     "im2col_back(x)",
     "im2col_3d(x)",
@@ -1167,7 +1169,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
+static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 96");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -4514,6 +4516,75 @@ struct ggml_tensor * ggml_conv_1d_dw_ph(
         int                   s0,
         int                   d0) {
     return ggml_conv_1d_dw(ctx, a, b, s0, a->ne[0] / 2, d0);
+}
+
+// ggml_conv_1d_cf — channels-first 1D convolution (direct, no im2col)
+//
+// a: kernel [K, C_in, C_out]
+// b: data   [C_in, T]         (channels-first: ne[0]=C_in, ne[1]=T)
+// out:      [C_out, T_out]    (channels-first)
+//
+// T_out = floor((T + 2*p0 - d0*(K-1) - 1) / s0) + 1
+
+struct ggml_tensor * ggml_conv_1d_cf(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        int                   s0,
+        int                   p0,
+        int                   d0) {
+    GGML_ASSERT(ggml_is_matrix(b));        // b is 2D: [C_in, T]
+    GGML_ASSERT(a->ne[1] == b->ne[0]);     // C_in must match
+    GGML_ASSERT(a->ne[3] == 1);
+
+    const int64_t T_out = ggml_calc_conv_output_size(b->ne[1], a->ne[0], s0, p0, d0);
+    GGML_ASSERT(T_out > 0);
+
+    const int64_t ne[4] = { a->ne[2], T_out, 1, 1 }; // [C_out, T_out]
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    int32_t params[] = { s0, p0, d0, 0 }; // last 0 = not depthwise
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_CONV_1D_CF;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
+// ggml_conv_1d_dw_cf — depthwise channels-first 1D convolution
+//
+// a: kernel [K, 1, C]
+// b: data   [C, T]
+// out:      [C, T_out]
+
+struct ggml_tensor * ggml_conv_1d_dw_cf(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        int                   s0,
+        int                   p0,
+        int                   d0) {
+    GGML_ASSERT(ggml_is_matrix(b));
+    GGML_ASSERT(a->ne[1] == 1);           // depthwise: groups = C
+    GGML_ASSERT(a->ne[2] == b->ne[0]);    // C must match
+    GGML_ASSERT(a->ne[3] == 1);
+
+    const int64_t T_out = ggml_calc_conv_output_size(b->ne[1], a->ne[0], s0, p0, d0);
+    GGML_ASSERT(T_out > 0);
+
+    const int64_t ne[4] = { b->ne[0], T_out, 1, 1 }; // [C, T_out]
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    int32_t params[] = { s0, p0, d0, 1 }; // last 1 = depthwise
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_CONV_1D_CF;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
 }
 
 // ggml_conv_transpose_1d

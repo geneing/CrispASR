@@ -524,6 +524,7 @@ extern "C" {
         GGML_OP_ROPE_BACK,
         GGML_OP_CLAMP,
         GGML_OP_CONV_TRANSPOSE_1D,
+        GGML_OP_CONV_1D_CF,  // channels-first 1D convolution (no im2col)
         GGML_OP_IM2COL,
         GGML_OP_IM2COL_BACK,
         GGML_OP_IM2COL_3D,
@@ -1954,6 +1955,31 @@ extern "C" {
             struct ggml_tensor  * b,  // data
             int                   s,  // stride
             int                   d); // dilation
+
+    // channels-first 1D convolution (direct, no im2col).
+    // a: kernel [K, C_out, C_in]     (same as ggml_conv_1d)
+    // b: data   [C_in, T]            (channels-first, ne[0]=C_in, ne[1]=T)
+    // Returns   [C_out, T_out]       (channels-first)
+    // Avoids transpose overhead when data is already channels-first.
+    GGML_API struct ggml_tensor * ggml_conv_1d_cf(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,   // convolution kernel [K, C_in, C_out]
+            struct ggml_tensor  * b,   // data [C_in, T] (channels-first)
+            int                   s0,  // stride
+            int                   p0,  // padding
+            int                   d0); // dilation
+
+    // depthwise channels-first 1D convolution (direct, no im2col).
+    // a: kernel [K, 1, C]   (depthwise: each channel has its own K-tap filter)
+    // b: data   [C, T]      (channels-first)
+    // Returns   [C, T_out]  (channels-first)
+    GGML_API struct ggml_tensor * ggml_conv_1d_dw_cf(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,   // kernel [K, 1, C]
+            struct ggml_tensor  * b,   // data [C, T] (channels-first)
+            int                   s0,  // stride
+            int                   p0,  // padding
+            int                   d0); // dilation
 
     // depthwise
     // TODO: this is very likely wrong for some cases! - needs more testing
