@@ -2491,3 +2491,27 @@ proper negative conditioning path — using zero vector as negative).
 |-------|------------|-----------|
 | Realtime-0.5B | 607 MB | Perfect (with voice .gguf preset) |
 | 1.5B | 1.6 GB | Perfect (with reference WAV) |
+
+### VibeVoice TTS Performance Optimization (April 2026)
+
+**Phase 1: Cached prediction head graph — 25% speedup**
+
+The prediction head (4 AdaLN + SwiGLU layers) is called 280+ times per
+TTS synthesis (20 DPM steps × 14 frames). Previously rebuilt the ggml
+graph from scratch each time. Now built once with a separate `ggml_context`
+and reused via `ggml_backend_sched_reset()`.
+
+| | Before | After | Speedup |
+|--|--------|-------|---------|
+| Realtime-0.5B Q4_K, "Hello, how are you today?" | 11.85s | 8.82s | **25.6%** |
+
+**Why other graphs can't be cached:**
+
+- **LM decode graph**: KV cache view offsets (`ggml_view_4d` offset parameter)
+  change with `n_past` at each step. ggml encodes offsets at graph build time —
+  no way to update without rebuilding the graph. Only 14 calls (low impact).
+- **Connector graph**: Cacheable but only 14 calls of a 5-op graph (~0.07s total).
+- **VAE decoder**: Already built once per synthesis.
+
+**Remaining bottleneck**: 20-layer TTS LM forward pass (~150ms × 14 frames = 2.1s).
+Would need fused QKV, persistent KV view indexing, or GPU offload for further gains.
