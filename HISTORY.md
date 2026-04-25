@@ -372,3 +372,11 @@ Moved here once shipped. See git history for code diffs.
 - **EOS classifier**: automatic length detection via sigmoid(FC1→SiLU→FC2)
 - **Critical bugs**: AdaLN SiLU (#16), text newline (#17), r-ratio sign (#14)
 - **CLI**: `crispasr --tts "text" --voice voice.gguf -m vibevoice-realtime.gguf`
+
+**VibeVoice-1.5B Base Model TTS (April 2026):**
+- Single-LM autoregressive TTS (no TTS LM, 28-layer Qwen2)
+- Voice cloning via acoustic+semantic encoder from reference WAV
+- Speech token IDs: vision tokens reused (151654/151652/151653)
+- ASR round-trip verified: "Hello, how are you today?" → exact match
+- Quantized: F16 (5.1 GB), Q8_0 (2.8 GB), Q4_K (1.6 GB)
+- HF: `cstr/vibevoice-1.5b-GGUF`

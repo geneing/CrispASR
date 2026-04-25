@@ -28,7 +28,10 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 - ~~**Japanese punctuation split (#29)** — `--split-on-punct` now handles `。？！`~~ FIXED
 - **Moonshine streaming** — different architecture, needs new runtime
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
-- ~~**VibeVoice TTS**~~ — **DONE**: perfect ASR round-trip with VibeVoice-Realtime-0.5B + Emma voice. 17 bugs fixed.
+- ~~**VibeVoice TTS**~~ — **DONE**: Realtime-0.5B (17 bugs, perfect round-trip) + 1.5B base model (voice cloning). HF: `cstr/vibevoice-realtime-0.5b-GGUF`, `cstr/vibevoice-1.5b-GGUF`
+- **VibeVoice-7B TTS** — needs 32+ GB RAM for conversion (9.3B params). Same architecture as 1.5B.
+- **VibeVoice multi-speaker** — 1.5B/7B support up to 4 speakers; need prompt template for multi-speaker scripts
+- **VibeVoice negative conditioning** — base model uses zero negative; proper dual-LM CFG would improve quality
 - ~~**Japanese punctuation split (#29)**~~ — FIXED
 
 ---

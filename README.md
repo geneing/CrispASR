@@ -70,6 +70,13 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 | **omniasr** | [`omniASR-LLM-300M-v2`](https://huggingface.co/cstr/omniasr-llm-300m-v2-GGUF) | Same encoder + 12L LLaMA decoder (SwiGLU, RoPE); autoregressive, best quality | **1600+** | Apache-2.0 |
 | **vibevoice** | [`microsoft/VibeVoice-ASR`](https://huggingface.co/cstr/vibevoice-asr-GGUF) | σ-VAE ConvNeXt encoders + Qwen2.5-7B decoder; timestamps, diarization, hotwords | 50+ | MIT |
 
+**Text-to-Speech models** (TTS — `--tts` flag):
+
+| Backend | Models | Architecture | Languages | License |
+|---------|--------|-------------|-----------|---------|
+| **vibevoice** | [`VibeVoice-Realtime-0.5B`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF) | 4L base + 20L TTS LM + DPM-Solver++ + σ-VAE decoder; pre-computed voice presets | en | MIT |
+| **vibevoice** | [`VibeVoice-1.5B`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF) | 28L Qwen2 LM + DPM-Solver++ + σ-VAE decoder; voice cloning from audio | en, zh | MIT |
+
 **Post-processing models** (work with all backends):
 
 | Model | Task | Architecture | Languages | License | HuggingFace |
@@ -427,6 +434,35 @@ crispasr -m model.gguf -f audio.wav --alt
 ```
 
 Streaming works with all backends. The `--stream-step` (default 3s), `--stream-length` (default 10s), and `--stream-keep` (default 200ms overlap) flags control the sliding window.
+
+### Text-to-Speech (TTS)
+
+CrispASR includes text-to-speech synthesis via Microsoft VibeVoice models.
+
+**Realtime-0.5B** (streaming model, pre-computed voice presets):
+```bash
+crispasr --tts "Hello, how are you today?" \
+    -m vibevoice-realtime-0.5b-q4_k.gguf \
+    --voice vibevoice-voice-emma.gguf \
+    --tts-output hello.wav
+```
+
+**1.5B** (base model, voice cloning from reference audio):
+```bash
+VIBEVOICE_VOICE_AUDIO=reference_voice.wav \
+crispasr --tts "Hello, how are you today?" \
+    -m vibevoice-1.5b-tts-q4_k.gguf \
+    --tts-output hello.wav
+```
+
+Output: 24 kHz mono WAV. Both models produce perfect ASR round-trip on tested phrases.
+
+| Model | Size (Q4_K) | Voice Input | Features |
+|-------|------------|------------|----------|
+| Realtime-0.5B | 607 MB | `.gguf` voice presets | Streaming, EOS classifier |
+| 1.5B | 1.6 GB | Reference WAV audio | Voice cloning, multi-speaker |
+
+GGUF downloads: [`cstr/vibevoice-realtime-0.5b-GGUF`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF), [`cstr/vibevoice-1.5b-GGUF`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF)
 
 ### Server mode (persistent model, HTTP API)
 

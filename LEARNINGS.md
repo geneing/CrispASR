@@ -2443,3 +2443,51 @@ diverged in practice. The fix was found by comparing prediction head MAGNITUDE
 (rms 0.65 vs 0.26), not direction (cos was misleading). Then hooking the official
 model's `adaLN_modulation` module revealed the Sequential(SiLU, Linear) structure
 that our manual reimplementation had missed.
+
+### VibeVoice-1.5B Base Model TTS (April 2026)
+
+The 1.5B/7B base models use a fundamentally different TTS architecture
+than the Realtime-0.5B streaming model.
+
+**Key discovery: VibeVoice reuses Qwen2 vision tokens for speech:**
+```
+speech_start_id    = <|vision_start|> = 151652
+speech_end_id      = <|vision_end|>   = 151653
+speech_diffusion_id = <|vision_pad|>  = 151654
+```
+NOT `<|object_ref_start|>` (151646) / `<|box_start|>` (151648) as initially assumed.
+This mapping is defined in `modular_vibevoice_text_tokenizer.py`.
+
+**Single-LM architecture** (no TTS LM):
+```
+Prompt: system_prompt + voice_reference + text_input + " Speech output:\n" + <speech_start>
+LM generates autoregressively:
+  → <speech_diffusion> tokens → each triggers DPM-Solver++ → acoustic latent
+  → latent fed back via acoustic connector → next LM step
+  → <speech_end> → stop
+```
+
+**Voice cloning** uses the acoustic + semantic encoders already in the GGUF:
+1. Load reference WAV (24kHz mono)
+2. `vibevoice_encode_speech()` → combined features [T_frames, d_lm]
+3. Insert between `<speech_start>` and `<speech_end>` in voice section of prompt
+4. LM learns speaker identity from these embeddings
+
+**Prompt template** (from `VibeVoiceProcessor`):
+```
+" Transform the text provided by various speakers into speech output,
+  utilizing the distinct voice of each respective speaker.\n"
+" Voice input:\n" <speech_start> [voice_embeddings] <speech_end>
+" Text input:\n Speaker 1: {text}\n"
+" Speech output:\n" <speech_start>
+```
+
+**CFG**: cfg_scale=1.5 for base model (lower than Realtime's 3.0 since no
+proper negative conditioning path — using zero vector as negative).
+
+**ASR round-trip**: "Hello, how are you today?" → exact match (F16, Q8_0, Q4_K).
+
+| Model | Size (Q4_K) | ASR Result |
+|-------|------------|-----------|
+| Realtime-0.5B | 607 MB | Perfect (with voice .gguf preset) |
+| 1.5B | 1.6 GB | Perfect (with reference WAV) |
