@@ -1379,13 +1379,15 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, ggml_tensor* x, const f
     h = ggml_mul(ctx, h1, ggml_sigmoid(ctx, h2)); // [2560, T]
 
     // Depthwise conv1d: groups=2560, kernel=33, SYMMETRIC padding=16
-    ggml_tensor* ht = ggml_cont(ctx, ggml_transpose(ctx, h)); // [T, 2560]
-    int pad_sym = (kernel_size - 1) / 2;                      // 16 on each side
-    ht = ggml_pad_ext(ctx, ht, pad_sym, pad_sym, 0, 0, 0, 0, 0, 0);
-    ht = ggml_conv_1d_dw(ctx, conv.dw_w, ht, 1, 0, 1);
-    // Output is [OL, 1, channels, 1] — reshape to [OL, channels]
-    ht = ggml_reshape_2d(ctx, ht, ht->ne[0], ht->ne[2]);
-    h = ggml_cont(ctx, ggml_transpose(ctx, ht)); // [channels, T]
+    // Use ggml_conv_1d_dw_cf — channels-first, no transpose needed.
+    // h is [C=2560, T], pad along T (ne[1]), conv produces [C, T_out]
+    {
+        int pad_sym = (kernel_size - 1) / 2; // 16 on each side
+        h = ggml_pad_ext(ctx, h, 0, 0, pad_sym, pad_sym, 0, 0, 0, 0);
+        h = ggml_conv_1d_dw_cf(ctx, conv.dw_w, h, 1, 0, 1);
+        if (ggml_n_dims(h) > 2)
+            h = ggml_reshape_2d(ctx, h, h->ne[0], h->ne[1]);
+    }
 
     // LayerNorm (named batch_norm in checkpoint)
     h = ggml_norm(ctx, h, 1e-5f);

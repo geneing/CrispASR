@@ -13,44 +13,58 @@ struct Entry {
     const char* filename;
     const char* url;
     const char* approx_size;
+    const char* companion_file; // optional extra file (e.g. tokenizer.bin), NULL if none
+    const char* companion_url;
 };
 
 // Keep entries aligned with what the CLI-only registry used to ship.
 // Adding a new backend: one row here + a PUBLIC-link in src/CMakeLists.txt.
+// clang-format off
 constexpr Entry k_registry[] = {
-    // Multilingual by default so `-m auto` works for non-English audio.
-    // Users who want the smaller English-only build can pass
-    // `-m models/ggml-base.en.bin` explicitly (once downloaded).
-    {"whisper", "ggml-base.bin", "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin", "~147 MB"},
+    {"whisper", "ggml-base.bin",
+     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin", "~147 MB", nullptr, nullptr},
     {"parakeet", "parakeet-tdt-0.6b-v3-q4_k.gguf",
-     "https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF/resolve/main/parakeet-tdt-0.6b-v3-q4_k.gguf", "~467 MB"},
+     "https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF/resolve/main/parakeet-tdt-0.6b-v3-q4_k.gguf", "~467 MB", nullptr, nullptr},
     {"canary", "canary-1b-v2-q4_k.gguf",
-     "https://huggingface.co/cstr/canary-1b-v2-GGUF/resolve/main/canary-1b-v2-q4_k.gguf", "~600 MB"},
+     "https://huggingface.co/cstr/canary-1b-v2-GGUF/resolve/main/canary-1b-v2-q4_k.gguf", "~600 MB", nullptr, nullptr},
     {"voxtral", "voxtral-mini-3b-2507-q4_k.gguf",
-     "https://huggingface.co/cstr/voxtral-mini-3b-2507-GGUF/resolve/main/voxtral-mini-3b-2507-q4_k.gguf", "~2.5 GB"},
+     "https://huggingface.co/cstr/voxtral-mini-3b-2507-GGUF/resolve/main/voxtral-mini-3b-2507-q4_k.gguf", "~2.5 GB", nullptr, nullptr},
     {"voxtral4b", "voxtral-mini-4b-realtime-q4_k.gguf",
      "https://huggingface.co/cstr/voxtral-mini-4b-realtime-GGUF/resolve/main/voxtral-mini-4b-realtime-q4_k.gguf",
-     "~3.3 GB"},
+     "~3.3 GB", nullptr, nullptr},
     {"granite", "granite-speech-4.0-1b-q4_k.gguf",
-     "https://huggingface.co/cstr/granite-speech-4.0-1b-GGUF/resolve/main/granite-speech-4.0-1b-q4_k.gguf", "~2.94 GB"},
+     "https://huggingface.co/cstr/granite-speech-4.0-1b-GGUF/resolve/main/granite-speech-4.0-1b-q4_k.gguf", "~2.94 GB", nullptr, nullptr},
     {"qwen3", "qwen3-asr-0.6b-q4_k.gguf",
-     "https://huggingface.co/cstr/qwen3-asr-0.6b-GGUF/resolve/main/qwen3-asr-0.6b-q4_k.gguf", "~500 MB"},
+     "https://huggingface.co/cstr/qwen3-asr-0.6b-GGUF/resolve/main/qwen3-asr-0.6b-q4_k.gguf", "~500 MB", nullptr, nullptr},
     {"cohere", "cohere-transcribe-q4_k.gguf",
-     "https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF/resolve/main/cohere-transcribe-q4_k.gguf", "~550 MB"},
+     "https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF/resolve/main/cohere-transcribe-q4_k.gguf", "~550 MB", nullptr, nullptr},
     {"wav2vec2", "wav2vec2-xlsr-en-q4_k.gguf",
      "https://huggingface.co/cstr/wav2vec2-large-xlsr-53-english-GGUF/resolve/main/wav2vec2-xlsr-en-q4_k.gguf",
-     "~212 MB"},
+     "~212 MB", nullptr, nullptr},
     {"omniasr", "omniasr-ctc-1b-q4_k.gguf",
-     "https://huggingface.co/cstr/omniASR-CTC-1B-GGUF/resolve/main/omniasr-ctc-1b-q4_k.gguf", "~551 MB"},
+     "https://huggingface.co/cstr/omniASR-CTC-1B-GGUF/resolve/main/omniasr-ctc-1b-q4_k.gguf", "~551 MB", nullptr, nullptr},
     {"omniasr-llm", "omniasr-llm-300m-v2-q4_k.gguf",
-     "https://huggingface.co/cstr/omniasr-llm-300m-v2-GGUF/resolve/main/omniasr-llm-300m-v2-q4_k.gguf", "~580 MB"},
+     "https://huggingface.co/cstr/omniasr-llm-300m-v2-GGUF/resolve/main/omniasr-llm-300m-v2-q4_k.gguf", "~580 MB", nullptr, nullptr},
     {"hubert", "hubert-large-ls960-ft-q4_k.gguf",
-     "https://huggingface.co/cstr/hubert-large-ls960-ft-GGUF/resolve/main/hubert-large-ls960-ft-q4_k.gguf", "~200 MB"},
+     "https://huggingface.co/cstr/hubert-large-ls960-ft-GGUF/resolve/main/hubert-large-ls960-ft-q4_k.gguf", "~200 MB", nullptr, nullptr},
     {"data2vec", "data2vec-audio-base-960h-q4_k.gguf",
-     "https://huggingface.co/cstr/data2vec-audio-960h-GGUF/resolve/main/data2vec-audio-base-960h-q4_k.gguf", "~60 MB"},
+     "https://huggingface.co/cstr/data2vec-audio-960h-GGUF/resolve/main/data2vec-audio-base-960h-q4_k.gguf", "~60 MB", nullptr, nullptr},
     {"vibevoice", "vibevoice-asr-q4_k.gguf",
-     "https://huggingface.co/cstr/vibevoice-asr-GGUF/resolve/main/vibevoice-asr-q4_k.gguf", "~4.5 GB"},
+     "https://huggingface.co/cstr/vibevoice-asr-GGUF/resolve/main/vibevoice-asr-q4_k.gguf", "~4.5 GB", nullptr, nullptr},
+    {"firered-asr", "firered-asr2-aed-q4_k.gguf",
+     "https://huggingface.co/cstr/firered-asr2-aed-GGUF/resolve/main/firered-asr2-aed-q4_k.gguf", "~918 MB", nullptr, nullptr},
+    {"kyutai-stt", "kyutai-stt-1b-q4_k.gguf",
+     "https://huggingface.co/cstr/kyutai-stt-1b-GGUF/resolve/main/kyutai-stt-1b-q4_k.gguf", "~636 MB", nullptr, nullptr},
+    {"glm-asr", "glm-asr-nano-q4_k.gguf",
+     "https://huggingface.co/cstr/glm-asr-nano-GGUF/resolve/main/glm-asr-nano-q4_k.gguf", "~1.2 GB", nullptr, nullptr},
+    {"moonshine", "moonshine-tiny-q4_k.gguf",
+     "https://huggingface.co/cstr/moonshine-tiny-GGUF/resolve/main/moonshine-tiny-q4_k.gguf", "~20 MB",
+     "tokenizer.bin", "https://huggingface.co/cstr/moonshine-tiny-GGUF/resolve/main/tokenizer.bin"},
+    {"fastconformer-ctc", "stt-en-fastconformer-ctc-large-q4_k.gguf",
+     "https://huggingface.co/cstr/stt-en-fastconformer-ctc-large-GGUF/resolve/main/stt-en-fastconformer-ctc-large-q4_k.gguf",
+     "~83 MB", nullptr, nullptr},
 };
+// clang-format on
 
 const Entry* find_by_backend(const std::string& backend) {
     for (const auto& e : k_registry)
@@ -140,8 +154,12 @@ std::string crispasr_resolve_model(const std::string& model_arg, const std::stri
                 fprintf(stderr, "crispasr: model '%s' not found locally — downloading %s (%s)\n", model_arg.c_str(),
                         match->filename, match->approx_size);
             }
-            return crispasr_cache::ensure_cached_file(match->filename, match->url, quiet, "crispasr",
+            std::string dl = crispasr_cache::ensure_cached_file(match->filename, match->url, quiet, "crispasr",
                                                       cache_dir_override);
+            if (!dl.empty() && match->companion_file && match->companion_url)
+                crispasr_cache::ensure_cached_file(match->companion_file, match->companion_url, quiet, "crispasr",
+                                                   cache_dir_override);
+            return dl;
         }
         // Either no registry match or caller didn't authorise download —
         // return the arg untouched so the caller can decide (prompt,
@@ -158,5 +176,12 @@ std::string crispasr_resolve_model(const std::string& model_arg, const std::stri
 
     if (!quiet)
         fprintf(stderr, "crispasr: resolving %s (%s) via -m auto\n", e->filename, e->approx_size);
-    return crispasr_cache::ensure_cached_file(e->filename, e->url, quiet, "crispasr", cache_dir_override);
+    std::string result = crispasr_cache::ensure_cached_file(e->filename, e->url, quiet, "crispasr", cache_dir_override);
+
+    // Download companion file (e.g. tokenizer.bin for moonshine) if needed
+    if (!result.empty() && e->companion_file && e->companion_url) {
+        crispasr_cache::ensure_cached_file(e->companion_file, e->companion_url, quiet, "crispasr", cache_dir_override);
+    }
+
+    return result;
 }
