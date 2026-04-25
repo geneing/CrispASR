@@ -28,7 +28,7 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 - ~~**Japanese punctuation split (#29)** — `--split-on-punct` now handles `。？！`~~ FIXED
 - **Moonshine streaming** — different architecture, needs new runtime
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
-- **VibeVoice-1.5B TTS** — text-to-speech module using σ-VAE decoder (`crispasr --tts "text" -o output.wav`)
+- **~~VibeVoice-1.5B TTS~~** — ~~text-to-speech module using σ-VAE decoder~~ IMPLEMENTED (pipeline functional, quality needs TTS-specific LM)
 - ~~**Japanese punctuation split (#29)**~~ — FIXED
 
 ---

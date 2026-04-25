@@ -44,7 +44,7 @@ public:
     const char* name() const override { return "vibevoice"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN;
+        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_TTS;
     }
 
     bool init(const whisper_params& p) override {
@@ -81,6 +81,22 @@ public:
         return out;
     }
 
+    std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
+        if (!voice_loaded_ && !params.tts_voice.empty()) {
+            if (vibevoice_load_voice(ctx_, params.tts_voice.c_str()) == 0)
+                voice_loaded_ = true;
+        }
+        if (!ctx_ || text.empty())
+            return {};
+        int n_samples = 0;
+        float* pcm = vibevoice_synthesize(ctx_, text.c_str(), &n_samples);
+        if (!pcm || n_samples <= 0)
+            return {};
+        std::vector<float> out(pcm, pcm + n_samples);
+        std::free(pcm);
+        return out;
+    }
+
     void shutdown() override {
         if (ctx_) {
             vibevoice_free(ctx_);
@@ -90,6 +106,7 @@ public:
 
 private:
     vibevoice_context* ctx_ = nullptr;
+    bool voice_loaded_ = false;
 };
 
 } // namespace

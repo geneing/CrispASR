@@ -362,6 +362,12 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             params.stream_continuous = true;
         } else if (arg == "--monitor") {
             params.stream_monitor = true;
+        } else if (arg == "--tts") {
+            params.tts_text = ARGV_NEXT;
+        } else if (arg == "--tts-output") {
+            params.tts_output = ARGV_NEXT;
+        } else if (arg == "--voice") {
+            params.tts_voice = ARGV_NEXT;
         } else if (arg == "--auto-download") {
             params.auto_download = true;
         } else if (arg == "--server") {
@@ -1358,7 +1364,7 @@ int main(int argc, char** argv) {
         return crispasr_run_server(params, params.server_host, params.server_port);
     }
 
-    if (params.fname_inp.empty() && !params.stream) {
+    if (params.fname_inp.empty() && !params.stream && params.tts_text.empty()) {
         fprintf(stderr, "error: no input files specified\n");
         whisper_print_usage(argc, argv, params);
         return 2;
@@ -1392,7 +1398,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (explicit_backend || model_is_auto || auto_detected_non_whisper || params.stream) {
+        if (explicit_backend || model_is_auto || auto_detected_non_whisper || params.stream || !params.tts_text.empty()) {
             const int rc = crispasr_run_backend(params);
 #if defined(_WIN32)
             // Bypass global C++ destructors (ggml Vulkan device teardown can

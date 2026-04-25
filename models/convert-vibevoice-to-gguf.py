@@ -80,11 +80,17 @@ def main():
     print(f"  acoustic vae_dim={vae_dim_acoustic}, semantic vae_dim={vae_dim_semantic}")
     print(f"  encoder: {n_stages} stages, depths={encoder_depths}, ratios={encoder_ratios}")
     print(f"  total downsample: {total_downsample}x, base_filters={n_filters}")
+    tts_n_layers = cfg.get("tts_backbone_num_hidden_layers", 0)
+
+    actual_base_layers = n_lm_layers  # will be corrected after scanning tensors
     print(f"  vocab={vocab_size}, rope_theta={rope_theta}, head_dim={head_dim}")
+    if tts_n_layers > 0:
+        print(f"  TTS LM: {tts_n_layers} layers (streaming model)")
 
     # Create GGUF
     model_name = os.path.basename(args.input.rstrip("/"))
-    writer = gguf.GGUFWriter(args.output, "vibevoice-asr")
+    arch = "vibevoice-tts" if tts_n_layers > 0 else "vibevoice-asr"
+    writer = gguf.GGUFWriter(args.output, arch)
     writer.add_name(model_name)
 
     # Hyperparameters
@@ -104,6 +110,16 @@ def main():
     writer.add_array("vibevoice.encoder_ratios", encoder_ratios)
     writer.add_uint32("vibevoice.has_decoder", 1 if args.include_decoder else 0)
     writer.add_array("vibevoice.encoder_depths", encoder_depths)
+
+    # TTS-specific metadata (VibeVoice-Realtime streaming model)
+    tts_n_layers = cfg.get("tts_backbone_num_hidden_layers", 0)
+    writer.add_uint32("vibevoice.tts_n_layers", tts_n_layers)
+    diff_cfg = cfg.get("diffusion_head_config", {})
+    if diff_cfg:
+        writer.add_string("vibevoice.prediction_type", diff_cfg.get("prediction_type", "v_prediction"))
+        writer.add_string("vibevoice.beta_schedule", diff_cfg.get("ddpm_beta_schedule", "cosine"))
+        writer.add_uint32("vibevoice.ddpm_num_steps", diff_cfg.get("ddpm_num_steps", 1000))
+        writer.add_uint32("vibevoice.ddpm_inference_steps", diff_cfg.get("ddpm_num_inference_steps", 20))
 
     # Embed Qwen2 vocabulary for token ID → string decoding.
     # The VibeVoice snapshot itself does not ship tokenizer files; the
@@ -140,6 +156,8 @@ def main():
         # Strip leading "model." prefix only (not "model." inside "language_model.")
         if name.startswith("model."):
             name = name[len("model."):]
+        # tts_eos_classifier is at top level (no model. prefix)
+        name = name.replace("tts_eos_classifier.", "tts_eos.")
         name = name.replace("acoustic_tokenizer.encoder.", "at_enc.")
         name = name.replace("acoustic_tokenizer.decoder.", "at_dec.")
         name = name.replace("semantic_tokenizer.encoder.", "st_enc.")
@@ -171,10 +189,31 @@ def main():
         name = name.replace("noisy_images_proj.", "noisy_proj.")
         name = name.replace("final_layer.", "final.")
         name = name.replace("cond_proj.", "cond.")
+        name = name.replace("tts_language_model.", "tts_lm.")
+        name = name.replace("tts_input_types.", "tts_types.")
         return name
 
-    # Load and write tensors
+    # Pre-scan: detect actual base LM layer count (Realtime model has 4, not 24)
     shard_files = sorted([f for f in os.listdir(model_dir) if f.endswith(".safetensors")])
+    detected_base_layers = set()
+    for shard in shard_files:
+        path = os.path.join(model_dir, shard)
+        with safe_open(path, framework="pt") as f:
+            for name in f.keys():
+                if "language_model.layers." in name and "tts_" not in name:
+                    try:
+                        layer = int(name.split("language_model.layers.")[1].split(".")[0])
+                        detected_base_layers.add(layer)
+                    except (ValueError, IndexError):
+                        pass
+    if detected_base_layers:
+        actual_base_layers = max(detected_base_layers) + 1
+        if actual_base_layers != n_lm_layers:
+            print(f"  NOTE: actual base LM layers = {actual_base_layers} (config says {n_lm_layers})")
+            n_lm_layers = actual_base_layers
+            writer.add_uint32("vibevoice.n_lm_layers", n_lm_layers)
+
+    # Load and write tensors
     tensor_count = 0
     skipped = 0
 

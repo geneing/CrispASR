@@ -82,6 +82,7 @@ enum crispasr_capability : uint32_t {
     CAP_AUTO_DOWNLOAD = 1u << 13,       // supports -m auto via HF hub
     CAP_PARALLEL_PROCESSORS = 1u << 14, // whisper-style n_processors
     CAP_VAD_INTERNAL = 1u << 15,        // backend handles VAD internally (whisper)
+    CAP_TTS = 1u << 16,                 // text-to-speech synthesis
 };
 
 // ---------------------------------------------------------------------------
@@ -126,6 +127,13 @@ public:
             mono[(size_t)i] = 0.5f * (left_samples[i] + right_samples[i]);
         }
         return transcribe(mono.data(), n_samples_per_channel, t_offset_cs, params);
+    }
+
+    // TTS: synthesize speech from text. Returns 24 kHz mono PCM samples.
+    // Default returns empty (not supported). Only backends with CAP_TTS override.
+    virtual std::vector<float> synthesize(const std::string& text, const whisper_params& /*params*/) {
+        (void)text;
+        return {};
     }
 
     // Release all resources.

@@ -209,4 +209,10 @@ struct whisper_params {
     // Default (empty): platform default (~/.cache/crispasr on POSIX,
     // %USERPROFILE%/.cache/crispasr on Windows). Set via --cache-dir.
     std::string cache_dir;
+
+    // TTS mode: synthesize speech from text (vibevoice backend only).
+    // --tts "text" -m vibevoice-tts.gguf --voice voice.gguf -o output.wav
+    std::string tts_text;
+    std::string tts_output;     // output WAV file path (default: tts_output.wav)
+    std::string tts_voice;      // voice prompt GGUF path
 };

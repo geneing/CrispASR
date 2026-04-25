@@ -58,6 +58,17 @@ float* vibevoice_run_connector(struct vibevoice_context* ctx, const char* prefix
 float* vibevoice_encode_speech(struct vibevoice_context* ctx, const float* samples, int n_samples, int* n_frames,
                                int* d_lm);
 
+// ── TTS API (requires GGUF converted with --include-decoder) ─────────────────
+
+// Synthesize speech from text. Returns malloc'd 24 kHz mono PCM float array.
+// n_samples is set to the number of output samples. Caller frees with free().
+// Returns NULL if the model lacks decoder tensors (vibevoice.has_decoder=0).
+float* vibevoice_synthesize(struct vibevoice_context* ctx, const char* text, int* out_n_samples);
+
+// Load a voice prompt GGUF for TTS. Returns 0 on success.
+// The voice prompt pre-fills KV caches with speaker identity.
+int vibevoice_load_voice(struct vibevoice_context* ctx, const char* voice_path);
+
 #ifdef __cplusplus
 }
 #endif

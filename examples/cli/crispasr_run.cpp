@@ -613,6 +613,64 @@ int crispasr_run_backend(const whisper_params& params_in) {
         fprintf(stderr, "crispasr[verbose]: backend '%s' initialised OK\n", backend_name.c_str());
     }
 
+    // ---- TTS mode: synthesize speech from text ----
+    if (!params.tts_text.empty()) {
+        if (!(backend->capabilities() & CAP_TTS)) {
+            fprintf(stderr, "crispasr: error: backend '%s' does not support TTS\n", backend_name.c_str());
+            return 14;
+        }
+
+        auto audio = backend->synthesize(params.tts_text, params);
+        if (audio.empty()) {
+            fprintf(stderr, "crispasr: error: TTS synthesis failed\n");
+            return 15;
+        }
+
+        // Write output WAV (24 kHz mono)
+        std::string out_path = params.tts_output.empty() ? "tts_output.wav" : params.tts_output;
+        FILE* fout = fopen(out_path.c_str(), "wb");
+        if (!fout) {
+            fprintf(stderr, "crispasr: error: cannot write '%s'\n", out_path.c_str());
+            return 16;
+        }
+        // WAV header: 24 kHz, mono, 16-bit PCM
+        int32_t sr = 24000;
+        int16_t channels = 1;
+        int16_t bits = 16;
+        int32_t data_size = (int32_t)audio.size() * 2;
+        int32_t file_size = 36 + data_size;
+        fwrite("RIFF", 1, 4, fout);
+        fwrite(&file_size, 4, 1, fout);
+        fwrite("WAVEfmt ", 1, 8, fout);
+        int32_t fmt_size = 16;
+        fwrite(&fmt_size, 4, 1, fout);
+        int16_t fmt_tag = 1; // PCM
+        fwrite(&fmt_tag, 2, 1, fout);
+        fwrite(&channels, 2, 1, fout);
+        fwrite(&sr, 4, 1, fout);
+        int32_t byte_rate = sr * channels * (bits / 8);
+        fwrite(&byte_rate, 4, 1, fout);
+        int16_t block_align = channels * (bits / 8);
+        fwrite(&block_align, 2, 1, fout);
+        fwrite(&bits, 2, 1, fout);
+        fwrite("data", 1, 4, fout);
+        fwrite(&data_size, 4, 1, fout);
+        // Convert float → int16
+        for (size_t i = 0; i < audio.size(); i++) {
+            float s = audio[i];
+            if (s > 1.0f) s = 1.0f;
+            if (s < -1.0f) s = -1.0f;
+            int16_t v = (int16_t)(s * 32767.0f);
+            fwrite(&v, 2, 1, fout);
+        }
+        fclose(fout);
+
+        if (!params.no_prints)
+            fprintf(stderr, "crispasr: TTS output written to '%s' (%zu samples, %.2f sec)\n", out_path.c_str(),
+                    audio.size(), audio.size() / 24000.0);
+        return 0;
+    }
+
     // Optional punctuation restoration post-processor.
     fireredpunc_context* punc_ctx = nullptr;
     if (!params.punc_model.empty()) {

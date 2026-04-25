@@ -195,7 +195,8 @@ No response. HF model card has no license field.
 ### Other
 
 - **OmniASR-LLM beam search** — beam=2+ with N hypothesis KV caches
-- **TTS module** — VibeVoice-1.5B σ-VAE decoder for text-to-speech
+- ~~**TTS module** — VibeVoice-1.5B σ-VAE decoder for text-to-speech~~ **DONE** (pipeline functional: prediction head + DDIM + σ-VAE decoder; quality limited by using ASR LM conditioning instead of TTS-specific LM)
+- **TTS quality improvement** — need VibeVoice TTS-specific LM weights + autoregressive frame generation for production-quality speech
 - **ggml_conv_1d_dw F16 im2col fix** — CPU depthwise conv without im2col for VibeVoice precision
 
 ---

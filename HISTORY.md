@@ -359,3 +359,25 @@ Moved here once shipped. See git history for code diffs.
 - GHCR publishing (main, cuda, vulkan, intel, musa)
 - passwd fix for ubuntu:24.04 images
 - Standardized run-server.sh entrypoint
+
+**VibeVoice TTS (April 2026):**
+- **#50** VibeVoice-1.5B TTS pipeline — full end-to-end text-to-speech synthesis
+  - GGUF converter `--include-decoder` flag: 276 σ-VAE decoder tensors + 26 prediction head tensors
+  - Flow matching prediction head: 4 AdaLN + SwiGLU layers with sinusoidal timestep embedding
+  - DDIM sampler: 20-step noise schedule (scaled linear beta, epsilon prediction)
+  - σ-VAE acoustic decoder: 7-stage transposed ConvNeXt (3200x upsample to 24kHz)
+  - ggml_conv_transpose_1d for upsampling, causal trimming
+  - Byte-level Qwen2 tokenizer (GPT-2 byte encoder) for text input
+  - LM conditioning via Qwen2 forward pass (full self-attention, no KV cache)
+  - CLI: `crispasr --tts "text" --tts-output output.wav -m vibevoice-tts.gguf`
+  - WAV writer: 24 kHz mono 16-bit PCM
+  - Known limitation: uses ASR LM hidden states for conditioning (TTS-specific LM not available)
+
+**VibeVoice TTS — Working (April 2026):**
+- **16 bugs found and fixed** via stage-by-stage diff methodology
+- **ASR round-trip verified**: "Hello, how are you today?" → parakeet: "Hello, hello, how are you today?"
+- **Architecture**: Base LM (4L) → TTS LM (20L) → DPM-Solver++ → σ-VAE decoder → 24kHz audio
+- **Voice prompts**: pre-computed KV caches from .pt files (Emma, Carter, etc.)
+- **Key bug**: missing SiLU in AdaLN modulation (prediction head diverged without it)
+- **CLI**: `crispasr --tts "text" --voice voice.gguf -m vibevoice-realtime.gguf`
+- **Models**: VibeVoice-Realtime-0.5B (2.04 GB), voice prompts (2.7 MB each)
