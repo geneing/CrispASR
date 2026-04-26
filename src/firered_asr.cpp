@@ -1718,6 +1718,21 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         read_f32_vec(m.dec.norm_out_b, norm_b);
         read_f32_vec(m.dec.prj_w, prj_w); // [odim, d]
 
+        if (ctx->params.verbosity >= 2) {
+            // Dump first values of key decoder tensors to verify GPU→CPU dequantization
+            auto dump = [](const char* name, const std::vector<float>& v, int n) {
+                fprintf(stderr, "  %s[0..%d]: [", name, n-1);
+                for (int i = 0; i < n && i < (int)v.size(); i++)
+                    fprintf(stderr, "%s%.4f", i?",":"", v[i]);
+                fprintf(stderr, "] (total %zu)\n", v.size());
+            };
+            dump("emb_w", emb_w, 8);
+            dump("pe_dec", pe_dec, 8);
+            dump("norm_w", norm_w, 8);
+            dump("norm_b", norm_b, 8);
+            dump("prj_w", prj_w, 8);
+        }
+
         float scale = sqrtf((float)hp.d_model);
         // For LID models (odim <= 256, small vocab), only 1 decode step needed —
         // the first token after SOS is the language. Full ASR needs longer sequences.
@@ -1973,6 +1988,12 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         int64_t t_dequant = ggml_time_us() - t_dequant0;
                         fprintf(stderr, "firered_asr: decoder weights dequantized in %.1fms\n", t_dequant / 1e3);
                     }
+                    if (ctx->params.verbosity >= 2) {
+                        auto& c0 = dec_cache[0];
+                        fprintf(stderr, "  dec.0 sattn_w_qs[0..7]: [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                                c0.sattn_w_qs[0], c0.sattn_w_qs[1], c0.sattn_w_qs[2], c0.sattn_w_qs[3],
+                                c0.sattn_w_qs[4], c0.sattn_w_qs[5], c0.sattn_w_qs[6], c0.sattn_w_qs[7]);
+                    }
                 }
 
                 auto& beam = beams[0];
@@ -1984,6 +2005,13 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                 std::vector<float> x(d);
                 for (int i = 0; i < d; i++) {
                     x[i] = emb_w[cur_token * d + i] * scale;
+                }
+                if (ctx->params.verbosity >= 2 && step < 2) {
+                    fprintf(stderr, "  step%d: token=%d(sos=%d,eos=%d), x_emb[0..7]=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                            step, cur_token, hp.sos_id, hp.eos_id,
+                            x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]);
+                }
+                for (int i = 0; i < d; i++) {
                     if (step < (int)(m.dec.pe->ne[1]))
                         x[i] += pe_dec[step * d + i];
                 }
