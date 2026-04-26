@@ -99,8 +99,20 @@ struct wav2vec2_model {
 
     ggml_context* ctx = nullptr;
     ggml_backend_buffer_t buf = nullptr; // backend buffer (core_gguf)
-    ggml_backend_t backend = nullptr;    // CPU backend that owns buf
+    ggml_backend_t backend = nullptr;    // backend that owns buf
     std::map<std::string, ggml_tensor*> tensors;
+
+    wav2vec2_model() = default;
+    wav2vec2_model(const wav2vec2_model&) = delete;
+    wav2vec2_model& operator=(const wav2vec2_model&) = delete;
+    // Free in dependency order: buf (depends on backend) → ctx → backend.
+    // Without this, on Metal the residency set survives past main() and
+    // ggml_metal's static teardown trips ggml_metal_rsets_free's assert.
+    ~wav2vec2_model() noexcept {
+        if (buf) ggml_backend_buffer_free(buf);
+        if (ctx) ggml_free(ctx);
+        if (backend) ggml_backend_free(backend);
+    }
 };
 
 // ---------------------------------------------------------------------------
