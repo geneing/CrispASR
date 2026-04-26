@@ -436,6 +436,75 @@ These are each preserved in `HISTORY.md` with full context. Summary form:
 
 ---
 
+## Weight placement: CPU weights + GPU encoder via scheduler
+
+### The problem: single-token decoder matmuls on GPU
+
+For autoregressive decoders (firered-asr, kyutai-stt, any AED model),
+each decode step runs ~128 small matmuls (1×1280 × 1280×1280) through
+16 transformer layers. Three approaches were tried on Kaggle T4:
+
+| Approach | Weights | Matmul method | ms/step | Why |
+|---|---|---|---|---|
+| `ggml_vecmat` + CUDA | GPU | Per-call ggml graph on CUDA | **2,600** | 128 CUDA context cycles × ~20ms overhead each |
+| F32 dequant + `cpu_matmul_bt` | GPU→CPU | Dequant Q4_K to F32, plain C matmul | **590** | No SIMD, no OMP on Kaggle |
+| **`ggml_vecmat` + CPU** | **CPU** | Per-call ggml graph on CPU | **60** | Native Q4_K SIMD (fused dequant+multiply) |
+
+The native ggml Q4_K kernel on CPU uses AVX2/NEON SIMD for fused
+dequant+dot-product, which is 9.3× faster than dequanting to F32 first
+and doing plain float matmul. And on CPU there's near-zero per-graph
+overhead (no CUDA launch, no D2H/H2D copies).
+
+### The fix: load weights to CPU, let scheduler copy to GPU for encoder
+
+```cpp
+// Load to CPU — decoder uses native Q4_K SIMD directly
+core_gguf::load_weights(path_model, ctx->backend_cpu, "firered_asr", wl);
+
+// Encoder uses ggml_backend_sched which auto-copies CPU weights to GPU
+// for mul_mat ops. Slightly slower than pre-loaded GPU weights but the
+// decoder speedup (60ms vs 2600ms per step) dominates.
+```
+
+The `ggml_backend_sched` handles the cross-device copy transparently:
+when building an encoder graph with `ggml_mul_mat(ctx, weight, input)`
+where `weight` is on CPU and the scheduler assigns the op to GPU, it
+inserts an automatic H2D copy. This adds ~1s total for the encoder
+(16 layers of weight copies), but the decoder saves 28×2540ms = 71s.
+
+### Applicability to other backends
+
+This pattern applies to ANY backend with an autoregressive decoder
+where single-token matmuls dominate:
+
+- **kyutai-stt** — 24-layer Mimi decoder, same AED structure
+- **omniasr-llm** — LLM decoder with per-token generation
+- **voxtral / voxtral4b / qwen3 / granite** — LLM backends with
+  autoregressive decode loops
+
+For LLM backends that already use `ggml_backend_sched` for the full
+decode graph (voxtral, qwen3, granite), the scheduler handles weight
+placement automatically. But if any backend creates per-call mini-graphs
+like `ggml_vecmat` did, switching to CPU weights + CPU backend for those
+calls gives the same 40× speedup.
+
+**Rule of thumb:** If your decode loop creates >10 tiny ggml graphs per
+step on a GPU backend, you're paying more in CUDA overhead than you gain
+from GPU compute. Either batch into fewer larger graphs, or use CPU
+weights with native quantized SIMD kernels.
+
+### GPU logit projection bug
+
+When the decoder runs on CPU but the logit projection uses a GPU graph
+(`project_decoder_logits`), the `ggml_backend_sched` state can become
+corrupted if other operations (like decoder weight dequantization) reset
+the scheduler between graph builds. Symptom: logits are wrong, EOS is
+never generated, decoder runs to max_len. Fix: use CPU for the logit
+projection too when decoder weights are on CPU. The Q4_K native kernel
+handles the 1280×8667 projection in ~0.4ms on CPU.
+
+---
+
 ## Quantization
 
 ### Small models with conv-heavy architectures resist quantization
@@ -633,6 +702,7 @@ GPU-specific: batched encoder (5x) and speculative decoding (2-4x).
 - Realtime speed reporting per file
 - All model weights loaded to GPU when ggml_backend_init_best() picks
   a GPU backend (already built into core_gguf::load_weights)
+- FireRed decoder: weights on CPU for native Q4_K SIMD (see below)
 
 **Key discovery:** `ggml_backend_sched_set_tensor_backend()` prevents
 the scheduler from reallocating external weight tensors. This was the
