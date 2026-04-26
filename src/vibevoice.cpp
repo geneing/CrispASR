@@ -289,15 +289,20 @@ static ggml_tensor* build_conv_rms_norm(ggml_context* ctx, ggml_tensor* x, ggml_
 // Causal Conv1d: zero-pad left by (K-1)*dilation - (stride-1), then conv1d.
 // Uses zero (constant) padding — config pad_mode='constant'.
 // Input/output in [C, T] format (channels-first, like PyTorch).
-// Uses ggml_conv_1d_cf to avoid transpose overhead.
+//
+// Uses ggml_conv_1d (with transpose) — this works on ALL backends including
+// Metal/CUDA/Vulkan via im2col. The conv_1d_cf direct kernel is CPU-only
+// and saves ~2 transposes per call, but im2col+transpose is fast on GPU.
 static ggml_tensor* build_causal_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int stride) {
     int K = (int)w->ne[0];
     int dilation = 1;
     int pad_left = (K - 1) * dilation - (stride - 1); // VibeVoice/EnCodec convention
     if (pad_left < 0)
         pad_left = 0;
-    int T_in = (int)x->ne[1]; // x is [C, T]: ne[0]=C, ne[1]=T
-    // Compute extra right padding for stride alignment (same as get_extra_padding_for_conv1d)
+    // x is [C, T], transpose to [T, C] for ggml_conv_1d
+    x = ggml_cont(ctx, ggml_transpose(ctx, x)); // [T, C]
+    int T_in = (int)x->ne[0];
+    // Compute extra right padding for stride alignment
     int pad_right = 0;
     if (stride > 1) {
         double n_frames = (double)(T_in - K + pad_left) / stride + 1.0;
@@ -306,34 +311,34 @@ static ggml_tensor* build_causal_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_
         if (pad_right < 0)
             pad_right = 0;
     }
-    // Pad along T (ne[1]) in channels-first format — no transpose needed
     if (pad_left > 0 || pad_right > 0)
-        x = ggml_pad_ext(ctx, x, 0, 0, pad_left, pad_right, 0, 0, 0, 0);
-    // conv_1d_cf: [K, C_in, C_out] × [C_in, T_padded] → [C_out, T_out]
-    x = ggml_conv_1d_cf(ctx, w, x, stride, 0, dilation);
-    // Flatten to 2D if needed (conv_1d_cf returns [C_out, T_out, 1, 1])
-    if (ggml_n_dims(x) > 2)
-        x = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1]);
-    if (b)
-        x = ggml_add(ctx, x, b); // [C_out] + [C_out, T_out] broadcasts over T
-    return x;
+        x = ggml_pad_ext(ctx, x, pad_left, pad_right, 0, 0, 0, 0, 0, 0);
+    x = ggml_conv_1d(ctx, w, x, stride, 0, dilation);
+    // conv_1d output: [T_out, C_out] → transpose to [C_out, T_out]
+    if (b) {
+        ggml_tensor* xt = ggml_cont(ctx, ggml_transpose(ctx, x)); // [C_out, T_out]
+        xt = ggml_add(ctx, xt, b);
+        return xt;
+    }
+    return ggml_cont(ctx, ggml_transpose(ctx, x));
 }
 
-// Causal depthwise Conv1d using ggml_conv_1d_dw_cf (channels-first, F32).
-// No transpose overhead, no F16 im2col precision loss.
+// Causal depthwise Conv1d using ggml_conv_1d_dw (im2col, works on ALL backends).
 // Input/output in [C, T] format.
+// Uses transpose + ggml_conv_1d_dw + transpose to stay GPU-compatible.
 static ggml_tensor* build_causal_dw_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b) {
     int K = (int)w->ne[0];
     int pad_left = K - 1;
 
-    // Pad along T (ne[1]) in channels-first format — no transpose needed
+    // Transpose [C, T] → [T, C] for ggml_conv_1d_dw
+    x = ggml_cont(ctx, ggml_transpose(ctx, x));
     if (pad_left > 0)
-        x = ggml_pad_ext(ctx, x, 0, 0, pad_left, 0, 0, 0, 0, 0);
-    // conv_1d_dw_cf: [K, 1, C] × [C, T_padded] → [C, T_out] (direct F32)
-    x = ggml_conv_1d_dw_cf(ctx, w, x, 1, 0, 1);
-    // Flatten to 2D if needed
+        x = ggml_pad_ext(ctx, x, pad_left, 0, 0, 0, 0, 0, 0, 0);
+    x = ggml_conv_1d_dw(ctx, w, x, 1, 0, 1);
+    // conv_1d_dw returns 3D+ → flatten then transpose back to [C, T]
     if (ggml_n_dims(x) > 2)
-        x = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1]);
+        x = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1] * x->ne[2]);
+    x = ggml_cont(ctx, ggml_transpose(ctx, x));
     if (b)
         x = ggml_add(ctx, x, b); // [C] + [C, T] broadcasts
     return x;
