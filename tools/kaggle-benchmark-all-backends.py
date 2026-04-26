@@ -52,22 +52,22 @@ JFK_REF = "and so my fellow americans ask not what your country can do for you a
 # All backends to test with their auto-download models
 BACKENDS = [
     # (backend, display_name, timeout_seconds, notes)
-    ("whisper",           "Whisper (base)",         60,  "ggml-base.bin"),
-    ("parakeet",          "Parakeet TDT 0.6B",      60,  "Q4_K"),
-    ("moonshine",         "Moonshine Tiny",          30,  "Q4_K, 27M params"),
-    ("wav2vec2",          "Wav2Vec2 XLSR-EN",        60,  "Q4_K, 300M params"),
-    ("fastconformer-ctc", "FastConformer CTC Large", 30,  "Q4_K, 120M params"),
-    ("data2vec",          "Data2Vec Base",            30,  "Q4_K, 95M params"),
-    ("hubert",            "HuBERT Large",             60,  "Q4_K, 300M params"),
-    ("canary",            "Canary 1B",               120, "Q4_K, 1B params"),
-    ("cohere",            "Cohere Transcribe",       120, "Q4_K, 2B params"),
-    ("qwen3",             "Qwen3 ASR 0.6B",          60,  "Q4_K"),
-    ("omniasr",           "OmniASR CTC 1B v2",      120, "Q4_K, 975M params"),
-    ("omniasr-llm",       "OmniASR LLM 300M",       120, "Q4_K, 300M+1.3B params"),
-    ("glm-asr",           "GLM ASR Nano",            180, "Q4_K, 1.3B params"),
-    ("firered-asr",       "FireRed ASR2 AED",        600, "Q4_K, 900M params"),
-    ("kyutai-stt",        "Kyutai STT 1B",           120, "Q4_K, 1B params"),
-    ("vibevoice",         "VibeVoice ASR",           180, "Q4_K, 4.5B params"),
+    ("firered-asr",       "FireRed ASR2 AED",         90, "Q4_K, 900M params"),
+    ("whisper",           "Whisper (base)",           60, "ggml-base.bin"),
+    ("parakeet",          "Parakeet TDT 0.6B",       60, "Q4_K"),
+    ("moonshine",         "Moonshine Tiny",           30, "Q4_K, 27M params"),
+    ("wav2vec2",          "Wav2Vec2 XLSR-EN",         60, "Q4_K, 300M params"),
+    ("fastconformer-ctc", "FastConformer CTC Large",  30, "Q4_K, 120M params"),
+    ("data2vec",          "Data2Vec Base",             30, "Q4_K, 95M params"),
+    ("hubert",            "HuBERT Large",              60, "Q4_K, 300M params"),
+    ("canary",            "Canary 1B",                120, "Q4_K, 1B params"),
+    ("cohere",            "Cohere Transcribe",        120, "Q4_K, 2B params"),
+    ("qwen3",             "Qwen3 ASR 0.6B",           60, "Q4_K"),
+    ("omniasr",           "OmniASR CTC 1B v2",       120, "Q4_K, 975M params"),
+    ("omniasr-llm",       "OmniASR LLM 300M",        120, "Q4_K, 300M+1.3B params"),
+    ("glm-asr",           "GLM ASR Nano",             90, "Q4_K, 1.3B params"),
+    ("kyutai-stt",        "Kyutai STT 1B",            90, "Q4_K, 1B params"),
+    ("vibevoice",         "VibeVoice ASR",             90, "Q4_K, 4.5B params"),
 ]
 
 # Slow / large backends (only test if BENCHMARK_SLOW=1)
@@ -90,9 +90,40 @@ print("✓ Dependencies installed")
 # ── Clone and build CrispASR ───────────────────────────────────────────────
 CRISPASR_DIR = f"{WORK}/CrispASR"
 
-def run(cmd, timeout=600):
-    """Run shell command, return (success, stdout, stderr, elapsed)."""
+def run(cmd, timeout=600, stream_stderr=False):
+    """Run shell command, return (success, stdout, stderr, elapsed).
+    If stream_stderr=True, print stderr lines in real-time (for debugging hangs).
+    """
     t0 = time.time()
+    if stream_stderr:
+        try:
+            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+            stderr_lines = []
+            import select
+            while True:
+                elapsed_so_far = time.time() - t0
+                if elapsed_so_far > timeout:
+                    proc.kill()
+                    return False, "", "TIMEOUT", elapsed_so_far
+                # Read stderr line by line in real-time
+                ready, _, _ = select.select([proc.stderr], [], [], 1.0)
+                if ready:
+                    line = proc.stderr.readline()
+                    if line:
+                        stderr_lines.append(line)
+                        print(f"    [live] {line.rstrip()}", flush=True)
+                if proc.poll() is not None:
+                    # Process finished — drain remaining
+                    for line in proc.stderr:
+                        stderr_lines.append(line)
+                        print(f"    [live] {line.rstrip()}", flush=True)
+                    break
+            stdout = proc.stdout.read()
+            elapsed = time.time() - t0
+            return proc.returncode == 0, stdout, "".join(stderr_lines), elapsed
+        except Exception:
+            return False, "", "TIMEOUT", time.time() - t0
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                            timeout=timeout)
@@ -331,10 +362,11 @@ def benchmark_backend(backend, display_name, timeout, notes):
     result["download_s"] = round(dl_time, 1)
 
     # Run inference — model is now cached in ~/.cache/crispasr
-    cmd = (f"CRISPASR_VERBOSE=1 {CRISPASR} --backend {backend} -m auto --auto-download "
+    # Stream stderr in real-time for all backends to diagnose hangs
+    cmd = (f"CRISPASR_VERBOSE=1 FIRERED_BENCH=1 {CRISPASR} --backend {backend} -m auto --auto-download "
            f"-f {JFK_WAV} --no-prints -v")
     t0 = time.time()
-    ok, stdout, stderr, elapsed = run(cmd, timeout=timeout)
+    ok, stdout, stderr, elapsed = run(cmd, timeout=timeout, stream_stderr=True)
     result["wall_s"] = round(elapsed, 2)
 
     # Parse crispasr's own timing from stderr (excludes download)

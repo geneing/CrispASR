@@ -261,10 +261,17 @@ extern "C" struct firered_asr_context* firered_asr_init_from_file(const char* pa
     ctx->params = params;
     ctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
 
+    if (params.verbosity >= 1) {
+        fprintf(stderr, "firered_asr: init start (verbosity=%d, use_gpu=%d, threads=%d)\n",
+                params.verbosity, params.use_gpu, params.n_threads);
+    }
     ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();
+    if (params.verbosity >= 1)
+        fprintf(stderr, "firered_asr: backend ready (%s)\n",
+                ggml_backend_is_cpu(ctx->backend) ? "CPU" : "GPU");
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
     if (ggml_backend_is_cpu(ctx->backend))
         ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
@@ -315,6 +322,9 @@ extern "C" struct firered_asr_context* firered_asr_init_from_file(const char* pa
     }
 
     // ---- pass 2: load tensor data ----
+    if (params.verbosity >= 1)
+        fprintf(stderr, "firered_asr: loading weights to %s...\n",
+                ggml_backend_is_cpu(ctx->backend) ? "CPU" : "GPU");
     core_gguf::WeightLoad wl;
     if (!core_gguf::load_weights(path_model, ctx->backend, "firered_asr", wl)) {
         fprintf(stderr, "firered_asr: failed to load weights from '%s'\n", path_model);
@@ -1909,6 +1919,11 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         int hd_dec = d / nh_dec;
         const float inv_sqrt_hd_dec = 1.0f / sqrtf((float)hd_dec);
 
+        if (ctx->params.verbosity >= 1)
+            fprintf(stderr, "firered_asr: decoder starting (max_len=%d, beam=%d, layers=%d)\n",
+                    max_len, beam_size_effective, hp.n_layers_dec);
+        int64_t t_dec0 = ggml_time_us();
+
         for (int step = 0; step < max_len; step++) {
             // Check if all beams finished
             bool all_done = true;
@@ -1919,6 +1934,12 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                 }
             if (all_done)
                 break;
+
+            if (ctx->params.verbosity >= 2 || (getenv("FIRERED_BENCH") && (step % 20 == 0 || step < 3))) {
+                int64_t t_now = ggml_time_us();
+                fprintf(stderr, "firered_asr: decode step %d/%d (%.1fms elapsed)\n",
+                        step, max_len, (t_now - t_dec0) / 1e3);
+            }
 
             if (beam_size == 1) {
                 auto& beam = beams[0];
@@ -2347,8 +2368,12 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
             }
         }
 
-        if (ctx->params.verbosity >= 1)
-            fprintf(stderr, "firered_asr: decoder produced %d tokens\n", (int)tokens.size() - 1);
+        if (ctx->params.verbosity >= 1) {
+            int64_t t_dec1 = ggml_time_us();
+            fprintf(stderr, "firered_asr: decoder produced %d tokens in %.1fms (%.1fms/token)\n",
+                    (int)tokens.size() - 1, (t_dec1 - t_dec0) / 1e3,
+                    tokens.size() > 1 ? (t_dec1 - t_dec0) / 1e3 / (tokens.size() - 1) : 0);
+        }
 
         if (!result.empty()) {
             while (!result.empty() && result.front() == ' ')
