@@ -117,32 +117,38 @@ if os.path.isdir(BUILD_DIR):
     shutil.rmtree(BUILD_DIR, ignore_errors=True)
 os.makedirs(BUILD_DIR, exist_ok=True)
 
+# Install ninja for faster builds (2-3x faster than make)
+subprocess.run("apt-get install -y ninja-build 2>/dev/null || pip install -q ninja",
+               shell=True, capture_output=True)
+has_ninja = shutil.which("ninja") is not None
+generator = ["-G", "Ninja"] if has_ninja else []
+
+# Common cmake flags (match Docker/dev-build.sh patterns)
+common_flags = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DWHISPER_BUILD_TESTS=OFF",  # skip test binaries — saves ~30% build time
+]
+
 cmake_ok = False
 if has_gpu:
-    # Try CUDA build — may fail on some Kaggle environments (missing cuda_driver target).
-    # Workaround: create a stub libcuda.so if missing (Kaggle has the runtime but not driver stubs).
-    cuda_stub = "/usr/local/cuda/lib64/stubs/libcuda.so"
-    if not os.path.exists(cuda_stub):
-        os.makedirs(os.path.dirname(cuda_stub), exist_ok=True)
-        # Create minimal stub
-        subprocess.run(f"echo 'INPUT(-lcuda)' | sudo tee {cuda_stub}", shell=True,
-                       capture_output=True)
+    # CUDA build — use LIBRARY_PATH for stubs (same as Docker) + NO_VMM fallback
+    cuda_stubs = "/usr/local/cuda/lib64/stubs"
+    if os.path.isdir(cuda_stubs):
+        os.environ["LIBRARY_PATH"] = f"{cuda_stubs}:{os.environ.get('LIBRARY_PATH', '')}"
 
     print("GPU: CUDA detected, attempting CUDA build...")
-    # GGML_CUDA_NO_VMM=ON avoids linking CUDA::cuda_driver (libcuda.so),
-    # which is missing on Kaggle (driver is loaded at runtime, not via stubs).
     r = subprocess.run(
-        f"cmake -S {CRISPASR_DIR} -B {BUILD_DIR} -DCMAKE_BUILD_TYPE=Release "
-        f"-DGGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON "
-        f"-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc",
-        shell=True, capture_output=True, text=True
+        ["cmake", "-S", CRISPASR_DIR, "-B", BUILD_DIR] + generator + common_flags + [
+            "-DGGML_CUDA=ON", "-DGGML_CUDA_NO_VMM=ON",
+            "-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc",
+        ],
+        capture_output=True, text=True
     )
     if r.returncode == 0:
         cmake_ok = True
-        print("✓ CUDA cmake configured")
+        print(f"✓ CUDA cmake configured ({'Ninja' if has_ninja else 'Make'})")
     else:
         print(f"⚠ CUDA cmake failed, falling back to CPU build")
-        # Clean build dir for retry
         shutil.rmtree(BUILD_DIR, ignore_errors=True)
         os.makedirs(BUILD_DIR, exist_ok=True)
         has_gpu = False
@@ -150,11 +156,15 @@ if has_gpu:
 if not cmake_ok:
     print("GPU: CPU-only build")
     subprocess.run(
-        f"cmake -S {CRISPASR_DIR} -B {BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF",
-        shell=True, check=True
+        ["cmake", "-S", CRISPASR_DIR, "-B", BUILD_DIR] + generator + common_flags + [
+            "-DGGML_CUDA=OFF",
+        ],
+        check=True
     )
 
-subprocess.run(f"cmake --build {BUILD_DIR} -j$(nproc)", shell=True, check=True)
+# Build only the main binary (not quantize, test tools, etc.)
+subprocess.run(f"cmake --build {BUILD_DIR} --target crispasr -j$(nproc)",
+               shell=True, check=True)
 
 assert os.path.isfile(CRISPASR), f"Build failed: {CRISPASR} not found"
 
