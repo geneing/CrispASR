@@ -72,8 +72,42 @@ static int is_sentence_end_at(const std::string& text, size_t i) {
     return 0;
 }
 
+// Check if position i is a CJK comma/clause marker (soft break point).
+// Returns byte length of the marker (3 for CJK), 0 if not.
+static int is_clause_break_at(const std::string& text, size_t i) {
+    if (i + 2 < text.size()) {
+        unsigned char b0 = (unsigned char)text[i];
+        unsigned char b1 = (unsigned char)text[i + 1];
+        unsigned char b2 = (unsigned char)text[i + 2];
+        // 、(E3 80 81) — Japanese/Chinese comma (読点)
+        if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x81)
+            return 3;
+        // ，(EF BC 8C) — full-width comma
+        if (b0 == 0xEF && b1 == 0xBC && b2 == 0x8C)
+            return 3;
+    }
+    return 0;
+}
+
+// Count UTF-8 codepoints in a string
+static int utf8_len(const std::string& s) {
+    int n = 0;
+    for (size_t i = 0; i < s.size(); ) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) i += 1;
+        else if (c < 0xE0) i += 2;
+        else if (c < 0xF0) i += 3;
+        else i += 4;
+        n++;
+    }
+    return n;
+}
+
 // Split a long text into sentences at punctuation boundaries.
 // Returns pairs of (sentence_text, approximate_fraction_through_segment).
+// For CJK text without sentence-ending punctuation (e.g. many ASR backends
+// don't produce 。for Japanese), falls back to splitting at clause breaks
+// (、，) or at ~42 CJK characters — a typical subtitle line length.
 static std::vector<std::pair<std::string, float>> split_text_at_punct(const std::string& text) {
     std::vector<std::pair<std::string, float>> sentences;
     size_t start = 0;
@@ -107,6 +141,62 @@ static std::vector<std::pair<std::string, float>> split_text_at_punct(const std:
         if (!remainder.empty())
             sentences.push_back({remainder, 1.0f});
     }
+
+    // Fallback for CJK text without sentence-ending punctuation (#29):
+    // If we got <=1 sentence and the text is long (>42 codepoints),
+    // re-split at clause breaks (、，) or at ~42 character boundaries.
+    if (sentences.size() <= 1 && utf8_len(text) > 42) {
+        sentences.clear();
+        start = 0;
+        int chars_since_split = 0;
+        size_t last_clause_break = std::string::npos;
+
+        for (size_t i = 0; i < len; ) {
+            int clen = is_clause_break_at(text, i);
+            if (clen > 0)
+                last_clause_break = i + clen;
+
+            unsigned char c = (unsigned char)text[i];
+            int cplen = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+            i += cplen;
+            chars_since_split++;
+
+            bool do_split = false;
+            size_t split_at = i;
+
+            if (chars_since_split >= 42) {
+                // Force split — prefer last clause break if available
+                if (last_clause_break != std::string::npos && last_clause_break > start)
+                    split_at = last_clause_break;
+                do_split = true;
+            } else if (clen > 0 && chars_since_split >= 20) {
+                // Split at clause break after ≥20 chars
+                split_at = last_clause_break;
+                do_split = true;
+            }
+
+            if (do_split && split_at > start) {
+                std::string chunk = text.substr(start, split_at - start);
+                size_t first = chunk.find_first_not_of(" \t");
+                if (first != std::string::npos)
+                    chunk = chunk.substr(first);
+                if (!chunk.empty())
+                    sentences.push_back({chunk, (float)split_at / (float)len});
+                start = split_at;
+                chars_since_split = 0;
+                last_clause_break = std::string::npos;
+            }
+        }
+        if (start < len) {
+            std::string remainder = text.substr(start);
+            size_t first = remainder.find_first_not_of(" \t");
+            if (first != std::string::npos)
+                remainder = remainder.substr(first);
+            if (!remainder.empty())
+                sentences.push_back({remainder, 1.0f});
+        }
+    }
+
     return sentences;
 }
 
