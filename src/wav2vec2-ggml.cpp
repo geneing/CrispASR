@@ -1170,7 +1170,9 @@ std::vector<float> wav2vec2_compute_logits_graph(const wav2vec2_model& m, const 
                     for (int t2 = 0; t2 < T; t2++) {
                         double sum2 = 0, sq2 = 0;
                         for (int h2 = 0; h2 < H; h2++) {
-                            float v2 = pos_out[h2 * T + t2]; sum2 += v2; sq2 += (double)v2 * v2;
+                            float v2 = pos_out[h2 * T + t2];
+                            sum2 += v2;
+                            sq2 += (double)v2 * v2;
                         }
                         float mean2 = (float)(sum2 / H), var2 = (float)(sq2 / H) - mean2 * mean2;
                         float inv2 = 1.0f / sqrtf(var2 + hp.layer_norm_eps);
@@ -1178,7 +1180,8 @@ std::vector<float> wav2vec2_compute_logits_graph(const wav2vec2_model& m, const 
                             pos_out[h2 * T + t2] = (pos_out[h2 * T + t2] - mean2) * inv2;
                     }
                 }
-                for (auto& v : pos_out) v = gelu(v);
+                for (auto& v : pos_out)
+                    v = gelu(v);
                 pos_cf = std::move(pos_out);
             }
 

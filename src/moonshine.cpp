@@ -355,7 +355,7 @@ static struct ggml_tensor* conv_1d_f32(struct ggml_context* ctx0,
 
     // result is [OC, N*OL] → need [OL, OC, N]
     // Transpose to [N*OL, OC] then reshape
-    result = ggml_cont(ctx0, ggml_transpose(ctx0, result)); // [N*OL, OC]
+    result = ggml_cont(ctx0, ggml_transpose(ctx0, result));                              // [N*OL, OC]
     result = ggml_reshape_3d(ctx0, result, im2col->ne[1], kernel->ne[2], im2col->ne[2]); // [OL, OC, N]
 
     return result;

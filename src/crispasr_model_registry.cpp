@@ -154,8 +154,8 @@ std::string crispasr_resolve_model(const std::string& model_arg, const std::stri
                 fprintf(stderr, "crispasr: model '%s' not found locally — downloading %s (%s)\n", model_arg.c_str(),
                         match->filename, match->approx_size);
             }
-            std::string dl = crispasr_cache::ensure_cached_file(match->filename, match->url, quiet, "crispasr",
-                                                      cache_dir_override);
+            std::string dl =
+                crispasr_cache::ensure_cached_file(match->filename, match->url, quiet, "crispasr", cache_dir_override);
             if (!dl.empty() && match->companion_file && match->companion_url)
                 crispasr_cache::ensure_cached_file(match->companion_file, match->companion_url, quiet, "crispasr",
                                                    cache_dir_override);

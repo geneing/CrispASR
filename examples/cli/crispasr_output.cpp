@@ -92,12 +92,16 @@ static int is_clause_break_at(const std::string& text, size_t i) {
 // Count UTF-8 codepoints in a string
 static int utf8_len(const std::string& s) {
     int n = 0;
-    for (size_t i = 0; i < s.size(); ) {
+    for (size_t i = 0; i < s.size();) {
         unsigned char c = (unsigned char)s[i];
-        if (c < 0x80) i += 1;
-        else if (c < 0xE0) i += 2;
-        else if (c < 0xF0) i += 3;
-        else i += 4;
+        if (c < 0x80)
+            i += 1;
+        else if (c < 0xE0)
+            i += 2;
+        else if (c < 0xF0)
+            i += 3;
+        else
+            i += 4;
         n++;
     }
     return n;
@@ -151,7 +155,7 @@ static std::vector<std::pair<std::string, float>> split_text_at_punct(const std:
         int chars_since_split = 0;
         size_t last_clause_break = std::string::npos;
 
-        for (size_t i = 0; i < len; ) {
+        for (size_t i = 0; i < len;) {
             int clen = is_clause_break_at(text, i);
             if (clen > 0)
                 last_clause_break = i + clen;

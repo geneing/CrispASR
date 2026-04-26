@@ -86,19 +86,19 @@ VibeVoice-7B is the **largest model** in Microsoft's VibeVoice family — a 9.3B
 - **50+ languages** with automatic language detection
 - **MIT licence**
 
-> **Note:** This is the ASR-only conversion. The VAE decoder (for TTS) is not included because conversion requires ≥32 GB RAM. TTS support is available via the smaller [VibeVoice-Realtime-0.5B](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF) and [VibeVoice-1.5B](https://huggingface.co/cstr/vibevoice-1.5b-GGUF) models.
+> **Update (April 2026):** Now includes both ASR (encoder + LM) and TTS (σ-VAE decoder + prediction head). TTS requires ≥Q4_K for good quality — Q3_K is too aggressive for the decoder. For faster/smaller TTS, use [VibeVoice-Realtime-0.5B](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF) or [VibeVoice-1.5B](https://huggingface.co/cstr/vibevoice-1.5b-GGUF).
 
 ## Files
 
 | File | Size | Notes |
 | --- | ---: | --- |
-| `vibevoice-7b-q3_k.gguf` | 4.5 GB | Q3_K — smallest, good for constrained environments |
-| `vibevoice-7b-q4_0.gguf` | 5.2 GB | Q4_0 — fast decode |
-| `vibevoice-7b-q4_k.gguf` | 5.6 GB | **Q4_K — recommended default** |
-| `vibevoice-7b-q5_k.gguf` | 6.3 GB | Q5_K — higher quality |
-| `vibevoice-7b-q6_k.gguf` | 7.2 GB | Q6_K — near-lossless |
-| `vibevoice-7b-q8_0.gguf` | 9.5 GB | Q8_0 — reference quality |
-| `vibevoice-7b-f16.gguf` | 16.8 GB | F16 — full precision |
+| `vibevoice-7b-q3_k.gguf` | 4.7 GB | Q3_K — ASR only (TTS quality too low) |
+| `vibevoice-7b-q4_0.gguf` | 5.6 GB | Q4_0 — fast decode |
+| `vibevoice-7b-q4_k.gguf` | 5.8 GB | **Q4_K — recommended default (ASR + TTS)** |
+| `vibevoice-7b-q5_k.gguf` | 6.8 GB | Q5_K — higher quality |
+| `vibevoice-7b-q6_k.gguf` | 7.9 GB | Q6_K — near-lossless |
+| `vibevoice-7b-q8_0.gguf` | 9.8 GB | Q8_0 — reference quality |
+| `vibevoice-7b-f16.gguf` | 17.4 GB | F16 — full precision |
 
 ## Quick Start
 
