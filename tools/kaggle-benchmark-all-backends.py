@@ -255,9 +255,8 @@ def benchmark_backend(backend, display_name, timeout, notes):
         "model_size_mb": None,
     }
 
-    # Run transcription. -v activates verbose logging on stderr (backend
-    # diagnostics, timing, GPU device info). --no-prints suppresses the
-    # normal progress output but keeps -v diagnostics.
+    # Run with verbose logging. The wall time includes download + load + inference.
+    # CrispASR's own stderr timing ("transcribed Xs in Ys") excludes download.
     cmd = (f"CRISPASR_VERBOSE=1 {CRISPASR} --backend {backend} -m auto --auto-download "
            f"-f {JFK_WAV} --no-prints -v")
     t0 = time.time()
