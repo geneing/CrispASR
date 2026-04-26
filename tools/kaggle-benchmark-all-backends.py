@@ -291,7 +291,9 @@ for backend, name, timeout, notes in BACKENDS:
     results.append(r)
 
 # Optionally run slow backends
-if os.environ.get("BENCHMARK_SLOW", "0") == "1":
+# Run slow backends if requested (voxtral 3B/4B, granite — need more time)
+BENCHMARK_SLOW = os.environ.get("BENCHMARK_SLOW", "1")  # ON by default on Kaggle
+if BENCHMARK_SLOW == "1":
     for backend, name, timeout, notes in SLOW_BACKENDS:
         r = benchmark_backend(backend, name, timeout, notes)
         results.append(r)
