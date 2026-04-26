@@ -255,7 +255,9 @@ def benchmark_backend(backend, display_name, timeout, notes):
     # Run transcription — stderr contains crispasr's own timing line:
     #   "crispasr: transcribed X.Xs audio in Y.Ys (Z.Zx realtime)"
     # This is pure inference time (excludes model download/load).
-    cmd = (f"{CRISPASR} --backend {backend} -m auto --auto-download "
+    # Enable verbose logging for all backends that support it.
+    env_prefix = "WAV2VEC2_VERBOSE=1 VIBEVOICE_BENCH=1 FIRERED_BENCH=1 OMNIASR_DUMP_DIR= "
+    cmd = (f"{env_prefix}{CRISPASR} --backend {backend} -m auto --auto-download "
            f"-f {JFK_WAV} --no-prints")
     t0 = time.time()
     ok, stdout, stderr, elapsed = run(cmd, timeout=timeout)
