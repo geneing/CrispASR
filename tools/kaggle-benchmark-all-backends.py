@@ -232,9 +232,9 @@ def benchmark_backend(backend, display_name, timeout, notes):
         "model_size_mb": None,
     }
 
-    # Step 1: Run transcription
+    # Step 1: Run transcription (capture stderr for diagnostics)
     cmd = (f"{CRISPASR} --backend {backend} -m auto --auto-download "
-           f"-f {JFK_WAV} --no-prints 2>/dev/null")
+           f"-f {JFK_WAV} --no-prints")
     t0 = time.time()
     ok, stdout, stderr, elapsed = run(cmd, timeout=timeout)
     result["elapsed_s"] = round(elapsed, 2)
@@ -243,6 +243,10 @@ def benchmark_backend(backend, display_name, timeout, notes):
     if not ok:
         result["status"] = "TIMEOUT" if "TIMEOUT" in stderr else "CRASH"
         print(f"  ✗ {result['status']} after {elapsed:.1f}s")
+        # Show last few lines of stderr for diagnostics
+        if stderr:
+            for line in stderr.strip().split("\n")[-3:]:
+                print(f"    stderr: {line[:120]}")
         # Still clean up any downloaded model to free disk
         _cleanup_cache(backend)
         return result
