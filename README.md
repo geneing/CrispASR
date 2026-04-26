@@ -66,6 +66,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 | **kyutai-stt** | [`kyutai/stt-1b-en_fr`](https://huggingface.co/kyutai/stt-1b-en_fr) | Mimi neural audio codec (SEANet + 8L transformer + RVQ) + 16L causal LM (SwiGLU, RMSNorm) | en, fr | MIT |
 | **firered-asr** | [`FireRedTeam/FireRedASR2-AED`](https://huggingface.co/FireRedTeam/FireRedASR2-AED) | Conformer encoder + CTC + beam search decoder; also LID (120 languages via FireRedLID GGUF) | Mandarin, English, 20+ Chinese dialects | Apache-2.0 |
 | **moonshine** | [`UsefulSensors/moonshine-{tiny,base}`](https://huggingface.co/cstr/moonshine-base-GGUF) | Conv stem + 6L transformer encoder + 6L decoder (288–416d, partial RoPE, SiLU); multilingual variants (ja, ko, zh, ar, vi, uk) | English + 6 langs | MIT |
+| **moonshine-streaming** | [`UsefulSensors/moonshine-streaming-{tiny,small,medium}`](https://huggingface.co/cstr/moonshine-streaming-tiny-GGUF) | Streaming ASR: raw-waveform frontend + sliding-window encoder + autoregressive decoder (34–245M, designed for edge/low-latency) | English | MIT |
 | **omniasr** | [`facebook/omniASR-CTC-{300M,1B}`](https://huggingface.co/cstr/omniASR-CTC-1B-GGUF) | wav2vec2-style CNN + 24–48L transformer + CTC head | **1600+** | Apache-2.0 |
 | **omniasr** | [`omniASR-LLM-300M-v2`](https://huggingface.co/cstr/omniasr-llm-300m-v2-GGUF) | Same encoder + 12L LLaMA decoder (SwiGLU, RoPE); autoregressive, best quality | **1600+** | Apache-2.0 |
 | **vibevoice** | [`microsoft/VibeVoice-ASR`](https://huggingface.co/cstr/vibevoice-asr-GGUF) | σ-VAE ConvNeXt encoders + Qwen2.5-7B decoder; timestamps, diarization, hotwords | 50+ | MIT |
@@ -1069,12 +1070,13 @@ Every `src/core/` migration commit includes a `md5sum`-level regression test aga
 | kyutai-stt | Mimi codec + causal LM | ✔ | ✔ | ✔ | CPU | gguf_loader |
 | firered-asr | Conformer + CTC + beam dec | ✔ | ✔ | ✔ | CPU | mel, gguf_loader |
 | moonshine | Conv + 6L enc-dec | ✔ | ✔ | ✔ | CPU | (vendored) |
+| moonshine-streaming | Sliding-window enc + dec | ✔ | ✔ | ✔ | CPU | (vendored) |
 | omniasr | wav2vec2 enc + CTC/LLM | ✔ | ✔ | CTC:— LLM:✔ | CPU | gguf_loader, kv_self_attn, swiglu |
 | vibevoice | σ-VAE + Qwen2 7B | ✔ | ✔ | ✔ | CUDA/Metal | gguf_loader |
 
 **Architecture families:**
 - **Feedforward CTC** (wav2vec2, omniasr-CTC, fc-ctc, firered-asr): No decoder, no KV cache. Fastest. No native punctuation.
-- **Encoder-decoder** (whisper, canary, cohere, moonshine): Cross-attention KV cache, autoregressive text decoder.
+- **Encoder-decoder** (whisper, canary, cohere, moonshine, moonshine-streaming): Cross-attention KV cache, autoregressive text decoder.
 - **Audio-LLM** (granite, voxtral, voxtral4b, qwen3, glm-asr, omniasr-LLM, vibevoice): Audio features injected into LLM embedding space, KV-cached autoregressive decoding.
 - **Transducer** (parakeet): LSTM predictor + joint network, frame-synchronous TDT decoding.
 - **Codec + LM** (kyutai-stt): Neural audio codec (RVQ) → token-based LM.
@@ -1269,7 +1271,7 @@ It is a model-agnostic tool that iterates through the GGUF tensor list and re-qu
 
 ## Branch state & roadmap
 
-**18 ASR backends** + 2 punctuation models + VAD/LID/diarization/alignment — all through a unified C-ABI with Python/Rust/Dart wrappers. See [PLAN.md](PLAN.md) for the roadmap, [HISTORY.md](HISTORY.md) for completed milestones, and [PERFORMANCE.md](PERFORMANCE.md) for benchmarks (moonshine 16.8x RT, parakeet 2.9x RT, wav2vec2 1.1x RT on CPU).
+**20 ASR backends** + 2 punctuation models + VAD/LID/diarization/alignment — all through a unified C-ABI with Python/Rust/Dart wrappers. See [PLAN.md](PLAN.md) for the roadmap, [HISTORY.md](HISTORY.md) for completed milestones, and [PERFORMANCE.md](PERFORMANCE.md) for benchmarks (moonshine 16.8x RT, parakeet 2.9x RT, wav2vec2 1.1x RT on CPU).
 
 ---
 
