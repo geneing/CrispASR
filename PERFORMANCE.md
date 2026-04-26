@@ -1,103 +1,185 @@
-# CrispASR — Performance Benchmarks
+# CrispASR — Performance benchmarks
 
-All benchmarks on jfk.wav, 4 threads, CPU-only (no GPU), Q4_K quant.
-Machine: x86_64, 7.6 GB RAM, clang-format 18, AVX2.
+Test audio: jfk.wav (11.0s), Q4_K quantization, greedy decode (`-bs 1`).
 
-Date: 2026-04-24
+---
 
-## Summary (11s audio)
+## Kaggle T4 GPU — 2026-04-26
 
-| # | Backend | Model | RT factor | Time | Notes |
-|---|---|---|---|---|---|
-| 1 | **moonshine** | moonshine-tiny | **16.8x** | 0.7s | Tiny (27M), English only |
-| 2 | **fc-ctc** | stt-en-fc-ctc-large | **9.4x** | 1.2s | NeMo CTC, English only |
-| 3 | **parakeet** | parakeet-tdt-0.6b-v3 | **2.9x** | 3.8s | TDT, 25 EU languages |
-| 4 | **canary** | canary-1b-v2 | **2.7x** | 4.0s | Seq2seq, 25 EU languages |
-| 5 | **data2vec** | data2vec-audio-base | **2.1x** | 5.2s | CTC, English only |
-| 6 | **qwen3** | Qwen3-ASR-0.6B | **1.7x** | 6.5s | LLM, 30+ languages |
-| 7 | **omniasr-300m** | omniASR-CTC-300M | **1.4x** | 7.7s | CTC, 1600+ languages |
-| 8 | **cohere** | cohere-transcribe | **1.4x** | 7.7s | Seq2seq, 13 languages |
-| 9 | **wav2vec2** | wav2vec2-large-xlsr | **1.1x** | 9.9s | CTC, per-model language |
-| 10 | **omniasr-1b** | omniASR-CTC-1B | **0.7x** | 15.7s | CTC, 1600+ languages |
-| 11 | **omniasr-llm** | omniASR-LLM-300M-v2 | **0.4x** | 29.2s | LLM, 1600+ languages |
-| 12 | **firered** | FireRedASR2-AED | **0.1x** | 123.0s | CPU decoder bottleneck |
+Platform: 2x Tesla T4 (15 GB VRAM each), 4 CPU threads, CUDA.
+Commit: `b9fd8eb`. **All 19 backends pass.**
 
-## Long audio scaling (55s = 5× the 11s clip)
+### By architecture
 
-| Backend | 11s | 55s | Scale | Notes |
+#### Encoder-CTC (non-autoregressive, single forward pass)
+
+| Backend | Params | Model MB | WER | RTx | Time | Notes |
+|---|---|---|---|---|---|---|
+| FastConformer CTC Large | 120M | 83 | 0.0% | **9.6x** | 1.1s | 18 FC layers |
+| OmniASR CTC 1B v2 | 975M | 551 | 4.5% | 7.4x | 1.5s | w2v-BERT enc, 276ms GPU |
+| Data2Vec Base | 95M | 78 | 0.0% | 5.3x | 2.1s | 12 layers, pos_conv 735ms |
+| Wav2Vec2 XLSR-EN | 300M | 212 | 0.0% | 3.6x | 3.1s | 24 layers, pos_conv 1.6s |
+| HuBERT Large | 300M | 212 | 0.0% | 3.6x | 3.1s | Same runtime as wav2vec2 |
+
+#### Encoder-TDT (non-autoregressive, transducer)
+
+| Backend | Params | Model MB | WER | RTx | Time | Notes |
+|---|---|---|---|---|---|---|
+| Parakeet TDT 0.6B | 600M | 466 | 0.0% | 5.6x | 2.0s | 24 FC layers + joint net |
+
+#### Encoder-Decoder / AED (autoregressive, attention-based)
+
+| Backend | Params | Model MB | WER | RTx | Time | Notes |
+|---|---|---|---|---|---|---|
+| Whisper (base) | 74M | 141 | 0.0% | **9.3x** | 1.2s | Full GPU (upstream) |
+| Moonshine Tiny | 27M | 20 | 9.1% | 6.7x | 1.6s | CPU-only, tiny |
+| Canary 1B | 1B | 672 | 0.0% | 6.2x | 1.8s | GPU enc+dec, 32+8 layers |
+| Cohere Transcribe | 2B | 1440 | 0.0% | 5.2x | 2.1s | GPU enc, AED dec |
+| Kyutai STT 1B | 1B | 636 | 4.5% | 1.4x | 7.7s | 24-layer Mimi decoder |
+| FireRed ASR2 AED | 900M | 918 | 0.0% | 0.6x | 19.0s | CPU Q4_K SIMD dec (60ms/step) |
+
+#### Encoder-LLM (autoregressive, language model decoder)
+
+| Backend | Params | Model MB | WER | RTx | Time | Notes |
+|---|---|---|---|---|---|---|
+| Qwen3 ASR 0.6B | 780M | 515 | 0.0% | 4.7x | 2.3s | 0.6B LLM |
+| GLM ASR Nano | 1.3B | 1262 | 0.0% | 4.6x | 2.4s | ~1B LLM |
+| Voxtral Mini 3B | 3B | 2530 | 0.0% | 2.4x | 4.7s | Mistral 3B LLM |
+| OmniASR LLM 300M | 1.6B | 1018 | 4.5% | 1.7x | 6.4s | LLaMA 1.3B dec |
+| Granite Speech 1B | 2.9B | 2805 | 0.0% | 1.7x | 6.4s | Granite LLM |
+| VibeVoice ASR | 4.5B | 4589 | 4.5% | 1.2x | 8.8s | ~4B LLM, JSON output |
+| Voxtral 4B Realtime | 4B | 2407 | 0.0% | 0.9x | 12.8s | Causal streaming arch |
+
+### Speed ranking
+
+| Rank | Backend | RTx | Time | Architecture |
 |---|---|---|---|---|
-| moonshine | 0.7s | 5.8s | 8.3x | Superlinear (decoder grows with output) |
-| fc-ctc | 1.2s | 5.2s | 4.3x | Sublinear (efficient encoder) |
-| parakeet | 3.8s | 18.2s | 4.8x | Near-linear |
-| canary | 4.0s | 20.7s | 5.2x | Near-linear |
-| data2vec | 5.2s | 25.9s | 5.0x | Linear |
-| qwen3 | 6.5s | 29.8s | 4.6x | Good |
-| wav2vec2 | 9.9s | 57.4s | 5.8x | Slight superlinear (pos_conv O(T)) |
-| omniasr-300m | 7.7s | 37.5s | 4.9x | Linear |
-| omniasr-1b | 15.7s | 80.8s | 5.1x | Linear |
-| cohere | 7.7s | 41.5s | 5.4x | Near-linear |
-| firered | 123s | **TIMEOUT** | — | CPU decoder, needs ggml graph |
+| 1 | FastConformer CTC | 9.6x | 1.1s | Encoder-CTC |
+| 2 | Whisper base | 9.3x | 1.2s | Encoder-Decoder |
+| 3 | OmniASR CTC 1B | 7.4x | 1.5s | Encoder-CTC |
+| 4 | Moonshine Tiny | 6.7x | 1.6s | Encoder-Decoder |
+| 5 | Canary 1B | 6.2x | 1.8s | Encoder-AED |
+| 6 | Parakeet TDT 0.6B | 5.6x | 2.0s | Encoder-TDT |
+| 7 | Data2Vec Base | 5.3x | 2.1s | Encoder-CTC |
+| 8 | Cohere Transcribe | 5.2x | 2.1s | Encoder-AED |
+| 9 | Qwen3 ASR 0.6B | 4.7x | 2.3s | Encoder-LLM |
+| 10 | GLM ASR Nano | 4.6x | 2.4s | Encoder-LLM |
+| 11 | Wav2Vec2 XLSR-EN | 3.6x | 3.1s | Encoder-CTC |
+| 12 | HuBERT Large | 3.6x | 3.1s | Encoder-CTC |
+| 13 | Voxtral Mini 3B | 2.4x | 4.7s | Encoder-LLM |
+| 14 | OmniASR LLM 300M | 1.7x | 6.4s | Encoder-LLM |
+| 15 | Granite Speech 1B | 1.7x | 6.4s | Encoder-LLM |
+| 16 | Kyutai STT 1B | 1.4x | 7.7s | Encoder-AED |
+| 17 | VibeVoice ASR | 1.2x | 8.8s | Encoder-LLM |
+| 18 | Voxtral 4B Realtime | 0.9x | 12.8s | Encoder-LLM |
+| 19 | FireRed ASR2 AED | 0.6x | 19.0s | Encoder-AED |
 
-Auto-chunking at 30s keeps all backends memory-bounded. No OOM on 55s.
+---
 
-## Per-phase breakdown (wav2vec2 family)
+## CPU-only VPS — 2026-04-24
+
+Platform: x86_64, 4 threads, 7.6 GB RAM, AVX2, no GPU.
+
+| Backend | RTx (CPU) | Time (CPU) | RTx (T4) | Speedup |
+|---|---|---|---|---|
+| FastConformer CTC | 9.4x | 1.2s | 9.6x | 1.1x |
+| Moonshine Tiny | 16.8x | 0.7s | 6.7x | 0.4x* |
+| Parakeet TDT 0.6B | 2.9x | 3.8s | 5.6x | 1.9x |
+| Canary 1B | 2.7x | 4.0s | 6.2x | 2.2x |
+| Data2Vec Base | 2.1x | 5.2s | 5.3x | 2.5x |
+| Qwen3 ASR 0.6B | 1.7x | 6.5s | 4.7x | 2.8x |
+| Wav2Vec2 XLSR-EN | 1.1x | 9.9s | 3.6x | 3.2x |
+| Cohere Transcribe | 1.4x | 7.7s | 5.2x | 3.7x |
+| FireRed ASR2 AED | 0.1x | 123s | 0.6x | 6.5x |
+
+*Moonshine runs CPU-only on both (tiny model, no GPU benefit).
+
+GPU acceleration is strongest for encoder-heavy models (2-6x). Decoder-bound
+models benefit less (FireRed decoder still runs on CPU even with GPU).
+
+---
+
+## Per-phase breakdowns
+
+### wav2vec2 family (Kaggle T4)
 
 | Model | CNN | Pos conv | Encoder | Total |
 |---|---|---|---|---|
-| wav2vec2-large (24L, d=1024) | 2.3s | 2.1s | 6.1s | 9.9s |
-| hubert-large (24L, d=1024) | 2.3s | 1.9s | 6.3s | 10.6s |
-| data2vec-base (12L, d=768) | 2.1s | 0.9s | 2.5s | 5.2s |
+| wav2vec2-large (24L) | 215ms | 1588ms | 127ms | 1941ms |
+| hubert-large (24L) | 227ms | 1595ms | 128ms | 1960ms |
+| data2vec-base (12L) | 221ms | 735ms | 57ms | 1023ms |
+
+**Bottleneck:** pos_conv (grouped conv1d on CPU) = 50-80% of total time.
+Encoder graph on GPU is only 57-128ms.
+
+### FireRed AED decoder (Kaggle T4)
+
+| Phase | Time | Notes |
+|---|---|---|
+| Fbank extraction | ~50ms | CPU |
+| Conv2d subsampling | ~100ms | CPU |
+| Hybrid encoder (16L) | ~17s | GPU matmuls + CPU attention, slow due to CPU weight copies |
+| K/V precompute | 433ms | GPU (scheduler auto-copies) |
+| Decoder (28 steps) | 1695ms | CPU Q4_K SIMD, 60.5ms/step |
+| **Total** | **19.0s** | Encoder dominates |
+
+### OmniASR (Kaggle T4)
+
+| Model | Encoder | Prefill | Decode | Total | RTx |
+|---|---|---|---|---|---|
+| CTC 1B v2 | 244ms | — | — | 277ms | 39.8x (encoder only) |
+| LLM 300M v2 | 97ms | 803ms | 4028ms (103 steps) | 5021ms | 2.2x |
+
+---
+
+## Key observations
+
+1. **CTC models dominate on speed.** No decoder loop = one forward pass.
+2. **Small LLM decoders (0.6-1B) are competitive** — Qwen3 and GLM hit 4.5x+
+   realtime with 0% WER, close to encoder-only models.
+3. **Large LLMs (3-4.5B) are 1-2x realtime** on T4. Usable but not fast.
+4. **Most WER=0% on jfk.wav.** The 4.5% models have minor formatting differences,
+   not actual transcription errors. Moonshine Tiny (9.1%) has a real word error.
+5. **wav2vec2 pos_conv is the bottleneck** (1.6s = 80% of runtime). Grouped
+   conv on CPU; encoder on GPU is only 128ms.
+6. **FireRed encoder is slow** because CPU weights auto-copy to GPU per-layer.
+   Pre-loading encoder weights to GPU would save ~15s.
+
+---
 
 ## Optimization history
 
-### wav2vec2 CNN → ggml (10.8x speedup)
+### FireRed decoder — 2026-04-26
 
-| Change | CNN | Pos conv | Total | Speedup |
-|---|---|---|---|---|
-| Baseline (manual C++) | 95.2s | 6.8s | 108.4s | 1.0x |
-| ggml F32 im2col | 2.4s | 6.8s | 15.5s | 7.0x |
-| + OpenMP pos_conv | 2.3s | 2.1s | 9.9s | **10.9x** |
+| Path | ms/step | 28 tokens | Why |
+|---|---|---|---|
+| Manual C++ F32 (original) | 4400 | 123s | No SIMD, no parallelism |
+| + OpenMP matmuls | 2320 | 58s | 2.1x from OMP |
+| + ggml Q4_K CPU native | **70** | **2.0s** | 9.3x from fused SIMD kernel |
+| ggml_vecmat on CUDA | 2600 | timeout | CUDA launch overhead kills it |
+| F32 dequant + cpu_matmul | 590 | 16.5s | No SIMD, OMP disabled on Kaggle |
+| **ggml_vecmat CPU (final)** | **60** | **1.7s** | Weights on CPU, native Q4_K |
 
-## Optimization roadmap
+### wav2vec2 CNN — 2026-04-24
 
-### From koboldcpp / llama.cpp patterns
+| Change | CNN | Total | Speedup |
+|---|---|---|---|
+| Baseline (manual C++) | 95.2s | 108.4s | 1.0x |
+| ggml F32 im2col | 2.4s | 15.5s | 7.0x |
+| + OpenMP pos_conv | 2.3s | 9.9s | 10.9x |
 
-| Optimization | Applicable to | Expected gain | Effort | Status |
-|---|---|---|---|---|
-| **KV cache Q8_0** | All LLM backends (7) | 2× less KV memory | Low | TODO |
-| **Encoder output caching** | Server mode | Skip re-encode for same audio | Low | TODO |
-| **Multi-threaded mel** | All mel-based backends (8) | <5% (mel is <100ms) | Low | Low priority |
-| **Speculative decoding** | LLM backends | 2-4× decode speed | High | TODO |
-| **GPU layer autofit** | All backends | Auto GPU/CPU split | Medium | TODO |
-| **Batched encoder** | All (GPU only) | 3-5× on GPU | High | TODO |
-
-### CrispASR-specific
-
-| Optimization | Applicable to | Expected gain | Effort | Status |
-|---|---|---|---|---|
-| **FireRed decoder → ggml graph** | firered-asr | ~10× (123s→~12s) | High | Critical |
-| **Fused QKV pre-merge** | LLM decoders | ~10-15% attention | Medium | TODO |
-| **wav2vec2 pos_conv → ggml** | wav2vec2 family | ~1.5× (2.1s→~0.7s) | Medium | TODO |
-| **Temperature sampling** | 5 backends | Feature parity | Low | TODO |
-
-### Priority: FireRed decoder
-
-FireRed-ASR at 0.1x RT is the worst performer. The encoder is fast (ggml graph)
-but the decoder runs manual C++ loops for self-attention, cross-attention, and
-MLP at each decode step. Moving the heavy decoder matmuls to persistent ggml
-subgraphs (as documented in LEARNINGS.md) is the highest-impact remaining
-optimization.
+---
 
 ## Reproduce
 
 ```bash
-# Per-phase timing
-WAV2VEC2_BENCH=1 crispasr --backend wav2vec2 -m model.gguf -f audio.wav -l en
-OMNIASR_BENCH=1 crispasr --backend omniasr -m model.gguf -f audio.wav -l en
+# Per-backend timing
+CRISPASR_VERBOSE=1 crispasr --backend firered-asr -m auto -f jfk.wav -v -bs 1
 
-# Full benchmark (all backends, 11s + 55s)
-bash tools/benchmark_phases.sh 4
+# wav2vec2 phase breakdown
+WAV2VEC2_VERBOSE=1 crispasr --backend wav2vec2 -m auto -f jfk.wav -v
 
-# Memory + verbose
-crispasr --backend wav2vec2 -m model.gguf -f audio.wav -v
+# Full Kaggle benchmark (all 19 backends)
+# See tools/kaggle-benchmark-all-backends.py or gist:
+# https://gist.github.com/CrispStrobe/c15f7a64878d93907a8a4a51b193b806
 ```

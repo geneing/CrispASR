@@ -1735,12 +1735,8 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         int d = hp.d_model;
         int odim = hp.odim;
         const bool use_gpu_decoder_proj = !ggml_backend_is_cpu(ctx->backend);
-        int debug_dec_step = -1;
-        int debug_dec_layer = -1;
-        if (const char* env = std::getenv("FIRERED_DEBUG_DECODER_STEP"))
-            debug_dec_step = atoi(env);
-        if (const char* env = std::getenv("FIRERED_DEBUG_DECODER_LAYER"))
-            debug_dec_layer = atoi(env);
+        // Debug: set FIRERED_DEBUG_DECODER_STEP=N FIRERED_DEBUG_DECODER_LAYER=M
+        // to dump intermediate values at decode step N, layer M (beam path only).
 
         // Pre-cache only SMALL tensors (norms/biases, ~d floats each).
         // Large weight matrices stay in Q4_K and are used via ggml_vecmat.
@@ -1778,7 +1774,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         // V_enc[li][t*d+i] = sum_k enc[t*d+k] * W_v[i*d+k] + bias
         std::vector<std::vector<float>> K_enc(hp.n_layers_dec), V_enc(hp.n_layers_dec);
         for (int li = 0; li < hp.n_layers_dec; li++) {
-            auto& c = dec_cache[li];
+            (void)dec_cache[li]; // used later in decode loop
             K_enc[li].resize(T_sub * d);
             V_enc[li].resize(T_sub * d);
             bool kv_done = false;
@@ -2462,7 +2458,6 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "firered_asr: CTC decoded %d frames → %zu chars\n", T_sub, result.size());
         // Dump first few CTC predictions for debugging
-        int prev_id = -1;
         fprintf(stderr, "  CTC first 20 argmax: [");
         for (int t = 0; t < std::min(20, T_sub); t++) {
             int best_id = 0;
