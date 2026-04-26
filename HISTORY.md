@@ -416,7 +416,11 @@ Moved here once shipped. See git history for code diffs.
 - Before: "koamerik asnot what yor country" (cosine 0.65 at layer 0)
 - After: "fellow americans ask not what your country" (exact match)
 - Converter now auto-detects v1 (fairseq2 .pt) vs v2 (HF transformers)
-- HF: `cstr/omniASR-CTC-1B-v2-GGUF` (F16 + Q4_K + Q8_0)
+- 300M v2: works perfectly on ≤5s audio (cos=0.999997), breaks on >7s
+  (positional encoding doesn't generalize beyond training length).
+  Workaround: use --vad to chunk audio.
+- HF: `cstr/omniASR-CTC-1B-v2-GGUF` (F16 + Q4_K + Q8_0),
+  `cstr/omniASR-CTC-300M-v2-GGUF` (F16)
 
 **Moonshine multilingual — 12 models (April 2026):**
 - Fixed converter: 1D tensors (norms/biases) forced to F32 for binary ops
