@@ -149,11 +149,11 @@ if not cmake_ok:
 subprocess.run(f"cmake --build {BUILD_DIR} -j$(nproc)", shell=True, check=True)
 
 assert os.path.isfile(CRISPASR), f"Build failed: {CRISPASR} not found"
-print(f"✓ CrispASR built ({'GPU' if has_gpu else 'CPU'})")
 
-# Check version
-ok, out, err, _ = run(f"{CRISPASR} --help 2>&1 | head -3")
-print(out[:200] if out else err[:200])
+# Show version + git commit
+ok, out, _, _ = run(f"cd {CRISPASR_DIR} && git log --oneline -1")
+git_hash = out.strip() if ok else "unknown"
+print(f"✓ CrispASR built ({'GPU' if has_gpu else 'CPU'}) — {git_hash}")
 
 # ─────────────────────────── cell 4 (code) ───────────────────────────
 # ── Download test audio ────────────────────────────────────────────────────
@@ -227,26 +227,46 @@ def benchmark_backend(backend, display_name, timeout, notes):
         "status": "UNKNOWN",
         "transcript": "",
         "wer": None,
+        "wall_s": None,
+        "inference_s": None,
         "elapsed_s": None,
         "realtime_factor": None,
         "model_size_mb": None,
     }
 
-    # Step 1: Run transcription (capture stderr for diagnostics)
+    # Run transcription — stderr contains crispasr's own timing line:
+    #   "crispasr: transcribed X.Xs audio in Y.Ys (Z.Zx realtime)"
+    # This is pure inference time (excludes model download/load).
     cmd = (f"{CRISPASR} --backend {backend} -m auto --auto-download "
            f"-f {JFK_WAV} --no-prints")
     t0 = time.time()
     ok, stdout, stderr, elapsed = run(cmd, timeout=timeout)
-    result["elapsed_s"] = round(elapsed, 2)
-    result["realtime_factor"] = round(AUDIO_DURATION / elapsed, 2) if elapsed > 0 else 0
+    result["wall_s"] = round(elapsed, 2)
+
+    # Parse crispasr's own timing from stderr (excludes download)
+    inference_s = elapsed  # fallback: use wall time
+    rt_factor = None
+    if stderr:
+        m_time = re.search(r"transcribed\s+[\d.]+s\s+audio\s+in\s+([\d.]+)s\s+\(([\d.]+)x", stderr)
+        if m_time:
+            inference_s = float(m_time.group(1))
+            rt_factor = float(m_time.group(2))
+    result["inference_s"] = round(inference_s, 2)
+    result["elapsed_s"] = round(inference_s, 2)
+    result["realtime_factor"] = round(rt_factor if rt_factor else AUDIO_DURATION / inference_s, 2) if inference_s > 0 else 0
 
     if not ok:
         result["status"] = "TIMEOUT" if "TIMEOUT" in stderr else "CRASH"
-        print(f"  ✗ {result['status']} after {elapsed:.1f}s")
-        # Show last few lines of stderr for diagnostics
+        print(f"  ✗ {result['status']} after {elapsed:.1f}s  (wall)")
+        # Show stderr for diagnostics — assertions appear before the stack trace
         if stderr:
-            for line in stderr.strip().split("\n")[-3:]:
-                print(f"    stderr: {line[:120]}")
+            lines = stderr.strip().split("\n")
+            # Show assertion/error lines + last 3 lines of stack trace
+            for line in lines:
+                if any(k in line.lower() for k in ["assert", "error", "fail", "abort", "fatal", "ggml_"]):
+                    print(f"    stderr: {line[:150]}")
+            for line in lines[-3:]:
+                print(f"    stderr: {line[:150]}")
         # Still clean up any downloaded model to free disk
         _cleanup_cache(backend)
         return result
@@ -280,8 +300,10 @@ def benchmark_backend(backend, display_name, timeout, notes):
 
     status_icon = {"PASS": "✓", "DEGRADED": "~", "FAIL": "✗"}.get(result["status"], "?")
     sz_str = f"{result['model_size_mb']:.0f}MB" if result["model_size_mb"] else "?"
+    wall_s = result.get("wall_s", elapsed)
+    dl_note = f"  (wall={wall_s:.1f}s incl. download)" if abs(wall_s - inference_s) > 1 else ""
     print(f"  {status_icon} WER={w:.1%}  RT={result['realtime_factor']:.1f}x  "
-          f"Time={elapsed:.1f}s  Model={sz_str}")
+          f"Inference={inference_s:.1f}s  Model={sz_str}{dl_note}")
     print(f"    Output: {transcript[:100]}")
 
     # Step 5: Clean up model to free disk for the next backend
@@ -328,22 +350,23 @@ md_lines.append(f"**GPU:** {sys_info['gpu']}  ")
 md_lines.append(f"**Audio:** {sys_info['audio']}  ")
 md_lines.append(f"**Reference:** _{JFK_REF}_\n")
 
-md_lines.append("| # | Backend | Status | WER | RT Factor | Time (s) | Model (MB) | Transcript |")
-md_lines.append("|---|---|---|---|---|---|---|---|")
+md_lines.append("| # | Backend | Status | WER | RT Factor | Inference (s) | Wall (s) | Model (MB) | Transcript |")
+md_lines.append("|---|---|---|---|---|---|---|---|---|")
 
 for i, r in enumerate(results, 1):
     status = {"PASS": "✅", "DEGRADED": "⚠️", "FAIL": "❌",
               "CRASH": "💥", "TIMEOUT": "⏱️", "EMPTY": "🔇"}.get(r["status"], "❓")
     wer_str = f"{r['wer']:.1%}" if r["wer"] is not None else "—"
     rt_str = f"{r['realtime_factor']:.1f}x" if r["realtime_factor"] else "—"
-    time_str = f"{r['elapsed_s']:.1f}" if r["elapsed_s"] else "—"
+    inf_str = f"{r['inference_s']:.1f}" if r.get("inference_s") else "—"
+    wall_str = f"{r['wall_s']:.1f}" if r.get("wall_s") else "—"
     sz_str = f"{r['model_size_mb']:.0f}" if r["model_size_mb"] else "—"
     transcript = r["transcript"][:60] + "..." if len(r["transcript"]) > 60 else r["transcript"]
     transcript = transcript.replace("|", "\\|")
 
     md_lines.append(
         f"| {i} | **{r['display_name']}** | {status} | {wer_str} | {rt_str} | "
-        f"{time_str} | {sz_str} | {transcript} |"
+        f"{inf_str} | {wall_str} | {sz_str} | {transcript} |"
     )
 
 # Summary stats
