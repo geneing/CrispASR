@@ -576,8 +576,7 @@ static int run_encoder(moonshine_streaming_context* ctx, const float* frontend_o
         // Sliding-window attention
         ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, masks[li], scale, 0.0f, 0.0f);
 
-        // Reshape back + output proj + residual
-        attn = ggml_cont(ctx0, ggml_permute(ctx0, attn, 0, 2, 1, 3));
+        // Result is [head_dim, n_heads, T] — reshape directly to [d, T]
         attn = ggml_reshape_2d(ctx0, attn, d, T_enc);
         cur = ggml_add(ctx0, residual, ggml_mul_mat(ctx0, L.attn_o_w, attn));
 
