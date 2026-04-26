@@ -165,12 +165,12 @@ def calc_wer(ref: str, hyp: str) -> float | None:
 
 
 def run_one(crispasr: Path, model: Path, backend: str, audio: Path, use_gpu: bool,
-            timeout: int, audio_duration: float) -> dict:
+            timeout: int, audio_duration: float, verbose: bool = True) -> dict:
     """Run a single inference, return parsed result dict.
 
-    Realtime factor = audio_duration / wall_time. crispasr doesn't print
-    inference timing on its own, and for a one-shot CLI invocation wall
-    time is what the user actually experiences anyway."""
+    `realtime_factor` is wall-clock RT (audio / wall). For one-shot CLI
+    runs this includes process startup + model load + (cold) Metal kernel
+    JIT — see the `--warmup` flag for steady-state numbers."""
     cmd = [
         str(crispasr),
         "--backend", backend,
@@ -179,6 +179,8 @@ def run_one(crispasr: Path, model: Path, backend: str, audio: Path, use_gpu: boo
         "--no-prints",
         "-bs", "1",
     ]
+    if verbose:
+        cmd.append("-v")
     if not use_gpu:
         cmd.append("-ng")
     env = {**os.environ, "CRISPASR_VERBOSE": "1"}
@@ -195,6 +197,13 @@ def run_one(crispasr: Path, model: Path, backend: str, audio: Path, use_gpu: boo
     transcript = re.sub(r"\[[\d:.]+\s*-->\s*[\d:.]+\]\s*", "", out.strip()).strip()
     rt = audio_duration / elapsed if elapsed > 0 else None
 
+    # Try to extract a model-load hint from stderr (best-effort; many
+    # backends don't emit anything useful).
+    load_s = None
+    m = re.search(r"library_init:\s+loaded in\s+([\d.]+)\s+sec", err or "")
+    if m:
+        load_s = float(m.group(1))
+
     if not ok:
         return {"status": "CRASH", "wall_s": round(elapsed, 2), "transcript": "",
                 "stderr_tail": (err or "")[-400:]}
@@ -206,6 +215,7 @@ def run_one(crispasr: Path, model: Path, backend: str, audio: Path, use_gpu: boo
         "status": "OK",
         "wall_s": round(elapsed, 2),
         "inference_s": round(elapsed, 2),
+        "metal_lib_load_s": load_s,
         "realtime_factor": round(rt, 2) if rt else None,
         "transcript": transcript,
     }
@@ -213,7 +223,7 @@ def run_one(crispasr: Path, model: Path, backend: str, audio: Path, use_gpu: boo
 
 def benchmark_backend(backend: str, display: str, timeout: int, notes: str,
                       models_dir: Path, audio: Path, audio_duration: float,
-                      run_cpu: bool) -> dict:
+                      run_cpu: bool, warmup: bool, verbose: bool) -> dict:
     print(f"\n{'='*60}\n  {display}  (--backend {backend})\n{'='*60}")
 
     result = {
@@ -231,10 +241,18 @@ def benchmark_backend(backend: str, display: str, timeout: int, notes: str,
     result["model_path"] = str(model)
     result["model_size_mb"] = round(os.path.getsize(model) / 1024 / 1024, 1)
 
-    # Metal run
+    # Metal run (optional warmup first to prime kernel cache + page cache)
+    if warmup:
+        print("  → Metal warmup…", flush=True)
+        w0 = run_one(CRISPASR, model, backend, audio, use_gpu=True,
+                     timeout=timeout, audio_duration=audio_duration, verbose=verbose)
+        if w0["status"] == "OK":
+            print(f"    cold: {w0.get('realtime_factor', '?')}x RT  ({w0.get('wall_s', '?')}s wall)")
+        result["metal_cold"] = w0
+
     print("  → Metal…", flush=True)
     metal = run_one(CRISPASR, model, backend, audio, use_gpu=True,
-                    timeout=timeout, audio_duration=audio_duration)
+                    timeout=timeout, audio_duration=audio_duration, verbose=verbose)
     if metal.get("transcript"):
         w = calc_wer(JFK_REF, metal["transcript"])
         if w is not None:
@@ -242,16 +260,20 @@ def benchmark_backend(backend: str, display: str, timeout: int, notes: str,
     result["metal"] = metal
     if metal["status"] == "OK":
         print(f"    {metal.get('realtime_factor', '?')}x RT  "
-              f"WER={metal.get('wer', '?')}  inf={metal.get('inference_s', '?')}s")
+              f"WER={metal.get('wer', '?')}  wall={metal.get('wall_s', '?')}s")
         print(f"    out: {metal['transcript'][:80]}")
     else:
         print(f"    ✗ {metal['status']} — {metal.get('stderr_tail', '')[:200]}")
 
     # Optional CPU comparison
     if run_cpu:
+        if warmup:
+            print("  → CPU warmup…", flush=True)
+            run_one(CRISPASR, model, backend, audio, use_gpu=False,
+                    timeout=timeout, audio_duration=audio_duration, verbose=verbose)
         print("  → CPU (-ng)…", flush=True)
         cpu = run_one(CRISPASR, model, backend, audio, use_gpu=False,
-                      timeout=timeout, audio_duration=audio_duration)
+                      timeout=timeout, audio_duration=audio_duration, verbose=verbose)
         if cpu.get("transcript"):
             w = calc_wer(JFK_REF, cpu["transcript"])
             if w is not None:
@@ -259,22 +281,28 @@ def benchmark_backend(backend: str, display: str, timeout: int, notes: str,
         result["cpu"] = cpu
         if cpu["status"] == "OK":
             print(f"    {cpu.get('realtime_factor', '?')}x RT  "
-                  f"WER={cpu.get('wer', '?')}  inf={cpu.get('inference_s', '?')}s")
+                  f"WER={cpu.get('wer', '?')}  wall={cpu.get('wall_s', '?')}s")
 
     return result
 
 
-def emit_markdown(results: list[dict], sysinfo: dict, run_cpu: bool) -> str:
+def emit_markdown(results: list[dict], sysinfo: dict, run_cpu: bool, warmup: bool) -> str:
     md = []
     md.append("# CrispASR Backend Benchmark — macOS\n")
     md.append(f"**Date:** {sysinfo['date']}  ")
     md.append(f"**Platform:** {sysinfo['platform']}  ")
     md.append(f"**Audio:** {sysinfo['audio']}  ")
-    md.append(f"**Reference:** _{JFK_REF}_\n")
+    md.append(f"**Reference:** _{JFK_REF}_  ")
+    if warmup:
+        md.append("**Mode:** warmup + measured (RT = audio / measured-wall, with kernel/page cache hot)\n")
+    else:
+        md.append("**Mode:** cold (RT = audio / wall, includes process startup + model load + Metal kernel JIT)\n")
 
-    head = ["#", "Backend", "Status", "Metal RT", "Metal WER", "Metal inf (s)"]
+    head = ["#", "Backend", "Status", "Warm RT", "Warm wall (s)", "WER"]
+    if warmup:
+        head += ["Cold RT", "Cold wall (s)"]
     if run_cpu:
-        head += ["CPU RT", "CPU WER", "CPU inf (s)"]
+        head += ["CPU RT", "CPU wall (s)", "CPU WER"]
     head += ["Model (MB)", "Notes"]
     md.append("| " + " | ".join(head) + " |")
     md.append("|" + "|".join(["---"] * len(head)) + "|")
@@ -287,19 +315,22 @@ def emit_markdown(results: list[dict], sysinfo: dict, run_cpu: bool) -> str:
             return f"{v:.1f}×" if v else "—"
         if k == "wer":
             return f"{v:.1%}" if v is not None else "—"
-        if k == "inference_s":
+        if k in ("inference_s", "wall_s"):
             return f"{v:.1f}" if v else "—"
         return str(v or "—")
 
     for i, r in enumerate(results, 1):
         m = r.get("metal") or {}
+        cold = r.get("metal_cold") or {}
         c = r.get("cpu") or {}
         status = m.get("status", r.get("status", "?"))
         size = f"{r['model_size_mb']:.0f}" if r.get("model_size_mb") else "—"
         row = [str(i), f"**{r['display_name']}**", status,
-               col(m, "realtime_factor"), col(m, "wer"), col(m, "inference_s")]
+               col(m, "realtime_factor"), col(m, "wall_s"), col(m, "wer")]
+        if warmup:
+            row += [col(cold, "realtime_factor"), col(cold, "wall_s")]
         if run_cpu:
-            row += [col(c, "realtime_factor"), col(c, "wer"), col(c, "inference_s")]
+            row += [col(c, "realtime_factor"), col(c, "wall_s"), col(c, "wer")]
         row += [size, r.get("notes", "")]
         md.append("| " + " | ".join(row) + " |")
 
@@ -359,6 +390,11 @@ def main():
                     help="Where to write results .md and .json")
     ap.add_argument("--gist", action="store_true",
                     help="Upload to GitHub gist (uses GH_GIST_TOKEN env)")
+    ap.add_argument("--no-warmup", dest="warmup", action="store_false",
+                    help="Skip the warmup pass; report cold-start wall RT instead "
+                         "(default: warmup ON for steady-state numbers)")
+    ap.add_argument("--quiet", dest="verbose", action="store_false",
+                    help="Don't pass -v to crispasr (default: verbose ON)")
     args = ap.parse_args()
 
     if not CRISPASR.is_file():
@@ -399,13 +435,19 @@ def main():
     print(f"CrispASR macOS benchmark — {sysinfo['date']}")
     print(f"  HEAD: {sysinfo['git']}")
     print(f"  Models: {models_dir}  ({len(backend_set)} backends, "
-          f"{'Metal+CPU' if args.cpu else 'Metal only'})")
+          f"{'Metal+CPU' if args.cpu else 'Metal only'}, "
+          f"{'warmup' if args.warmup else 'cold'}, "
+          f"{'verbose' if args.verbose else 'quiet'})")
+
+    sysinfo["warmup"] = args.warmup
+    sysinfo["verbose"] = args.verbose
 
     results = []
     for backend, display, timeout, notes in backend_set:
         results.append(benchmark_backend(
             backend, display, timeout, notes,
-            models_dir, Path(args.audio), audio_duration, args.cpu))
+            models_dir, Path(args.audio), audio_duration,
+            args.cpu, args.warmup, args.verbose))
 
     # Output
     Path(args.results).mkdir(parents=True, exist_ok=True)
@@ -413,7 +455,7 @@ def main():
     json_path = Path(args.results) / "macbook_benchmark.json"
     json_path.write_text(json.dumps(payload, indent=2))
 
-    md = emit_markdown(results, sysinfo, args.cpu)
+    md = emit_markdown(results, sysinfo, args.cpu, args.warmup)
     md_path = Path(args.results) / "macbook_benchmark.md"
     md_path.write_text(md)
 
