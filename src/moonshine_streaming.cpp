@@ -515,10 +515,10 @@ static void audio_frontend_cpu(const float* pcm, int n_samples, const ms_model& 
 // Sliding-window transformer encoder. Uses ggml graphs with
 // ggml_graph_compute_with_ctx for CPU execution (model is small).
 
-// TODO: implement full encoder with sliding-window attention
-// For now, placeholder that builds one graph per layer
-static void encode(moonshine_streaming_context* ctx, const float* frontend_out, int T_enc,
-                   std::vector<float>& enc_output) {
+// Build the full encoder as a single ggml graph (gallocr pattern from moonshine.cpp).
+// Build encoder as single ggml graph with gallocr (same pattern as moonshine.cpp).
+static int run_encoder(moonshine_streaming_context* ctx, const float* frontend_out, int T_enc,
+                       std::vector<float>& enc_output) {
     auto& m = ctx->model;
     auto& hp = m.hp;
     int d = (int)hp.enc_hidden;
@@ -526,72 +526,64 @@ static void encode(moonshine_streaming_context* ctx, const float* frontend_out, 
     int head_dim = (int)hp.enc_head_dim;
     int kv_heads = (int)hp.enc_kv_heads;
     float ln_eps = 1e-5f;
+    bool verbose = ctx->verbosity >= 2 || getenv("MOONSHINE_STREAMING_BENCH");
 
-    // Working buffer: x [d, T] in ggml = [T, d] row-major
-    std::vector<float> x(T_enc * d);
-    memcpy(x.data(), frontend_out, T_enc * d * sizeof(float));
+    const size_t n_tensors = hp.enc_n_layers * 30 + 50;
+    const size_t mem_size = ggml_tensor_overhead() * n_tensors + ggml_graph_overhead_custom(16384, false);
+    struct ggml_init_params gp = {mem_size, nullptr, true};
+    ggml_context* ctx0 = ggml_init(gp);
+    if (!ctx0)
+        return -1;
 
+    // Input
+    ggml_tensor* cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T_enc);
+    ggml_set_name(cur, "enc_input");
+    ggml_set_input(cur);
+
+    // Per-layer masks
+    std::vector<ggml_tensor*> masks(hp.enc_n_layers, nullptr);
+    for (uint32_t li = 0; li < hp.enc_n_layers; li++) {
+        auto [wl, wr] = hp.sliding_windows[li];
+        if (wl < (uint32_t)T_enc || wr < (uint32_t)T_enc) {
+            char name[32];
+            snprintf(name, sizeof(name), "mask_%u", li);
+            masks[li] = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T_enc, T_enc);
+            ggml_set_name(masks[li], name);
+            ggml_set_input(masks[li]);
+        }
+    }
+
+    // Transformer layers
+    float scale = 1.0f / sqrtf((float)head_dim);
     for (uint32_t li = 0; li < hp.enc_n_layers; li++) {
         auto& L = m.enc[li];
-        auto [win_left, win_right] = hp.sliding_windows[li];
+        ggml_tensor* residual = cur;
 
-        // Build ggml graph for this layer
-        size_t mem = ggml_tensor_overhead() * 256 + ggml_graph_overhead_custom(4096, false);
-        struct ggml_init_params gp = {mem, nullptr, true};
-        ggml_context* ctx0 = ggml_init(gp);
-        if (!ctx0)
-            break;
-        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 4096, false);
+        // Pre-norm (unit-offset baked at convert time)
+        cur = ggml_norm(ctx0, cur, ln_eps);
+        cur = ggml_mul(ctx0, cur, L.attn_norm_w);
 
-        // Input: [d, T]
-        ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T_enc);
-        ggml_set_name(inp, "x_in");
-        ggml_set_input(inp);
+        // Q/K/V
+        ggml_tensor* Q = ggml_mul_mat(ctx0, L.attn_q_w, cur);
+        ggml_tensor* K = ggml_mul_mat(ctx0, L.attn_k_w, cur);
+        ggml_tensor* V = ggml_mul_mat(ctx0, L.attn_v_w, cur);
 
-        // Pre-norm (unit-offset already baked into weight)
-        ggml_tensor* xn = ggml_norm(ctx0, inp, ln_eps);
-        xn = ggml_mul(ctx0, xn, L.attn_norm_w);
+        // Reshape for flash_attn: [head_dim, T, heads]
+        Q = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q, head_dim, n_heads, T_enc), 0, 2, 1, 3));
+        K = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, K, head_dim, kv_heads, T_enc), 0, 2, 1, 3));
+        V = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, V, head_dim, kv_heads, T_enc), 0, 2, 1, 3));
 
-        // Q/K/V projections
-        ggml_tensor* Q = ggml_mul_mat(ctx0, L.attn_q_w, xn); // [n_heads*head_dim, T]
-        ggml_tensor* K = ggml_mul_mat(ctx0, L.attn_k_w, xn); // [kv_heads*head_dim, T]
-        ggml_tensor* V = ggml_mul_mat(ctx0, L.attn_v_w, xn); // [kv_heads*head_dim, T]
+        // Sliding-window attention
+        ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, masks[li], scale, 0.0f, 0.0f);
 
-        // Reshape for flash_attn: [head_dim, T, n_heads]
-        Q = ggml_reshape_3d(ctx0, Q, head_dim, n_heads, T_enc);
-        Q = ggml_permute(ctx0, Q, 0, 2, 1, 3); // [head_dim, T, n_heads]
-        Q = ggml_cont(ctx0, Q);
-        K = ggml_reshape_3d(ctx0, K, head_dim, kv_heads, T_enc);
-        K = ggml_permute(ctx0, K, 0, 2, 1, 3);
-        K = ggml_cont(ctx0, K);
-        V = ggml_reshape_3d(ctx0, V, head_dim, kv_heads, T_enc);
-        V = ggml_permute(ctx0, V, 0, 2, 1, 3);
-        V = ggml_cont(ctx0, V);
-
-        // Sliding-window attention mask
-        ggml_tensor* mask = nullptr;
-        if (win_left < (uint32_t)T_enc || win_right < (uint32_t)T_enc) {
-            // Build mask: [T, T] where allowed positions = 0, blocked = -inf
-            mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_enc, T_enc);
-            ggml_set_name(mask, "sw_mask");
-            ggml_set_input(mask);
-        }
-
-        float scale = 1.0f / sqrtf((float)head_dim);
-        ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, mask, scale, 0.0f, 0.0f);
-
-        // Reshape back: [head_dim, T, n_heads] → [d, T]
-        attn = ggml_permute(ctx0, attn, 0, 2, 1, 3); // [head_dim, n_heads, T]
-        attn = ggml_cont(ctx0, attn);
+        // Reshape back + output proj + residual
+        attn = ggml_cont(ctx0, ggml_permute(ctx0, attn, 0, 2, 1, 3));
         attn = ggml_reshape_2d(ctx0, attn, d, T_enc);
+        cur = ggml_add(ctx0, residual, ggml_mul_mat(ctx0, L.attn_o_w, attn));
 
-        // Output projection + residual
-        ggml_tensor* out = ggml_mul_mat(ctx0, L.attn_o_w, attn);
-        out = ggml_add(ctx0, inp, out);
-
-        // FFN: pre-norm → fc1+GELU → fc2 + residual
-        ggml_tensor* fn = ggml_norm(ctx0, out, ln_eps);
-        fn = ggml_mul(ctx0, fn, L.ffn_norm_w);
+        // FFN: pre-norm + fc1+GELU + fc2 + residual
+        residual = cur;
+        ggml_tensor* fn = ggml_mul(ctx0, ggml_norm(ctx0, cur, ln_eps), L.ffn_norm_w);
         fn = ggml_mul_mat(ctx0, L.ffn_fc1_w, fn);
         if (L.ffn_fc1_b)
             fn = ggml_add(ctx0, fn, L.ffn_fc1_b);
@@ -599,60 +591,67 @@ static void encode(moonshine_streaming_context* ctx, const float* frontend_out, 
         fn = ggml_mul_mat(ctx0, L.ffn_fc2_w, fn);
         if (L.ffn_fc2_b)
             fn = ggml_add(ctx0, fn, L.ffn_fc2_b);
-        out = ggml_add(ctx0, out, fn);
+        cur = ggml_add(ctx0, fn, residual);
+    }
 
-        ggml_set_name(out, "layer_out");
-        ggml_set_output(out);
-        ggml_build_forward_expand(gf, out);
+    // Final norm
+    cur = ggml_mul(ctx0, ggml_norm(ctx0, cur, ln_eps), m.enc_output_norm_w);
+    ggml_set_name(cur, "encoder_output");
+    ggml_set_output(cur);
 
-        // Compute
-        ggml_graph_compute_with_ctx(ctx0, gf, ctx->n_threads);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+    ggml_build_forward_expand(gf, cur);
 
-        // Set input data
-        ggml_backend_tensor_set(inp, x.data(), 0, T_enc * d * sizeof(float));
-
-        // Build sliding window mask if needed
-        if (mask) {
-            std::vector<float> mask_data(T_enc * T_enc);
-            for (int tq = 0; tq < T_enc; tq++) {
-                for (int tk = 0; tk < T_enc; tk++) {
-                    // Allow if tk >= tq - win_left AND tk <= tq + win_right
-                    bool allowed = (tk >= tq - (int)win_left) && (tk <= tq + (int)win_right);
-                    mask_data[tq * T_enc + tk] = allowed ? 0.0f : -INFINITY;
-                }
-            }
-            ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
-        }
-
-        // Re-compute with actual data
-        ggml_graph_compute_with_ctx(ctx0, gf, ctx->n_threads);
-
-        // Read output
-        ggml_tensor* out_t = ggml_graph_get_tensor(gf, "layer_out");
-        ggml_backend_tensor_get(out_t, x.data(), 0, T_enc * d * sizeof(float));
+    // Allocate + set inputs
+    ggml_gallocr_t gallocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
+    if (!ggml_gallocr_alloc_graph(gallocr, gf)) {
+        fprintf(stderr, "moonshine_streaming: encoder alloc failed\n");
+        ggml_gallocr_free(gallocr);
         ggml_free(ctx0);
+        return -1;
     }
 
-    // Final layer norm
-    {
-        std::vector<float> norm_w(d);
-        ggml_backend_tensor_get(m.enc_output_norm_w, norm_w.data(), 0, d * sizeof(float));
-        for (int t = 0; t < T_enc; t++) {
-            float mean = 0.0f, var = 0.0f;
-            for (int i = 0; i < d; i++)
-                mean += x[t * d + i];
-            mean /= d;
-            for (int i = 0; i < d; i++) {
-                float v = x[t * d + i] - mean;
-                var += v * v;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_input"), frontend_out, 0, (size_t)T_enc * d * sizeof(float));
+
+    // Set masks
+    for (uint32_t li = 0; li < hp.enc_n_layers; li++) {
+        if (!masks[li])
+            continue;
+        auto [wl, wr] = hp.sliding_windows[li];
+        size_t mask_sz = (size_t)T_enc * T_enc;
+        std::vector<ggml_fp16_t> mask_data(mask_sz);
+        for (int tq = 0; tq < T_enc; tq++)
+            for (int tk = 0; tk < T_enc; tk++) {
+                bool ok = (tk >= tq - (int)wl) && (tk <= tq + (int)wr);
+                mask_data[(size_t)tq * T_enc + tk] = ggml_fp32_to_fp16(ok ? 0.0f : -INFINITY);
             }
-            float inv_std = 1.0f / sqrtf(var / d + 1e-5f);
-            for (int i = 0; i < d; i++)
-                x[t * d + i] = (x[t * d + i] - mean) * inv_std * norm_w[i];
-        }
+        char name[32];
+        snprintf(name, sizeof(name), "mask_%u", li);
+        ggml_tensor* mt = ggml_graph_get_tensor(gf, name);
+        if (mt)
+            ggml_backend_tensor_set(mt, mask_data.data(), 0, mask_sz * sizeof(ggml_fp16_t));
     }
 
-    enc_output = std::move(x);
+    if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "moonshine_streaming: encoder compute failed\n");
+        ggml_gallocr_free(gallocr);
+        ggml_free(ctx0);
+        return -1;
+    }
+
+    ggml_tensor* out_t = ggml_graph_get_tensor(gf, "encoder_output");
+    enc_output.resize((size_t)d * T_enc);
+    ggml_backend_tensor_get(out_t, enc_output.data(), 0, (size_t)d * T_enc * sizeof(float));
+
+    if (verbose) {
+        fprintf(stderr, "moonshine_streaming: encoder %u layers done\n", hp.enc_n_layers);
+        fprintf(stderr, "  enc_out[0,:8] = [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n", enc_output[0], enc_output[1],
+                enc_output[2], enc_output[3], enc_output[4], enc_output[5], enc_output[6], enc_output[7]);
+    }
+
+    ggml_gallocr_free(gallocr);
+    ggml_free(ctx0);
+    return 0;
 }
 
 // ── Decoder ─────────────────────────────────────────────────────────────────
@@ -676,11 +675,19 @@ extern "C" char* moonshine_streaming_transcribe(struct moonshine_streaming_conte
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "moonshine_streaming: %d samples → %d encoder frames\n", n_samples, T_enc);
+        if (T_enc > 0 && ctx->verbosity >= 2) {
+            int d = (int)m.hp.enc_hidden;
+            fprintf(stderr, "  frontend[0,:8] = [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n", frontend_out[0],
+                    frontend_out[1], frontend_out[2], frontend_out[3], frontend_out[4], frontend_out[5],
+                    frontend_out[6], frontend_out[7]);
+        }
     }
 
     // Step 2: Encoder
     std::vector<float> enc_output;
-    encode(ctx, frontend_out.data(), T_enc, enc_output);
+    if (run_encoder(ctx, frontend_out.data(), T_enc, enc_output) != 0) {
+        return nullptr;
+    }
 
     if (ctx->verbosity >= 2) {
         fprintf(stderr, "  enc_out[0..7]: [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n", enc_output[0], enc_output[1],

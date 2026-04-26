@@ -27,7 +27,18 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 - **Audio format support** — fix `.m4a`/`.mp4`/`.webm` crash in ffmpeg path
 - ~~**Japanese punctuation split (#29)**~~ **FIXED** — CJK clause-break + 42-char fallback
 - ~~**Moonshine multilingual**~~ **FIXED** — converter forces 1D tensors to F32 (line 338). All 14 GGUF variants (tiny/base × en/ja/ar/ko/zh/vi/uk) work on CPU. head_dim=52 (base) works on CPU flash_attn; GPU flash_attn needs aligned head_dim (ggml limitation, moonshine forced to CPU anyway)
-- **Moonshine streaming** — different architecture, needs new runtime
+- **Moonshine streaming** — **[next, IN PROGRESS]** different architecture from regular moonshine.
+  Converter DONE (`models/convert-moonshine-streaming-to-gguf.py`, tested tiny+small).
+  Runtime skeleton compiles (`src/moonshine_streaming.{h,cpp}`), loads GGUF, binds 161 tensors.
+  Audio frontend implemented (CPU). Encoder needs rewrite to single-graph pattern.
+  Decoder not yet implemented. Backend wrapper not yet created.
+  Reference: frontend `[-0.2069,...]`, enc `[0.5546,-0.0089,...]`, transcript OK.
+  Sizes: tiny 34M, small 123M, medium 245M. All MIT.
+- **Gemma-4-E2B** — **[queued]** Google multimodal with 300M USM Conformer audio encoder + 2.3B Gemma4 LLM.
+  GGUF exists at ggml-org (text+vision only). llama.cpp PR #21421 adds audio conformer.
+  Need converter + runtime. Apache 2.0. 128-bin log-mel, 30s max, 262K vocab.
+- **MiMo-V2.5-ASR** — **[queued, low priority]** Xiaomi 8B Qwen2 + 1.2B RVQ audio tokenizer.
+  Two-stage pipeline, needs A100 for conversion. MIT.
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
 - ~~**VibeVoice TTS**~~ — **DONE**: Realtime-0.5B (17 bugs, perfect round-trip) + 1.5B base model (voice cloning). HF: `cstr/vibevoice-realtime-0.5b-GGUF`, `cstr/vibevoice-1.5b-GGUF`
 - **VibeVoice-7B TTS** — needs 32+ GB RAM for conversion (9.3B params). Same architecture as 1.5B.

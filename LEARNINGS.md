@@ -523,6 +523,44 @@ kernels with small spatial dimensions (k ≤ 5) and few channels (C < 256),
 ship it F32. The 16 MB F32 Silero LID model is smaller than a single
 layer of most ASR encoders — quantization is pointless.
 
+### Moonshine Streaming: unit-offset LayerNorm and sliding-window attention
+
+Moonshine Streaming (UsefulSensors, MIT) uses a non-standard LayerNorm
+in the encoder where the scale parameter is `gamma + 1.0` instead of
+`gamma`. The PyTorch code stores `gamma` as the parameter; applying
+standard `gamma * norm(x)` produces wrong output.
+
+**Fix:** Add +1.0 to gamma at conversion time in the GGUF converter.
+Then the C++ runtime uses standard `ggml_mul(norm(x), gamma_tensor)`
+and gets correct results without special-casing the forward pass.
+
+The encoder also uses per-layer sliding-window attention with configurable
+(left, right) windows — e.g., `(16, 4)` for first/last layers, `(16, 0)`
+for middle layers. This implements bounded local attention via the `mask`
+parameter of `ggml_flash_attn_ext`: fill a `[T, T]` F32 tensor with 0.0
+(attend) or `-INFINITY` (block) based on relative position.
+
+The audio frontend has NO mel spectrogram — it processes raw waveform
+frames (80 samples = 5ms at 16kHz) with CMVN, an `asinh(exp(k)*x)`
+compression (learned scalar k), a Linear+SiLU projection, and two
+CausalConv1d layers with stride-2. The asinh function must be built from
+ggml primitives: `log(x + sqrt(x*x + 1))`. Causal convolution is
+implemented by left-padding the input with `(kernel_size - 1)` zeros
+before calling `ggml_conv_1d` with `pad=0`.
+
+### Models with different encoder/decoder hidden sizes
+
+Moonshine Streaming small (enc=620, dec=512) and medium (enc=768, dec=640)
+have mismatched hidden sizes. The cross-attention K/V projections take
+encoder-dimension inputs. The model includes a learned projection
+`decoder.proj.weight` [dec_hidden, enc_hidden] that maps encoder output
+to decoder space. The positional embedding for cross-attention
+(`decoder.pos_emb.weight`) uses **encoder** hidden size, not decoder.
+
+**Rule of thumb:** When porting an encoder-decoder model, always check
+`config.encoder_hidden_size` vs `config.hidden_size`. If they differ,
+look for a projection layer in the decoder.
+
 ---
 
 ## Methodical debugging of ported models against ground truth
