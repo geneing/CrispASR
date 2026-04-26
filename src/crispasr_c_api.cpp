@@ -1727,8 +1727,13 @@ CA_EXPORT int crispasr_detect_language_pcm(const float* samples, int32_t n_sampl
     opts.verbose = false;
 
     CrispasrLidResult r;
-    if (!crispasr_detect_language(samples, n_samples, opts, r))
+    if (!crispasr_detect_language(samples, n_samples, opts, r)) {
+        crispasr_lid_free_cache(); // free GPU memory even on failure
         return 1;
+    }
+
+    // Free cached LID context to release GPU VRAM for subsequent ASR calls
+    crispasr_lid_free_cache();
 
     if ((int)r.lang_code.size() + 1 > out_lang_cap)
         return 2;

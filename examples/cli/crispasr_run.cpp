@@ -975,6 +975,8 @@ int crispasr_run_backend(const whisper_params& params_in) {
                         params.language.c_str());
             }
         }
+        // Free LID cache to reclaim GPU VRAM before ASR model loads
+        crispasr_lid_free_cache();
 
         // Slice into chunks (VAD or fixed-window fallback).
         const auto slices = crispasr_compute_audio_slices(
