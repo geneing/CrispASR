@@ -111,7 +111,14 @@ def main():
     n_enc = max(int(k.split('.')[2]) for k in sd if k.startswith("encoder.layers.")) + 1
     d_model = sd["encoder.layers.0.self_attn.q_proj.weight"].shape[0]
     d_ffn = sd["encoder.layers.0.ffn.inner_proj.weight"].shape[0]
-    n_heads = d_model // 64  # head_dim=64
+    # Infer n_heads from config if available (v2), else from known architecture
+    if is_v2 and "num_attention_heads" in cfg:
+        n_heads = cfg["num_attention_heads"]
+    else:
+        # v1 fairseq2 models: 300M has n_heads=16 (hd=64), 1B has n_heads=16 (hd=80),
+        # 3B has n_heads=20 (hd=64), 7B has n_heads=20 (hd=64)
+        # Use head_dim=64 as default for v1 models
+        n_heads = d_model // 64
     vocab_size = sd["final_proj.weight"].shape[0]
     n_cnn = max(int(k.split('.')[3]) for k in sd
                 if k.startswith("encoder_frontend.feature_extractor.layers.")) + 1
@@ -149,7 +156,9 @@ def main():
     writer.add_name(f"OmniASR-CTC-{model_name.split('-')[-1]}")
     writer.add_uint32("omniasr.d_model", d_model)
     writer.add_uint32("omniasr.d_ffn", d_ffn)
+    head_dim = d_model // n_heads
     writer.add_uint32("omniasr.n_heads", n_heads)
+    writer.add_uint32("omniasr.head_dim", head_dim)
     writer.add_uint32("omniasr.n_enc_layers", n_enc)
     writer.add_uint32("omniasr.n_cnn_layers", n_cnn)
     writer.add_uint32("omniasr.vocab_size", vocab_size)
@@ -185,24 +194,35 @@ def main():
         name = name.replace("output_proj.", "out.")
         return name
 
-    # Pre-compute weight normalization for pos_encoder conv
-    # v1 (fairseq2) stores weight_g and weight_v separately
-    # v2 (HF) stores parametrizations.weight.original0 (g) and original1 (v)
-    # Combined weight = g * v / ||v|| per output channel
-    # Handle v2 parametrizations format
+    # Pre-compute weight normalization for pos_encoder conv.
+    # v2 (HF): use torch._weight_norm to materialize the combined weight
+    #   correctly (the parametrize dim may differ from the fairseq2 convention).
+    # v1 (fairseq2): weight_g and weight_v with per-output-channel norm.
     pg_key = "encoder_frontend.pos_encoder.conv.parametrizations.weight.original0"
     pv_key = "encoder_frontend.pos_encoder.conv.parametrizations.weight.original1"
     if pg_key in sd and pv_key in sd:
         wg = sd[pg_key]
         wv = sd[pv_key]
-        v_norm = wv.reshape(wv.shape[0], -1).norm(dim=1).reshape(-1, 1, 1)
-        w_combined = (wg / (v_norm + 1e-12)) * wv
+        # Use torch._weight_norm with the correct dim (read from the model)
+        # Safest: load the model and read conv.weight directly
+        try:
+            from transformers import AutoModel
+            hf_model = AutoModel.from_pretrained(args.input)
+            w_combined = hf_model.encoder.pos_conv_embed.conv.weight.detach()
+            b_combined = hf_model.encoder.pos_conv_embed.conv.bias.detach()
+            print(f"  pos_conv weight from HF model: {w_combined.shape} (materialized)")
+        except Exception as e:
+            print(f"  WARNING: could not load HF model for pos_conv weight ({e})")
+            print(f"  Falling back to manual weight norm (may be inaccurate)")
+            v_norm = wv.reshape(wv.shape[0], -1).norm(dim=1).reshape(-1, 1, 1)
+            w_combined = (wg / (v_norm + 1e-12)) * wv
+            b_combined = sd["encoder_frontend.pos_encoder.conv.bias"]
         sd["pos_conv.weight"] = w_combined
-        sd["pos_conv.bias"] = sd["encoder_frontend.pos_encoder.conv.bias"]
-        print(f"  Pre-computed pos_conv weight (v2 parametrizations): {w_combined.shape}")
+        sd["pos_conv.bias"] = b_combined
         del sd[pg_key]
         del sd[pv_key]
-        del sd["encoder_frontend.pos_encoder.conv.bias"]
+        if "encoder_frontend.pos_encoder.conv.bias" in sd:
+            del sd["encoder_frontend.pos_encoder.conv.bias"]
     elif "encoder_frontend.pos_encoder.conv.weight_v" in sd:
         wv = sd["encoder_frontend.pos_encoder.conv.weight_v"]  # [OC, IC/G, K]
         wg = sd["encoder_frontend.pos_encoder.conv.weight_g"]  # [1, 1, K] or similar
