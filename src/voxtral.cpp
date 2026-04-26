@@ -814,6 +814,11 @@ extern "C" void voxtral_free(voxtral_context* ctx) {
         ggml_free(ctx->model.ctx);
     if (ctx->backend_cpu)
         ggml_backend_free(ctx->backend_cpu);
+    // Free the primary backend last — buffers above were allocated against it,
+    // and on Metal an unreleased backend leaves the residency set live and
+    // trips ggml_metal_rsets_free's assert at process exit.
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
     delete ctx;
 }
 

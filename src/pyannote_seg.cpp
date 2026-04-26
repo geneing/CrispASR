@@ -61,6 +61,7 @@ struct pyannote_model {
 
     ggml_context* ctx = nullptr;
     ggml_backend_buffer_t buf = nullptr;
+    ggml_backend_t backend = nullptr; // owns buf — must outlive it on Metal
     std::map<std::string, ggml_tensor*> tensors;
 };
 
@@ -84,8 +85,8 @@ static bool pyannote_load(pyannote_model& m, const char* path) {
     }
     m.ctx = wl.ctx;
     m.buf = wl.buf;
+    m.backend = backend; // keep alive until pyannote_seg_free — Metal buffer needs its device
     m.tensors = std::move(wl.tensors);
-    ggml_backend_free(backend);
 
     auto get = [&](const char* name) -> ggml_tensor* {
         auto it = m.tensors.find(name);
@@ -211,6 +212,8 @@ extern "C" void pyannote_seg_free(struct pyannote_seg_context* ctx) {
         ggml_backend_buffer_free(ctx->model.buf);
     if (ctx->model.ctx)
         ggml_free(ctx->model.ctx);
+    if (ctx->model.backend)
+        ggml_backend_free(ctx->model.backend);
     delete ctx;
 }
 

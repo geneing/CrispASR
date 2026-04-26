@@ -1012,8 +1012,13 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
 void moonshine_free(struct moonshine_context* ctx) {
     if (!ctx)
         return;
-    ggml_backend_free(ctx->backend);
+    // moonshine_model's destructor frees buf_w + ctx_w. It must run BEFORE
+    // we free the backend, otherwise ggml_metal sees a buffer outliving its
+    // device and ggml_metal_rsets_free's assert fires at process exit.
+    auto* backend = ctx->backend;
     delete ctx;
+    if (backend)
+        ggml_backend_free(backend);
 }
 
 void moonshine_print_model_info(struct moonshine_context* ctx) {
