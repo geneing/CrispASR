@@ -24,14 +24,18 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 ## Pending features (v0.5.x)
 
 - **WebSocket streaming server** — `/ws` endpoint for real-time transcription
-- **Audio format support** — fix `.m4a`/`.mp4`/`.webm` crash in ffmpeg path
+- ~~**Audio format support**~~ **FIXED** — `common-whisper.cpp` now falls back to an
+  `ffmpeg` subprocess (`ffmpeg -loglevel error -i <file> -f s16le -ar 16000 -ac 1 -`)
+  when miniaudio fails to open the input. Handles m4a/mp4/webm/aac/opus when the
+  user has ffmpeg installed. The previous `ma_decoder_init_memory(fname.c_str(),
+  fname.size(), ...)` was a silent no-op that always failed.
 - ~~**Japanese punctuation split (#29)**~~ **FIXED** — CJK clause-break + 42-char fallback
-- ~~**Moonshine multilingual**~~ **FIXED** — converter forces 1D tensors to F32 (line 338). All 14 GGUF variants (tiny/base × en/ja/ar/ko/zh/vi/uk) work on CPU. head_dim=52 (base) works on CPU flash_attn; GPU flash_attn needs aligned head_dim (ggml limitation, moonshine forced to CPU anyway)
+- ~~**Moonshine multilingual**~~ **FIXED** — converter forces 1D tensors to F32 (line 338). All 14 GGUF variants (tiny/base × en/ja/ar/ko/zh/vi/uk) work on CPU. head_dim=52 (base) works on CPU flash_attn; GPU flash_attn needs aligned head_dim (ggml limitation, moonshine forced to CPU anyway). Verified 2026-04-26: tiny 50.7×, base (head_dim=52) 14.2×, base-zh on English audio 14.8× — all transcripts correct.
 - **Moonshine streaming** — **[next, IN PROGRESS]** different architecture from regular moonshine.
   Converter DONE (`models/convert-moonshine-streaming-to-gguf.py`, tested tiny+small).
   Runtime skeleton compiles (`src/moonshine_streaming.{h,cpp}`), loads GGUF, binds 161 tensors.
   Audio frontend implemented (CPU). Encoder gallocr pattern implemented; likely divergence fixed
-  (changed ggml_gelu→ggml_gelu_erf to match PyTorch default — needs verification with model).
+  (changed ggml_gelu→ggml_gelu_erf to match PyTorch default — still needs end-to-end verification with a converted GGUF).
   Decoder not yet implemented (KV cache + cross-attention + greedy decode). Backend wrapper stub exists.
   Reference: frontend `[-0.2069,...]`, enc `[0.5546,-0.0089,...]`.
   Sizes: tiny 34M, small 123M, medium 245M. All MIT.
@@ -168,6 +172,16 @@ each backend. High-value gaps to close:
   currently don't chunk long audio; the dispatch layer does VAD slicing
   but the LLM models themselves pad to a fixed 30s window. Variable-
   length mel would let them handle >30s natively.
+  **2026-04-26:** Attempted voxtral 3B variable-length encoder (commit
+  8f4c776, reverted in c2328db). Encoder math correct, but the LLM
+  produces "I'm sorry, I don't understand." instead of the transcript.
+  Hypothesis: Voxtral 3B was trained with a fixed 375-audio-token
+  context and the chat-template/positional reasoning is sensitive to
+  the audio token count, even though the encoder graph itself accepts
+  any length divisible by 8. Future fix would need to either (a) keep
+  T_mel=3000 padding but skip attention compute on padded positions,
+  or (b) verify against a Voxtral checkpoint that supports variable
+  audio context.
 
 - **[done]** ~~**Streaming transcription.**~~ **Done.** Generic
   `--stream` (stdin PCM), `--mic` (microphone capture via
