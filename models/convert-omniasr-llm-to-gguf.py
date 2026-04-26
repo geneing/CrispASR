@@ -146,13 +146,14 @@ def main():
         name = name.replace("ffn.inner_proj.", "ffn.up.")
         name = name.replace("ffn.output_proj.", "ffn.down.")
         name = name.replace("layer_norm.", "ln.")
-        name = name.replace("final_proj.", "ctc.")
+        name = name.replace("final_proj.", "lm_head.")
         name = name.replace("output_proj.", "out.")
         name = name.replace("llama_decoder.layers.", "dec.")
-        name = name.replace("llama_decoder.layer_norm.", "dec_ln.")
-        name = name.replace("text_frontend.", "text_emb.")
+        name = name.replace("llama_decoder.ln.", "dec_ln.")
+        name = name.replace("text_frontend.", "tok_emb.")
         name = name.replace("encoder_proj.", "enc_proj.")
         name = name.replace("lang_embeddings.", "lang_emb.")
+        name = name.replace("ffn.gate_proj.", "ffn.gate.")
         return name
 
     tensor_count = 0
