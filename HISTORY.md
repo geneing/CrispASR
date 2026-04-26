@@ -402,6 +402,24 @@ Moved here once shipped. See git history for code diffs.
   after ≥20 chars, force-splits at ~42 chars. English behavior unchanged.
 
 **VibeVoice-7B GGUF (April 2026):**
-- ASR-only GGUF (929 tensors: encoder + LM + tokenizer, no TTS decoder)
-- 7 quantizations: Q3_K (4.5 GB) through F16 (16.8 GB)
+- Full ASR+TTS GGUF (1205 tensors: encoder + LM + decoder + tokenizer)
+- 7 quantizations: Q3_K (4.7 GB) through F16 (17.4 GB)
+- TTS requires ≥Q4_K (Q3_K quality too low for decoder)
 - HF: `cstr/VibeVoice-7B-GGUF` with README
+
+**OmniASR CTC fix — two bugs found via stage-by-stage diff (April 2026):**
+- pos_conv weight normalization: converter used per-output-channel norm
+  (dim=0) instead of the model's per-kernel-position norm (dim=2).
+  Fix: materialize weight directly from the HF model.
+- head_dim hardcoded to 64: the 1B model uses 16 heads × 80 dim,
+  not 20 × 64. Fix: read from HF config.
+- Before: "koamerik asnot what yor country" (cosine 0.65 at layer 0)
+- After: "fellow americans ask not what your country" (exact match)
+- Converter now auto-detects v1 (fairseq2 .pt) vs v2 (HF transformers)
+- HF: `cstr/omniASR-CTC-1B-v2-GGUF` (F16 + Q4_K + Q8_0)
+
+**Moonshine multilingual — 12 models (April 2026):**
+- Fixed converter: 1D tensors (norms/biases) forced to F32 for binary ops
+- Fixed runtime: conv_1d_f32 mul_mat argument order for F16 kernels
+- All 12 models tested and uploaded to HuggingFace
+- HF: `cstr/moonshine-{tiny,base}-{ja,ar,ko,zh,vi,uk}-GGUF`
