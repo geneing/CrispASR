@@ -176,3 +176,16 @@ catch_discover_tests(test-params
     TEST_SPEC "[unit]"
     PROPERTIES LABELS "unit"
 )
+
+# ─── test-backends — integration tests for all CrispASR backends ────────────
+# Requires network (downloads models). Not run in CI by default.
+# Usage: ctest -L integration --output-on-failure
+# Or:    ./tests/test-backends.sh [backend ...]
+set(TEST_TARGET test-backends)
+add_test(NAME ${TEST_TARGET}
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test-backends.sh
+        parakeet moonshine wav2vec2 fastconformer-ctc data2vec hubert
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+set_tests_properties(${TEST_TARGET} PROPERTIES
+    LABELS "integration"
+    TIMEOUT 600)
