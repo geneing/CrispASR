@@ -67,11 +67,13 @@ public:
         // ---- Pad audio for the streaming model ----
         // Each "token" = hop_length * conv_stride * downsample_factor =
         // 160 * 2 * 4 = 1280 samples. The 4B Realtime encoder expects left
-        // padding of 32 tokens plus right-alignment + 17 tokens of right
-        // padding; without this the encoder graph reshape fails.
+        // padding of 32 tokens plus right-alignment + 10 tokens of right
+        // padding (matching the reference voxtral.c implementation).
+        // right_align ensures T_mel % 8 == 0 (required by the stack-4 projector),
+        // so any non-negative N_RIGHT_PAD_TOKENS value is safe.
         constexpr int SAMPLES_PER_TOKEN = 1280;
         constexpr int N_LEFT_PAD_TOKENS = 32;
-        constexpr int N_RIGHT_PAD_TOKENS = 17;
+        constexpr int N_RIGHT_PAD_TOKENS = 10;
         const int left_pad = N_LEFT_PAD_TOKENS * SAMPLES_PER_TOKEN;
         const int right_align = (SAMPLES_PER_TOKEN - (n_samples % SAMPLES_PER_TOKEN)) % SAMPLES_PER_TOKEN;
         const int right_pad = right_align + N_RIGHT_PAD_TOKENS * SAMPLES_PER_TOKEN;

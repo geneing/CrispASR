@@ -91,7 +91,7 @@ MODEL_REGISTRY = {
     "glm-asr":           ("glm-asr-nano-q4_k.gguf",              "cstr/glm-asr-nano-GGUF",                    "glm-asr-nano-q4_k.gguf"),
     "firered-asr":       ("firered-asr2-aed-q4_k.gguf",          "cstr/firered-asr2-aed-GGUF",                "firered-asr2-aed-q4_k.gguf"),
     "kyutai-stt":        ("kyutai-stt-1b-q4_k.gguf",             "cstr/kyutai-stt-1b-GGUF",                   "kyutai-stt-1b-q4_k.gguf"),
-    "vibevoice":         ("vibevoice-asr-7b-q4_k.gguf",          "cstr/vibevoice-asr-GGUF",                   "vibevoice-asr-q4_k.gguf"),  # local name differs from HF
+    "vibevoice":         ("vibevoice-asr-7b-q4_k-fixed.gguf",    "cstr/vibevoice-asr-GGUF",                   "vibevoice-asr-q4_k.gguf"),  # use fixed GGUF (original had tokenizer + lm_head bugs)
     "voxtral":           ("voxtral-mini-3b-2507-q4_k.gguf",      "cstr/voxtral-mini-3b-2507-GGUF",            "voxtral-mini-3b-2507-q4_k.gguf"),
     "voxtral4b":         ("voxtral-mini-4b-realtime-q4_k.gguf",  "cstr/voxtral-mini-4b-realtime-GGUF",        "voxtral-mini-4b-realtime-q4_k.gguf"),
     "granite":           ("granite-speech-4.0-1b-q4_k.gguf",     "cstr/granite-speech-4.0-1b-GGUF",           "granite-speech-4.0-1b-q4_k.gguf"),

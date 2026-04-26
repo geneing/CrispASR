@@ -725,7 +725,11 @@ static struct ggml_tensor* moonshine_build_decoder_step(struct ggml_context* ctx
     const float scale = 1.0f / sqrtf((float)head_dim);
 
     // Token embedding: [hidden, 1]
+    // ggml_get_rows inherits the embed type; cast to F32 so mul_mat src1 is always F32
+    // (multilingual GGUFs may store dec_embed as F16)
     struct ggml_tensor* cur = ggml_get_rows(ctx0, model.dec_embed, token_id);
+    if (cur->type != GGML_TYPE_F32)
+        cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
 
     for (uint32_t il = 0; il < hp.dec_n_layers; il++) {
         const auto& layer = model.dec_layers[il];
