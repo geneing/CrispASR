@@ -34,14 +34,13 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 ## 40. More Moonshine model variants
 
 Convert + upload to HuggingFace:
-- `moonshine-base` (61.5M, better WER)
-- `moonshine-streaming-tiny/small/medium`
-- `moonshine-tiny-{ja,ar,ko,zh,vi,uk}` (multilingual)
-- `moonshine-base-{ja,uk,vi,zh,ar,ko}` (multilingual)
+- ~~`moonshine-base` (61.5M, better WER)~~ **DONE** (cstr/moonshine-base-GGUF)
+- `moonshine-streaming-tiny/small/medium` — different architecture, needs new runtime
+- ~~`moonshine-tiny-{ja,ar,ko,zh,vi,uk}` (multilingual)~~ **DONE** (12 repos on HF)
+- ~~`moonshine-base-{ja,uk,vi,zh,ar,ko}` (multilingual)~~ **DONE** (12 repos on HF)
 
-Existing converter handles all sizes. Run + quantize + upload.
-
-**Effort:** Trivial per-model.
+Converter fix: 1D tensors (norms, biases) forced to F32; conv_1d_f32 mul_mat
+argument order fixed for F16 kernels.
 
 ---
 
