@@ -419,8 +419,11 @@ Moved here once shipped. See git history for code diffs.
 - 300M v2: works perfectly on ≤5s audio (cos=0.999997), breaks on >7s
   (positional encoding doesn't generalize beyond training length).
   Workaround: use --vad to chunk audio.
+- LLM converter: complete rewrite (previous was corrupted). Tensor
+  name mapping fixed (dec_ln, lm_head, tok_emb, gate). Same pos_conv fix.
 - HF: `cstr/omniASR-CTC-1B-v2-GGUF` (F16 + Q4_K + Q8_0),
-  `cstr/omniASR-CTC-300M-v2-GGUF` (F16)
+  `cstr/omniASR-CTC-300M-v2-GGUF` (F16),
+  `cstr/omniasr-llm-300m-v2-GGUF` (F16 + Q4_K — fixed pos_conv + names)
 
 **Moonshine multilingual — 12 models (April 2026):**
 - Fixed converter: 1D tensors (norms/biases) forced to F32 for binary ops
