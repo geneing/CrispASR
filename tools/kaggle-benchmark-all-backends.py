@@ -100,13 +100,21 @@ def run(cmd, timeout=600):
     except subprocess.TimeoutExpired:
         return False, "", "TIMEOUT", time.time() - t0
 
-if not os.path.isdir(CRISPASR_DIR):
+if os.path.isdir(CRISPASR_DIR):
+    # Pull latest to pick up fixes pushed since initial clone
+    subprocess.run(f"cd {CRISPASR_DIR} && git fetch --depth 1 origin main && git reset --hard origin/main",
+                   shell=True, check=True, capture_output=True)
+    print("✓ CrispASR updated to latest")
+else:
     subprocess.run(f"git clone --depth 1 https://github.com/CrispStrobe/CrispASR.git {CRISPASR_DIR}",
                    shell=True, check=True)
     print("✓ CrispASR cloned")
 
 # Detect GPU — try CUDA first, fall back to CPU if cmake fails
 has_gpu = os.path.exists("/usr/local/cuda/bin/nvcc")
+# Clean build dir to force full rebuild with latest source
+if os.path.isdir(BUILD_DIR):
+    shutil.rmtree(BUILD_DIR, ignore_errors=True)
 os.makedirs(BUILD_DIR, exist_ok=True)
 
 cmake_ok = False
