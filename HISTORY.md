@@ -380,3 +380,28 @@ Moved here once shipped. See git history for code diffs.
 - ASR round-trip verified: "Hello, how are you today?" → exact match
 - Quantized: F16 (5.1 GB), Q8_0 (2.8 GB), Q4_K (1.6 GB)
 - HF: `cstr/vibevoice-1.5b-GGUF`
+
+**ggml conv1d extensions + performance optimizations (April 2026):**
+- Three new ggml ops: `GGML_OP_CONV_1D_CF` (channels-first conv1d),
+  `GGML_OP_CONV_1D_CF` depthwise variant, `GGML_OP_CONV_1D_GROUP`
+  (fused grouped conv1d). All with direct F32 kernels, F16/BF16
+  kernel weight support, multi-threaded over output channels.
+- VibeVoice TTS: VAE decoder 29% faster (700→476 ops), total 32%
+  faster (0.39x→0.56x RT) via conv_1d_cf + `--tts-steps 10`
+- wav2vec2: 12% faster via grouped positional conv + CNN cleanup
+- firered-asr: depthwise conv migrated to conv_1d_dw_cf
+- `VIBEVOICE_BENCH=1` / `WAV2VEC2_BENCH=1` per-phase timing
+
+**Auto-download for all 19 backends (April 2026):**
+- Added firered-asr, kyutai-stt, glm-asr, moonshine, fastconformer-ctc
+  to model registry. Every backend now supports `-m auto --auto-download`.
+- Companion file mechanism for moonshine's tokenizer.bin
+
+**#29 Japanese split-on-punct fix (April 2026):**
+- CJK fallback in `split_text_at_punct`: splits at clause breaks (、，)
+  after ≥20 chars, force-splits at ~42 chars. English behavior unchanged.
+
+**VibeVoice-7B GGUF (April 2026):**
+- ASR-only GGUF (929 tensors: encoder + LM + tokenizer, no TTS decoder)
+- 7 quantizations: Q3_K (4.5 GB) through F16 (16.8 GB)
+- HF: `cstr/VibeVoice-7B-GGUF` with README

@@ -15,7 +15,7 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 
 | # | Optimization | Backends | Expected gain | Effort |
 |---|---|---|---|---|
-| O2 | Fused QKV pre-merge (single matmul) | LLM decoders (voxtral, qwen3, granite, glm, omniasr-llm) | ~10-15% attn | Medium |
+| O2 | Fused QKV pre-merge (single matmul) | LLM decoders (voxtral, qwen3, granite, glm, omniasr-llm) | ~10-15% attn (GPU mainly) | Medium |
 | O5 | Pipelined mel+encode threading | LLM backends, CPU | ~15-20% | Medium |
 | O4 | Beam search for LLM backends | All Audio-LLM | Quality improvement | High |
 | O6 | Batched encoder (GPU only) | All backends | 3-5x on GPU | High |
@@ -25,14 +25,14 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 
 - **WebSocket streaming server** — `/ws` endpoint for real-time transcription
 - **Audio format support** — fix `.m4a`/`.mp4`/`.webm` crash in ffmpeg path
-- ~~**Japanese punctuation split (#29)** — `--split-on-punct` now handles `。？！`~~ FIXED
+- ~~**Japanese punctuation split (#29)**~~ **FIXED** — CJK clause-break + 42-char fallback
+- **Moonshine multilingual** — converter works, but base models crash (head_dim=52 padding issue); tiny multilingual models work
 - **Moonshine streaming** — different architecture, needs new runtime
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
 - ~~**VibeVoice TTS**~~ — **DONE**: Realtime-0.5B (17 bugs, perfect round-trip) + 1.5B base model (voice cloning). HF: `cstr/vibevoice-realtime-0.5b-GGUF`, `cstr/vibevoice-1.5b-GGUF`
 - **VibeVoice-7B TTS** — needs 32+ GB RAM for conversion (9.3B params). Same architecture as 1.5B.
 - **VibeVoice multi-speaker** — 1.5B/7B support up to 4 speakers; need prompt template for multi-speaker scripts
 - **VibeVoice negative conditioning** — base model uses zero negative; proper dual-LM CFG would improve quality
-- ~~**Japanese punctuation split (#29)**~~ — FIXED
 
 ---
 
