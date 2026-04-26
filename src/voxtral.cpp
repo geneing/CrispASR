@@ -457,11 +457,7 @@ extern "C" float* voxtral_compute_mel(voxtral_context* ctx, const float* samples
         return nullptr;
     }
     const int n_fft = 400, hop = 160, n_mels = 128, n_freqs = 201;
-    // Pad mel to the next multiple of 8 (so T_enc = T_mel/2 is divisible by 4,
-    // as required by the stack-4-frames projector). Capped at 3000 (30s) since
-    // the learned positional embedding only covers 1500 encoder positions.
-    // The dispatch layer already chunks audio at chunk_seconds≤30, so inputs
-    // longer than 30s will never reach here as a single call.
+    const int T_out = 3000; // Voxtral always pads to 30s
 
     // Window is stored already padded to n_fft in the GGUF, so win_length
     // == n_fft and core_mel's center-pad step is a no-op for it.
@@ -486,9 +482,7 @@ extern "C" float* voxtral_compute_mel(voxtral_context* ctx, const float* samples
     p.log_eps = 1e-10f;
     p.center_pad = true;
     p.drop_last_frame = true; // Whisper convention
-    // Don't pad to a fixed 3000; let compute() return the natural frame count,
-    // then we align to the next multiple of 8 below.
-    p.pad_to_T = 0;
+    p.pad_to_T = T_out;
 
     int T_ret = 0;
     auto mel =
@@ -496,17 +490,6 @@ extern "C" float* voxtral_compute_mel(voxtral_context* ctx, const float* samples
 
     if (mel.empty())
         return nullptr;
-
-    // Align T_ret to the next multiple of 8 (projector needs T_enc = T_ret/2
-    // to be divisible by 4), capped at 3000.
-    const int T_aligned = std::min(3000, ((T_ret + 7) / 8) * 8);
-    if (T_aligned > T_ret) {
-        mel.resize((size_t)n_mels * T_aligned, 0.0f);
-        T_ret = T_aligned;
-    } else if (T_aligned < T_ret) {
-        mel.resize((size_t)n_mels * T_aligned);
-        T_ret = T_aligned;
-    }
 
     if (out_n_mels)
         *out_n_mels = n_mels;
@@ -539,7 +522,7 @@ extern "C" float* voxtral_compute_mel(voxtral_context* ctx, const float* samples
 
 static const float kLayerNormEps = 1e-5f;
 
-static ggml_cgraph* voxtral_build_graph_encoder(voxtral_context* ctx, int T_mel) {
+static ggml_cgraph* voxtral_build_graph_encoder(voxtral_context* ctx) {
     const auto& m = ctx->model;
     const auto& hp = m.hparams;
     const int d = (int)hp.audio_d_model;         // 1280
@@ -548,7 +531,7 @@ static ggml_cgraph* voxtral_build_graph_encoder(voxtral_context* ctx, int T_mel)
     const int n_layers = (int)hp.audio_n_layers; // 32
     const int proj_in = (int)hp.proj_in_dim;     // 5120
     const int n_mels = (int)hp.n_mels;           // 128
-    // T_mel is the actual (aligned) mel frame count — ≤3000 for 30s audio
+    const int T_mel = 3000;                      // padded to 30s
     const float attn_scale = 1.0f / std::sqrt((float)head_dim);
 
     ggml_init_params ip = {
@@ -600,13 +583,8 @@ static ggml_cgraph* voxtral_build_graph_encoder(voxtral_context* ctx, int T_mel)
     cur = ggml_cont(ctx0, ggml_transpose(ctx0, cur)); // (1280, 1500) = (d, T_enc)
 
     // ---- Add learned positional embedding ----
-    // embed_positions ne = (d=1280, max_pos=1500). For T_enc < 1500, view the
-    // first T_enc positions; avoids a shape mismatch on short audio.
-    ggml_tensor* pos_embed = (T_enc == (int)m.audio.embed_positions->ne[1])
-        ? m.audio.embed_positions
-        : ggml_view_2d(ctx0, m.audio.embed_positions, d, T_enc,
-                       m.audio.embed_positions->nb[1], 0);
-    cur = ggml_add(ctx0, cur, pos_embed);
+    // embed_positions ggml ne = (d=1280, max_pos=1500) = (d, T_enc). Matches cur.
+    cur = ggml_add(ctx0, cur, m.audio.embed_positions);
 
     // ---- 32 × Whisper encoder block ----
     for (int il = 0; il < n_layers; il++) {
@@ -1087,13 +1065,12 @@ extern "C" float* voxtral_run_encoder(voxtral_context* ctx, const float* mel_fea
     if (!ctx || !mel_features)
         return nullptr;
     const auto& hp = ctx->model.hparams;
-    if (n_mels != (int)hp.n_mels || T_mel <= 0 || T_mel > 3000 || T_mel % 8 != 0) {
-        fprintf(stderr, "voxtral: encoder expects n_mels=%d T_mel in (0,3000] %%8==0, got (%d,%d)\n",
-                (int)hp.n_mels, n_mels, T_mel);
+    if (n_mels != (int)hp.n_mels || T_mel != 3000) {
+        fprintf(stderr, "voxtral: encoder expects (128, 3000) mel, got (%d, %d)\n", n_mels, T_mel);
         return nullptr;
     }
 
-    ggml_cgraph* gf = voxtral_build_graph_encoder(ctx, T_mel);
+    ggml_cgraph* gf = voxtral_build_graph_encoder(ctx);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "voxtral: failed to alloc encoder graph\n");
