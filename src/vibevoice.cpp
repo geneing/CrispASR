@@ -1613,27 +1613,59 @@ static void dpm_second_order(const ddim_schedule& sched, int step_idx, float* x,
 // Forward declaration
 static ggml_cgraph* build_pred_head_graph_impl(vibevoice_context* ctx, int n_frames, std::vector<uint8_t>& meta_buf);
 
+// True when the active backend is Metal — used to skip optimisations
+// that rely on graph reuse across ggml_backend_sched_reset(), which is
+// currently broken on the Metal scheduler (see get_pred_head_graph).
+//
+// Metal devices register with names like "MTL0", "MTL1" — not "Metal".
+// Match the "MTL" prefix; CPU is "CPU", CUDA is "CUDA0", Vulkan is
+// "Vulkan0", so this is unambiguous.
+static bool backend_is_metal(ggml_backend_t b) {
+    if (!b)
+        return false;
+    const char* name = ggml_backend_name(b);
+    return name && std::strncmp(name, "MTL", 3) == 0;
+}
+
 // Get or build the cached prediction head graph.
-// The graph structure is the same for a given n_frames — only input tensor data changes.
-// Building once and reusing with ggml_backend_sched_reset saves ~30% per synthesis.
+// The graph structure is the same for a given n_frames — only input
+// tensor data changes. Building once and reusing with
+// ggml_backend_sched_reset saves ~30% per synthesis on CPU/CUDA/Vulkan.
+//
+// Metal exception: after ggml_backend_sched_reset(), reusing the same
+// graph fires GGML_ASSERT(src_backend_id != -1) inside
+// ggml_backend_sched_split_graph — some tensor view's buffer-id linkage
+// doesn't survive the reset on the Metal scheduler specifically.
+// Reproducible with the streaming Q4_0 we built locally AND with the
+// canonical Q4_K from cstr/VibeVoice-7B-GGUF, so it's the cache + Metal
+// scheduler interaction, not the model file. For Metal we fall back to
+// rebuild-each-call (matches what build_decoder_graph does) — a few
+// percent slower per diffusion sub-step but TTS actually runs.
+//
+// The proper long-term fix is upstream ggml — make the scheduler's
+// view-tensor backend mapping survive sched_reset() — at which point
+// this branch can collapse back to always-cache.
 static ggml_cgraph* get_pred_head_graph(vibevoice_context* ctx, int n_frames) {
-    if (ctx->pred_graph && ctx->pred_graph_n_frames == n_frames)
+    const bool reuse_ok = !backend_is_metal(ctx->backend);
+
+    if (reuse_ok && ctx->pred_graph && ctx->pred_graph_n_frames == n_frames)
         return ctx->pred_graph;
 
-    // Free old cached graph if different n_frames
+    // Free old cached graph if different n_frames (or first build, or
+    // every time on Metal because reuse_ok is false).
     if (ctx->pred_graph_ctx) {
         ggml_free(ctx->pred_graph_ctx);
         ctx->pred_graph_ctx = nullptr;
         ctx->pred_graph = nullptr;
     }
 
-    // Allocate separate metadata buffer for the cached graph
+    // Allocate separate metadata buffer for the cached graph.
     if (ctx->pred_graph_meta.empty())
         ctx->pred_graph_meta.resize(ggml_tensor_overhead() * 512 + ggml_graph_overhead_custom(4096, false));
 
     ctx->pred_graph = build_pred_head_graph_impl(ctx, n_frames, ctx->pred_graph_meta);
     ctx->pred_graph_n_frames = n_frames;
-    // The ggml_context lives inside pred_graph_meta (no_alloc=true)
+    // The ggml_context lives inside pred_graph_meta (no_alloc=true).
     return ctx->pred_graph;
 }
 
