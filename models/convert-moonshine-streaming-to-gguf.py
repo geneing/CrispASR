@@ -186,6 +186,9 @@ def main():
     max_positions = config.get("max_position_embeddings", 4096)
     sample_rate = enc_config.get("sample_rate", 16000)
     frame_ms = enc_config.get("frame_ms", 5.0)
+    # head_dim is explicit in config, NOT derived from hidden/heads
+    enc_head_dim = enc_config.get("head_dim", enc_hidden // enc_heads)
+    dec_head_dim = config.get("head_dim", dec_hidden // dec_heads)
 
     print(f"\nModel: moonshine-streaming")
     print(f"  Encoder: hidden={enc_hidden}, layers={enc_layers}, heads={enc_heads}, "
@@ -235,12 +238,14 @@ def main():
     writer.add_uint32("moonshine_streaming.encoder.attention.head_count", enc_heads)
     writer.add_uint32("moonshine_streaming.encoder.attention.head_count_kv", enc_kv_heads)
     writer.add_uint32("moonshine_streaming.encoder.feed_forward_length", enc_intermediate)
+    writer.add_uint32("moonshine_streaming.encoder.attention.head_dim", enc_head_dim)
 
     writer.add_uint32("moonshine_streaming.decoder.embedding_length", dec_hidden)
     writer.add_uint32("moonshine_streaming.decoder.block_count", dec_layers)
     writer.add_uint32("moonshine_streaming.decoder.attention.head_count", dec_heads)
     writer.add_uint32("moonshine_streaming.decoder.attention.head_count_kv", dec_kv_heads)
     writer.add_uint32("moonshine_streaming.decoder.feed_forward_length", dec_intermediate)
+    writer.add_uint32("moonshine_streaming.decoder.attention.head_dim", dec_head_dim)
 
     writer.add_uint32("moonshine_streaming.vocab_size", vocab_size)
     writer.add_uint32("moonshine_streaming.bos_token_id", config.get("bos_token_id", 1))

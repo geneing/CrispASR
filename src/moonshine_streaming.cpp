@@ -215,8 +215,12 @@ extern "C" struct moonshine_streaming_context* moonshine_streaming_init_from_fil
     hp.frame_ms = gguf_get_f32(gctx, "moonshine_streaming.audio.frame_ms", 5.0f);
     hp.frame_size = (uint32_t)(hp.frame_ms * hp.sample_rate / 1000.0f);
 
-    hp.enc_head_dim = hp.enc_hidden / hp.enc_n_heads;
-    hp.dec_head_dim = hp.dec_hidden / hp.dec_n_heads;
+    // head_dim is explicit in config, NOT derived from hidden/heads
+    // (small: enc_hidden=620, heads=8, head_dim=64 — 620/8=77.5 would be WRONG)
+    hp.enc_head_dim =
+        gguf_get_u32(gctx, "moonshine_streaming.encoder.attention.head_dim", hp.enc_hidden / hp.enc_n_heads);
+    hp.dec_head_dim =
+        gguf_get_u32(gctx, "moonshine_streaming.decoder.attention.head_dim", hp.dec_hidden / hp.dec_n_heads);
 
     // Read per-layer sliding windows
     hp.sliding_windows.resize(hp.enc_n_layers);
@@ -576,8 +580,8 @@ static int run_encoder(moonshine_streaming_context* ctx, const float* frontend_o
         // Sliding-window attention
         ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, masks[li], scale, 0.0f, 0.0f);
 
-        // Result is [head_dim, n_heads, T] — reshape directly to [d, T]
-        attn = ggml_reshape_2d(ctx0, attn, d, T_enc);
+        // Result is [head_dim, n_heads, T] — reshape to [n_heads*head_dim, T]
+        attn = ggml_reshape_2d(ctx0, attn, n_heads * head_dim, T_enc);
         cur = ggml_add(ctx0, residual, ggml_mul_mat(ctx0, L.attn_o_w, attn));
 
         // FFN: pre-norm + fc1+GELU + fc2 + residual
