@@ -177,6 +177,21 @@ catch_discover_tests(test-params
     PROPERTIES LABELS "unit"
 )
 
+# ─── test_qwen3_audio_tower — pre-refactor numeric baseline for the audio
+# tower. Captures sum/sum_sq/max_abs + first-32/last-32 windows on the encoder
+# output for a fixed PCM (jfk.raw) so that extracting the audio tower into the
+# CrispAudio shared library is verifiably non-disruptive. CPU-only — output
+# must be deterministic across machines.
+add_executable(test_qwen3_audio_tower test_qwen3_audio_tower.cpp)
+target_include_directories(test_qwen3_audio_tower PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(test_qwen3_audio_tower PRIVATE qwen3_asr)
+# Not auto-registered with add_test — needs a model file + jfk.raw which the
+# test runner / dev produces locally. Run manually:
+#   ./build/tests/test_qwen3_audio_tower model.gguf samples/jfk.raw \
+#       > tests/fixtures/qwen3_audio_tower_jfk.txt
+#   ./build/tests/test_qwen3_audio_tower --check model.gguf samples/jfk.raw \
+#       tests/fixtures/qwen3_audio_tower_jfk.txt
+
 # ─── test-backends — integration tests for all CrispASR backends ────────────
 # Requires network (downloads models). Not run in CI by default.
 # Usage: ctest -L integration --output-on-failure
