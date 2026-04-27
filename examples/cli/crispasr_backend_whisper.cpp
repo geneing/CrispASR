@@ -135,9 +135,10 @@ public:
         // with whisper's internal Silero-only VAD loader. Detect and disable.
         const bool firered = crispasr_vad_is_firered(p);
         const std::string resolved_vad = crispasr_resolve_vad_model(p);
-        const bool external_vad = firered || (resolved_vad.find("whisper") != std::string::npos &&
-                                              resolved_vad.find("vad") != std::string::npos &&
-                                              resolved_vad.find(".gguf") != std::string::npos);
+        const bool external_vad =
+            firered || (resolved_vad.find("marblenet") != std::string::npos) ||
+            (resolved_vad.find("whisper") != std::string::npos && resolved_vad.find("vad") != std::string::npos &&
+             resolved_vad.find(".gguf") != std::string::npos);
         const std::string vad_path = external_vad ? "" : resolved_vad;
         wp.vad = external_vad ? false : p.vad;
         wp.vad_model_path = vad_path.c_str();

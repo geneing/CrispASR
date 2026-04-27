@@ -23,6 +23,9 @@ constexpr const char* kVadFireredFile = "firered-vad.gguf";
 constexpr const char* kVadWhisperUrl =
     "https://huggingface.co/cstr/whisper-vad-encdec-asmr-GGUF/resolve/main/whisper-vad-asmr-q4_k.gguf";
 constexpr const char* kVadWhisperFile = "whisper-vad-asmr-q4_k.gguf";
+constexpr const char* kVadMarblenetUrl =
+    "https://huggingface.co/cstr/marblenet-vad-GGUF/resolve/main/marblenet-vad.gguf";
+constexpr const char* kVadMarblenetFile = "marblenet-vad.gguf";
 } // namespace
 
 // Check if a path refers to a FireRedVAD model (by filename pattern).
@@ -43,11 +46,16 @@ std::string crispasr_resolve_vad_model(const whisper_params& p) {
     if (!want_vad)
         return "";
     // Explicit path (not a keyword) — use as-is
-    if (!v.empty() && v != "auto" && v != "default" && v != "silero" && v != "firered" && v != "whisper-vad")
+    if (!v.empty() && v != "auto" && v != "default" && v != "silero" && v != "firered" && v != "whisper-vad" &&
+        v != "marblenet")
         return v;
     // `--vad -vm firered` → auto-download FireRedVAD (2.4 MB, F1=97.57%)
     if (v == "firered")
         return crispasr_cache::ensure_cached_file(kVadFireredFile, kVadFireredUrl, p.no_prints, "crispasr[vad]",
+                                                  p.cache_dir);
+    // `--vad -vm marblenet` → auto-download MarbleNet VAD (439 KB, multilingual)
+    if (v == "marblenet")
+        return crispasr_cache::ensure_cached_file(kVadMarblenetFile, kVadMarblenetUrl, p.no_prints, "crispasr[vad]",
                                                   p.cache_dir);
     // `--vad -vm whisper-vad` → auto-download Whisper-VAD-EncDec (22 MB Q4_K, experimental)
     if (v == "whisper-vad")
