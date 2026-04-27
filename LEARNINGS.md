@@ -557,11 +557,20 @@ calls is correct in principle but requires careful tensor shape management:
    channel-first `[C, T]` in C (where each channel's T values are
    contiguous). No transpose needed.
 
-**Status: DONE.** The ggml graph version works after two fixes:
+**Standalone status: DONE (4.9x speedup).** The ggml graph version works after two fixes:
 (a) Use `ggml_pad_ext` for asymmetric "same" padding before im2col
 (b) Transpose mul_mat output from `[ne[0]=cpg, ne[1]=T]` (time-major)
 to channel-first `[cpg, T]` (channel-contiguous).
 Result: pos_conv 1588ms → 324ms (4.9x faster) on wav2vec2-large.
+
+**Integrated graph status: BLOCKED.** Folding grouped conv into the full
+transformer graph (one `ggml_backend_sched_graph_compute` call) triggers
+`view_src bounds` asserts during graph construction with `no_alloc=true`.
+The assert fires even when using fresh per-group input tensors (not views
+of model weights). Root cause: ggml's `ggml_pad_ext` output tensor +
+`ggml_view_2d` combination in `no_alloc=true` contexts. The standalone
+approach (separate gallocr per call) works because each call gets its own
+allocation context.
 
 ### Moonshine Streaming: unit-offset LayerNorm and sliding-window attention
 
