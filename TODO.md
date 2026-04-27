@@ -40,8 +40,12 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 - **Gemma-4-E2B** — **[IN PROGRESS]** Google USM Conformer (12L) + Gemma4 LLM (35L).
   Converter DONE, F16 GGUF on HF (`cstr/gemma4-e2b-it-GGUF`, 9.5 GB, 872 tensors).
   Q4_K quantization pending (BPE merges fix applied, re-running on Kaggle).
-  Runtime skeleton compiles, backend registered: `--backend gemma4-e2b`.
-  Conformer encoder + LLM decoder forward passes not yet implemented.
+  Runtime compiles, backend registered: `--backend gemma4-e2b`.
+  Full forward pass implemented: Conv2D sub → 12L Conformer (macaron FFN,
+  full self-attn w/ per_dim_scale + logit cap, LightConv1d) → output proj →
+  35L Gemma4 LLM (PLE, KV-cached GQA 8Q/1KV, Q/K RMSNorm, SwiGLU, softcap).
+  **Needs testing**: differential test vs PyTorch, chunked attention, rel pos bias,
+  proper BPE tokenization, hybrid sliding/full attention.
   Apache 2.0. 128-bin log-mel, 30s max, 262K BPE vocab.
 - **MiMo-V2.5-ASR** — **[IN PROGRESS]** Xiaomi 8B Qwen2 + 1.2B RVQ audio tokenizer.
   Both converters DONE. F16 GGUFs on HF: `cstr/mimo-asr-GGUF` (15.3 GB),
