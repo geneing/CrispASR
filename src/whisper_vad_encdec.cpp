@@ -615,7 +615,7 @@ static wvad_result wvad_forward(whisper_vad_encdec_context* ctx, const float* me
     std::vector<float> logits_vec(n_out);
     ggml_backend_tensor_get(out, logits_vec.data(), 0, n_out * sizeof(float));
 
-    // Read encoder output (for reuse by whisper ASR — encoder is frozen whisper-base)
+    // Read encoder output (for reuse by whisper ASR — encoder attention layers were fine-tuned despite freeze_encoder:true in config)
     ggml_tensor* enc_t = ggml_graph_get_tensor(gf, "enc_out");
     std::vector<float> enc_vec;
     if (enc_t) {
@@ -696,7 +696,7 @@ extern "C" int whisper_vad_encdec_detect(struct whisper_vad_encdec_context* ctx,
     if (n_frames_out)
         *n_frames_out = nf;
 
-    // Output encoder embeddings if requested (frozen whisper-base encoder output,
+    // Output encoder embeddings if requested (fine-tuned encoder output (NOT reusable for whisper ASR),
     // can be injected into whisper's cross-attention state to skip the ASR encoder pass)
     if (encoder_out && !fwd.enc_emb.empty()) {
         *encoder_out = (float*)malloc(fwd.enc_emb.size() * sizeof(float));
