@@ -523,6 +523,18 @@ kernels with small spatial dimensions (k ≤ 5) and few channels (C < 256),
 ship it F32. The 16 MB F32 Silero LID model is smaller than a single
 layer of most ASR encoders — quantization is pointless.
 
+### ggml version bumps: conv_1d_dw shape change (0.9.8 → 0.10.0)
+
+In ggml 0.9.8, `ggml_conv_1d_dw` returned `[OL, 1, channels, 1]` (4D).
+In ggml 0.10.0, it returns `[OL, channels, 1]` (3D). Code that does
+`ggml_reshape_2d(result, result->ne[0], result->ne[2])` to extract
+`[OL, channels]` breaks because `ne[2]` is now `1` instead of `channels`.
+Fix: use `ne[1]` instead: `ggml_reshape_2d(ht, ht->ne[0], ht->ne[1])`.
+
+**Rule of thumb:** After any ggml bump, test all backends that use
+`ggml_conv_1d_dw` or `ggml_im2col`-based ops — the output tensor
+dimensions may shift.
+
 ### Moonshine Streaming: unit-offset LayerNorm and sliding-window attention
 
 Moonshine Streaming (UsefulSensors, MIT) uses a non-standard LayerNorm
