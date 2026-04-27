@@ -228,6 +228,36 @@ def main():
             # would also bloat the header by ~30 MB.
             print(f"  Tokenizer: {len(tokens)} tokens (merges skipped)")
 
+    # Generate and store mel filterbank + Hann window (same as qwen3/voxtral)
+    # Gemma4 uses WhisperFeatureExtractor: n_fft=400, hop=160, n_mels=128, sr=16000
+    n_fft = 400
+    n_mels = 128
+    sr = 16000
+    n_freqs = n_fft // 2 + 1
+
+    # Hann window [n_fft]
+    hann = np.hanning(n_fft + 1)[:n_fft].astype(np.float32)
+    writer.add_tensor("audio.mel_window", hann, raw_dtype=GGMLQuantizationType.F32)
+
+    # Mel filterbank [n_freqs, n_mels] (HTK scale, slaney normalization)
+    mel_lo = 2595.0 * np.log10(1.0 + 0.0 / 700.0)
+    mel_hi = 2595.0 * np.log10(1.0 + (sr / 2.0) / 700.0)
+    mel_pts = 700.0 * (10.0 ** (np.linspace(mel_lo, mel_hi, n_mels + 2) / 2595.0) - 1.0)
+    fft_freqs = np.arange(n_freqs) * sr / n_fft
+    fb = np.zeros((n_freqs, n_mels), dtype=np.float64)
+    for m in range(n_mels):
+        lo, ctr, hi = mel_pts[m], mel_pts[m + 1], mel_pts[m + 2]
+        if hi > lo:
+            enorm = 2.0 / (hi - lo)
+            for f in range(n_freqs):
+                if lo <= fft_freqs[f] <= ctr and ctr > lo:
+                    fb[f, m] = (fft_freqs[f] - lo) / (ctr - lo) * enorm
+                elif ctr < fft_freqs[f] <= hi and hi > ctr:
+                    fb[f, m] = (hi - fft_freqs[f]) / (hi - ctr) * enorm
+    fb = np.ascontiguousarray(fb.astype(np.float32))
+    writer.add_tensor("audio.mel_filters", fb, raw_dtype=GGMLQuantizationType.F32)
+    print(f"  Mel: {n_mels}-bin filterbank ({n_freqs}x{n_mels}), Hann window ({n_fft})")
+
     # Map and write tensors (streaming, one at a time)
     mapped = 0
     skipped = 0

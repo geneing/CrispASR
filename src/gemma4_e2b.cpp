@@ -124,6 +124,10 @@ struct g4e_model {
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
 
+    // Mel resources (stored in GGUF, preferred over runtime generation)
+    ggml_tensor* mel_window = nullptr;  // [n_fft] Hann window
+    ggml_tensor* mel_filters = nullptr; // [n_freqs, n_mels] filterbank
+
     // Audio subsampling
     ggml_tensor* sub_conv0_w = nullptr;      // [128, 1, 3, 3]
     ggml_tensor* sub_norm0_w = nullptr;      // [128]
@@ -820,6 +824,8 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
     };
 
     // ── Bind audio tensors ──────────────────────────────────────────────
+    m.mel_window = get("audio.mel_window");
+    m.mel_filters = get("audio.mel_filters");
     m.sub_conv0_w = get("audio.subsample.conv0.weight");
     m.sub_norm0_w = get("audio.subsample.norm0.weight");
     m.sub_conv1_w = get("audio.subsample.conv1.weight");
@@ -955,6 +961,21 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     const int n_fft = 400, hop = 160, n_mels = 128;
     const int n_freqs = n_fft / 2 + 1;
 
+    // Prefer GGUF-stored mel resources; fall back to runtime-generated ones
+    std::vector<float> hann_buf, filt_buf;
+    const float* hann_ptr = ctx->mel_window.data();
+    const float* filt_ptr = ctx->mel_filterbank.data();
+    if (m.mel_window && m.mel_filters) {
+        hann_buf.resize(n_fft);
+        ggml_backend_tensor_get(m.mel_window, hann_buf.data(), 0, n_fft * sizeof(float));
+        filt_buf.resize((size_t)n_freqs * n_mels);
+        ggml_backend_tensor_get(m.mel_filters, filt_buf.data(), 0, filt_buf.size() * sizeof(float));
+        hann_ptr = hann_buf.data();
+        filt_ptr = filt_buf.data();
+        if (verbose)
+            fprintf(stderr, "gemma4_e2b: using GGUF-stored mel filterbank\n");
+    }
+
     core_mel::Params mp;
     mp.n_fft = n_fft;
     mp.hop_length = hop;
@@ -971,8 +992,7 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     mp.drop_last_frame = true;
 
     int T_mel = 0;
-    auto mel = core_mel::compute(pcm, n_samples, ctx->mel_window.data(), n_fft, ctx->mel_filterbank.data(), n_freqs,
-                                 g4e_fft_wrapper, mp, T_mel);
+    auto mel = core_mel::compute(pcm, n_samples, hann_ptr, n_fft, filt_ptr, n_freqs, g4e_fft_wrapper, mp, T_mel);
     if (mel.empty()) {
         fprintf(stderr, "gemma4_e2b: mel computation failed\n");
         return nullptr;
