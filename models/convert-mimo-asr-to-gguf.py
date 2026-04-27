@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
 try:
     from gguf import GGUFWriter, GGMLQuantizationType
@@ -118,7 +119,7 @@ def main():
     st_files = sorted(model_dir.glob("*.safetensors"))
     if not st_files:
         st_files = sorted(model_dir.glob("model-*.safetensors"))
-    handles = [safe_open(str(f), framework="numpy") for f in st_files]
+    handles = [safe_open(str(f), framework="pt") for f in st_files]
     tensor_names = {}
     for idx, h in enumerate(handles):
         for name in h.keys():
@@ -177,7 +178,7 @@ def main():
     mapped = 0
     for hf_name in sorted(tensor_names.keys()):
         gguf_name = map_tensor_name(hf_name)
-        data = handles[tensor_names[hf_name]].get_tensor(hf_name)
+        data = handles[tensor_names[hf_name]].get_tensor(hf_name).to(torch.float32).numpy()
 
         if data.ndim == 0:
             data = np.array([data.item()], dtype=np.float32)

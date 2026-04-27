@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
 try:
     from gguf import GGUFWriter, GGMLQuantizationType
@@ -170,7 +171,7 @@ def main():
     if not st_files:
         print(f"Error: No .safetensors files found in {model_dir}")
         sys.exit(1)
-    handles = [safe_open(str(f), framework="numpy") for f in st_files]
+    handles = [safe_open(str(f), framework="pt") for f in st_files]
     tensor_names = {}
     for idx, h in enumerate(handles):
         for name in h.keys():
@@ -235,7 +236,7 @@ def main():
             skipped += 1
             continue
 
-        data = handles[tensor_names[hf_name]].get_tensor(hf_name)
+        data = handles[tensor_names[hf_name]].get_tensor(hf_name).to(torch.float32).numpy()
 
         # Scalar tensors → 1-element F32
         if data.ndim == 0:
