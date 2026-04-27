@@ -914,6 +914,25 @@ static std::vector<parakeet_emitted_token> parakeet_tdt_decode(parakeet_context*
     // SOS / first input is the blank token (NeMo convention)
     std::vector<float> pred_out;
     predictor_step(W, blank_id, state, pred_out);
+    if (getenv("PARAKEET_DEBUG"))
+        fprintf(
+            stderr, "parakeet: pred_out[blank]: mean=%.4f std=%.4f [0..3]=%.4f %.4f %.4f %.4f\n",
+            [&] {
+                double s = 0;
+                for (auto v : pred_out)
+                    s += v;
+                return s / pred_out.size();
+            }(),
+            [&] {
+                double s = 0, m = 0;
+                for (auto v : pred_out) {
+                    m += v;
+                    s += v * v;
+                }
+                m /= pred_out.size();
+                return sqrt(s / pred_out.size() - m * m);
+            }(),
+            (double)pred_out[0], (double)pred_out[1], (double)pred_out[2], (double)pred_out[3]);
 
     std::vector<float> proj_e(J.joint_hidden);
     std::vector<float> logits(J.vocab_total);
@@ -926,12 +945,27 @@ static std::vector<parakeet_emitted_token> parakeet_tdt_decode(parakeet_context*
     std::mt19937_64 rng(ctx->decode_seed != 0 ? ctx->decode_seed : (uint64_t)std::random_device{}());
 
     int t = 0;
+    int total_steps = 0;
     while (t < T_enc) {
         joint_proj_enc(J, enc + (size_t)t * d_model, proj_e);
 
         int n_inner = 0;
         while (n_inner < max_per_step) {
             joint_step(J, proj_e.data(), pred_out.data(), logits);
+
+            if (getenv("PARAKEET_DEBUG") && total_steps < 5) {
+                // Show first few logits
+                int best = 0;
+                float best_v = logits[0];
+                for (int v = 1; v < n_vocab_blk; v++)
+                    if (logits[v] > best_v) {
+                        best_v = logits[v];
+                        best = v;
+                    }
+                fprintf(stderr, "parakeet: t=%d step=%d best_tok=%d (%.3f) blank_logit=%.3f\n", t, total_steps, best,
+                        best_v, logits[blank_id]);
+            }
+            total_steps++;
 
             // Argmax (default) or temperature sample over the vocab+blank
             // logits. The duration logits are picked separately by argmax
@@ -1260,8 +1294,18 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
     auto enc = parakeet_encode_mel(ctx, mel.data(), (int)ctx->model.hparams.n_mels, T_mel, &T_enc);
     if (enc.empty())
         return nullptr;
-    if (getenv("PARAKEET_DEBUG"))
+    if (getenv("PARAKEET_DEBUG")) {
         fprintf(stderr, "parakeet: encoder OK (%d frames)\n", T_enc);
+        int d = (int)ctx->model.hparams.d_model;
+        double s = 0, sq = 0;
+        for (int i = 0; i < T_enc * d; i++) {
+            s += enc[i];
+            sq += (double)enc[i] * enc[i];
+        }
+        double m = s / (T_enc * d), v = sq / (T_enc * d) - m * m;
+        fprintf(stderr, "parakeet: enc mean=%.4f std=%.4f enc[0,:4]=%.4f %.4f %.4f %.4f\n", m, sqrt(v), (double)enc[0],
+                (double)enc[1], (double)enc[2], (double)enc[3]);
+    }
 
     // 3. TDT greedy decode
     auto emitted = parakeet_tdt_decode(ctx, enc.data(), T_enc, (int)ctx->model.hparams.d_model);
