@@ -126,7 +126,7 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 
 **Language identification** for backends without native LID: `--lid-backend whisper` (default, 75 MB ggml-tiny.bin), `--lid-backend silero` (native GGUF, 16 MB, 95 languages), or `--lid-backend firered` (FireRedLID, 1.7 GB, 120 languages — Conformer encoder + Transformer decoder).
 
-**Voice activity detection**: `--vad` uses the default Silero VAD (~885 KB, auto-downloaded). Each VAD segment is transcribed independently, producing separate SRT/VTT entries with correct timestamps. Use `--vad --split-on-punct` for best subtitle output. Pass `--vad-model <path>` to use an alternative model — if the filename contains "firered-vad", FireRedVAD (DFSMN, 2.4 MB) is used automatically.
+**Voice activity detection**: `--vad` uses the default Silero VAD (~885 KB, auto-downloaded). Each VAD segment is transcribed independently, producing separate SRT/VTT entries with correct timestamps. Use `--vad --split-on-punct` for best subtitle output. Pass `--vad -vm firered` to auto-download FireRedVAD (2.4 MB, F1=97.57%, recommended). Three VAD backends available: Silero (default), FireRedVAD, and Whisper-VAD-EncDec (experimental).
 
 **Punctuation restoration** (`--punc-model`): CTC-based backends output lowercase without punctuation. Add `--punc-model fireredpunc-q8_0.gguf` (or `fullstop-punc-q4_k.gguf` for DE/FR/IT) to restore punctuation and capitalization. See the post-processing table above for model details. Also available via Python/Rust/Dart wrappers (`crispasr.PuncModel`).
 
@@ -222,7 +222,8 @@ Three LID providers are available:
 Two VAD providers are available:
 
 - **Silero VAD** (default) — ~885 KB, auto-downloaded via `--vad`. Industry-standard, well-tested.
-- **FireRedVAD** — DFSMN-based, 2.4 MB. Pass `--vad-model firered-vad.gguf` to use. Detected automatically from filename.
+- **FireRedVAD** — DFSMN-based, 2.4 MB, F1=97.57%. Pass `--vad -vm firered` to auto-download, or `--vad-model firered-vad.gguf`. Recommended.
+- **Whisper-VAD-EncDec** *(experimental)* — Whisper-base encoder + TransformerDecoder head, 22 MB Q4_K ([`cstr/whisper-vad-encdec-asmr-GGUF`](https://huggingface.co/cstr/whisper-vad-encdec-asmr-GGUF)). Trained on Japanese ASMR; may not generalise well to all domains. Pass `--vad-model whisper-vad-asmr-q4_k.gguf`. Slower than Silero/FireRedVAD (~1s vs ~50ms).
 
 Pass `--lid-backend off` to skip LID entirely.
 
