@@ -3,11 +3,11 @@
 Pending roadmap items. Each is self-contained with files, approach, and
 effort estimate. Completed items have been moved to `HISTORY.md`.
 
-**Current state (April 2026, v0.5.0):** 19 ASR backends + TTS, unified CLI,
+**Current state (April 2026, v0.5.3):** 21 ASR backends + TTS, unified CLI,
 OpenAI-compatible server, shared `src/core/` library, FireRedPunc
 post-processor, C-ABI + Python/Rust/Dart wrappers, CI on 6 platforms.
 All backends support `-m auto --auto-download`. Three new ggml ops
-(`conv_1d_cf`, `conv_1d_dw_cf`, `conv_1d_group`).
+(`conv_1d_cf`, `conv_1d_dw_cf`, `conv_1d_group`). ggml bumped to 0.10.0.
 
 ---
 
@@ -17,7 +17,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 |---|---|---|---|
 | **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Medium | |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
-| **LOW** | #40b Moonshine streaming | High | Deferred |
+| **LOW** | ~~#40b Moonshine streaming~~ | ~~High~~ | **DONE** (3 sizes) |
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
 | **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
