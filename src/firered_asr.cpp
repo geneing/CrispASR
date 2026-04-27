@@ -325,8 +325,9 @@ extern "C" struct firered_asr_context* firered_asr_init_from_file(const char* pa
     }
 
     // ---- pass 2: load tensor data ----
-    // Always load to CPU: the decoder uses native Q4_K SIMD (70ms/step vs
-    // 590ms with F32 dequant). The encoder scheduler auto-copies to GPU.
+    // Load to CPU: the decoder uses native Q4_K SIMD (60ms/step).
+    // The encoder scheduler auto-copies CPU weights to GPU per layer.
+    // TODO: single-graph encoder would eliminate per-layer copy overhead (~15s on T4).
     if (params.verbosity >= 1)
         fprintf(stderr, "firered_asr: loading weights to CPU (Q4_K SIMD decoder)...\n");
     core_gguf::WeightLoad wl;
