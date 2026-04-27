@@ -491,15 +491,20 @@ static bool ggml_grouped_conv1d_same(const float* x_cf, float* y_cf, int C, int 
         return false;
     }
 
-    // Read outputs: mul_mat gives [cpg, T] per group → channel-first layout
+    // Read outputs: mul_mat gives [ne[0]=cpg, ne[1]=T] = time-major layout
+    // (data[c + t*cpg]). Transpose to channel-first (data[c*T + t]) for y_cf.
+    std::vector<float> tmp((size_t)cpg * T);
     for (int g = 0; g < G; g++) {
         char name[32];
         snprintf(name, sizeof(name), "gc_%d", g);
         ggml_tensor* out = ggml_graph_get_tensor(gf, name);
         if (!out)
             continue;
-        size_t bytes = (size_t)cpg * T * sizeof(float);
-        ggml_backend_tensor_get(out, y_cf + (size_t)g * cpg * T, 0, bytes);
+        ggml_backend_tensor_get(out, tmp.data(), 0, (size_t)cpg * T * sizeof(float));
+        // Transpose: tmp[c + t*cpg] → y_cf[(g*cpg+c)*T + t]
+        for (int c = 0; c < cpg; c++)
+            for (int t = 0; t < T; t++)
+                y_cf[(g * cpg + c) * T + t] = tmp[c + t * cpg];
     }
 
     ggml_gallocr_free(alloc);
@@ -1280,9 +1285,8 @@ static std::vector<float> wav2vec2_compute_logits_graph(const wav2vec2_model& m,
             const float* pw = tensor_data_f32(w_tensor);
             const float* pb = b_tensor ? tensor_data_f32(b_tensor) : nullptr;
             std::vector<float> pos_out(H * T, 0.0f);
-            // ggml grouped conv disabled pending shape debugging — produces wrong output
-            // if (!ggml_grouped_conv1d_same(pos_cf.data(), pos_out.data(), H, K_this, G_pos, T, pw, pb, m.backend))
-            grouped_conv1d_same(pos_cf.data(), pw, pb, pos_out.data(), H, H, K_this, G_pos, T);
+            if (!ggml_grouped_conv1d_same(pos_cf.data(), pos_out.data(), H, K_this, G_pos, T, pw, pb, m.backend))
+                grouped_conv1d_same(pos_cf.data(), pw, pb, pos_out.data(), H, H, K_this, G_pos, T);
 
             if (n_layers > 1) {
                 for (int t2 = 0; t2 < T; t2++) {
@@ -1709,9 +1713,8 @@ std::vector<float> wav2vec2_compute_logits(const wav2vec2_model& m, const float*
         // Grouped positional conv: try ggml (SIMD), fallback to manual CPU
         const float* pw = tensor_data_f32(m.pos_conv_w);
         const float* pb = tensor_data_f32(m.pos_conv_b);
-        // ggml grouped conv disabled pending shape debugging
-        // if (!ggml_grouped_conv1d_same(hcf.data(), pos_out.data(), H, K_pos, G_pos, T, pw, pb, m.backend))
-        grouped_conv1d_same(hcf.data(), pw, pb, pos_out.data(), H, H, K_pos, G_pos, T);
+        if (!ggml_grouped_conv1d_same(hcf.data(), pos_out.data(), H, K_pos, G_pos, T, pw, pb, m.backend))
+            grouped_conv1d_same(hcf.data(), pw, pb, pos_out.data(), H, H, K_pos, G_pos, T);
 
         for (int t = 0; t < T; t++)
             for (int h = 0; h < H; h++)
