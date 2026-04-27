@@ -76,6 +76,7 @@ SLOW_BACKENDS = [
     ("voxtral",           "Voxtral Mini 3B",         300, "Q4_K, 3B params"),
     ("voxtral4b",         "Voxtral 4B Realtime",     300, "Q4_K, 4B params"),
     ("granite",           "Granite Speech 1B",       300, "Q4_K, 2.9B params"),
+    ("gemma4-e2b",        "Gemma-4-E2B 2.3B",        300, "Q4_K, 2.3B params"),
 ]
 
 print(f"CrispASR Benchmark — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -254,6 +255,7 @@ MODEL_REGISTRY = {
     "voxtral":           ("voxtral-mini-3b-2507-q4_k.gguf","cstr/voxtral-mini-3b-2507-GGUF",       "voxtral-mini-3b-2507-q4_k.gguf"),
     "voxtral4b":         ("voxtral-mini-4b-realtime-q4_k.gguf","cstr/voxtral-mini-4b-realtime-GGUF","voxtral-mini-4b-realtime-q4_k.gguf"),
     "granite":           ("granite-speech-4.0-1b-q4_k.gguf","cstr/granite-speech-4.0-1b-GGUF",     "granite-speech-4.0-1b-q4_k.gguf"),
+    "gemma4-e2b":        ("gemma4-e2b-it-q4_k.gguf",      "cstr/gemma4-e2b-it-GGUF",              "gemma4-e2b-it-q4_k.gguf"),
 }
 
 # Also download moonshine tokenizer

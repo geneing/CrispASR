@@ -69,6 +69,9 @@ constexpr Entry k_registry[] = {
     {"fastconformer-ctc", "stt-en-fastconformer-ctc-large-q4_k.gguf",
      "https://huggingface.co/cstr/stt-en-fastconformer-ctc-large-GGUF/resolve/main/stt-en-fastconformer-ctc-large-q4_k.gguf",
      "~83 MB", nullptr, nullptr},
+    {"gemma4-e2b", "gemma4-e2b-it-q4_k.gguf",
+     "https://huggingface.co/cstr/gemma4-e2b-it-GGUF/resolve/main/gemma4-e2b-it-q4_k.gguf",
+     "~2.5 GB", nullptr, nullptr},
 };
 // clang-format on
 
