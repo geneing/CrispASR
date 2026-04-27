@@ -388,13 +388,18 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
     ggml_set_name(mel_in, "mel");
     ggml_set_input(mel_in);
 
+    // Helper: ensure tensor is F32 (dequant Q4_K etc. for ops that need F32)
+    auto f32 = [&](ggml_tensor* t) -> ggml_tensor* {
+        return (t && t->type != GGML_TYPE_F32) ? ggml_cast(ctx0, t, GGML_TYPE_F32) : t;
+    };
+
     // Conv1d front-end
     // ggml conv_1d_ph requires F16 kernel on CPU (im2col_f16 assert)
     ggml_tensor* conv1_w_f16 = ggml_cast(ctx0, m.conv1_w, GGML_TYPE_F16);
     ggml_tensor* h = ggml_conv_1d_ph(ctx0, conv1_w_f16, mel_in, 1, 1);
     if (m.conv1_b) {
         h = ggml_cont(ctx0, ggml_transpose(ctx0, h)); // [C, T]
-        h = ggml_add(ctx0, h, m.conv1_b);
+        h = ggml_add(ctx0, h, f32(m.conv1_b));
         h = ggml_cont(ctx0, ggml_transpose(ctx0, h));
     }
     h = ggml_gelu(ctx0, h);
@@ -402,7 +407,7 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
     h = ggml_conv_1d_ph(ctx0, conv2_w_f16, h, 2, 1); // stride=2: 3000->1500
     if (m.conv2_b) {
         h = ggml_cont(ctx0, ggml_transpose(ctx0, h));
-        h = ggml_add(ctx0, h, m.conv2_b);
+        h = ggml_add(ctx0, h, f32(m.conv2_b));
         h = ggml_cont(ctx0, ggml_transpose(ctx0, h));
     }
     h = ggml_gelu(ctx0, h);
@@ -416,7 +421,7 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
     if (m.pos_emb) {
         int T_actual = (int)h->ne[1];
         if (T_actual == T) {
-            h = ggml_add(ctx0, h, m.pos_emb);
+            h = ggml_add(ctx0, h, f32(m.pos_emb));
         } else {
             ggml_tensor* pe = ggml_view_2d(ctx0, m.pos_emb, d, T_actual, m.pos_emb->nb[1], 0);
             h = ggml_add(ctx0, h, pe);
@@ -431,16 +436,16 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
 
         // Pre-attention LayerNorm
         h = ggml_norm(ctx0, h, eps);
-        h = ggml_add(ctx0, ggml_mul(ctx0, h, L.attn_ln_w), L.attn_ln_b);
+        h = ggml_add(ctx0, ggml_mul(ctx0, h, f32(L.attn_ln_w)), f32(L.attn_ln_b));
 
         // Q (with bias), K (no bias), V (with bias)
         ggml_tensor* Q = ggml_mul_mat(ctx0, L.q_w, h);
         if (L.q_b)
-            Q = ggml_add(ctx0, Q, L.q_b);
+            Q = ggml_add(ctx0, Q, f32(L.q_b));
         ggml_tensor* K = ggml_mul_mat(ctx0, L.k_w, h);
         ggml_tensor* V = ggml_mul_mat(ctx0, L.v_w, h);
         if (L.v_b)
-            V = ggml_add(ctx0, V, L.v_b);
+            V = ggml_add(ctx0, V, f32(L.v_b));
 
         // Reshape + permute for flash_attn: (hd, T, nh)
         Q = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q, hd, nh, T), 0, 2, 1, 3));
@@ -454,26 +459,26 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
         // Output projection + residual
         attn = ggml_mul_mat(ctx0, L.o_w, attn);
         if (L.o_b)
-            attn = ggml_add(ctx0, attn, L.o_b);
+            attn = ggml_add(ctx0, attn, f32(L.o_b));
         h = ggml_add(ctx0, residual, attn);
 
         // FFN
         residual = h;
         h = ggml_norm(ctx0, h, eps);
-        h = ggml_add(ctx0, ggml_mul(ctx0, h, L.ffn_ln_w), L.ffn_ln_b);
+        h = ggml_add(ctx0, ggml_mul(ctx0, h, f32(L.ffn_ln_w)), f32(L.ffn_ln_b));
         h = ggml_mul_mat(ctx0, L.fc1_w, h);
-        if (L.fc1_b)
-            h = ggml_add(ctx0, h, L.fc1_b);
+        if (f32(L.fc1_b))
+            h = ggml_add(ctx0, h, f32(L.fc1_b));
         h = ggml_gelu(ctx0, h);
         h = ggml_mul_mat(ctx0, L.fc2_w, h);
-        if (L.fc2_b)
-            h = ggml_add(ctx0, h, L.fc2_b);
+        if (f32(L.fc2_b))
+            h = ggml_add(ctx0, h, f32(L.fc2_b));
         h = ggml_add(ctx0, residual, h);
     }
 
     // Final encoder LayerNorm
     h = ggml_norm(ctx0, h, eps);
-    h = ggml_add(ctx0, ggml_mul(ctx0, h, m.enc_ln_w), m.enc_ln_b);
+    h = ggml_add(ctx0, ggml_mul(ctx0, h, f32(m.enc_ln_w)), f32(m.enc_ln_b));
     // h = encoder output [d, T]
 
     ggml_tensor* enc_out = h;
@@ -491,7 +496,7 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
         ggml_tensor* residual = tgt;
         ggml_tensor* qkv = ggml_mul_mat(ctx0, L.sa_in_proj_w, tgt);
         if (L.sa_in_proj_b)
-            qkv = ggml_add(ctx0, qkv, L.sa_in_proj_b);
+            qkv = ggml_add(ctx0, qkv, f32(L.sa_in_proj_b));
         // Split Q, K, V each [d, T]
         ggml_tensor* sa_Q = ggml_cont(ctx0, ggml_view_2d(ctx0, qkv, d, T, qkv->nb[1], 0));
         ggml_tensor* sa_K = ggml_cont(ctx0, ggml_view_2d(ctx0, qkv, d, T, qkv->nb[1], d * sizeof(float)));
@@ -506,14 +511,14 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
         sa = ggml_reshape_2d(ctx0, sa, d, T);
         sa = ggml_mul_mat(ctx0, L.sa_o_w, sa);
         if (L.sa_o_b)
-            sa = ggml_add(ctx0, sa, L.sa_o_b);
+            sa = ggml_add(ctx0, sa, f32(L.sa_o_b));
         tgt = ggml_add(ctx0, residual, sa);
 
         // norm1
         if (L.norm1_w)
-            tgt = ggml_add(ctx0, ggml_mul(ctx0, ggml_norm(ctx0, tgt, eps), L.norm1_w), L.norm1_b);
-        else if (L.norm1_b)
-            tgt = ggml_add(ctx0, ggml_norm(ctx0, tgt, eps), L.norm1_b);
+            tgt = ggml_add(ctx0, ggml_mul(ctx0, ggml_norm(ctx0, tgt, eps), f32(L.norm1_w)), f32(L.norm1_b));
+        else if (f32(L.norm1_b))
+            tgt = ggml_add(ctx0, ggml_norm(ctx0, tgt, eps), f32(L.norm1_b));
 
         // Cross-attention: Q from target, K/V from encoder.
         // Fused in_proj_w [ne0=d, ne1=3d]. Do full mul_mat then split output.
@@ -521,8 +526,8 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
         ggml_tensor* ca_q_all = ggml_mul_mat(ctx0, L.ca_in_proj_w, tgt);      // [3d, T]
         ggml_tensor* ca_kv_all = ggml_mul_mat(ctx0, L.ca_in_proj_w, enc_out); // [3d, T]
         if (L.ca_in_proj_b) {
-            ca_q_all = ggml_add(ctx0, ca_q_all, L.ca_in_proj_b);
-            ca_kv_all = ggml_add(ctx0, ca_kv_all, L.ca_in_proj_b);
+            ca_q_all = ggml_add(ctx0, ca_q_all, f32(L.ca_in_proj_b));
+            ca_kv_all = ggml_add(ctx0, ca_kv_all, f32(L.ca_in_proj_b));
         }
         // Q from tgt result [0..d), K from enc result [d..2d), V from enc result [2d..3d)
         ggml_tensor* ca_Q = ggml_cont(ctx0, ggml_view_2d(ctx0, ca_q_all, d, T, ca_q_all->nb[1], 0));
@@ -540,33 +545,33 @@ static std::vector<float> wvad_forward(whisper_vad_encdec_context* ctx, const fl
         ca = ggml_reshape_2d(ctx0, ca, d, T);
         ca = ggml_mul_mat(ctx0, L.ca_o_w, ca);
         if (L.ca_o_b)
-            ca = ggml_add(ctx0, ca, L.ca_o_b);
+            ca = ggml_add(ctx0, ca, f32(L.ca_o_b));
         tgt = ggml_add(ctx0, residual, ca);
 
         // norm2
-        if (L.norm2_b)
-            tgt = ggml_add(ctx0, ggml_norm(ctx0, tgt, eps), L.norm2_b);
+        if (f32(L.norm2_b))
+            tgt = ggml_add(ctx0, ggml_norm(ctx0, tgt, eps), f32(L.norm2_b));
 
         // FFN
         residual = tgt;
         ggml_tensor* ff = ggml_mul_mat(ctx0, L.fc1_w, tgt);
-        if (L.fc1_b)
-            ff = ggml_add(ctx0, ff, L.fc1_b);
+        if (f32(L.fc1_b))
+            ff = ggml_add(ctx0, ff, f32(L.fc1_b));
         ff = ggml_relu(ctx0, ff); // PyTorch TransformerDecoder default is ReLU
         ff = ggml_mul_mat(ctx0, L.fc2_w, ff);
-        if (L.fc2_b)
-            ff = ggml_add(ctx0, ff, L.fc2_b);
+        if (f32(L.fc2_b))
+            ff = ggml_add(ctx0, ff, f32(L.fc2_b));
         tgt = ggml_add(ctx0, residual, ff);
 
         // norm3
-        if (L.norm3_b)
-            tgt = ggml_add(ctx0, ggml_norm(ctx0, tgt, eps), L.norm3_b);
+        if (f32(L.norm3_b))
+            tgt = ggml_add(ctx0, ggml_norm(ctx0, tgt, eps), f32(L.norm3_b));
     }
 
     // ── Frame classifier: Linear(512→1) + sigmoid ──
     ggml_tensor* logits = ggml_mul_mat(ctx0, m.cls_w, tgt); // [1, T]
     if (m.cls_b)
-        logits = ggml_add(ctx0, logits, m.cls_b);
+        logits = ggml_add(ctx0, logits, f32(m.cls_b));
     // Sigmoid in post-processing (not in graph for numerical stability)
 
     ggml_set_name(logits, "logits");
