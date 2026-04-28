@@ -468,8 +468,8 @@ static std::vector<float> parakeet_compute_mel_impl(parakeet_context* ctx, const
     p.log_eps = (float)(1.0 / (1 << 24));
     p.center_pad = true;
 
-    auto mel = core_mel::compute(samples, n_samples, window_raw.data(), win, mel_fb.data(), n_freqs, parakeet_fft_r2c, p,
-                                 T_out);
+    auto mel = core_mel::compute(samples, n_samples, window_raw.data(), win, mel_fb.data(), n_freqs, parakeet_fft_r2c,
+                                 p, T_out);
     return mel;
 }
 
@@ -851,8 +851,8 @@ static void parakeet_init_pred_weights(parakeet_context* ctx) {
 
     // Sanity checks against the actual tensor shapes. ggml stores
     // PyTorch (rows, cols) as ne[0]=cols, ne[1]=rows.
-    const int64_t embed_cols = p.embed_w->ne[0]; // == hidden
-    const int64_t embed_rows = p.embed_w->ne[1]; // == vocab+1
+    const int64_t embed_cols = p.embed_w->ne[0];       // == hidden
+    const int64_t embed_rows = p.embed_w->ne[1];       // == vocab+1
     const int64_t lstm0_ih_cols = p.lstm0_w_ih->ne[0]; // == in_dim
     const int64_t lstm0_ih_rows = p.lstm0_w_ih->ne[1]; // == 4*H
     if (embed_cols != H) {
@@ -868,9 +868,8 @@ static void parakeet_init_pred_weights(parakeet_context* ctx) {
                 (long long)lstm0_ih_rows, (long long)lstm0_ih_cols, 4 * H, H);
     }
     if (embed_rows < blank_id + 1) {
-        fprintf(stderr,
-                "parakeet: WARN embed.weight rows=%lld but blank_id+1=%d\n",
-                (long long)embed_rows, blank_id + 1);
+        fprintf(stderr, "parakeet: WARN embed.weight rows=%lld but blank_id+1=%d\n", (long long)embed_rows,
+                blank_id + 1);
     }
 
     // NeMo's RNNT decoder uses Embedding(..., padding_idx=blank_id), so
@@ -884,7 +883,8 @@ static void parakeet_init_pred_weights(parakeet_context* ctx) {
         float maxv = 0;
         for (int k = 0; k < H; k++) {
             s += row[k] * row[k];
-            if (fabsf(row[k]) > maxv) maxv = fabsf(row[k]);
+            if (fabsf(row[k]) > maxv)
+                maxv = fabsf(row[k]);
         }
         fprintf(stderr,
                 "parakeet: embed[blank=%d]  L2=%.4f  max|.|=%.4f  "
@@ -1107,17 +1107,18 @@ static std::vector<parakeet_emitted_token> parakeet_tdt_decode(parakeet_context*
                 for (auto v : pred_out) {
                     m += v;
                     s += v * v;
-                    if (v < minv) minv = v;
-                    if (v > maxv) maxv = v;
+                    if (v < minv)
+                        minv = v;
+                    if (v > maxv)
+                        maxv = v;
                 }
                 m /= pred_out.size();
                 double std_ = sqrt(s / pred_out.size() - m * m);
                 fprintf(stderr,
                         "parakeet: emit#%zu tok=%d dur=%d  pred_out: mean=%.4f std=%.4f "
                         "min=%.3f max=%.3f [0..3]=%.3f %.3f %.3f %.3f\n",
-                        emitted.size(), tok, dur_skip, m, std_, (double)minv, (double)maxv,
-                        (double)pred_out[0], (double)pred_out[1], (double)pred_out[2],
-                        (double)pred_out[3]);
+                        emitted.size(), tok, dur_skip, m, std_, (double)minv, (double)maxv, (double)pred_out[0],
+                        (double)pred_out[1], (double)pred_out[2], (double)pred_out[3]);
             }
 
             // Advance encoder frame by the predicted duration (≥ 0). If 0,

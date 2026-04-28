@@ -42,7 +42,7 @@
 // One macro per compiled-in ggml backend. Each guard mirrors the
 // corresponding GGML_* CMake option so the banner accurately reports
 // which paths the binary can drive at runtime.
-static const char * crispasr_compiled_backends() {
+static const char* crispasr_compiled_backends() {
     static std::string s;
     if (!s.empty())
         return s.c_str();
@@ -74,7 +74,7 @@ static const char * crispasr_compiled_backends() {
     return s.c_str();
 }
 
-static const char * crispasr_compiler_id() {
+static const char* crispasr_compiler_id() {
 #if defined(__clang__)
     static char buf[64];
     std::snprintf(buf, sizeof(buf), "clang %d.%d.%d", __clang_major__, __clang_minor__, __clang_patchlevel__);
@@ -92,12 +92,12 @@ static const char * crispasr_compiler_id() {
 #endif
 }
 
-void crispasr_print_short_banner(FILE * out) {
+void crispasr_print_short_banner(FILE* out) {
     std::fprintf(out, "crispasr %s (git %s, %s) [backends: %s]\n", CRISPASR_VERSION_STR, CRISPASR_GIT_SHA1,
                  CRISPASR_BUILD_TYPE, crispasr_compiled_backends());
 }
 
-void crispasr_print_build_info(FILE * out) {
+void crispasr_print_build_info(FILE* out) {
     std::fprintf(out, "=== build info ===\n");
     std::fprintf(out, "  version       : %s\n", CRISPASR_VERSION_STR);
     std::fprintf(out, "  git sha       : %s\n", CRISPASR_GIT_SHA1);
@@ -134,8 +134,8 @@ void crispasr_print_build_info(FILE * out) {
     std::fprintf(out, "\n");
 }
 
-static void print_env_if_set(FILE * out, const char * name) {
-    const char * v = std::getenv(name);
+static void print_env_if_set(FILE* out, const char* name) {
+    const char* v = std::getenv(name);
     if (v && *v) {
         std::fprintf(out, "  %-28s = %s\n", name, v);
     } else {
@@ -146,8 +146,8 @@ static void print_env_if_set(FILE * out, const char * name) {
 #if defined(__linux__)
 // Best-effort: dump small text files that are likely to point at the cause
 // of a CUDA bring-up failure. Silent when the file does not exist.
-static void cat_small_file(FILE * out, const char * path) {
-    FILE * f = std::fopen(path, "r");
+static void cat_small_file(FILE* out, const char* path) {
+    FILE* f = std::fopen(path, "r");
     if (!f)
         return;
     std::fprintf(out, "  --- %s ---\n", path);
@@ -166,12 +166,12 @@ static void cat_small_file(FILE * out, const char * path) {
 #include <dirent.h>
 #include <sys/stat.h>
 
-static void list_dir_files(FILE * out, const char * path, const char * substr) {
-    DIR * d = ::opendir(path);
+static void list_dir_files(FILE* out, const char* path, const char* substr) {
+    DIR* d = ::opendir(path);
     if (!d)
         return;
     std::fprintf(out, "  %s/\n", path);
-    struct dirent * e;
+    struct dirent* e;
     int n = 0;
     while ((e = ::readdir(d)) != nullptr) {
         if (e->d_name[0] == '.')
@@ -189,7 +189,7 @@ static void list_dir_files(FILE * out, const char * path, const char * substr) {
 }
 #endif
 
-void crispasr_print_runtime_env(FILE * out) {
+void crispasr_print_runtime_env(FILE* out) {
     std::fprintf(out, "=== runtime env ===\n");
     print_env_if_set(out, "PATH");
     print_env_if_set(out, "LD_LIBRARY_PATH");
@@ -221,7 +221,7 @@ void crispasr_print_runtime_env(FILE * out) {
     std::fprintf(out, "\n");
 }
 
-void crispasr_print_devices(FILE * out) {
+void crispasr_print_devices(FILE* out) {
     std::fprintf(out, "=== ggml backends + devices ===\n");
 
     // ggml_backend_load_all() walks the build's loadable backends and
@@ -235,7 +235,7 @@ void crispasr_print_devices(FILE * out) {
     std::fprintf(out, "  registered backends: %zu\n", n_reg);
     for (size_t i = 0; i < n_reg; ++i) {
         ggml_backend_reg_t reg = ggml_backend_reg_get(i);
-        const char * name = ggml_backend_reg_name(reg);
+        const char* name = ggml_backend_reg_name(reg);
         const size_t n_dev = ggml_backend_reg_dev_count(reg);
         std::fprintf(out, "    [%zu] %s (devices: %zu)\n", i, name ? name : "(null)", n_dev);
     }
@@ -246,33 +246,32 @@ void crispasr_print_devices(FILE * out) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         struct ggml_backend_dev_props p {};
         ggml_backend_dev_get_props(dev, &p);
-        const char * type_str = "?";
+        const char* type_str = "?";
         switch (p.type) {
-            case GGML_BACKEND_DEVICE_TYPE_CPU:
-                type_str = "cpu";
-                break;
-            case GGML_BACKEND_DEVICE_TYPE_GPU:
-                type_str = "gpu";
-                break;
-            case GGML_BACKEND_DEVICE_TYPE_IGPU:
-                type_str = "igpu";
-                break;
-            case GGML_BACKEND_DEVICE_TYPE_ACCEL:
-                type_str = "accel";
-                break;
-            case GGML_BACKEND_DEVICE_TYPE_META:
-                type_str = "meta";
-                break;
+        case GGML_BACKEND_DEVICE_TYPE_CPU:
+            type_str = "cpu";
+            break;
+        case GGML_BACKEND_DEVICE_TYPE_GPU:
+            type_str = "gpu";
+            break;
+        case GGML_BACKEND_DEVICE_TYPE_IGPU:
+            type_str = "igpu";
+            break;
+        case GGML_BACKEND_DEVICE_TYPE_ACCEL:
+            type_str = "accel";
+            break;
+        case GGML_BACKEND_DEVICE_TYPE_META:
+            type_str = "meta";
+            break;
         }
-        std::fprintf(out, "    [%zu] %-6s name=%s desc=%s mem=%zu/%zu MiB id=%s\n", i, type_str,
-                     p.name ? p.name : "?", p.description ? p.description : "?",
-                     (size_t)(p.memory_free / (1024 * 1024)), (size_t)(p.memory_total / (1024 * 1024)),
-                     p.device_id ? p.device_id : "?");
+        std::fprintf(out, "    [%zu] %-6s name=%s desc=%s mem=%zu/%zu MiB id=%s\n", i, type_str, p.name ? p.name : "?",
+                     p.description ? p.description : "?", (size_t)(p.memory_free / (1024 * 1024)),
+                     (size_t)(p.memory_total / (1024 * 1024)), p.device_id ? p.device_id : "?");
     }
     std::fprintf(out, "\n");
 }
 
-void crispasr_print_full_diagnostics(FILE * out) {
+void crispasr_print_full_diagnostics(FILE* out) {
     crispasr_print_build_info(out);
     crispasr_print_runtime_env(out);
     crispasr_print_devices(out);

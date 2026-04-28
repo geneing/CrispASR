@@ -132,22 +132,22 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
     }
 
     auto& hp = ctx->hp;
-    hp.llm_hidden       = mimo_kv_u32(gctx, "mimo_asr.llm.hidden_size", hp.llm_hidden);
-    hp.llm_layers       = mimo_kv_u32(gctx, "mimo_asr.llm.num_layers", hp.llm_layers);
-    hp.llm_heads        = mimo_kv_u32(gctx, "mimo_asr.llm.num_heads", hp.llm_heads);
-    hp.llm_kv_heads     = mimo_kv_u32(gctx, "mimo_asr.llm.num_kv_heads", hp.llm_kv_heads);
+    hp.llm_hidden = mimo_kv_u32(gctx, "mimo_asr.llm.hidden_size", hp.llm_hidden);
+    hp.llm_layers = mimo_kv_u32(gctx, "mimo_asr.llm.num_layers", hp.llm_layers);
+    hp.llm_heads = mimo_kv_u32(gctx, "mimo_asr.llm.num_heads", hp.llm_heads);
+    hp.llm_kv_heads = mimo_kv_u32(gctx, "mimo_asr.llm.num_kv_heads", hp.llm_kv_heads);
     hp.llm_intermediate = mimo_kv_u32(gctx, "mimo_asr.llm.intermediate_size", hp.llm_intermediate);
-    hp.llm_vocab        = mimo_kv_u32(gctx, "mimo_asr.llm.vocab_size", hp.llm_vocab);
-    hp.llm_max_pos      = mimo_kv_u32(gctx, "mimo_asr.llm.max_position_embeddings", hp.llm_max_pos);
-    hp.llm_rope_theta   = mimo_kv_f32(gctx, "mimo_asr.llm.rope_theta", hp.llm_rope_theta);
-    hp.llm_rms_eps      = mimo_kv_f32(gctx, "mimo_asr.llm.rms_norm_eps", hp.llm_rms_eps);
+    hp.llm_vocab = mimo_kv_u32(gctx, "mimo_asr.llm.vocab_size", hp.llm_vocab);
+    hp.llm_max_pos = mimo_kv_u32(gctx, "mimo_asr.llm.max_position_embeddings", hp.llm_max_pos);
+    hp.llm_rope_theta = mimo_kv_f32(gctx, "mimo_asr.llm.rope_theta", hp.llm_rope_theta);
+    hp.llm_rms_eps = mimo_kv_f32(gctx, "mimo_asr.llm.rms_norm_eps", hp.llm_rms_eps);
 
-    hp.audio_channels     = mimo_kv_u32(gctx, "mimo_asr.audio.channels", hp.audio_channels);
-    hp.audio_group_size   = mimo_kv_u32(gctx, "mimo_asr.audio.group_size", hp.audio_group_size);
-    hp.audio_layers       = mimo_kv_u32(gctx, "mimo_asr.audio.input_layers", hp.audio_layers);
-    hp.audio_dim          = mimo_kv_u32(gctx, "mimo_asr.audio.input_dim", hp.audio_dim);
-    hp.audio_heads        = mimo_kv_u32(gctx, "mimo_asr.audio.input_heads", hp.audio_heads);
-    hp.audio_head_dim     = mimo_kv_u32(gctx, "mimo_asr.audio.input_head_dim", hp.audio_head_dim);
+    hp.audio_channels = mimo_kv_u32(gctx, "mimo_asr.audio.channels", hp.audio_channels);
+    hp.audio_group_size = mimo_kv_u32(gctx, "mimo_asr.audio.group_size", hp.audio_group_size);
+    hp.audio_layers = mimo_kv_u32(gctx, "mimo_asr.audio.input_layers", hp.audio_layers);
+    hp.audio_dim = mimo_kv_u32(gctx, "mimo_asr.audio.input_dim", hp.audio_dim);
+    hp.audio_heads = mimo_kv_u32(gctx, "mimo_asr.audio.input_heads", hp.audio_heads);
+    hp.audio_head_dim = mimo_kv_u32(gctx, "mimo_asr.audio.input_head_dim", hp.audio_head_dim);
     hp.audio_intermediate = mimo_kv_u32(gctx, "mimo_asr.audio.input_intermediate", hp.audio_intermediate);
 
     // Vocab
@@ -157,7 +157,8 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
         ctx->vocab.resize(n);
         for (int i = 0; i < n; i++) {
             const char* s = gguf_get_arr_str(gctx, tok_key, i);
-            if (s) ctx->vocab[i] = s;
+            if (s)
+                ctx->vocab[i] = s;
         }
     }
     gguf_free(gctx);
@@ -171,7 +172,8 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
     ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
-    if (!ctx->backend) ctx->backend = ctx->backend_cpu;
+    if (!ctx->backend)
+        ctx->backend = ctx->backend_cpu;
 
     // Load weights to CPU (Q4_K SIMD path; mirror gemma4_e2b)
     core_gguf::WeightLoad wl;
@@ -185,42 +187,47 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
     ctx->tensors = std::move(wl.tensors);
 
     if (params.verbosity >= 1) {
-        fprintf(stderr,
-                "mimo_asr: loaded %zu tensors  llm=%uL/%u  audio=%uL/%u (×%u channels)\n",
-                ctx->tensors.size(), hp.llm_layers, hp.llm_hidden,
-                hp.audio_layers, hp.audio_dim, hp.audio_channels);
+        fprintf(stderr, "mimo_asr: loaded %zu tensors  llm=%uL/%u  audio=%uL/%u (×%u channels)\n", ctx->tensors.size(),
+                hp.llm_layers, hp.llm_hidden, hp.audio_layers, hp.audio_dim, hp.audio_channels);
     }
     return ctx;
 }
 
 extern "C" int mimo_asr_set_tokenizer_path(struct mimo_asr_context* ctx, const char* path) {
-    if (!ctx || !path) return -1;
+    if (!ctx || !path)
+        return -1;
     ctx->tokenizer_path = path;
     return 0;
 }
 
-extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* /*ctx*/,
-                                     const float* /*pcm*/, int /*n_samples*/) {
+extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* /*ctx*/, const float* /*pcm*/, int /*n_samples*/) {
     // PLAN #51 — full forward pass not yet implemented. The model
     // loads cleanly; we just don't run the encoder + LLM yet.
-    static const char kStub[] =
-        "[mimo_asr: forward pass not yet implemented — PLAN #51]";
+    static const char kStub[] = "[mimo_asr: forward pass not yet implemented — PLAN #51]";
     char* out = (char*)malloc(sizeof(kStub));
-    if (out) std::memcpy(out, kStub, sizeof(kStub));
+    if (out)
+        std::memcpy(out, kStub, sizeof(kStub));
     return out;
 }
 
 extern "C" void mimo_asr_free(struct mimo_asr_context* ctx) {
-    if (!ctx) return;
-    if (ctx->buf_w) ggml_backend_buffer_free(ctx->buf_w);
-    if (ctx->ctx_w) ggml_free(ctx->ctx_w);
-    if (ctx->backend && ctx->backend != ctx->backend_cpu) ggml_backend_free(ctx->backend);
-    if (ctx->backend_cpu) ggml_backend_free(ctx->backend_cpu);
+    if (!ctx)
+        return;
+    if (ctx->buf_w)
+        ggml_backend_buffer_free(ctx->buf_w);
+    if (ctx->ctx_w)
+        ggml_free(ctx->ctx_w);
+    if (ctx->backend && ctx->backend != ctx->backend_cpu)
+        ggml_backend_free(ctx->backend);
+    if (ctx->backend_cpu)
+        ggml_backend_free(ctx->backend_cpu);
     delete ctx;
 }
 
 extern "C" void mimo_asr_set_n_threads(struct mimo_asr_context* ctx, int n_threads) {
-    if (!ctx || n_threads <= 0) return;
+    if (!ctx || n_threads <= 0)
+        return;
     ctx->n_threads = n_threads;
-    if (ctx->backend_cpu) ggml_backend_cpu_set_n_threads(ctx->backend_cpu, n_threads);
+    if (ctx->backend_cpu)
+        ggml_backend_cpu_set_n_threads(ctx->backend_cpu, n_threads);
 }

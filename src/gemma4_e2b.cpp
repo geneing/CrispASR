@@ -49,14 +49,14 @@ struct g4e_llm_hp {
     uint32_t num_layers = 35;
     uint32_t num_heads = 8;
     uint32_t num_kv_heads = 1;
-    uint32_t head_dim = 256;          // sliding-attention layers
-    uint32_t global_head_dim = 512;   // full-attention layers
+    uint32_t head_dim = 256;        // sliding-attention layers
+    uint32_t global_head_dim = 512; // full-attention layers
     uint32_t intermediate_size = 6144;
     uint32_t vocab_size = 262144;
     uint32_t max_position_embeddings = 131072;
     uint32_t sliding_window = 512;
-    uint32_t num_kv_shared_layers = 0; // first N layers reuse later K/V
-    float rope_theta = 10000.0f;       // sliding layers
+    uint32_t num_kv_shared_layers = 0;  // first N layers reuse later K/V
+    float rope_theta = 10000.0f;        // sliding layers
     float rope_theta_full = 1000000.0f; // full layers (partial-rotary)
     float partial_rotary_factor = 0.25f;
     float final_logit_softcapping = 30.0f;
@@ -206,9 +206,9 @@ struct gemma4_e2b_context {
     // stay simple — only the slots whose `layer_full_mask` matches that
     // cache are written/read.
     ggml_context* kv_ctx = nullptr;
-    ggml_tensor* kv_k = nullptr;       // local (sliding) layers
+    ggml_tensor* kv_k = nullptr; // local (sliding) layers
     ggml_tensor* kv_v = nullptr;
-    ggml_tensor* kv_k_full = nullptr;  // full-attention layers
+    ggml_tensor* kv_k_full = nullptr; // full-attention layers
     ggml_tensor* kv_v_full = nullptr;
     ggml_backend_buffer_t kv_buf = nullptr;
     int kv_max_ctx = 0;
@@ -409,10 +409,11 @@ static void g4e_gen_mel_filterbank(int n_mels, int n_fft, int sr, std::vector<fl
 // ne=(n_mels, T_mel, 1, 1) (n_mels=fast), which is the conv2d input
 // shape that mirrors HF's (B, 1, T, n_mels) interpretation (T as H,
 // n_mels as W). The crispasr-diff hook passes this layout through.
-static std::vector<float> g4e_compute_mel_hf_faithful(
-    const float* pcm, int n_samples, int n_fft, int win_length, int hop_length, int n_mels,
-    const float* window /* size win_length */, const float* mel_filters /* (n_freqs, n_mels) */,
-    float mel_floor, int& out_T_mel) {
+static std::vector<float> g4e_compute_mel_hf_faithful(const float* pcm, int n_samples, int n_fft, int win_length,
+                                                      int hop_length, int n_mels,
+                                                      const float* window /* size win_length */,
+                                                      const float* mel_filters /* (n_freqs, n_mels) */, float mel_floor,
+                                                      int& out_T_mel) {
     const int n_freqs = n_fft / 2 + 1;
     const int pad_left = win_length / 2;
     const int total = n_samples + pad_left;
@@ -556,7 +557,10 @@ static bool g4e_kv_init(gemma4_e2b_context* ctx, int max_ctx) {
     // the second buffer entirely.
     bool has_full = false;
     for (int v : lhp.layer_full_mask)
-        if (v) { has_full = true; break; }
+        if (v) {
+            has_full = true;
+            break;
+        }
 
     ggml_init_params kp = {ggml_tensor_overhead() * 8 + 1024, nullptr, true};
     ctx->kv_ctx = ggml_init(kp);
@@ -632,7 +636,7 @@ static std::vector<float> g4e_make_audio_pos_enc(int hidden_size, int chunk_size
     const float min_t = 1.0f, max_t = 10000.0f;
     const float log_inc = std::log(max_t / min_t) / std::max(half - 1, 1);
     for (int p = 0; p < n_pos; p++) {
-        const float pos_id = (float)(chunk_size - p);  // arange(12, -1, -1)[p]
+        const float pos_id = (float)(chunk_size - p); // arange(12, -1, -1)[p]
         for (int i = 0; i < half; i++) {
             const float inv_t = min_t * std::exp(-i * log_inc);
             const float scaled = pos_id * inv_t;
@@ -655,17 +659,16 @@ static std::vector<float> g4e_make_audio_pos_enc(int hidden_size, int chunk_size
 //   marking K positions outside [0, T) as -inf, others 0.
 
 static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x, const g4e_audio_layer& L,
-                                              const g4e_audio_hp& hp, ggml_tensor* pos_enc,
-                                              ggml_tensor* pad_mask) {
+                                              const g4e_audio_hp& hp, ggml_tensor* pos_enc, ggml_tensor* pad_mask) {
     const int hd = (int)hp.head_dim;
     const int n_h = (int)hp.num_heads;
     const int hidden = (int)hp.hidden_size;
     const int T = (int)x->ne[1];
     const int chunk_size = (int)hp.chunk_size;
     const int max_past = (int)hp.context_left - 1;
-    const int max_future = 0; // E2B: attention_context_right=0
+    const int max_future = 0;                                    // E2B: attention_context_right=0
     const int context_size = chunk_size + max_past + max_future; // 24
-    const int n_pos = chunk_size + 1; // 13
+    const int n_pos = chunk_size + 1;                            // 13
     const int num_blocks = (T + chunk_size - 1) / chunk_size;
     const int T_padded = num_blocks * chunk_size;
     const float eps = 1e-6f;
@@ -707,7 +710,7 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
         Q = ggml_pad_ext(ctx, Q, 0, 0, 0, T_padded - T, 0, 0, 0, 0);
     }
     const int K_pad_start = max_past;
-    const int K_pad_end   = (T_padded - T) + max_future + chunk_size - 1;
+    const int K_pad_end = (T_padded - T) + max_future + chunk_size - 1;
     K = ggml_pad_ext(ctx, K, 0, 0, K_pad_start, K_pad_end, 0, 0, 0, 0);
     V = ggml_pad_ext(ctx, V, 0, 0, K_pad_start, K_pad_end, 0, 0, 0, 0);
 
@@ -718,7 +721,7 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
     rel_K = ggml_reshape_3d(ctx, rel_K, hd, n_h, n_pos);             // (D, H, n_pos)
     // Permute to (D, n_pos, H) for matmul with Q_block.
     // input 0 (D)→0; input 1 (H)→2; input 2 (n_pos)→1.
-    rel_K = ggml_cont(ctx, ggml_permute(ctx, rel_K, 0, 2, 1, 3));    // (D, n_pos, H)
+    rel_K = ggml_cont(ctx, ggml_permute(ctx, rel_K, 0, 2, 1, 3)); // (D, n_pos, H)
 
     // Per-block manual attention.
     std::vector<ggml_tensor*> block_outs;
@@ -750,22 +753,18 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
         // PyTorch shift on (chunk, n_pos): pad last dim to (chunk, ctx_size+1=25), flatten,
         // trim to chunk*ctx_size, reshape (chunk, ctx_size).
         // In ggml with (n_pos, chunk, H): pad ne[0] from n_pos to ctx_size+1=25:
-        ggml_tensor* bd_pad = ggml_pad_ext(ctx, bd_raw,
-                                           0, (context_size + 1) - n_pos, 0, 0, 0, 0, 0, 0);
+        ggml_tensor* bd_pad = ggml_pad_ext(ctx, bd_raw, 0, (context_size + 1) - n_pos, 0, 0, 0, 0, 0, 0);
         // ne=(ctx_size+1, chunk, H). Total elem per head: (ctx_size+1)*chunk = 25*12 = 300.
         // Reshape to flat (ctx_size+1)*chunk per head, take first ctx_size*chunk = 24*12 = 288.
         // Then reshape to (ctx_size, chunk, H).
         ggml_tensor* bd_flat = ggml_reshape_2d(ctx, bd_pad, (context_size + 1) * chunk_size, n_h);
-        ggml_tensor* bd_trim = ggml_view_2d(ctx, bd_flat, context_size * chunk_size, n_h,
-                                            bd_flat->nb[1], 0);
+        ggml_tensor* bd_trim = ggml_view_2d(ctx, bd_flat, context_size * chunk_size, n_h, bd_flat->nb[1], 0);
         bd_trim = ggml_cont(ctx, bd_trim);
         ggml_tensor* matrix_bd = ggml_reshape_3d(ctx, bd_trim, context_size, chunk_size, n_h);
 
         // Sum + softcap + boundary mask.
         // DEBUG: toggle to disable rel_pos_bias contribution.
-        ggml_tensor* scores = std::getenv("CRISPASR_NO_REL_POS")
-                                  ? matrix_ac
-                                  : ggml_add(ctx, matrix_ac, matrix_bd);
+        ggml_tensor* scores = std::getenv("CRISPASR_NO_REL_POS") ? matrix_ac : ggml_add(ctx, matrix_ac, matrix_bd);
         (void)matrix_bd;
         scores = ggml_scale(ctx, scores, 1.0f / softcap);
         scores = ggml_tanh(ctx, scores);
@@ -773,8 +772,7 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
 
         // Boundary mask for this block: (context_size, 1, 1) view of pad_mask
         // at column b. ggml_add_inplace can broadcast across (chunk, H).
-        ggml_tensor* mask_b = ggml_view_1d(ctx, pad_mask, context_size,
-                                           (size_t)b * pad_mask->nb[1]);
+        ggml_tensor* mask_b = ggml_view_1d(ctx, pad_mask, context_size, (size_t)b * pad_mask->nb[1]);
         // Convert F16 to F32 for adding to scores. Use ggml_cast or ggml_cpy.
         // Simpler: cast via ggml_cpy to a new f32 tensor of same shape.
         ggml_tensor* mask_b_f32 = ggml_cast(ctx, mask_b, GGML_TYPE_F32);
@@ -800,8 +798,7 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
         attn_out = ggml_concat(ctx, attn_out, block_outs[b], 1);
     // attn_out ne=(D, T_padded, H). Trim to T frames.
     if (T_padded > T) {
-        attn_out = ggml_view_3d(ctx, attn_out, hd, T, n_h,
-                                attn_out->nb[1], attn_out->nb[2], 0);
+        attn_out = ggml_view_3d(ctx, attn_out, hd, T, n_h, attn_out->nb[1], attn_out->nb[2], 0);
         attn_out = ggml_cont(ctx, attn_out);
     }
     // Permute back (D, T, H) → (D, H, T): input 0→0; input 1 (T)→2; input 2 (H)→1.
@@ -983,7 +980,7 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
         /*rope_theta*/ theta,
         /*rope_beta_fast*/ 32.0f,
         /*rope_beta_slow*/ 1.0f,
-        /*attn_scale*/ 1.0f,   // Gemma4: scaling=1.0 (q_norm replaces 1/sqrt(d))
+        /*attn_scale*/ 1.0f, // Gemma4: scaling=1.0 (q_norm replaces 1/sqrt(d))
         /*qk_norm_eps*/ eps,
         /*gqa_mode*/ core_attn::GQA_MANUAL_CONT,
     };
@@ -1029,8 +1026,8 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
             // The helper applies q_norm, k_norm, v_norm (RMS-no-weight),
             // RoPE, and writes into the layer's own cache slot.
             attn = core_attn::kv_self_attn(ctx0, gf, x, b.q_proj, b.k_proj, b.v_proj, b.o_proj, b.q_norm, b.k_norm,
-                                           positions, (T == 1) ? nullptr : causal_mask, kv_k_for_layer,
-                                           kv_v_for_layer, (int)il, n_past, kvp);
+                                           positions, (T == 1) ? nullptr : causal_mask, kv_k_for_layer, kv_v_for_layer,
+                                           (int)il, n_past, kvp);
         } else {
             // KV-shared layer: compute Q only, read K/V from donor's slot.
             // Donor has the same `layer_type` (sliding/full) by construction,
@@ -1047,17 +1044,17 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
                 Q = ggml_rms_norm(ctx0, Q, kvp.qk_norm_eps);
                 Q = ggml_mul(ctx0, Q, b.q_norm);
             }
-            Q = ggml_rope_ext(ctx0, Q, positions, nullptr, n_rot_e, kvp.rope_type, kvp.n_ctx_orig, kvp.rope_theta,
-                              1.0f, 0.0f, 1.0f, kvp.rope_beta_fast, kvp.rope_beta_slow);
+            Q = ggml_rope_ext(ctx0, Q, positions, nullptr, n_rot_e, kvp.rope_type, kvp.n_ctx_orig, kvp.rope_theta, 1.0f,
+                              0.0f, 1.0f, kvp.rope_beta_fast, kvp.rope_beta_slow);
 
             // Read full K/V history from donor's slot. K and V are stored
             // post-norm/post-RoPE in the cache, so no extra processing here.
-            ggml_tensor* Kfull = ggml_cont(
-                ctx0, ggml_view_3d(ctx0, kv_k_for_layer, hd_e, Lk, n_kv_e, kv_k_for_layer->nb[1],
-                                   kv_k_for_layer->nb[2], (size_t)donor_il * kv_k_for_layer->nb[3]));
-            ggml_tensor* Vfull = ggml_cont(
-                ctx0, ggml_view_3d(ctx0, kv_v_for_layer, hd_e, Lk, n_kv_e, kv_v_for_layer->nb[1],
-                                   kv_v_for_layer->nb[2], (size_t)donor_il * kv_v_for_layer->nb[3]));
+            ggml_tensor* Kfull =
+                ggml_cont(ctx0, ggml_view_3d(ctx0, kv_k_for_layer, hd_e, Lk, n_kv_e, kv_k_for_layer->nb[1],
+                                             kv_k_for_layer->nb[2], (size_t)donor_il * kv_k_for_layer->nb[3]));
+            ggml_tensor* Vfull =
+                ggml_cont(ctx0, ggml_view_3d(ctx0, kv_v_for_layer, hd_e, Lk, n_kv_e, kv_v_for_layer->nb[1],
+                                             kv_v_for_layer->nb[2], (size_t)donor_il * kv_v_for_layer->nb[3]));
 
             if (kvp.gqa_mode != core_attn::GQA_NATIVE && grp_e > 1) {
                 ggml_tensor* K4 = ggml_reshape_4d(ctx0, Kfull, hd_e, Lk, 1, n_kv_e);
@@ -1075,7 +1072,7 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
 
             Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
             ggml_tensor* attnt = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, (T == 1) ? nullptr : causal_mask,
-                                                    kvp.attn_scale, 0.0f, 0.0f);
+                                                     kvp.attn_scale, 0.0f, 0.0f);
             attnt = ggml_reshape_2d(ctx0, attnt, hd_e * n_q_e, T);
             attn = ggml_mul_mat(ctx0, b.o_proj, attnt);
         }
@@ -1117,9 +1114,9 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
         // This sits AFTER attention + FFN, BEFORE the layer_scalar multiply.
         if (per_layer_inputs && b.ple_gate && b.ple_proj) {
             ggml_tensor* pli = pli_for_layer(il);
-            ggml_tensor* gate = ggml_mul_mat(ctx0, b.ple_gate, cur);  // [ple_dim, T]
-            gate = ggml_gelu(ctx0, gate);                              // ACT2FN[hidden_activation] = gelu_pytorch_tanh
-            ggml_tensor* gated = ggml_mul(ctx0, gate, pli);            // element-wise [ple_dim, T]
+            ggml_tensor* gate = ggml_mul_mat(ctx0, b.ple_gate, cur);    // [ple_dim, T]
+            gate = ggml_gelu(ctx0, gate);                               // ACT2FN[hidden_activation] = gelu_pytorch_tanh
+            ggml_tensor* gated = ggml_mul(ctx0, gate, pli);             // element-wise [ple_dim, T]
             ggml_tensor* delta = ggml_mul_mat(ctx0, b.ple_proj, gated); // [hidden, T]
             if (b.post_ple_norm) {
                 delta = ggml_rms_norm(ctx0, delta, eps);
@@ -1241,8 +1238,7 @@ static float* g4e_run_llm_kv(gemma4_e2b_context* ctx, const float* inputs_embeds
     ggml_backend_tensor_set(pos_in, positions.data(), 0, positions.size() * sizeof(int32_t));
     ggml_tensor* ple_ids_in = ggml_graph_get_tensor(gf, "ple_ids");
     if (ple_ids_in)
-        ggml_backend_tensor_set(ple_ids_in, ctx->ple_token_ids.data(), 0,
-                                (size_t)n_tokens * sizeof(int32_t));
+        ggml_backend_tensor_set(ple_ids_in, ctx->ple_token_ids.data(), 0, (size_t)n_tokens * sizeof(int32_t));
     if (n_tokens > 1) {
         ggml_tensor* mask_in = ggml_graph_get_tensor(gf, "causal_mask");
         ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
@@ -1501,10 +1497,18 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
         // Converter renames: q_proj/k_proj/v_proj → q/k/v; o_proj is
         // kept as o_proj. Try the short names first; fall back to the
         // long *_proj names if a future converter reverses the rename.
-        L.q_proj = g("attn.q.weight"); if (!L.q_proj) L.q_proj = g("attn.q_proj.weight");
-        L.k_proj = g("attn.k.weight"); if (!L.k_proj) L.k_proj = g("attn.k_proj.weight");
-        L.v_proj = g("attn.v.weight"); if (!L.v_proj) L.v_proj = g("attn.v_proj.weight");
-        L.o_proj = g("attn.o_proj.weight"); if (!L.o_proj) L.o_proj = g("attn.o.weight");
+        L.q_proj = g("attn.q.weight");
+        if (!L.q_proj)
+            L.q_proj = g("attn.q_proj.weight");
+        L.k_proj = g("attn.k.weight");
+        if (!L.k_proj)
+            L.k_proj = g("attn.k_proj.weight");
+        L.v_proj = g("attn.v.weight");
+        if (!L.v_proj)
+            L.v_proj = g("attn.v_proj.weight");
+        L.o_proj = g("attn.o_proj.weight");
+        if (!L.o_proj)
+            L.o_proj = g("attn.o.weight");
         L.q_norm = g("attn.q_norm.weight");
         L.k_norm = g("attn.k_norm.weight");
         L.post_attn_norm = g("post_attn_norm.weight");
@@ -1526,20 +1530,24 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
     // means the model only has one attention type → leave mask all-0.
     {
         int from_metadata = 0;
-        for (int v : lhp.layer_full_mask) from_metadata += v;
+        for (int v : lhp.layer_full_mask)
+            from_metadata += v;
         if (from_metadata == 0) {
             // Discover per-layer q.ne[1] values.
             int min_cols = INT32_MAX, max_cols = 0;
             for (uint32_t il = 0; il < lhp.num_layers; il++) {
                 ggml_tensor* q = m.llm_layers[il].q_proj;
-                if (!q) continue;
+                if (!q)
+                    continue;
                 int cols = (int)q->ne[1];
-                if (cols < min_cols) min_cols = cols;
-                if (cols > max_cols) max_cols = cols;
+                if (cols < min_cols)
+                    min_cols = cols;
+                if (cols > max_cols)
+                    max_cols = cols;
             }
             if (min_cols != INT32_MAX && max_cols > min_cols) {
                 // Two distinct sizes — the bigger one is full attention.
-                const uint32_t inferred_local_hd  = (uint32_t)(min_cols / lhp.num_heads);
+                const uint32_t inferred_local_hd = (uint32_t)(min_cols / lhp.num_heads);
                 const uint32_t inferred_global_hd = (uint32_t)(max_cols / lhp.num_heads);
                 if (lhp.global_head_dim == lhp.head_dim) {
                     // Metadata only had a single head_dim; trust shapes.
@@ -1549,7 +1557,8 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
                 int n_full = 0;
                 for (uint32_t il = 0; il < lhp.num_layers; il++) {
                     ggml_tensor* q = m.llm_layers[il].q_proj;
-                    if (!q) continue;
+                    if (!q)
+                        continue;
                     if ((int)q->ne[1] == max_cols) {
                         lhp.layer_full_mask[il] = 1;
                         n_full++;
@@ -1573,9 +1582,10 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
     g4e_compute_kv_share_donor(lhp);
     if (params.verbosity >= 1 && lhp.num_kv_shared_layers > 0) {
         int n_shared = 0;
-        for (int v : lhp.kv_share_donor) if (v >= 0) n_shared++;
-        fprintf(stderr, "gemma4_e2b: kv-share %d/%u layers reuse donor K/V\n",
-                n_shared, lhp.num_layers);
+        for (int v : lhp.kv_share_donor)
+            if (v >= 0)
+                n_shared++;
+        fprintf(stderr, "gemma4_e2b: kv-share %d/%u layers reuse donor K/V\n", n_shared, lhp.num_layers);
     }
 
     // Setup scheduler for GPU-accelerated encoder/LLM
@@ -1613,17 +1623,15 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
             ctx->start_of_turn_id = i;
         else if (m.vocab[i] == "<turn|>" || m.vocab[i] == "<end_of_turn>")
             ctx->end_of_turn_id = i;
-        else if (m.vocab[i] == "<|audio|>" || m.vocab[i] == "<audio_soft_token>" ||
-                 m.vocab[i] == "<audio>")
+        else if (m.vocab[i] == "<|audio|>" || m.vocab[i] == "<audio_soft_token>" || m.vocab[i] == "<audio>")
             ctx->audio_soft_token_id = i;
     }
 
     if (params.verbosity >= 1) {
         fprintf(stderr, "gemma4_e2b: audio %uL×%u, llm %uL×%u, vocab %u\n", ahp.num_layers, ahp.hidden_size,
                 lhp.num_layers, lhp.hidden_size, lhp.vocab_size);
-        fprintf(stderr, "gemma4_e2b: bos=%d eos=%d start_of_turn=%d end_of_turn=%d audio_soft=%d\n",
-                ctx->bos_id, ctx->eos_id, ctx->start_of_turn_id, ctx->end_of_turn_id,
-                ctx->audio_soft_token_id);
+        fprintf(stderr, "gemma4_e2b: bos=%d eos=%d start_of_turn=%d end_of_turn=%d audio_soft=%d\n", ctx->bos_id,
+                ctx->eos_id, ctx->start_of_turn_id, ctx->end_of_turn_id, ctx->audio_soft_token_id);
     }
 
     return ctx;
@@ -1660,13 +1668,13 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     // HF-faithful mel: bypasses core_mel because Gemma4's FE uses
     // semicausal padding + unfold(size=frame_length+1) which doesn't fit
     // core_mel's API. See g4e_compute_mel_hf_faithful for details.
-    const float* hann_ptr = ctx->mel_window.data();    // length win_length
+    const float* hann_ptr = ctx->mel_window.data();     // length win_length
     const float* filt_ptr = ctx->mel_filterbank.data(); // (n_freqs, n_mels) FreqsMels layout
 
     int T_mel = 0;
     const float mel_floor = 0.001f; // HF default
-    auto mel = g4e_compute_mel_hf_faithful(pcm, n_samples, n_fft, win_length, hop, n_mels,
-                                           hann_ptr, filt_ptr, mel_floor, T_mel);
+    auto mel = g4e_compute_mel_hf_faithful(pcm, n_samples, n_fft, win_length, hop, n_mels, hann_ptr, filt_ptr,
+                                           mel_floor, T_mel);
     if (mel.empty()) {
         fprintf(stderr, "gemma4_e2b: mel computation failed\n");
         return nullptr;
@@ -1800,7 +1808,7 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     //   embs_normed = embedding_pre_projection_norm(inputs_embeds)  # RMSNorm(no-weight)
     //   return embedding_projection(embs_normed)                     # Linear(no-bias)
     if (m.audio_embed_proj_w) {
-        h = ggml_rms_norm(ectx, h, eps);                     // pre-projection norm, no weight
+        h = ggml_rms_norm(ectx, h, eps); // pre-projection norm, no weight
         h = ggml_mul_mat(ectx, m.audio_embed_proj_w, h);
     }
 
@@ -1842,8 +1850,7 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
             for (int b = 0; b < num_blocks_a; b++) {
                 for (int k = 0; k < context_size_a; k++) {
                     int abs_k = b * chunk_a - max_past_a + k;
-                    pm_buf[(size_t)b * context_size_a + k] =
-                        (abs_k >= 0 && abs_k < T_sub) ? zero_h : neginf_h;
+                    pm_buf[(size_t)b * context_size_a + k] = (abs_k >= 0 && abs_k < T_sub) ? zero_h : neginf_h;
                 }
             }
             ggml_backend_tensor_set(pm, pm_buf.data(), 0, pm_buf.size() * sizeof(ggml_fp16_t));
@@ -2056,12 +2063,12 @@ extern "C" float* gemma4_e2b_compute_mel(struct gemma4_e2b_context* ctx, const f
 
     // Match Gemma4AudioFeatureExtractor exactly via g4e_compute_mel_hf_faithful.
     const int n_fft = 512, hop = 160, n_mels = 128, win_length = 320;
-    const float* hann_ptr = ctx->mel_window.data();    // length win_length
+    const float* hann_ptr = ctx->mel_window.data();     // length win_length
     const float* filt_ptr = ctx->mel_filterbank.data(); // (n_freqs, n_mels) FreqsMels
 
     int T_mel = 0;
-    auto mel = g4e_compute_mel_hf_faithful(pcm, n_samples, n_fft, win_length, hop, n_mels,
-                                           hann_ptr, filt_ptr, /*mel_floor=*/0.001f, T_mel);
+    auto mel = g4e_compute_mel_hf_faithful(pcm, n_samples, n_fft, win_length, hop, n_mels, hann_ptr, filt_ptr,
+                                           /*mel_floor=*/0.001f, T_mel);
     if (mel.empty())
         return nullptr;
     if (T_mel > 3000)
@@ -2228,8 +2235,7 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
             for (int b = 0; b < num_blocks_a; b++) {
                 for (int k = 0; k < context_size_a; k++) {
                     int abs_k = b * chunk_a - max_past_a + k;
-                    pm_buf[(size_t)b * context_size_a + k] =
-                        (abs_k >= 0 && abs_k < T_sub) ? zero_h : neginf_h;
+                    pm_buf[(size_t)b * context_size_a + k] = (abs_k >= 0 && abs_k < T_sub) ? zero_h : neginf_h;
                 }
             }
             ggml_backend_tensor_set(pm, pm_buf.data(), 0, pm_buf.size() * sizeof(ggml_fp16_t));
@@ -2259,7 +2265,8 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
     if (const char* dump_dir = std::getenv("CRISPASR_DUMP_DIR")) {
         auto dump = [&](const char* name) {
             ggml_tensor* t = ggml_graph_get_tensor(enc_gf, name);
-            if (!t) return;
+            if (!t)
+                return;
             const size_t nb = ggml_nbytes(t);
             std::vector<uint8_t> buf(nb);
             ggml_backend_tensor_get(t, buf.data(), 0, nb);
@@ -2268,10 +2275,12 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
             FILE* f = fopen(path, "wb");
             if (f) {
                 // Header: magic 'G4DR', n_dims, ne[0..n_dims-1] as int32.
-                int32_t hdr[6] = {0x52443447, 0, (int32_t)t->ne[0], (int32_t)t->ne[1],
-                                   (int32_t)t->ne[2], (int32_t)t->ne[3]};
+                int32_t hdr[6] = {0x52443447,       0, (int32_t)t->ne[0], (int32_t)t->ne[1], (int32_t)t->ne[2],
+                                  (int32_t)t->ne[3]};
                 int n_dims = 1;
-                for (int d = 1; d < 4; d++) if (t->ne[d] > 1) n_dims = d + 1;
+                for (int d = 1; d < 4; d++)
+                    if (t->ne[d] > 1)
+                        n_dims = d + 1;
                 hdr[1] = n_dims;
                 fwrite(hdr, sizeof(int32_t), 6, f);
                 fwrite(buf.data(), 1, nb, f);

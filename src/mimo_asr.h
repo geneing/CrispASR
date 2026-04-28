@@ -27,8 +27,7 @@ struct mimo_asr_context_params mimo_asr_context_default_params(void);
 
 // Initialise from the LM GGUF file (cstr/mimo-asr-GGUF).
 // Returns nullptr on failure.
-struct mimo_asr_context* mimo_asr_init_from_file(const char* path_model,
-                                                 struct mimo_asr_context_params params);
+struct mimo_asr_context* mimo_asr_init_from_file(const char* path_model, struct mimo_asr_context_params params);
 
 // Transcribe PCM audio (16 kHz mono float32). The runtime handles
 // the call into the audio-tokeniser GGUF internally — point it at

@@ -27,16 +27,16 @@
 
 #include <cstdio>
 
-void crispasr_print_build_info(FILE * out);
-void crispasr_print_runtime_env(FILE * out);
-void crispasr_print_devices(FILE * out);
+void crispasr_print_build_info(FILE* out);
+void crispasr_print_runtime_env(FILE* out);
+void crispasr_print_devices(FILE* out);
 
 // Convenience wrapper used at startup when --verbose / --diagnostics is set.
 // Calls all three printers above with a header in between.
-void crispasr_print_full_diagnostics(FILE * out);
+void crispasr_print_full_diagnostics(FILE* out);
 
 // Compact one-line build banner ("crispasr <version> (<git>) <backends>").
 // Always safe to call. Used unconditionally in the docker entrypoint and
 // at the top of --verbose runs so a copy-paste of the first 5 lines of any
 // log is enough to identify the build.
-void crispasr_print_short_banner(FILE * out);
+void crispasr_print_short_banner(FILE* out);

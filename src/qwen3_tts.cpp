@@ -62,19 +62,19 @@ namespace {
 struct qwen3_tts_hp {
     // Talker (Qwen3 backbone)
     uint32_t n_layers = 28;
-    uint32_t d_model = 1024;       // 0.6B; 2048 for 1.7B
+    uint32_t d_model = 1024; // 0.6B; 2048 for 1.7B
     uint32_t n_heads = 16;
     uint32_t n_kv_heads = 8;
     uint32_t head_dim = 128;
-    uint32_t ff_dim = 3072;        // 0.6B; 6144 for 1.7B
-    uint32_t vocab_size = 3072;    // audio code vocabulary
+    uint32_t ff_dim = 3072;     // 0.6B; 6144 for 1.7B
+    uint32_t vocab_size = 3072; // audio code vocabulary
     uint32_t text_vocab_size = 151936;
     uint32_t text_hidden_size = 2048;
-    uint32_t n_code_groups = 16;   // 16 RVQ codebooks per frame
+    uint32_t n_code_groups = 16; // 16 RVQ codebooks per frame
     uint32_t max_pos = 32768;
-    float    rope_theta = 1000000.0f;
-    float    rms_norm_eps = 1e-6f;
-    bool     rope_interleaved = true;
+    float rope_theta = 1000000.0f;
+    float rms_norm_eps = 1e-6f;
+    bool rope_interleaved = true;
     std::vector<uint32_t> mrope_section; // [24, 20, 20]
 
     // Code predictor
@@ -154,20 +154,20 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
     }
 
     auto& hp = ctx->hp;
-    hp.n_layers          = q3t_kv_u32(gctx, "qwen3tts.talker.n_layers", hp.n_layers);
-    hp.d_model           = q3t_kv_u32(gctx, "qwen3tts.talker.d_model", hp.d_model);
-    hp.n_heads           = q3t_kv_u32(gctx, "qwen3tts.talker.n_heads", hp.n_heads);
-    hp.n_kv_heads        = q3t_kv_u32(gctx, "qwen3tts.talker.n_kv_heads", hp.n_kv_heads);
-    hp.head_dim          = q3t_kv_u32(gctx, "qwen3tts.talker.head_dim", hp.head_dim);
-    hp.ff_dim            = q3t_kv_u32(gctx, "qwen3tts.talker.ff_dim", hp.ff_dim);
-    hp.vocab_size        = q3t_kv_u32(gctx, "qwen3tts.talker.vocab_size", hp.vocab_size);
-    hp.text_vocab_size   = q3t_kv_u32(gctx, "qwen3tts.talker.text_vocab_size", hp.text_vocab_size);
-    hp.text_hidden_size  = q3t_kv_u32(gctx, "qwen3tts.talker.text_hidden_size", hp.text_hidden_size);
-    hp.n_code_groups     = q3t_kv_u32(gctx, "qwen3tts.talker.n_code_groups", hp.n_code_groups);
-    hp.max_pos           = q3t_kv_u32(gctx, "qwen3tts.talker.max_pos", hp.max_pos);
-    hp.rope_theta        = q3t_kv_f32(gctx, "qwen3tts.talker.rope_theta", hp.rope_theta);
-    hp.rms_norm_eps      = q3t_kv_f32(gctx, "qwen3tts.talker.rms_norm_eps", hp.rms_norm_eps);
-    hp.rope_interleaved  = q3t_kv_bool(gctx, "qwen3tts.talker.rope_interleaved", hp.rope_interleaved);
+    hp.n_layers = q3t_kv_u32(gctx, "qwen3tts.talker.n_layers", hp.n_layers);
+    hp.d_model = q3t_kv_u32(gctx, "qwen3tts.talker.d_model", hp.d_model);
+    hp.n_heads = q3t_kv_u32(gctx, "qwen3tts.talker.n_heads", hp.n_heads);
+    hp.n_kv_heads = q3t_kv_u32(gctx, "qwen3tts.talker.n_kv_heads", hp.n_kv_heads);
+    hp.head_dim = q3t_kv_u32(gctx, "qwen3tts.talker.head_dim", hp.head_dim);
+    hp.ff_dim = q3t_kv_u32(gctx, "qwen3tts.talker.ff_dim", hp.ff_dim);
+    hp.vocab_size = q3t_kv_u32(gctx, "qwen3tts.talker.vocab_size", hp.vocab_size);
+    hp.text_vocab_size = q3t_kv_u32(gctx, "qwen3tts.talker.text_vocab_size", hp.text_vocab_size);
+    hp.text_hidden_size = q3t_kv_u32(gctx, "qwen3tts.talker.text_hidden_size", hp.text_hidden_size);
+    hp.n_code_groups = q3t_kv_u32(gctx, "qwen3tts.talker.n_code_groups", hp.n_code_groups);
+    hp.max_pos = q3t_kv_u32(gctx, "qwen3tts.talker.max_pos", hp.max_pos);
+    hp.rope_theta = q3t_kv_f32(gctx, "qwen3tts.talker.rope_theta", hp.rope_theta);
+    hp.rms_norm_eps = q3t_kv_f32(gctx, "qwen3tts.talker.rms_norm_eps", hp.rms_norm_eps);
+    hp.rope_interleaved = q3t_kv_bool(gctx, "qwen3tts.talker.rope_interleaved", hp.rope_interleaved);
 
     {
         const int mr_key = gguf_find_key(gctx, "qwen3tts.talker.mrope_section");
@@ -178,19 +178,19 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
         }
     }
 
-    hp.cp_n_layers   = q3t_kv_u32(gctx, "qwen3tts.code_pred.n_layers", hp.cp_n_layers);
-    hp.cp_d_model    = q3t_kv_u32(gctx, "qwen3tts.code_pred.d_model", hp.cp_d_model);
+    hp.cp_n_layers = q3t_kv_u32(gctx, "qwen3tts.code_pred.n_layers", hp.cp_n_layers);
+    hp.cp_d_model = q3t_kv_u32(gctx, "qwen3tts.code_pred.d_model", hp.cp_d_model);
     hp.cp_vocab_size = q3t_kv_u32(gctx, "qwen3tts.code_pred.vocab_size", hp.cp_vocab_size);
     hp.cp_max_length = q3t_kv_u32(gctx, "qwen3tts.code_pred.max_length", hp.cp_max_length);
 
-    hp.spk_enc_dim     = q3t_kv_u32(gctx, "qwen3tts.speaker.enc_dim", hp.spk_enc_dim);
+    hp.spk_enc_dim = q3t_kv_u32(gctx, "qwen3tts.speaker.enc_dim", hp.spk_enc_dim);
     hp.spk_sample_rate = q3t_kv_u32(gctx, "qwen3tts.speaker.sample_rate", hp.spk_sample_rate);
 
-    hp.tts_bos_id  = q3t_kv_u32(gctx, "qwen3tts.tts_bos_token_id", hp.tts_bos_id);
-    hp.tts_eos_id  = q3t_kv_u32(gctx, "qwen3tts.tts_eos_token_id", hp.tts_eos_id);
-    hp.tts_pad_id  = q3t_kv_u32(gctx, "qwen3tts.tts_pad_token_id", hp.tts_pad_id);
+    hp.tts_bos_id = q3t_kv_u32(gctx, "qwen3tts.tts_bos_token_id", hp.tts_bos_id);
+    hp.tts_eos_id = q3t_kv_u32(gctx, "qwen3tts.tts_eos_token_id", hp.tts_eos_id);
+    hp.tts_pad_id = q3t_kv_u32(gctx, "qwen3tts.tts_pad_token_id", hp.tts_pad_id);
     hp.im_start_id = q3t_kv_u32(gctx, "qwen3tts.im_start_token_id", hp.im_start_id);
-    hp.im_end_id   = q3t_kv_u32(gctx, "qwen3tts.im_end_token_id", hp.im_end_id);
+    hp.im_end_id = q3t_kv_u32(gctx, "qwen3tts.im_end_token_id", hp.im_end_id);
 
     int tok_key = gguf_find_key(gctx, "tokenizer.ggml.tokens");
     if (tok_key >= 0) {
@@ -198,7 +198,8 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
         ctx->vocab.resize(n);
         for (int i = 0; i < n; i++) {
             const char* s = gguf_get_arr_str(gctx, tok_key, i);
-            if (s) ctx->vocab[i] = s;
+            if (s)
+                ctx->vocab[i] = s;
         }
     }
     gguf_free(gctx);
@@ -211,7 +212,8 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
     ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
-    if (!ctx->backend) ctx->backend = ctx->backend_cpu;
+    if (!ctx->backend)
+        ctx->backend = ctx->backend_cpu;
 
     core_gguf::WeightLoad wl;
     if (!core_gguf::load_weights(path_model, ctx->backend_cpu, "qwen3_tts", wl)) {
@@ -224,35 +226,34 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
     ctx->tensors = std::move(wl.tensors);
 
     if (params.verbosity >= 1) {
-        fprintf(stderr,
-                "qwen3_tts: loaded %zu tensors  talker=%uL/%u  code_groups=%u  text_vocab=%u\n",
+        fprintf(stderr, "qwen3_tts: loaded %zu tensors  talker=%uL/%u  code_groups=%u  text_vocab=%u\n",
                 ctx->tensors.size(), hp.n_layers, hp.d_model, hp.n_code_groups, hp.text_vocab_size);
     }
     return ctx;
 }
 
 extern "C" int qwen3_tts_set_codec_path(struct qwen3_tts_context* ctx, const char* path) {
-    if (!ctx || !path) return -1;
+    if (!ctx || !path)
+        return -1;
     ctx->codec_path = path;
     return 0;
 }
 
 extern "C" int qwen3_tts_set_voice_prompt(struct qwen3_tts_context* ctx, const char* wav_path) {
-    if (!ctx) return -1;
+    if (!ctx)
+        return -1;
     ctx->voice_prompt_path = wav_path ? wav_path : "";
     return 0;
 }
 
-extern "C" float* qwen3_tts_synthesize(struct qwen3_tts_context* /*ctx*/,
-                                       const char* /*text*/,
-                                       int* out_n_samples) {
+extern "C" float* qwen3_tts_synthesize(struct qwen3_tts_context* /*ctx*/, const char* /*text*/, int* out_n_samples) {
     // PLAN #52 — talker LM forward, code_predictor head, codec
     // decode are all still unimplemented. Return nullptr so callers
     // can branch on it.
-    if (out_n_samples) *out_n_samples = 0;
-    fprintf(stderr,
-            "qwen3_tts: synthesise called but talker/codec forward "
-            "passes are not yet implemented (PLAN #52)\n");
+    if (out_n_samples)
+        *out_n_samples = 0;
+    fprintf(stderr, "qwen3_tts: synthesise called but talker/codec forward "
+                    "passes are not yet implemented (PLAN #52)\n");
     return nullptr;
 }
 
@@ -261,16 +262,23 @@ extern "C" void qwen3_tts_pcm_free(float* pcm) {
 }
 
 extern "C" void qwen3_tts_free(struct qwen3_tts_context* ctx) {
-    if (!ctx) return;
-    if (ctx->buf_w) ggml_backend_buffer_free(ctx->buf_w);
-    if (ctx->ctx_w) ggml_free(ctx->ctx_w);
-    if (ctx->backend && ctx->backend != ctx->backend_cpu) ggml_backend_free(ctx->backend);
-    if (ctx->backend_cpu) ggml_backend_free(ctx->backend_cpu);
+    if (!ctx)
+        return;
+    if (ctx->buf_w)
+        ggml_backend_buffer_free(ctx->buf_w);
+    if (ctx->ctx_w)
+        ggml_free(ctx->ctx_w);
+    if (ctx->backend && ctx->backend != ctx->backend_cpu)
+        ggml_backend_free(ctx->backend);
+    if (ctx->backend_cpu)
+        ggml_backend_free(ctx->backend_cpu);
     delete ctx;
 }
 
 extern "C" void qwen3_tts_set_n_threads(struct qwen3_tts_context* ctx, int n_threads) {
-    if (!ctx || n_threads <= 0) return;
+    if (!ctx || n_threads <= 0)
+        return;
     ctx->n_threads = n_threads;
-    if (ctx->backend_cpu) ggml_backend_cpu_set_n_threads(ctx->backend_cpu, n_threads);
+    if (ctx->backend_cpu)
+        ggml_backend_cpu_set_n_threads(ctx->backend_cpu, n_threads);
 }

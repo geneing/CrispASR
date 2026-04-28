@@ -22,15 +22,14 @@ struct qwen3_tts_context_params {
     int verbosity; // 0=silent, 1=normal, 2=verbose
     bool use_gpu;
     float temperature; // 0 = greedy
-    int   tts_steps;   // for codec decode (codec is non-DiT, but the
+    int tts_steps;     // for codec decode (codec is non-DiT, but the
                        // codebooks may benefit from rejection sampling)
 };
 
 struct qwen3_tts_context_params qwen3_tts_context_default_params(void);
 
 // Initialise from the talker LM GGUF file.
-struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_model,
-                                                   struct qwen3_tts_context_params params);
+struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_model, struct qwen3_tts_context_params params);
 
 // Point the runtime at the codec GGUF (cstr/qwen3-tts-tokenizer-12hz-GGUF).
 // Required before the first synthesis call. Returns 0 on success.
@@ -43,9 +42,7 @@ int qwen3_tts_set_voice_prompt(struct qwen3_tts_context* ctx, const char* wav_pa
 
 // Synthesise text → 24 kHz mono float32 PCM. Caller frees with
 // `qwen3_tts_pcm_free`. *out_n_samples is set on success.
-float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx,
-                            const char* text,
-                            int* out_n_samples);
+float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx, const char* text, int* out_n_samples);
 
 void qwen3_tts_pcm_free(float* pcm);
 

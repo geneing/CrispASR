@@ -3,7 +3,7 @@
 
 #include "whisper.h"
 #include "grammar-parser.h"
-#include "whisper_params.h"   // struct whisper_params (shared with crispasr_*)
+#include "whisper_params.h"       // struct whisper_params (shared with crispasr_*)
 #include "crispasr_backend.h"     // crispasr_run_backend() dispatch entry point
 #include "crispasr_diagnostics.h" // --version / --diagnostics + verbose banner (#31)
 #include "crispasr_output.h"      // crispasr_make_disp_segments — split-on-punct (#29)
