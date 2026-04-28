@@ -1419,7 +1419,7 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     mp.layout = core_mel::Layout::MelsTime;
     mp.fb_layout = core_mel::FbLayout::FreqsMels;
     mp.matmul = core_mel::MatmulPrecision::Double;
-    mp.log_eps = 1e-10f;
+    mp.log_eps = 1e-3f; // HF Gemma4AudioFeatureExtractor.mel_floor = 0.001
     mp.center_pad = true;
     mp.drop_last_frame = true;
 
@@ -1802,7 +1802,7 @@ extern "C" float* gemma4_e2b_compute_mel(struct gemma4_e2b_context* ctx, const f
     mp.layout = core_mel::Layout::MelsTime;
     mp.fb_layout = core_mel::FbLayout::FreqsMels;
     mp.matmul = core_mel::MatmulPrecision::Double;
-    mp.log_eps = 1e-10f;
+    mp.log_eps = 1e-3f; // HF Gemma4AudioFeatureExtractor.mel_floor = 0.001
     mp.center_pad = true;
     mp.drop_last_frame = true;
 
