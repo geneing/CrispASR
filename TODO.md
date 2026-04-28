@@ -24,6 +24,8 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 | O7 | Speculative decoding | LLM backends | 2-4x decode | High | TODO |
 | O8 | FireRed single-graph encoder | firered-asr | ~15s GPU savings | High | TODO (needs rel_pos_attn refactor) |
 | O9 | Grouped conv graph integration | wav2vec2 family | ~300ms saved | Medium | BLOCKED (ggml view bounds) |
+| O10 | Gemma4 audio attention: replace block-wise manual attn with `flash_attn_ext` + bias mask | gemma4-e2b | ~5x encoder | Medium | TODO (~1% cos cost expected; current is correct but slow) |
+| O11 | Gemma4: reduce redundant `ggml_cont` calls in clipped_mul_mat (private_input flag wired) | gemma4-e2b | ~5-10% encoder | Low | Started — minor wins remain |
 
 ## Pending features (v0.5.x)
 
@@ -37,34 +39,29 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 - ~~**Moonshine multilingual**~~ **FIXED** — converter forces 1D tensors to F32 (line 338). All 14 GGUF variants (tiny/base × en/ja/ar/ko/zh/vi/uk) work on CPU. head_dim=52 (base) works on CPU flash_attn; GPU flash_attn needs aligned head_dim (ggml limitation, moonshine forced to CPU anyway). Verified 2026-04-26: tiny 50.7×, base (head_dim=52) 14.2×, base-zh on English audio 14.8× — all transcripts correct.
 - ~~**Moonshine streaming**~~ **DONE** — 3 sizes (tiny/small/medium), all MIT, all on HF.
   Backend `--backend moonshine-streaming`, model registry for auto-download.
-- **Gemma-4-E2B** — **[CRASH-INVESTIGATED, RUNTIME NEEDS FULL REWRITE]**
-  Google USM Conformer (12L) + Gemma4 LLM (35L). Converter:
-  `cstr/gemma4-e2b-it-GGUF` 9.5 GB. Backend registered:
-  `--backend gemma4-e2b`. The runtime currently SIGABRT/SIGSEGVs on
-  the first JFK transcribe attempt — `g4e_run_llm_kv` trips
-  `ggml_can_mul_mat`.
-  Investigation (April 2026, after the parakeet-ja fix):
-  - Per-layer `head_dim` varies: sliding-attention layers use 256,
-    full-attention layers use `global_head_dim = 512`. Runtime
-    currently reads a single `head_dim` from hparams → mul_mat
-    asserts the moment it hits the first full layer (index 4).
-  - `use_double_wide_mlp = true` in the JFK config — each layer
-    has TWO MLP halves with their own pre/post norms.
-  - `num_kv_shared_layers = 20` — the first 20 layers reuse
-    K/V from later layers; their `k_proj` / `v_proj` may even be
-    absent in the checkpoint.
-  - `attention_k_eq_v = false`, `layer_types` alternates
-    sliding/full (5 of 35 are full).
-  - Gemma4 has NO AltUp / LAuREL — those are Gemma3n (different
-    architecture). The runtime's PLE direction was fixed
-    (commit `48ee13e`), but the head_dim variation, double-wide MLP,
-    and KV sharing remain unimplemented.
-  Converter now persists `layer_full_mask`, `global_head_dim`,
-  `num_kv_shared_layers`, `use_double_wide_mlp`, `attention_k_eq_v`,
-  and the partial-rotary RoPE params for the full-attention layers.
-  **Next:** runtime refactor of `g4e_build_graph_llm_kv` to honour
-  all of those, plus `tools/reference_backends/gemma4.py` for diff
-  testing once it stops crashing. Apache 2.0.
+- ~~**Gemma-4-E2B**~~ — **DONE** (2026-04-28). Google USM Conformer (12L) +
+  Gemma4 LLM (35L), 5.1B params with PLE. End-to-end correct on jfk.wav.
+  Converter: `cstr/gemma4-e2b-it-GGUF` (F16 9.5 GB, Q8_0 5.0 GB,
+  Q4_K 2.8 GB, Q2_K 2.2 GB). Backend: `--backend gemma4-e2b`.
+  Per-stage cosine sim vs HF: `mel=1.0000`, `subsample=0.9994`,
+  `audio_layers=0.97-0.99`, `tower_output=0.99+`. Bugs fixed
+  along the way (full list in `HISTORY.md`):
+  - Audio: ClippableLinear QAT clip scalars (input/output min/max
+    applied LIVE every forward, not training-only); HF mel
+    feature-extractor parameters (fft_length=512, magnitude not
+    power, log(mel+0.001), no Slaney norm); per-dim scale baked
+    at load (q_scale·softplus(pds)); rel_pos_bias `matrix_ac+matrix_bd`
+    + rel_shift; subsample flatten axis order
+    (`ggml_permute(h, 1, 2, 0, 3)`); `ggml_clamp` is in-place →
+    pre-`ggml_cont` shared inputs.
+  - LLM: KV-share donor map (LAST 20 layers reuse, not FIRST);
+    `use_double_wide_mlp` is single 2× MLP not two halves; PLE
+    direction; per-layer head_dim (sliding=256, full=512);
+    partial-rotary RoPE via `n_rot`.
+  Diff harness: `crispasr-diff gemma4 …` works end-to-end with
+  `tools/reference_backends/gemma4.py` (audio-only path fits 8 GB
+  RAM via `_dump_audio_only`). Apache 2.0.
+  Open polish: speed (currently ~0.2× realtime — see #17 below).
 - **MiMo-V2.5-ASR** — **[IN PROGRESS]** Xiaomi 8B Qwen2 + 1.2B RVQ audio tokenizer.
   Both converters DONE. F16 GGUFs on HF: `cstr/mimo-asr-GGUF` (15.3 GB),
   `cstr/mimo-tokenizer-GGUF` (Q4_K 377 MB). Runtime not yet written. MIT.
@@ -86,10 +83,12 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
   fall back to q4_0); follow-up to ship a Q5_K build, or pin those
   two tensors to F16 inside Q4_K, lives below under "open polish".
   See HISTORY.md.
-- **Gemma-4-E2B** — **[IN PROGRESS]** Full forward pass implemented (encoder + LLM decoder).
-  Needs testing with GGUF on Kaggle. Q4_K on HF. See TODO entry above.
 - **MiMo-V2.5-ASR** — **[IN PROGRESS]** Converters done, F16+Q4_K on HF.
-  Runtime not yet written. MIT.
+  Runtime is scaffolded (loads cleanly) but `mimo_asr_transcribe` is
+  a stub. Forward pass is PLAN #51. MIT.
+- **Qwen3-TTS** — **[IN PROGRESS]** Both converters done (LM + RVQ codec).
+  Runtime is scaffolded (loads cleanly) but `qwen3_tts_synthesise`
+  returns nullptr with "not implemented". Forward pass is PLAN #52. Apache 2.0.
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
 - ~~**VibeVoice TTS**~~ — **DONE**: Realtime-0.5B (17 bugs, perfect round-trip) + 1.5B base model (voice cloning). HF: `cstr/vibevoice-realtime-0.5b-GGUF`, `cstr/vibevoice-1.5b-GGUF`
 - **VibeVoice-7B TTS** — needs 32+ GB RAM for conversion (9.3B params). Same architecture as 1.5B.
@@ -320,6 +319,25 @@ each backend. High-value gaps to close:
 - **[done]** ~~Remove dead ggml graph encoder `granite_build_encoder`.~~
   Resurrected — now used by the graph encoder path (`GRANITE_ENCODER_GRAPH=1`).
 
+### gemma4-e2b
+- **[later]** Speed — currently ~0.2× realtime. Biggest wins: O10
+  (flash_attn_ext for the encoder block-wise attention) and O5
+  (pipelined mel+encode threading). Fused QKV (O2 infrastructure
+  is in `core/attention.h`) needs the Q4_K-aware converter-level
+  fuse before it pays off.
+- **[later]** Move audio mel/attention hparams to GGUF for multi-flavor
+  support (currently hardcoded; Gemma-4 family ships several scales).
+- **[later]** Extract Gemma4 audio tower into a CrispAudio shared lib
+  (per the BiDirLM/CrispEmbed pattern) — the USM Conformer with
+  ClippableLinear is a useful standalone audio encoder.
+- **[later]** Stage-by-stage diff for the LLM half: `crispasr-diff
+  gemma4` currently covers mel + audio_encoder; LLM-side stages
+  would let us tighten any remaining sub-1% layer cos drop.
+- **[later]** Q2_K transcription quality test. F16 + Q8_0 + Q4_K
+  all verified end-to-end on JFK with the freshly-converted GGUFs;
+  Q2_K is converted but its long-context PLE quality has not been
+  smoke-tested.
+
 ### canary_ctc (aligner)
 - **[done]** ~~Fix single-backend scheduler — currently no CPU fallback
   if the primary backend rejects an op.~~ Already uses the 2-backend
@@ -495,6 +513,7 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 | `cstr/pyannote-v3-segmentation-GGUF` | ✅ shipped (f32, 5.7 MB) |
 | `cstr/wav2vec2-large-xlsr-53-english-GGUF` | ✅ shipped (f16, q4_k, q5_0, q8_0) |
 | `cstr/wav2vec2-large-xlsr-53-german-GGUF` | ✅ shipped (q4_k) |
+| `cstr/gemma4-e2b-it-GGUF` | ✅ shipped (f16, q8_0, q4_k, q2_k — 4 quants with QAT clip scalars) |
 
 ---
 

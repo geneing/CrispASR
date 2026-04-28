@@ -3285,10 +3285,13 @@ family does X" — sister models flip flags.
 DIFFERENT `head_dim`: 256 for sliding, 512 for full
 (`global_head_dim`). A single-`head_dim` graph trips
 `ggml_can_mul_mat` at the first full layer. Same model also has
-`num_kv_shared_layers=20` (first 20 layers reuse K/V from later
-layers — some lower-layer K/V projections may be absent in the
-checkpoint), and `use_double_wide_mlp=true` (TWO MLP halves per
-layer with their own pre/post norms).
+`num_kv_shared_layers=20` — and the direction matters: it's the
+**LAST** N layers that reuse K/V from earlier same-`layer_type`
+layers, not the first N (`first_kv_shared_layer_idx = num_layers
+- N`, see `transformers/models/gemma4/modeling_gemma4.py:1148`).
+Plus `use_double_wide_mlp=true`, which means the SAME MLP runs with
+2× `intermediate_size` ON the kv-shared layers — not two separate
+MLP halves (a misread that wasted us a session of converter work).
 
 Lesson: **runtime hparams aren't always per-model; some are
 per-layer.** When a `layer_types` array, `num_kv_shared_layers`-style
@@ -3297,4 +3300,156 @@ config, plan a per-layer mask in the runtime, not a single value.
 The converter should persist the mask (we now do for Gemma4 via
 `gemma4e2b.llm.layer_full_mask`) so the runtime can branch without
 re-parsing the YAML.
+
+**Sub-lesson: read the actual `forward()` end-to-end before assuming
+"this flag is/isn't load-bearing."** Twice with Gemma4 we caught
+ourselves pattern-matching ("kv-share = first N layers", "MLP =
+two halves") off names + config fields and were both times wrong.
+The HF source is the ground truth.
+
+## QAT clipping scalars are NOT just training-time noise (April 2026)
+
+Gemma4's audio tower uses `Gemma4ClippableLinear` everywhere
+(q/k/v/o projections, both feed-forwards, lconv1d.linear_start/end).
+At init the four buffers `input_min/max, output_min/max` are
+`±inf`; QAT trains them down to finite values like `±5..±40`. AND
+THE FORWARD HOOK ACTUALLY USES THEM:
+
+```python
+def forward(self, hidden_states):
+    if self.use_clipped_linears:
+        hidden_states = torch.clamp(hidden_states, self.input_min, self.input_max)
+    hidden_states = self.linear(hidden_states)
+    if self.use_clipped_linears:
+        hidden_states = torch.clamp(hidden_states, self.output_min, self.output_max)
+    return hidden_states
+```
+
+We initially read "QAT scalars" and reasoned "those get folded at
+inference, harmless to skip." Wrong. Skipping them produced an
+encoder that drifted gradually through the conformer and then
+collapsed at layer 11 (cos vs HF = 0.51 instead of >0.95). The
+network was trained EXPECTING clipped activations on every
+ClippableLinear's input and output; without the clamps, deep layers
+saw distributions outside their effective input range.
+
+**Confirmation strategy that saved us another full debugging session:**
+patch HF locally (`Gemma4ClippableLinear.forward = no_clip_forward`)
+and re-run. If your ggml runtime + the patched HF agree at cos=0.51
+*and* the bit-exact HF reference is the only one at >0.95, the
+delta IS the clipping op. We did that, the cos numbers matched to
+within 0.001, decision was unambiguous: stop skipping the scalars.
+
+Operational lesson: **store every config flag and every learned
+inference-time scalar in the GGUF, even when the name reads like a
+training-time artefact.** The converter should default to "include"
+and only skip with a citation. Our SKIP_PATTERNS used to read
+`".input_max", ".input_min", ".output_max", ".output_min"` because
+"clipping scalars" sounded inert. That was 480 missing scalars in
+gemma4-e2b alone.
+
+## ggml_clamp is in-place — copy shared inputs first (April 2026)
+
+`ggml_clamp(ctx, a, min, max)` returns `ggml_view_tensor(ctx, a)` and
+the executor writes the clamped result INTO `a`'s underlying memory
+when the graph runs (`ggml/src/ggml-cpu/ops.cpp` clamp_f32 has
+`dst->data == src->data` after the view).
+
+Practical consequence: if `h` is the post-norm hidden state shared
+between Q, K, V projections and each has its own clip bounds:
+
+```cpp
+ggml_tensor* Q = clipped_mul_mat(L.q_w, h, L.clip_q);  // clamps h in place to clip_q.in
+ggml_tensor* K = clipped_mul_mat(L.k_w, h, L.clip_k);  // K reads h that's ALREADY been clamped to Q's range
+```
+
+…you'd get `clamp(clamp(h, q_in), k_in)` for K's input, which is the
+intersection of the two ranges instead of `clamp(h, k_in)`. The same
+applies to any sibling that reads the same intermediate tensor.
+
+Fix: pre-`ggml_cont` once per consumer so each clamp acts on its own
+private buffer:
+
+```cpp
+ggml_tensor* h_q = ggml_cont(ctx, h);  // private copy
+ggml_tensor* h_k = ggml_cont(ctx, h);
+ggml_tensor* h_v = ggml_cont(ctx, h);
+Q = clipped_mul_mat(L.q_w, h_q, L.clip_q, /*private_input=*/true);
+K = clipped_mul_mat(L.k_w, h_k, L.clip_k, /*private_input=*/true);
+V = clipped_mul_mat(L.v_w, h_v, L.clip_v, /*private_input=*/true);
+```
+
+This applies to any in-place ggml op (`ggml_silu_inplace`,
+`ggml_clamp`, etc.) when the input has multiple downstream consumers.
+The "in-place" flag in the docstring isn't documentation — it's a
+hazard label.
+
+## Stage-by-stage diff with intermediate dumps localises subtle bugs (April 2026)
+
+The Gemma4 audio encoder went from cos=0.10 → 0.49 → 0.97 over a
+session of fixes. Each step we knew which sub-module to attack
+because we kept a running per-stage cosine table and could see
+exactly where the curve broke.
+
+The infrastructure that worked:
+
+1. Python reference dumper (`tools/reference_backends/gemma4.py`)
+   registers forward hooks on every named module (subsample, every
+   conformer layer, output_proj, audio→LLM adapter) and writes each
+   captured tensor as a named entry in a single GGUF reference
+   archive.
+2. Runtime exposes the same names via `ggml_set_output()` on the
+   intermediate tensors and writes them to `CRISPASR_DUMP_DIR=…`
+   when the env var is set. No code change to existing
+   forward — just `ggml_set_output()` + a side-channel write block
+   right before `ggml_free(ectx)`.
+3. A short Python diff script reads both sides and reports per-row
+   cosine + max-abs per stage. ~30 LOC.
+
+With all three in place, finding bugs becomes: "look at the table,
+find where cos drops, dive into THAT module." We localised:
+
+- mel = bit-exact → bug below mel.
+- subsample = 0.73 → axis-order bug in conv2d output flatten
+  (`(M, T, C) → (C, M, T)` for HF's C-fast-then-M-slow per-frame
+  feature ordering). Subsample → 0.999.
+- layer_5 = 0.97 vs layer_11 = 0.51 → drift compounding through
+  conformer body. Tested without rel_pos_bias to localise → still
+  0.51 → it's something in the body, not pos_bias alone. Patched
+  HF's ClippableLinear to no-op → HF's no-clip cos=0.51 matched ours
+  exactly → the clipping IS the bug.
+
+Total cycles to find each: 1-2 iterations once the table existed.
+Trying to debug without the table: weeks (we know — we tried).
+
+The same harness paid for itself again on the LLM side
+(`llm_hidden_layer_*` taps) when those become the next surface to
+debug.
+
+## HF audio feature extractors are not interchangeable (April 2026)
+
+`Gemma4AudioFeatureExtractor` looks like a Whisper FE on the
+outside (mel-128, 16 kHz, log) but every detail differs:
+
+| Param | Whisper-like | Gemma4 | Why it matters |
+|---|---|---|---|
+| frame_length / fft_length | 400 / 400 | 320 / 512 | window is 320 samples, fft is 512 (zero-padded), produces 257 freq bins |
+| windowing pad | symmetric `n_fft/2` | semicausal: `frame_length//2 = 160` left only | first STFT frame centres at t=0 |
+| unfold size | `frame_length` | `frame_length + 1`, drop last | one-sample offset across all frames |
+| spectrum | power (re² + im²) | magnitude (`|stft|`) | smaller dynamic range pre-log |
+| mel filter norm | Slaney (`2/(hi-lo)`) | none | filter peaks have variable magnitude |
+| log | `log10(max(mel, 1e-10))` | `ln(mel + 0.001)` | Whisper floors at -10, Gemma4 at ln(0.001)=-6.91 |
+| post-log normalisation | clip-and-rescale to `[-1, 1]` | none | Gemma4 features remain in raw log scale |
+
+Mixing these up is silent: the encoder runs and produces "speech-y"
+output that the LLM still tries to decode (it heard "la la la la"
+when fed mel features computed with the wrong floor). So the FE
+must be **bit-exact replicable** in our runtime, not just
+"approximately whisper-style."
+
+We ended up writing a dedicated `g4e_compute_mel_hf_faithful` that
+bypasses `core_mel` because the combination of semicausal padding +
+unfold-by-frame_length+1 doesn't fit `core_mel`'s parameter set. The
+test that catches this is the `mel_spectrogram` stage cos: bit-exact
+or it isn't.
 

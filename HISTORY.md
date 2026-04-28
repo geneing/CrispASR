@@ -467,3 +467,73 @@ Moved here once shipped. See git history for code diffs.
   the path forward.
 - HF: `cstr/parakeet-tdt-0.6b-ja-GGUF` (F16 1.24 GB,
   Q4_K 470 MB) re-uploaded with the new converter + README.
+
+**Gemma-4-E2B-it ASR — landed end-to-end (April 2026):**
+
+`google/gemma-4-E2B-it`: USM Conformer (12L, 1024d, chunked-local
+attention with relative position bias, ClippableLinear with QAT
+scalars, LightConv1d) + Gemma4 LLM decoder (35L, 1536d, GQA 8Q/1KV,
+per-layer embeddings, hybrid sliding/full attention with
+per-layer-type head_dim, GeGLU MLP). Q4_K transcribes
+`samples/jfk.wav` perfectly:
+
+> "And so my fellow Americans ask not what your country can do for
+> you, ask what you can do for your country."
+
+End-to-end took ~16 numerical bugs to fix. The dominant ones:
+
+- **ClippableLinear QAT scalars are NOT optional.** HF
+  `Gemma4ClippableLinear.forward` clamps every input AND output of
+  every q/k/v/o/ffw_layer/lconv1d.linear with trained finite bounds
+  (±5..±40). Skipping them collapsed audio_layer_11 cos to 0.51 vs HF.
+  Fix: stop skipping in converter, runtime applies clamp(input)→
+  matmul→clamp(output) per linear. 480 scalars persisted per audio
+  tower. Confirmed by patching HF locally to disable the clamps:
+  HF-no-clip cos = 0.51, exactly matching ours-no-clip → unambiguous
+  attribution. cos jumped to 0.97 once enabled.
+- **Audio FE is bit-different from Whisper-style.** `frame_length=320`,
+  `fft_length=512`, semicausal padding (160 zeros at start only),
+  unfold-by-`frame_length+1`-then-drop-last, magnitude (not power)
+  spectrum, HTK no-norm filterbank, `log(mel + 0.001)` (additive
+  epsilon, natural log), no post-log normalisation. Wrote a
+  dedicated `g4e_compute_mel_hf_faithful` instead of fighting
+  `core_mel`'s param surface.
+- **LLM forward had 5 separate bugs** — attn_scale=1.0 (q_norm
+  replaces 1/√d), v_norm RMSNorm-no-weight, layer_scalar at end of
+  layer (was applied twice mid-layer), PLE block at end + full
+  per_layer_inputs prep stage including `per_layer_model_projection
+  + per_layer_projection_norm`, MLP is GeGLU not SwiGLU. Each was a
+  distinct numerical mismatch with HF; combined they took the LLM
+  from outputting `<pad>` repeats to coherent English.
+- **KV-share direction was the LAST 20 layers, not the first.**
+  CLAUDE-memorised "first 20 layers reuse from later layers" was
+  wrong; HF source has `first_kv_shared_layer_idx = num_layers - N`
+  with each shared layer reading from the LAST earlier layer of the
+  same `layer_type`. Donor map computed at load.
+- **`use_double_wide_mlp=true` is a single 2× MLP, not two halves.**
+  Misread of the field name + converter rename rules ate a session;
+  HF L1024 of `modeling_gemma4.py` makes it explicit:
+  `intermediate_size = config.intermediate_size * (2 if use_double_wide_mlp else 1)`.
+
+Per-stage cos vs HF reference (Q4_K, JFK 11s):
+
+```
+mel_spectrogram          1.0000   bit-exact
+audio_subsample_output   1.0000
+audio_layer_0..7        >0.998
+audio_layer_11           0.969
+audio_tower_output       0.962
+encoder_output           0.966
+```
+
+Process win: the stage-by-stage diff harness
+(`tools/dump_reference.py --backend gemma4` + intermediate dumps from
+the runtime via `CRISPASR_DUMP_DIR=…`) was decisive. Every bug was
+localised in 1–2 iterations once the per-layer cos table existed —
+the alternative (eyeball end-to-end output, guess) wasted multiple
+sessions before we wired it up. See LEARNINGS for the methodology.
+
+HF: `cstr/gemma4-e2b-it-GGUF` re-uploaded with the QAT scalars and
+all the fixes above (F16, Q8_0, Q4_K, Q2_K). Speed currently 0.2×
+realtime — open as PLAN #50 follow-up (#17 in TODO: cont reduction,
+fused QKV, pipelined mel+enc).

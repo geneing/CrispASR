@@ -130,36 +130,52 @@ No response. HF model card has no license field.
 
 ---
 
-## 50. Gemma-4-E2B runtime refactor
+## 50. Gemma-4-E2B runtime refactor — **DONE** (April 2026)
 
-The Gemma4 GGUF (cstr/gemma4-e2b-it-GGUF) currently makes
-`crispasr --backend gemma4-e2b` SIGABRT/SIGSEGV. The PLE direction
-fix is in (commit `48ee13e`); the remaining gaps are structural and
-genuinely Gemma4-specific:
+Working end-to-end. Q4_K transcribes JFK perfectly: *"And so my
+fellow Americans ask not what your country can do for you, ask
+what you can do for your country."*
 
-1. **Per-layer head_dim** — sliding-attention layers use 256, full-
-   attention layers use `global_head_dim=512`. Single-head_dim graph
-   trips `ggml_can_mul_mat` at the first full layer.
-2. **Double-wide MLP** (`use_double_wide_mlp=true`): two MLP halves
-   per layer with `pre_feedforward_layernorm_2`,
-   `post_feedforward_layernorm_1/2` norms. Converter now maps these;
-   runtime needs the second half wired in.
-3. **KV-cache sharing** — first 20 layers reuse K/V from a later
-   layer (`num_kv_shared_layers=20`); some lower-layer K/V projection
-   weights may be absent in the checkpoint.
-4. **layer_types** — alternating sliding (window 512) / full attention.
-   New per-layer mask `parakeet.layer_full_mask` is in metadata.
-5. **Per-layer-type RoPE** — sliding uses theta 10000, full uses
-   `rope_theta_full=1e6` with `partial_rotary_factor=0.25`.
+Per-stage cos vs HF reference:
 
-The converter (`models/convert-gemma4-e2b-to-gguf.py`) already
-persists `layer_full_mask`, `global_head_dim`,
-`num_kv_shared_layers`, `use_double_wide_mlp`, `attention_k_eq_v`,
-and the partial-rotary RoPE params. Once the runtime honours all of
-these, `tools/reference_backends/gemma4.py` is in place for the
-stage-by-stage diff (same flow that cracked parakeet-ja).
+```
+mel_spectrogram          1.0000  bit-exact
+audio_subsample_output   1.0000
+audio_layer_0..7        >0.998
+audio_layer_11           0.969
+audio_tower_output       0.962
+encoder_output           0.966
+```
 
-**Effort:** Medium-large. ~400-600 LOC in `src/gemma4_e2b.cpp`.
+Bugs fixed (full list in HISTORY.md and `LEARNINGS.md`):
+
+1. Attention scale = 1.0 (q_norm replaces 1/√d, not the other way around).
+2. v_norm RMSNorm-without-weight on V before flash-attn.
+3. layer_scalar applied ONCE at end of layer.
+4. PLE block at end of layer + per_layer_inputs prep stage.
+5. KV-share donor map (LAST 20 layers reuse, not first 20 — converter
+   metadata + runtime both honour it now).
+6. LLM MLP is GeGLU not SwiGLU (`gelu_pytorch_tanh`).
+7. Audio attn Q/K scaling (`q_scale·softplus(per_dim_scale)`,
+   `k_scale=log(1+e)/log(2)`).
+8. Audio subsample LayerNorm + ReLU (was RMSNorm + SiLU).
+9. Audio lconv1d SiLU between conv_norm and out_proj.
+10. Audio chunked-local attention with relative position bias
+    (block-wise manual attention; flash_attn_ext can't express the
+    softcap-before-mask order HF needs).
+11. Audio→LLM adapter pre-projection RMSNorm.
+12. HF-faithful mel FE (`fft_length=512`, `frame_length=320`,
+    semicausal pad, `log(mel + mel_floor=0.001)`, no Slaney norm).
+13. Subsample axis order: ne=(n_mels, T_mel) input, (M, T, C)→(C, M, T)
+    flatten with C-fast for HF's per-frame feature ordering.
+14. **ClippableLinear QAT scalars**: 480 trained scalars per audio
+    tower applied via `clamp(input)→matmul→clamp(output)` per HF's
+    `Gemma4ClippableLinear.forward`. Stop-skipping in converter +
+    runtime support; this was the dominant remaining bug.
+
+Open follow-ups (not blockers): see TODO under #50 — speed
+optimisation (currently 0.2× realtime), audio hparams to GGUF for
+multi-flavour support, CrispAudio shared-lib extraction.
 
 ---
 
@@ -203,12 +219,20 @@ collection: [Qwen/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
   with a 16-codebook output head. No DiT; direct AR generation of
   RVQ codes. ~97ms end-to-end latency, 10 languages incl.
   en/de/zh/ja/ko/it.
-- **Status (April 2026):** both converters scaffolded
-  (`models/convert-qwen3-tts-to-gguf.py`,
-  `models/convert-qwen3-tts-tokenizer-to-gguf.py`) — they read every
-  hparam from the HF config.json and warn loudly on unmapped tensors.
-  Runtime, model registry entries, CLI hooks, and a reference dump
-  for diff-testing are all pending.
+- **Status (April 2026):** **scaffold only**.
+  - Both converters scaffolded
+    (`models/convert-qwen3-tts-to-gguf.py`,
+    `models/convert-qwen3-tts-tokenizer-to-gguf.py`) — they read every
+    hparam from the HF config.json and warn loudly on unmapped tensors.
+  - Runtime: `src/qwen3_tts.{h,cpp}` (284 LOC) — loads the GGUF, but
+    `qwen3_tts_synthesise` returns nullptr with `"qwen3_tts: synthesise
+    called but talker/codec forward not implemented"`. No actual
+    inference yet.
+  - Open: talker forward (Qwen3 LM with 16-codebook output head),
+    codec forward (RVQ encoder/decoder), model registry entry, CLI
+    hook, reference dump for diff-testing. None done.
+  - Recommend after #51 (MiMo) since both share RVQ codec runtime
+    work — see #53 for the proposed `core/audio_decoder.h` extraction.
 - **Reuse:** the talker is essentially Qwen3-0.6B/1.7B with a
   multi-codebook output head — `core_attn::kv_self_attn` +
   `core_ffn::swiglu` again. The codec needs new code for RVQ
