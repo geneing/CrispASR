@@ -264,14 +264,13 @@ collection: [Qwen/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
        × 16 codebooks → Python codec decode → 4.4s audio →
        parakeet ASR transcribes back verbatim.
   - **Open** (in priority order):
-    1. ✓ **Codec decoder** (Tokenizer-12Hz, commit `d1f47b1`).
+    1. ✓ **Codec decoder** (Tokenizer-12Hz, commits `d1f47b1`, `48c6c1a`).
        Converter rewritten (0 unmapped, 253 tensors, 0.25 GB F16 GGUF).
        C++ decoder: SplitRVQ → pre_conv → 8L XFMR(512d, sliding-window=72)
        → 2× ConvNeXt upsample → 4× SnakeBeta+tconv DecoderBlock → PCM.
-       CPU: T=5 frames → 9600 samples, all finite, range [-0.165,0.141].
-       Metal: GPU scheduler conflict with ggml_conv_1d_dw + SnakeBeta on
-       M1 (kIOGPUCommandBufferCallbackErrorImpactingInteractivity) — fix
-       separately; `use_gpu=false` for codec decode in the interim.
+       Diff harness: 8/8 stages PASS (cos_min≥0.999). CPU verified.
+       Metal: GPU scheduler conflict on M1 — use_gpu=false for codec;
+       investigate separately as PLAN #52 open item.
     2. **Runtime ECAPA speaker_encoder forward.** Removes the
        `bake-qwen3-tts-voice-pack.py` dependency for new voices —
        end users pass any ref WAV and we compute spk_embedding in
