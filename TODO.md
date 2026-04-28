@@ -37,16 +37,34 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 - ~~**Moonshine multilingual**~~ **FIXED** — converter forces 1D tensors to F32 (line 338). All 14 GGUF variants (tiny/base × en/ja/ar/ko/zh/vi/uk) work on CPU. head_dim=52 (base) works on CPU flash_attn; GPU flash_attn needs aligned head_dim (ggml limitation, moonshine forced to CPU anyway). Verified 2026-04-26: tiny 50.7×, base (head_dim=52) 14.2×, base-zh on English audio 14.8× — all transcripts correct.
 - ~~**Moonshine streaming**~~ **DONE** — 3 sizes (tiny/small/medium), all MIT, all on HF.
   Backend `--backend moonshine-streaming`, model registry for auto-download.
-- **Gemma-4-E2B** — **[IN PROGRESS]** Google USM Conformer (12L) + Gemma4 LLM (35L).
-  Converter DONE, F16 GGUF on HF (`cstr/gemma4-e2b-it-GGUF`, 9.5 GB, 872 tensors).
-  Q4_K quantization pending (BPE merges fix applied, re-running on Kaggle).
-  Runtime compiles, backend registered: `--backend gemma4-e2b`.
-  Full forward pass implemented: Conv2D sub → 12L Conformer (macaron FFN,
-  full self-attn w/ per_dim_scale + logit cap, LightConv1d) → output proj →
-  35L Gemma4 LLM (PLE, KV-cached GQA 8Q/1KV, Q/K RMSNorm, SwiGLU, softcap).
-  **Needs testing**: differential test vs PyTorch, chunked attention, rel pos bias,
-  proper BPE tokenization, hybrid sliding/full attention.
-  Apache 2.0. 128-bin log-mel, 30s max, 262K BPE vocab.
+- **Gemma-4-E2B** — **[CRASH-INVESTIGATED, RUNTIME NEEDS FULL REWRITE]**
+  Google USM Conformer (12L) + Gemma4 LLM (35L). Converter:
+  `cstr/gemma4-e2b-it-GGUF` 9.5 GB. Backend registered:
+  `--backend gemma4-e2b`. The runtime currently SIGABRT/SIGSEGVs on
+  the first JFK transcribe attempt — `g4e_run_llm_kv` trips
+  `ggml_can_mul_mat`.
+  Investigation (April 2026, after the parakeet-ja fix):
+  - Per-layer `head_dim` varies: sliding-attention layers use 256,
+    full-attention layers use `global_head_dim = 512`. Runtime
+    currently reads a single `head_dim` from hparams → mul_mat
+    asserts the moment it hits the first full layer (index 4).
+  - `use_double_wide_mlp = true` in the JFK config — each layer
+    has TWO MLP halves with their own pre/post norms.
+  - `num_kv_shared_layers = 20` — the first 20 layers reuse
+    K/V from later layers; their `k_proj` / `v_proj` may even be
+    absent in the checkpoint.
+  - `attention_k_eq_v = false`, `layer_types` alternates
+    sliding/full (5 of 35 are full).
+  - Gemma4 has NO AltUp / LAuREL — those are Gemma3n (different
+    architecture). The runtime's PLE direction was fixed
+    (commit `48ee13e`), but the head_dim variation, double-wide MLP,
+    and KV sharing remain unimplemented.
+  Converter now persists `layer_full_mask`, `global_head_dim`,
+  `num_kv_shared_layers`, `use_double_wide_mlp`, `attention_k_eq_v`,
+  and the partial-rotary RoPE params for the full-attention layers.
+  **Next:** runtime refactor of `g4e_build_graph_llm_kv` to honour
+  all of those, plus `tools/reference_backends/gemma4.py` for diff
+  testing once it stops crashing. Apache 2.0.
 - **MiMo-V2.5-ASR** — **[IN PROGRESS]** Xiaomi 8B Qwen2 + 1.2B RVQ audio tokenizer.
   Both converters DONE. F16 GGUFs on HF: `cstr/mimo-asr-GGUF` (15.3 GB),
   `cstr/mimo-tokenizer-GGUF` (Q4_K 377 MB). Runtime not yet written. MIT.
@@ -77,10 +95,23 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 - **VibeVoice-7B TTS** — needs 32+ GB RAM for conversion (9.3B params). Same architecture as 1.5B.
 - **VibeVoice multi-speaker** — 1.5B/7B support up to 4 speakers; need prompt template for multi-speaker scripts
 - **VibeVoice negative conditioning** — base model uses zero negative; proper dual-LM CFG would improve quality
-- **Qwen3 TTS** — user-requested follow-on after VibeVoice TTS landed.
-  Add converter + runtime + auto-download. Same backend slot as the
-  ASR Qwen3 (text → speech direction), needs new registry entry and
-  whatever speech-side decoder Qwen3-TTS ships with.
+- **Qwen3 TTS** — user-requested follow-on after VibeVoice TTS landed
+  (Apache 2.0,
+  [collection](https://huggingface.co/collections/Qwen/qwen3-tts)).
+  "Discrete Multi-Codebook LM" architecture: Qwen3 backbone with a
+  16-codebook output head, paired with `Qwen3-TTS-Tokenizer-12Hz`
+  (16 codebooks × 2048, 12.5 FPS RVQ). Variants:
+  Base / CustomVoice / VoiceDesign in 0.6B and 1.7B. 10 languages,
+  ~97ms end-to-end latency.
+  - Add `models/convert-qwen3-tts-to-gguf.py` for the LM
+  - Add `models/convert-qwen3-tts-tokenizer-to-gguf.py` for the codec
+  - New backend `qwen3-tts` reusing `core_attn::kv_self_attn` for
+    the LM, with a 16-codebook output layer in place of the usual
+    single-vocab lm_head, and the codec for waveform reconstruction.
+  - Auto-download for both the LM and the tokenizer.
+  Same scope as MiMo (which is also a separate-tokenizer + LM
+  pattern); the two share enough infrastructure that landing one
+  unblocks the other.
 
 ### Open polish
 
