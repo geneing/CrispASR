@@ -2217,14 +2217,15 @@ static std::vector<float> compute_spk_mel(const float* audio, int n_samples, int
     const float fmin = 0.0f, fmax = 12000.0f;
     const int pad = (n_fft - hop) / 2; // 384 reflect-pad on each side
 
-    // Reflect-pad audio
+    // Reflect-pad audio: matches PyTorch F.pad(mode='reflect') which excludes
+    // the boundary element (e.g. [a,b,c] padded by 2 → [c,b,a,b,c,b,a]).
     std::vector<float> audio_p(n_samples + 2 * pad, 0.0f);
-    for (int i = 0; i < pad && i < n_samples; i++)
-        audio_p[i] = audio[pad - 1 - i];
+    for (int i = 0; i < pad; i++)
+        audio_p[i] = audio[std::min(pad - i, n_samples - 1)]; // left: audio[pad-i..1]
     for (int i = 0; i < n_samples; i++)
         audio_p[pad + i] = audio[i];
-    for (int i = 0; i < pad && i < n_samples; i++)
-        audio_p[pad + n_samples + i] = audio[n_samples - 1 - i];
+    for (int i = 0; i < pad; i++)
+        audio_p[pad + n_samples + i] = audio[std::max(n_samples - 2 - i, 0)]; // right
 
     // Periodic Hann window
     std::vector<float> hann(n_fft);
