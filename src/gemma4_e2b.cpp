@@ -258,15 +258,22 @@ struct gemma4_e2b_context {
 // Output: [output_proj_dims, T_sub]
 
 // Apply Gemma4ClippableLinear semantics: x = clamp(x); y = W @ x; y = clamp(y).
-// When clip bounds are ±inf (default for GGUFs missing the QAT scalars),
-// the clamps are no-ops — we emit them anyway since ggml_clamp on
-// finite F32 with ±inf bounds is just a pass-through.
+//
+// Important: ggml_clamp is an in-place op (returns a view of the input
+// and overwrites its data when the graph runs). We must NOT clamp the
+// caller's `x` directly because it's often shared between multiple
+// consumers (e.g. Q, K, V projections all read the same h). We
+// ggml_cont() to a fresh tensor first so the in-place clamp only
+// touches our copy, leaving the caller's `x` intact for sibling
+// projections.
 static inline ggml_tensor* g4e_clipped_mul_mat(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, const g4e_clip& c) {
-    if (std::isfinite(c.in_min) || std::isfinite(c.in_max))
+    if (std::isfinite(c.in_min) || std::isfinite(c.in_max)) {
+        x = ggml_cont(ctx, x);              // private copy
         x = ggml_clamp(ctx, x, c.in_min, c.in_max);
+    }
     ggml_tensor* y = ggml_mul_mat(ctx, w, x);
     if (std::isfinite(c.out_min) || std::isfinite(c.out_max))
-        y = ggml_clamp(ctx, y, c.out_min, c.out_max);
+        y = ggml_clamp(ctx, y, c.out_min, c.out_max); // y is freshly produced, safe to clamp in place
     return y;
 }
 
@@ -1749,11 +1756,11 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     int64_t t_enc0 = ggml_time_us();
 
     // Build single encoder graph: mel → conv2d sub → 12 conformer layers → output proj
-    size_t enc_mem = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(32768, false);
+    size_t enc_mem = ggml_tensor_overhead() * 32768 + ggml_graph_overhead_custom(131072, false);
     std::vector<uint8_t> enc_meta(enc_mem);
     ggml_init_params enc_ip = {enc_mem, enc_meta.data(), true};
     ggml_context* ectx = ggml_init(enc_ip);
-    ggml_cgraph* enc_gf = ggml_new_graph_custom(ectx, 32768, false);
+    ggml_cgraph* enc_gf = ggml_new_graph_custom(ectx, 131072, false);
 
     // Input: mel [T_mel, n_mels, 1, 1] for conv2d
     ggml_tensor* mel_in = ggml_new_tensor_4d(ectx, GGML_TYPE_F32, n_mels, T_mel, 1, 1);
@@ -2154,11 +2161,11 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
     const float eps = m.llm_hp.rms_norm_eps;
 
     // Build encoder graph (same shape as gemma4_e2b_transcribe).
-    size_t enc_mem = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(32768, false);
+    size_t enc_mem = ggml_tensor_overhead() * 32768 + ggml_graph_overhead_custom(131072, false);
     std::vector<uint8_t> enc_meta(enc_mem);
     ggml_init_params enc_ip = {enc_mem, enc_meta.data(), true};
     ggml_context* ectx = ggml_init(enc_ip);
-    ggml_cgraph* enc_gf = ggml_new_graph_custom(ectx, 32768, false);
+    ggml_cgraph* enc_gf = ggml_new_graph_custom(ectx, 131072, false);
 
     ggml_tensor* mel_in = ggml_new_tensor_4d(ectx, GGML_TYPE_F32, n_mels, T_mel, 1, 1);
     ggml_set_name(mel_in, "mel");
