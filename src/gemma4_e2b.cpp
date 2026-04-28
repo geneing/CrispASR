@@ -762,7 +762,11 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
         ggml_tensor* matrix_bd = ggml_reshape_3d(ctx, bd_trim, context_size, chunk_size, n_h);
 
         // Sum + softcap + boundary mask.
-        ggml_tensor* scores = ggml_add(ctx, matrix_ac, matrix_bd);
+        // DEBUG: toggle to disable rel_pos_bias contribution.
+        ggml_tensor* scores = std::getenv("CRISPASR_NO_REL_POS")
+                                  ? matrix_ac
+                                  : ggml_add(ctx, matrix_ac, matrix_bd);
+        (void)matrix_bd;
         scores = ggml_scale(ctx, scores, 1.0f / softcap);
         scores = ggml_tanh(ctx, scores);
         scores = ggml_scale(ctx, scores, softcap);

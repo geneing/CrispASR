@@ -43,13 +43,14 @@ import numpy as np
 DEFAULT_STAGES = [
     "raw_audio",
     "mel_spectrogram",
-    "audio_subsample_output",       # post-conv2d subsample (pre-conformer)
-    "audio_layer_0",                # post-conformer-layer-0 (pre-output_proj)
-    "audio_layer_1",
-    "audio_layer_5",
-    "audio_layer_11",               # last conformer layer output
-    "audio_tower_output",           # post-output_proj (pre-adapter)
-    "encoder_output",               # post-adapter (final, fed to LLM)
+    "audio_pos_enc",
+    "audio_rel_k_layer0",
+    "audio_subsample_output",
+    "audio_layer_0", "audio_layer_1", "audio_layer_2", "audio_layer_3",
+    "audio_layer_4", "audio_layer_5", "audio_layer_6", "audio_layer_7",
+    "audio_layer_8", "audio_layer_9", "audio_layer_10", "audio_layer_11",
+    "audio_tower_output",
+    "encoder_output",
     "llm_hidden_layer_0",
     "llm_hidden_layer_1",
     "llm_hidden_layer_8",
@@ -167,13 +168,21 @@ def _dump_audio_only(model_dir: Path, audio: np.ndarray, stages: Set[str]) -> Di
     if hasattr(audio_tower, "subsample_conv_projection"):
         handles.append(audio_tower.subsample_conv_projection.register_forward_hook(
             make_hook("audio_subsample_output")))
+    if hasattr(audio_tower, "rel_pos_enc"):
+        handles.append(audio_tower.rel_pos_enc.register_forward_hook(
+            make_hook("audio_pos_enc")))
+    # Tap the relative_k_proj on layer 0's attention to dump rel_K_states.
+    if hasattr(audio_tower, "layers") and len(audio_tower.layers) > 0:
+        layer0 = audio_tower.layers[0]
+        if hasattr(layer0, "self_attn") and hasattr(layer0.self_attn, "relative_k_proj"):
+            handles.append(layer0.self_attn.relative_k_proj.register_forward_hook(
+                make_hook("audio_rel_k_layer0")))
     if hasattr(audio_tower, "layers"):
         n_audio_layers = len(audio_tower.layers)
-        for idx, label in [(0, "audio_layer_0"), (1, "audio_layer_1"),
-                           (5, "audio_layer_5"), (n_audio_layers - 1, "audio_layer_11")]:
-            if 0 <= idx < n_audio_layers:
-                handles.append(audio_tower.layers[idx].register_forward_hook(
-                    make_hook(label)))
+        for idx in range(n_audio_layers):
+            label = f"audio_layer_{idx}"
+            handles.append(audio_tower.layers[idx].register_forward_hook(
+                make_hook(label)))
 
     with torch.no_grad():
         audio_features = input_features.to(dtype)
