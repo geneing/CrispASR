@@ -75,12 +75,24 @@ struct g4e_llm_hp {
 
 // ── Model tensors ───────────────────────────────────────────────────────────
 
+// Per-Linear QAT clipping bounds. Gemma4ClippableLinear applies
+//   x = clamp(x, in_min, in_max); y = W @ x; y = clamp(y, out_min, out_max).
+// At init we read the four 1-element scalars from the GGUF (or default
+// to ±inf when absent on older GGUFs that filtered them).
+struct g4e_clip {
+    float in_min = -INFINITY;
+    float in_max = INFINITY;
+    float out_min = -INFINITY;
+    float out_max = INFINITY;
+};
+
 struct g4e_audio_layer {
     // Macaron FFN 1
     ggml_tensor* ffn1_pre_ln = nullptr;
     ggml_tensor* ffn1_up_w = nullptr;
     ggml_tensor* ffn1_down_w = nullptr;
     ggml_tensor* ffn1_post_ln = nullptr;
+    g4e_clip clip_ffn1_up, clip_ffn1_down;
 
     // Self-attention
     ggml_tensor* attn_pre_ln = nullptr;
@@ -91,6 +103,7 @@ struct g4e_audio_layer {
     ggml_tensor* attn_per_dim_scale = nullptr; // [head_dim]
     ggml_tensor* attn_rel_k_w = nullptr;       // [hidden, hidden] — relative position bias
     ggml_tensor* attn_post_ln = nullptr;
+    g4e_clip clip_q, clip_k, clip_v, clip_o;
 
     // LightConv1d
     ggml_tensor* conv_pre_ln = nullptr;
@@ -98,11 +111,13 @@ struct g4e_audio_layer {
     ggml_tensor* conv_dw_w = nullptr;   // [hidden, 1, k] — depthwise conv
     ggml_tensor* conv_ln = nullptr;
     ggml_tensor* conv_out_w = nullptr; // [hidden, hidden]
+    g4e_clip clip_conv_gate, clip_conv_out;
 
     // Macaron FFN 2
     ggml_tensor* ffn2_pre_ln = nullptr;
     ggml_tensor* ffn2_up_w = nullptr;
     ggml_tensor* ffn2_down_w = nullptr;
+    g4e_clip clip_ffn2_up, clip_ffn2_down;
     ggml_tensor* ffn2_post_ln = nullptr;
 
     // Output norm
@@ -242,14 +257,29 @@ struct gemma4_e2b_context {
 // Input: mel features [n_mels, T_mel] after Conv2D subsampling → [hidden, T_sub]
 // Output: [output_proj_dims, T_sub]
 
+// Apply Gemma4ClippableLinear semantics: x = clamp(x); y = W @ x; y = clamp(y).
+// When clip bounds are ±inf (default for GGUFs missing the QAT scalars),
+// the clamps are no-ops — we emit them anyway since ggml_clamp on
+// finite F32 with ±inf bounds is just a pass-through.
+static inline ggml_tensor* g4e_clipped_mul_mat(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, const g4e_clip& c) {
+    if (std::isfinite(c.in_min) || std::isfinite(c.in_max))
+        x = ggml_clamp(ctx, x, c.in_min, c.in_max);
+    ggml_tensor* y = ggml_mul_mat(ctx, w, x);
+    if (std::isfinite(c.out_min) || std::isfinite(c.out_max))
+        y = ggml_clamp(ctx, y, c.out_min, c.out_max);
+    return y;
+}
+
 static ggml_tensor* build_macaron_ffn(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pre_ln, ggml_tensor* up_w,
-                                      ggml_tensor* down_w, ggml_tensor* post_ln, float residual_weight, float eps) {
-    // Half-step FFN: x + residual_weight * post_ln(down(silu(up(pre_ln(x)))))
+                                      ggml_tensor* down_w, ggml_tensor* post_ln, float residual_weight, float eps,
+                                      const g4e_clip& clip_up, const g4e_clip& clip_down) {
+    // Half-step FFN with QAT clipping on both projections.
+    // x + residual_weight * post_ln(clipped_down(silu(clipped_up(pre_ln(x)))))
     ggml_tensor* h = ggml_rms_norm(ctx, x, eps);
     h = ggml_mul(ctx, h, pre_ln);
-    h = ggml_mul_mat(ctx, up_w, h);
+    h = g4e_clipped_mul_mat(ctx, up_w, h, clip_up);
     h = ggml_silu(ctx, h);
-    h = ggml_mul_mat(ctx, down_w, h);
+    h = g4e_clipped_mul_mat(ctx, down_w, h, clip_down);
     ggml_tensor* normed = ggml_rms_norm(ctx, h, eps);
     normed = ggml_mul(ctx, normed, post_ln);
     return ggml_add(ctx, x, ggml_scale(ctx, normed, residual_weight));
@@ -257,14 +287,13 @@ static ggml_tensor* build_macaron_ffn(ggml_context* ctx, ggml_tensor* x, ggml_te
 
 static ggml_tensor* build_light_conv1d(ggml_context* ctx, ggml_tensor* x, const g4e_audio_layer& L, int T, int hidden,
                                        float eps) {
-    // LightConv1d: pre_ln → gate_proj (GLU: split → sigmoid gate) → depthwise_conv1d(causal, k=5) →
-    // conv_norm → out_proj + residual
+    // LightConv1d with QAT clipping on linear_start (gate) and linear_end (out).
     ggml_tensor* residual = x;
     ggml_tensor* h = ggml_rms_norm(ctx, x, eps);
     h = ggml_mul(ctx, h, L.conv_pre_ln);
 
     // GLU gating: gate_proj produces [2*hidden, T], split into value + gate
-    h = ggml_mul_mat(ctx, L.conv_gate_w, h); // [2*hidden, T]
+    h = g4e_clipped_mul_mat(ctx, L.conv_gate_w, h, L.clip_conv_gate); // [2*hidden, T]
     int half = hidden;
     ggml_tensor* val = ggml_view_2d(ctx, h, half, T, h->nb[1], 0);
     ggml_tensor* gate = ggml_view_2d(ctx, h, half, T, h->nb[1], half * ggml_type_size(h->type));
@@ -281,13 +310,11 @@ static ggml_tensor* build_light_conv1d(ggml_context* ctx, ggml_tensor* x, const 
         ht = ggml_reshape_2d(ctx, ht, ht->ne[0], ht->ne[1]);
     h = ggml_cont(ctx, ggml_transpose(ctx, ht)); // back to [hidden, T]
 
-    // Conv norm + activation + out projection. HF
-    // Gemma4AudioLightConv1d.forward (modeling_gemma4.py L477-480) applies
-    // the activation (SiLU) AFTER conv_norm, BEFORE linear_end.
+    // Conv norm + activation + clipped out projection.
     h = ggml_rms_norm(ctx, h, eps);
     h = ggml_mul(ctx, h, L.conv_ln);
     h = ggml_silu(ctx, h);
-    h = ggml_mul_mat(ctx, L.conv_out_w, h);
+    h = g4e_clipped_mul_mat(ctx, L.conv_out_w, h, L.clip_conv_out);
 
     return ggml_add(ctx, residual, h);
 }
@@ -679,9 +706,9 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
     h = ggml_mul(ctx, h, L.attn_pre_ln);
 
     // Q/K/V projections + scaling.
-    ggml_tensor* Q = ggml_mul_mat(ctx, L.attn_q_w, h); // (hd*n_h, T)
-    ggml_tensor* K = ggml_mul_mat(ctx, L.attn_k_w, h);
-    ggml_tensor* V = ggml_mul_mat(ctx, L.attn_v_w, h);
+    ggml_tensor* Q = g4e_clipped_mul_mat(ctx, L.attn_q_w, h, L.clip_q); // (hd*n_h, T)
+    ggml_tensor* K = g4e_clipped_mul_mat(ctx, L.attn_k_w, h, L.clip_k);
+    ggml_tensor* V = g4e_clipped_mul_mat(ctx, L.attn_v_w, h, L.clip_v);
 
     Q = ggml_reshape_3d(ctx, Q, hd, n_h, T);
     K = ggml_reshape_3d(ctx, K, hd, n_h, T);
@@ -806,7 +833,7 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
     attn_out = ggml_reshape_2d(ctx, attn_out, hd * n_h, T);
 
     // Output projection.
-    attn_out = ggml_mul_mat(ctx, L.attn_o_w, attn_out);
+    attn_out = g4e_clipped_mul_mat(ctx, L.attn_o_w, attn_out, L.clip_o);
 
     // Post-norm + residual.
     attn_out = ggml_rms_norm(ctx, attn_out, eps);
@@ -1438,6 +1465,16 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
     m.sub_norm1_w = get("audio.subsample.norm1.weight");
     m.sub_input_proj_w = get("audio.subsample.input_proj.weight");
 
+    // Helper to read a 1-element F32 scalar from the GGUF (for QAT
+    // clipping bounds). Returns the default when the tensor is absent.
+    auto read_clip_scalar = [&](ggml_tensor* t, float def) -> float {
+        if (!t)
+            return def;
+        float v = def;
+        ggml_backend_tensor_get(t, &v, 0, sizeof(float));
+        return v;
+    };
+
     m.audio_layers.resize(ahp.num_layers);
     for (uint32_t i = 0; i < ahp.num_layers; i++) {
         char buf[128];
@@ -1446,11 +1483,24 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
             snprintf(buf, sizeof(buf), "audio.layers.%u.%s", i, suffix);
             return get(buf);
         };
+        auto load_clip = [&](const char* prefix, g4e_clip& c) {
+            char k[128];
+            snprintf(k, sizeof(k), "%s.input_min", prefix);
+            c.in_min = read_clip_scalar(g(k), -INFINITY);
+            snprintf(k, sizeof(k), "%s.input_max", prefix);
+            c.in_max = read_clip_scalar(g(k), INFINITY);
+            snprintf(k, sizeof(k), "%s.output_min", prefix);
+            c.out_min = read_clip_scalar(g(k), -INFINITY);
+            snprintf(k, sizeof(k), "%s.output_max", prefix);
+            c.out_max = read_clip_scalar(g(k), INFINITY);
+        };
         // Macaron FFN 1
         L.ffn1_pre_ln = g("ffn1.pre_ln.weight");
         L.ffn1_up_w = g("ffn1.up.weight");
         L.ffn1_down_w = g("ffn1.down.weight");
         L.ffn1_post_ln = g("ffn1.post_ln.weight");
+        load_clip("ffn1.up", L.clip_ffn1_up);
+        load_clip("ffn1.down", L.clip_ffn1_down);
         // Self-attention
         L.attn_pre_ln = g("attn_pre_ln.weight");
         L.attn_q_w = g("attn.q.weight");
@@ -1460,17 +1510,25 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
         L.attn_per_dim_scale = g("attn.per_dim_scale");
         L.attn_rel_k_w = g("attn.rel_k.weight");
         L.attn_post_ln = g("attn_post_ln.weight");
+        load_clip("attn.q", L.clip_q);
+        load_clip("attn.k", L.clip_k);
+        load_clip("attn.v", L.clip_v);
+        load_clip("attn.o", L.clip_o);
         // LightConv1d
         L.conv_pre_ln = g("conv.pre_ln.weight");
         L.conv_gate_w = g("conv.gate_proj.weight");
         L.conv_dw_w = g("conv.dw_conv.weight");
         L.conv_ln = g("conv.conv_ln.weight");
         L.conv_out_w = g("conv.out_proj.weight");
+        load_clip("conv.gate_proj", L.clip_conv_gate);
+        load_clip("conv.out_proj", L.clip_conv_out);
         // Macaron FFN 2
         L.ffn2_pre_ln = g("ffn2.pre_ln.weight");
         L.ffn2_up_w = g("ffn2.up.weight");
         L.ffn2_down_w = g("ffn2.down.weight");
         L.ffn2_post_ln = g("ffn2.post_ln.weight");
+        load_clip("ffn2.up", L.clip_ffn2_up);
+        load_clip("ffn2.down", L.clip_ffn2_down);
         // Output norm
         L.out_ln = g("out_ln.weight");
     }
@@ -1777,7 +1835,7 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
         // Macaron FFN 1 (half-step)
         if (L.ffn1_up_w)
             h = build_macaron_ffn(ectx, h, L.ffn1_pre_ln, L.ffn1_up_w, L.ffn1_down_w, L.ffn1_post_ln,
-                                  ahp.residual_weight, eps);
+                                  ahp.residual_weight, eps, L.clip_ffn1_up, L.clip_ffn1_down);
 
         // Self-attention (chunked-local + relative position bias).
         h = build_conformer_self_attn(ectx, h, L, ahp, audio_pos_enc, audio_pad_mask);
@@ -1789,7 +1847,7 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
         // Macaron FFN 2 (half-step)
         if (L.ffn2_up_w)
             h = build_macaron_ffn(ectx, h, L.ffn2_pre_ln, L.ffn2_up_w, L.ffn2_down_w, L.ffn2_post_ln,
-                                  ahp.residual_weight, eps);
+                                  ahp.residual_weight, eps, L.clip_ffn2_up, L.clip_ffn2_down);
 
         // Output layer norm
         if (L.out_ln) {
@@ -2169,13 +2227,13 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
         const auto& L = m.audio_layers[il];
         if (L.ffn1_up_w)
             h = build_macaron_ffn(ectx, h, L.ffn1_pre_ln, L.ffn1_up_w, L.ffn1_down_w, L.ffn1_post_ln,
-                                  ahp.residual_weight, eps);
+                                  ahp.residual_weight, eps, L.clip_ffn1_up, L.clip_ffn1_down);
         h = build_conformer_self_attn(ectx, h, L, ahp, audio_pos_enc, audio_pad_mask);
         if (L.conv_gate_w)
             h = build_light_conv1d(ectx, h, L, T_sub, hidden, eps);
         if (L.ffn2_up_w)
             h = build_macaron_ffn(ectx, h, L.ffn2_pre_ln, L.ffn2_up_w, L.ffn2_down_w, L.ffn2_post_ln,
-                                  ahp.residual_weight, eps);
+                                  ahp.residual_weight, eps, L.clip_ffn2_up, L.clip_ffn2_down);
         if (L.out_ln) {
             h = ggml_rms_norm(ectx, h, eps);
             h = ggml_mul(ectx, h, L.out_ln);
