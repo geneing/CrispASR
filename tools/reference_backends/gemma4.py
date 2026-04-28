@@ -53,9 +53,9 @@ DEFAULT_STAGES = [
 def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
          max_new_tokens: int) -> Dict[str, np.ndarray]:
     """Run Gemma-4-E2B reference forward and return stage captures."""
-    import torch
+    import os, torch
     try:
-        from transformers import AutoProcessor, AutoModelForCausalLM
+        from transformers import AutoProcessor, AutoModelForImageTextToText
     except ImportError as e:
         raise SystemExit(
             "transformers required. Install: pip install -U transformers\n"
@@ -64,10 +64,15 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     pretrained = str(model_dir)
     print(f"  loading Gemma-4-E2B from {pretrained}")
     processor = AutoProcessor.from_pretrained(pretrained, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained, torch_dtype=torch.float32, trust_remote_code=True,
+    # bfloat16 keeps the 9.6 GB model around 5 GB in RAM — fits on the M1
+    # without swap thrashing. The diff comparison is cosine, not absolute,
+    # so the 8-bit mantissa loss vs F32 is ~0.001 cos at most.
+    dtype = torch.bfloat16 if os.environ.get("CRISPASR_REF_DTYPE", "bf16") in ("bf16", "bfloat16") else torch.float32
+    model = AutoModelForImageTextToText.from_pretrained(
+        pretrained, torch_dtype=dtype, trust_remote_code=True,
     ).eval()
     dev = next(model.parameters()).device
+    print(f"  loaded in {dtype} on {dev}")
 
     # Build the chat-style prompt: an `<audio>` placeholder followed by the
     # user instruction. The exact template lives on the processor.
