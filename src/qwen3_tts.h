@@ -2,12 +2,20 @@
 
 // Qwen3-TTS public C ABI.
 //
-// Qwen/Qwen3-TTS is a "discrete multi-codebook LM" — a Qwen3
-// backbone (28 layers, 16Q/8KV, head_dim 128) with a 16-codebook
-// RVQ output head. The codec that turns codes back into 24 kHz
-// waveform lives in the SEPARATE Qwen/Qwen3-TTS-Tokenizer-12Hz
-// repo and gets its own context (loaded via
-// `qwen3_tts_set_codec_path`).
+// Qwen/Qwen3-TTS-12Hz-{0.6B,1.7B}-Base is a "discrete multi-codebook
+// LM" — a Qwen3 backbone (28 layers, 16Q/8KV, head_dim 128) with a
+// `codec_head` that emits codebook-0 of a 16-codebook RVQ, plus a
+// 5-layer `code_predictor` AR LM that fills in codebooks 1..15 given
+// the talker's hidden state and the previous codes. The codec that
+// turns codes back into 24 kHz waveform lives in the SEPARATE
+// Qwen/Qwen3-TTS-Tokenizer-12Hz repo and gets its own context (loaded
+// via `qwen3_tts_set_codec_path`).
+//
+// Status (April 2026): the talker forward is implemented and produces
+// codebook-0 streams for a text prompt. The 15-codebook code_predictor
+// and the codec decoder are still pending — see PLAN #52 step 3.
+// `qwen3_tts_synthesize` returns nullptr until the codec lands;
+// `qwen3_tts_synthesize_codes` works end-to-end for codebook-0 today.
 
 #include <stdint.h>
 
@@ -21,9 +29,8 @@ struct qwen3_tts_context_params {
     int n_threads;
     int verbosity; // 0=silent, 1=normal, 2=verbose
     bool use_gpu;
-    float temperature; // 0 = greedy
-    int tts_steps;     // for codec decode (codec is non-DiT, but the
-                       // codebooks may benefit from rejection sampling)
+    float temperature;  // 0 = greedy
+    int max_codec_steps; // upper bound on AR decode steps; 0 = use built-in default (1500)
 };
 
 struct qwen3_tts_context_params qwen3_tts_context_default_params(void);
@@ -32,16 +39,31 @@ struct qwen3_tts_context_params qwen3_tts_context_default_params(void);
 struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_model, struct qwen3_tts_context_params params);
 
 // Point the runtime at the codec GGUF (cstr/qwen3-tts-tokenizer-12hz-GGUF).
-// Required before the first synthesis call. Returns 0 on success.
+// Required before the first `qwen3_tts_synthesize` call. Returns 0 on success.
 int qwen3_tts_set_codec_path(struct qwen3_tts_context* ctx, const char* path);
 
 // Optional: reference-audio path (16 kHz mono WAV) for voice cloning
 // (Base / CustomVoice variants). Pass nullptr / "" to use the model's
-// built-in default voice.
+// built-in default voice. Currently a no-op until the speaker_encoder
+// forward lands.
 int qwen3_tts_set_voice_prompt(struct qwen3_tts_context* ctx, const char* wav_path);
+
+// Run the talker on `text`, AR-decode codebook-0 until <eos> or the
+// step limit, and return the resulting code stream. *out_n_codes is
+// set to the number of codes produced. Caller frees with
+// `qwen3_tts_codes_free`. Returns nullptr on failure.
+//
+// This is the path you can use today even without the codec — the
+// codes are valid Qwen3-TTS codec inputs; you can render them via the
+// HF python codec for audio.
+int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, const char* text, int* out_n_codes);
+
+void qwen3_tts_codes_free(int32_t* codes);
 
 // Synthesise text → 24 kHz mono float32 PCM. Caller frees with
 // `qwen3_tts_pcm_free`. *out_n_samples is set on success.
+//
+// Returns nullptr until the codec decoder lands (PLAN #52 step 3).
 float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx, const char* text, int* out_n_samples);
 
 void qwen3_tts_pcm_free(float* pcm);

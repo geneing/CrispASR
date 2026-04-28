@@ -110,15 +110,30 @@ def map_tensor_name(hf_name: str) -> str | None:
 
     n = hf_name
 
+    # ── Code predictor (must come BEFORE talker rules, since its prefix
+    #    is `talker.code_predictor.` and would partially match below). ──
+    # 15 separate codec_embedding tables (codebooks 1..15) and 15
+    # separate lm_head outputs.
+    n = n.replace("talker.code_predictor.model.codec_embedding.", "code_pred.token_embd.")
+    n = n.replace("talker.code_predictor.lm_head.", "code_pred.output.")
+    n = n.replace("talker.code_predictor.model.norm.", "code_pred.output_norm.")
+    n = n.replace("talker.code_predictor.model.layers.", "code_pred.blk.")
+
     # ── Talker (the audio-code AR LM) ──────────────────────────────────
-    # HF ships the talker under `model.talker.`. Map every layer
-    # tensor to GGUF's stock `blk.{i}.…` layout so we can reuse the
+    # HF prefix is `talker.` at top level (no leading `model.`). Map
+    # everything to GGUF's stock `blk.{i}.…` layout so we can reuse the
     # existing core_attn / core_ffn helpers.
-    n = n.replace("model.talker.model.embed_tokens.", "talker.token_embd.")
-    n = n.replace("model.talker.model.embed_tokens_text.", "talker.token_embd_text.")
-    n = n.replace("model.talker.model.norm.", "talker.output_norm.")
-    n = n.replace("model.talker.lm_head.", "talker.output.")
-    n = n.replace("model.talker.model.layers.", "talker.blk.")
+    n = n.replace("talker.model.codec_embedding.", "talker.token_embd.")
+    n = n.replace("talker.model.text_embedding.", "talker.token_embd_text.")
+    n = n.replace("talker.model.norm.", "talker.output_norm.")
+    n = n.replace("talker.codec_head.", "talker.output.")
+    n = n.replace("talker.model.layers.", "talker.blk.")
+    # text_projection: TalkerResizeMLP that lifts text embeddings from
+    # text_hidden_size (2048) into the talker's hidden_size (1024).
+    n = n.replace("talker.text_projection.linear_fc1.", "talker.text_proj.fc1.")
+    n = n.replace("talker.text_projection.linear_fc2.", "talker.text_proj.fc2.")
+
+    # ── Per-layer renames (apply to both talker.blk.* and code_pred.blk.*) ──
     n = n.replace(".self_attn.q_proj.", ".attn_q.")
     n = n.replace(".self_attn.k_proj.", ".attn_k.")
     n = n.replace(".self_attn.v_proj.", ".attn_v.")
@@ -131,11 +146,11 @@ def map_tensor_name(hf_name: str) -> str | None:
     n = n.replace(".mlp.up_proj.", ".ffn_up.")
     n = n.replace(".mlp.down_proj.", ".ffn_down.")
 
-    # ── Code predictor (5-layer head that emits the 16 RVQ codes) ──────
-    n = n.replace("model.code_predictor.", "code_pred.")
-
     # ── Speaker encoder (voice embedding extractor, 24 kHz path) ───────
-    n = n.replace("model.speaker_encoder.", "speaker.")
+    # Top-level prefix is `speaker_encoder.` (no leading `model.`).
+    # Pass it through under the GGUF prefix `speaker.` so the runtime
+    # can find every weight when voice-cloning lands.
+    n = n.replace("speaker_encoder.", "speaker.")
 
     return n
 
@@ -267,9 +282,12 @@ def main():
                 ln.strip() for ln in f
                 if ln.strip() and not ln.startswith("#")
             ]
-        # merges produce GGUF type-9 which our reader rejects; persist as
-        # add_string per merge — same workaround as qwen3-asr.
-        # NOTE: omit by default, BPE tokens alone are usable for inference.
+        # Persist BPE merges so the runtime can do greedy lowest-rank
+        # subword merging (otherwise core_bpe::bpe_one falls back to
+        # per-byte, which over-tokenises common words). Same call the
+        # qwen3-asr converter uses — the reader handles it fine.
+        w.add_token_merges(merges)
+        print(f"  Merges:        {len(merges)} entries from merges.txt")
 
     # ----- tensors ------------------------------------------------------
     n_mapped = 0
@@ -281,10 +299,11 @@ def main():
             n_skipped += 1
             continue
 
-        # Detect if anything was actually renamed; if the prefix didn't
-        # match any rule the GGUF name will still start with `model.` —
-        # that's a bug in our mapping, not a benign skip.
-        if gn.startswith(("model.", "lm_head.")):
+        # Detect if anything was actually renamed. Every tensor we keep
+        # should land under `talker.`, `code_pred.`, or `speaker.`. If
+        # not, our mapping rules missed it — surface as a loud warning
+        # rather than silently writing the raw HF name into the GGUF.
+        if not gn.startswith(("talker.", "code_pred.", "speaker.")):
             if len(skipped_examples) < 20:
                 skipped_examples.append(f"  [WARN unmapped] {hf_name}")
             n_skipped += 1

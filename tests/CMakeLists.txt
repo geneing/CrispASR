@@ -185,6 +185,12 @@ catch_discover_tests(test-params
 add_executable(test_qwen3_audio_tower test_qwen3_audio_tower.cpp)
 target_include_directories(test_qwen3_audio_tower PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_qwen3_audio_tower PRIVATE qwen3_asr)
+
+# ─── test_qwen3_tts_talker — sanity check the Qwen3-TTS talker forward.
+# Not auto-registered with add_test — needs a real GGUF on disk.
+add_executable(test_qwen3_tts_talker test_qwen3_tts_talker.cpp)
+target_include_directories(test_qwen3_tts_talker PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(test_qwen3_tts_talker PRIVATE qwen3_tts)
 # Not auto-registered with add_test — needs a model file + jfk.raw which the
 # test runner / dev produces locally. Run manually:
 #   ./build/tests/test_qwen3_audio_tower model.gguf samples/jfk.raw \
