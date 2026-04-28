@@ -148,6 +148,18 @@ void qwen3_tts_free(struct qwen3_tts_context* ctx);
 
 void qwen3_tts_set_n_threads(struct qwen3_tts_context* ctx, int n_threads);
 
+// Compute the 128-mel log-mel spectrogram used by the speaker encoder
+// from 24 kHz mono audio. Returns malloc'd (T_mel × 128) row-major float32.
+// *out_T_mel is set to the number of mel frames. Caller frees with free().
+float* qwen3_tts_compute_speaker_mel(struct qwen3_tts_context* ctx,
+                                      const float* audio, int n_samples,
+                                      int* out_T_mel, int* out_n_mels);
+
+// Run the ECAPA speaker encoder on a pre-computed mel spectrogram.
+// mel is (T_mel × n_mels=128) row-major float32. Returns malloc'd float[1024].
+float* qwen3_tts_run_speaker_enc_on_mel(struct qwen3_tts_context* ctx,
+                                         const float* mel, int T_mel, int* out_dim);
+
 // Compute a 1024-d speaker embedding from 24 kHz mono float32 audio
 // via the ECAPA-TDNN speaker encoder. Returns a malloc'd float[1024]
 // array that the caller frees with free(). Returns nullptr on failure.

@@ -2171,11 +2171,24 @@ static void spk_fft_r2c(const float* in, int N, float* out) {
     }
 }
 
-// Slaney-normalized HTK-scale mel filterbank. Layout: [n_mels, n_freqs] row-major.
+// Slaney-normalized librosa-default mel filterbank (Slaney scale, htk=False).
+// Layout: [n_mels, n_freqs] row-major (FbLayout::MelsFreqs).
+// The Slaney mel scale is LINEAR below 1 kHz and LOG above, matching librosa's default.
 static std::vector<float> build_slaney_mel_fb(int n_mels, int n_fft, int sr, float fmin, float fmax) {
     const int n_freqs = n_fft / 2 + 1;
-    auto hz_to_mel = [](float hz) { return 2595.0f * log10f(1.0f + hz / 700.0f); };
-    auto mel_to_hz = [](float mel) { return 700.0f * (powf(10.0f, mel / 2595.0f) - 1.0f); };
+    // Slaney mel scale (librosa htk=False default)
+    const float f_sp = 200.0f / 3.0f;     // linear spacing: ~66.67 Hz
+    const float min_log_hz = 1000.0f;
+    const float min_log_mel = min_log_hz / f_sp;
+    const float logstep = logf(6.4f) / 27.0f;
+    auto hz_to_mel = [&](float hz) -> float {
+        if (hz >= min_log_hz) return min_log_mel + logf(hz / min_log_hz) / logstep;
+        return hz / f_sp;
+    };
+    auto mel_to_hz = [&](float mel) -> float {
+        if (mel >= min_log_mel) return min_log_hz * expf(logstep * (mel - min_log_mel));
+        return mel * f_sp;
+    };
     const float mel_lo = hz_to_mel(fmin);
     const float mel_hi = hz_to_mel(fmax > 0.0f ? fmax : (float)sr / 2.0f);
     std::vector<float> mel_pts(n_mels + 2), hz_pts(n_mels + 2);
@@ -2225,7 +2238,9 @@ static std::vector<float> compute_spk_mel(const float* audio, int n_samples, int
     p.n_fft      = n_fft; p.hop_length = hop; p.win_length = n_fft; p.n_mels = n_mels;
     p.log_base   = core_mel::LogBase::Ln;
     p.log_guard  = core_mel::LogGuard::MaxClip; p.log_eps = 1e-5f;
-    p.spec_kind  = core_mel::SpecKind::Power;
+    // PyTorch reference computes magnitude spectrum: sqrt(re²+im²+1e-9)
+    // before applying the mel filterbank, not power spectrum.
+    p.spec_kind  = core_mel::SpecKind::Magnitude;
     p.norm       = core_mel::Normalization::None;
     p.layout     = core_mel::Layout::TimeMels; // (T, n_mels) output
     p.fb_layout  = core_mel::FbLayout::MelsFreqs;
@@ -2243,13 +2258,17 @@ static std::vector<float> compute_spk_mel(const float* audio, int n_samples, int
 // ECAPA graph builder helpers
 // ---------------------------------------------------------------------------
 
-// Conv1d with symmetric zero-padding ("same"). Input/output: [C, T].
+// Conv1d with symmetric REFLECT padding ("same", matching PyTorch padding_mode='reflect').
+// Input/output: [C, T] channels-first.
 static ggml_tensor* spk_same_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int dilation) {
     const int K = (int)w->ne[0];
     const int pad = (K - 1) * dilation / 2;
-    x = ggml_cont(ctx, ggml_transpose(ctx, x));
-    x = ggml_conv_1d(ctx, w, x, 1, pad, dilation);
-    x = ggml_cont(ctx, ggml_transpose(ctx, x));
+    // Transpose [C, T] → [T, C] for ggml_pad_reflect_1d and ggml_conv_1d
+    x = ggml_cont(ctx, ggml_transpose(ctx, x));       // [T, C]
+    if (pad > 0)
+        x = ggml_pad_reflect_1d(ctx, x, pad, pad);   // reflect-pad T dimension
+    x = ggml_conv_1d(ctx, w, x, 1, 0, dilation);    // [T_out, C_out] (p0=0, already padded)
+    x = ggml_cont(ctx, ggml_transpose(ctx, x));       // [C_out, T_out]
     if (b) x = ggml_add(ctx, x, b);
     return x;
 }
@@ -2338,6 +2357,7 @@ static ggml_cgraph* build_graph_spk_enc(qwen3_tts_context* c, int T_mel) {
     ggml_set_name(h, "spk_mel"); ggml_set_input(h);
 
     h = spk_tdnn_block(ctx0, h, spk.blk0, 1);
+    ggml_set_name(h, "spk_blk0_out"); ggml_set_output(h);
 
     static const int dilations[3] = {2, 3, 4};
     ggml_tensor* blk_outs[3];
@@ -2348,6 +2368,7 @@ static ggml_cgraph* build_graph_spk_enc(qwen3_tts_context* c, int T_mel) {
 
     ggml_tensor* mfa_in = ggml_concat(ctx0, ggml_concat(ctx0, blk_outs[0], blk_outs[1], 0), blk_outs[2], 0);
     h = spk_tdnn_block(ctx0, mfa_in, spk.mfa, 1);
+    ggml_set_name(h, "spk_mfa_out"); ggml_set_output(h);
     h = spk_asp_block(ctx0, h, spk.asp);         // [3072, 1]
 
     auto fcw = ggml_reshape_2d(ctx0, spk.fc_w, spk.fc_w->ne[1], spk.fc_w->ne[2]);
@@ -2405,11 +2426,12 @@ static bool load_spk_enc(qwen3_tts_context* c) {
 
 // Run speaker encoder on mel (T, 128) row-major → (1024,) embedding.
 static std::vector<float> run_spk_enc(qwen3_tts_context* c, const float* mel_TC, int T_mel) {
-    // Transpose to channels-first [128, T]
+    // Convert mel (T, 128) row-major → ggml [C=128, T] flat layout.
+    // ggml ne[0]=128 (C innermost), ne[1]=T → position of (c, t) is c + t*128.
     std::vector<float> mel_CT((size_t)128 * T_mel);
     for (int t = 0; t < T_mel; t++)
-        for (int k = 0; k < 128; k++)
-            mel_CT[(size_t)k * T_mel + t] = mel_TC[(size_t)t * 128 + k];
+        for (int c = 0; c < 128; c++)
+            mel_CT[(size_t)c + (size_t)t * 128] = mel_TC[(size_t)t * 128 + c];
 
     ggml_cgraph* gf = build_graph_spk_enc(c, T_mel);
     ggml_backend_sched_reset(c->sched);
@@ -3061,6 +3083,38 @@ extern "C" void qwen3_tts_set_n_threads(struct qwen3_tts_context* ctx, int n_thr
     ctx->n_threads = n_threads;
     if (ctx->backend_cpu)
         ggml_backend_cpu_set_n_threads(ctx->backend_cpu, n_threads);
+}
+
+extern "C" float* qwen3_tts_compute_speaker_mel(struct qwen3_tts_context* /*ctx*/,
+                                                const float* audio, int n_samples,
+                                                int* out_T_mel, int* out_n_mels) {
+    if (out_T_mel) *out_T_mel = 0;
+    if (out_n_mels) *out_n_mels = 0;
+    if (!audio || n_samples <= 0) return nullptr;
+    int T = 0;
+    auto mel = compute_spk_mel(audio, n_samples, &T);
+    if (mel.empty()) return nullptr;
+    const int n_mels = 128;
+    float* buf = (float*)malloc(mel.size() * sizeof(float));
+    if (!buf) return nullptr;
+    std::memcpy(buf, mel.data(), mel.size() * sizeof(float));
+    if (out_T_mel) *out_T_mel = T;
+    if (out_n_mels) *out_n_mels = n_mels;
+    return buf;
+}
+
+extern "C" float* qwen3_tts_run_speaker_enc_on_mel(struct qwen3_tts_context* ctx,
+                                                   const float* mel, int T_mel, int* out_dim) {
+    if (out_dim) *out_dim = 0;
+    if (!ctx || !mel || T_mel <= 0) return nullptr;
+    if (!ctx->spk_enc.loaded) return nullptr;
+    auto emb = run_spk_enc(ctx, mel, T_mel);
+    if (emb.empty()) return nullptr;
+    float* buf = (float*)malloc(1024 * sizeof(float));
+    if (!buf) return nullptr;
+    std::memcpy(buf, emb.data(), 1024 * sizeof(float));
+    if (out_dim) *out_dim = 1024;
+    return buf;
 }
 
 extern "C" float* qwen3_tts_compute_speaker_embedding(struct qwen3_tts_context* ctx,

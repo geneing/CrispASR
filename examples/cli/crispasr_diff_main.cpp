@@ -738,6 +738,72 @@ int main(int argc, char** argv) {
 
         qwen3_tts_free(ctx);
 
+    // ---- qwen3-tts-spk (ECAPA speaker encoder) ----
+    // Uses the same 440 Hz sine wave as the Python reference backend.
+    } else if (backend_name == "qwen3-tts-spk") {
+        auto cp = qwen3_tts_context_default_params();
+        cp.n_threads = 4; cp.verbosity = 0; cp.use_gpu = false;
+        qwen3_tts_context* ctx = qwen3_tts_init_from_file(model_path.c_str(), cp);
+        if (!ctx) { fprintf(stderr, "failed to load model\n"); return 4; }
+
+        // Generate the same 440 Hz sine the Python backend uses
+        const int sr = 24000, n = sr * 3;
+        std::vector<float> audio(n);
+        for (int i = 0; i < n; i++)
+            audio[i] = 0.5f * std::sin(2.0f * (float)M_PI * 440.0f * i / sr);
+
+        // Stage 1: mel spectrogram
+        int T_mel = 0, n_mels = 0;
+        float* mel = qwen3_tts_compute_speaker_mel(ctx, audio.data(), n, &T_mel, &n_mels);
+        if (!mel) {
+            printf("[ERR ] spk_mel  mel computation failed\n"); n_fail++;
+        } else {
+            // Python stores (T, 128) time-first, C++ also (T, 128) — compare flat
+            auto rep = ref.compare("spk_mel", mel, (size_t)T_mel * n_mels);
+            print_row("spk_mel", rep, COS_THRESHOLD);
+            record(rep);
+            free(mel);
+        }
+
+        // Stage 2a: ECAPA on the EXACT Python mel (isolates ECAPA network error).
+        // Read spk_mel from the reference archive (Python-computed).
+        {
+            auto mel_pair = ref.get_f32("spk_mel");
+            auto mel_shape = ref.shape("spk_mel");
+            if (mel_pair.first && mel_shape.size() >= 2) {
+                // GGUF ne=[128, T] = (C, T) in ggml. We need (T, 128) row-major for run_speaker_enc_on_mel.
+                // mel_pair.first is flat in (C, T) ggml order: element [c,t] at c + t*128.
+                // run_spk_enc expects (T, 128) row-major: element [t,c] at t*128 + c.
+                const int C = (int)mel_shape[0]; // 128
+                const int T = (int)mel_shape[1]; // T_mel
+                std::vector<float> mel_TC((size_t)T * C);
+                for (int t = 0; t < T; t++)
+                    for (int c = 0; c < C; c++)
+                        mel_TC[(size_t)t * C + c] = mel_pair.first[c + (size_t)t * C];
+                int dim2 = 0;
+                float* emb2 = qwen3_tts_run_speaker_enc_on_mel(ctx, mel_TC.data(), T, &dim2);
+                if (emb2) {
+                    auto rep = ref.compare("spk_emb", emb2, (size_t)dim2);
+                    print_row("spk_emb(ref_mel)", rep, COS_THRESHOLD, "  ECAPA-only");
+                    record(rep);
+                    free(emb2);
+                }
+            }
+        }
+
+        // Stage 2b: full embedding (C++ mel → ECAPA)
+        int dim = 0;
+        float* emb = qwen3_tts_compute_speaker_embedding(ctx, audio.data(), n, &dim);
+        if (!emb) {
+            fprintf(stderr, "[ERR ] spk_emb  ECAPA forward failed\n"); n_fail++;
+        } else {
+            auto rep = ref.compare("spk_emb", emb, (size_t)dim);
+            print_row("spk_emb(cpp_mel)", rep, COS_THRESHOLD, "  full pipeline");
+            record(rep);
+            free(emb);
+        }
+        qwen3_tts_free(ctx);
+
     // ---- qwen3-tts-codec (Tokenizer-12Hz decoder stages) ----
     // model_path = talker GGUF (for context init)
     // codec GGUF path = env var QWEN3_TTS_CODEC_GGUF
@@ -752,7 +818,7 @@ int main(int argc, char** argv) {
         auto cp = qwen3_tts_context_default_params();
         cp.n_threads = 4;
         cp.verbosity = 0;
-        cp.use_gpu = false; // codec has Metal scheduler issues on M1
+        cp.use_gpu = true; // codec is pinned to CPU internally via codec_sched
         qwen3_tts_context* ctx = qwen3_tts_init_from_file(model_path.c_str(), cp);
         if (!ctx) {
             fprintf(stderr, "failed to load qwen3-tts model '%s'\n", model_path.c_str());

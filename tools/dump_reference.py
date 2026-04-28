@@ -111,6 +111,9 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # Qwen3-TTS-Tokenizer-12Hz codec decoder only (codes → PCM).
     # model_dir = the Tokenizer-12Hz HF snapshot; audio arg is unused.
     "qwen3-tts-codec": "reference_backends.qwen3_tts_codec",
+    # Qwen3-TTS ECAPA speaker encoder only.
+    # model_dir = the talker HF snapshot (contains speaker_encoder.*).
+    "qwen3-tts-spk":   "reference_backends.qwen3_tts_spk",
     # VibeVoice-ASR 7B: two σ-VAE encoders + connectors + Qwen2 decoder.
     # NOTE: audio must be 16 kHz on entry (shared loader); the backend
     # resamples to 24 kHz internally.
