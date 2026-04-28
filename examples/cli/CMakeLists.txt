@@ -135,6 +135,7 @@ target_link_libraries(crispasr-diff PRIVATE
     voxtral
     voxtral4b
     qwen3_asr
+    qwen3_tts
     gemma4_e2b
     crispasr-diff-lib
     ${FFMPEG_LIBRARIES}

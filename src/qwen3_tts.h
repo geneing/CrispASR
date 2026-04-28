@@ -48,6 +48,24 @@ int qwen3_tts_set_codec_path(struct qwen3_tts_context* ctx, const char* path);
 // forward lands.
 int qwen3_tts_set_voice_prompt(struct qwen3_tts_context* ctx, const char* wav_path);
 
+// ---------------------------------------------------------------------------
+// Diff-harness stage APIs (PLAN #52 step 4)
+//
+// These expose intermediate activations without driving the AR decode
+// loop, so `crispasr-diff qwen3-tts` can verify each stage of the
+// talker against the qwen_tts PyTorch reference. They mirror the
+// stage names that `tools/reference_backends/qwen3_tts.py` dumps.
+// ---------------------------------------------------------------------------
+
+// text_embedding(ids) → text_projection: returns the post-resize-MLP
+// activations of shape (n_tokens, hidden_size). Caller frees with free().
+// *out_T = n_tokens, *out_d = hidden_size on success.
+//
+// Pure-text path that doesn't depend on the speaker_embed / codec
+// splice, so a numerical mismatch here implicates only the
+// text_embedding lookup or the text_proj fc1/fc2.
+float* qwen3_tts_run_text_proj(struct qwen3_tts_context* ctx, const int32_t* ids, int n_tokens, int* out_T, int* out_d);
+
 // Run the talker on `text`, AR-decode codebook-0 until <eos> or the
 // step limit, and return the resulting code stream. *out_n_codes is
 // set to the number of codes produced. Caller frees with

@@ -36,6 +36,7 @@
 #include "voxtral.h"
 #include "voxtral4b.h"
 #include "qwen3_asr.h"
+#include "qwen3_tts.h"
 #include "granite_speech.h"
 #include "parakeet.h"
 #include "canary.h"
@@ -329,6 +330,23 @@ static StageResult gemma4_encoder_r(gemma4_e2b_context* ctx, const float* sample
     return r;
 }
 
+// ---- qwen3-tts (Qwen3 talker, codec_head, code_predictor) ----
+
+static StageResult qwen3_tts_text_proj_r(qwen3_tts_context* ctx, const int32_t* ids, int n_tokens) {
+    StageResult r;
+    int T = 0, d = 0;
+    float* h = qwen3_tts_run_text_proj(ctx, ids, n_tokens, &T, &d);
+    if (!h) {
+        r.note = "qwen3_tts_run_text_proj returned null";
+        return r;
+    }
+    r.shape = {T, d};
+    r.data.assign(h, h + (size_t)T * d);
+    free(h);
+    r.ok = true;
+    return r;
+}
+
 } // namespace
 
 
@@ -356,7 +374,7 @@ int main(int argc, char** argv) {
         fprintf(stderr,
                 "usage: %s <backend> <model.gguf> <reference.gguf> <audio.wav>\n"
                 "\n"
-                "  backend       one of: voxtral, voxtral4b, qwen3, granite, parakeet, canary, cohere, gemma4\n"
+                "  backend       one of: voxtral, voxtral4b, qwen3, qwen3-tts, granite, parakeet, canary, cohere, gemma4\n"
                 "  model.gguf    crispasr-compatible model weights\n"
                 "  reference.gguf  archive produced by tools/dump_reference.py\n"
                 "  audio.wav     16 kHz mono WAV\n",
@@ -478,6 +496,44 @@ int main(int argc, char** argv) {
             n_fail++;
         }
         qwen3_asr_free(ctx);
+    } else if (backend_name == "qwen3-tts") {
+        // TTS backend: the 4th positional arg is the reference WAV used
+        // for voice-clone prompt building. The C++ side doesn't consume
+        // the audio directly — input ids come from the reference
+        // archive's `text_input_ids` tensor (deterministic, written by
+        // tools/reference_backends/qwen3_tts.py).
+        auto cp = qwen3_tts_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        qwen3_tts_context* ctx = qwen3_tts_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load qwen3-tts model\n");
+            return 4;
+        }
+
+        // Stage: text_proj_out — text_embedding + text_projection on the
+        // tokenised synth prompt. Read the int32 ids from the reference
+        // archive (written as F32 by the dumper for GGUF compatibility)
+        // and feed them through qwen3_tts_run_text_proj.
+        auto ids_pair = ref.get_f32("text_input_ids");
+        if (!ids_pair.first) {
+            printf("[ERR ] text_proj_out            text_input_ids missing from reference\n");
+            n_fail++;
+        } else {
+            std::vector<int32_t> ids(ids_pair.second);
+            for (size_t i = 0; i < ids_pair.second; i++)
+                ids[i] = (int32_t)ids_pair.first[i];
+            auto tp_r = qwen3_tts_text_proj_r(ctx, ids.data(), (int)ids.size());
+            if (tp_r.ok) {
+                auto rep = ref.compare("text_proj_out", tp_r.data.data(), tp_r.data.size());
+                print_row("text_proj_out", rep, COS_THRESHOLD);
+                record(rep);
+            } else {
+                printf("[ERR ] text_proj_out            %s\n", tp_r.note.c_str());
+                n_fail++;
+            }
+        }
+        qwen3_tts_free(ctx);
     } else if (backend_name == "granite") {
         auto cp = granite_speech_context_default_params();
         cp.n_threads = 4;

@@ -63,6 +63,7 @@
 #include "ggml.h"
 #include "gguf.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -73,6 +74,64 @@
 #include <vector>
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Debug / regression knobs (PLAN #52 step 4 methodology)
+//
+//   QWEN3_TTS_BENCH=1     — print per-stage wall-clock timings on stderr.
+//   QWEN3_TTS_DEBUG=1     — verbose per-step trace (prompt ids, sampled
+//                           code at every AR step, stop reason).
+//   QWEN3_TTS_DUMP_DIR=/d — dump key intermediate tensors to /d as
+//                           binary float32 files: text_proj_out.bin,
+//                           talker_prefill_logits.bin, talker_codes.bin.
+//                           Only set when investigating a specific run;
+//                           the dump itself is non-zero overhead.
+//
+// These knobs follow the existing CrispASR pattern (GEMMA4_E2B_BENCH,
+// VIBEVOICE_TTS_DUMP, OMNIASR_DUMP_DIR ...) so the regression harness
+// can flip them per-call without rebuilding.
+// ---------------------------------------------------------------------------
+
+bool env_bool(const char* k) {
+    const char* v = std::getenv(k);
+    return v && *v && std::strcmp(v, "0") != 0;
+}
+const char* env_str(const char* k) {
+    const char* v = std::getenv(k);
+    return (v && *v) ? v : nullptr;
+}
+double now_ms() {
+    using namespace std::chrono;
+    return duration_cast<duration<double, std::milli>>(steady_clock::now().time_since_epoch()).count();
+}
+void dump_f32(const char* dir, const char* name, const float* data, size_t n) {
+    if (!dir || !data || !n)
+        return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    FILE* f = std::fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "qwen3_tts: dump open '%s' failed\n", path);
+        return;
+    }
+    std::fwrite(data, sizeof(float), n, f);
+    std::fclose(f);
+    fprintf(stderr, "qwen3_tts: dumped %s (%zu floats)\n", path, n);
+}
+void dump_i32(const char* dir, const char* name, const int32_t* data, size_t n) {
+    if (!dir || !data || !n)
+        return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    FILE* f = std::fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "qwen3_tts: dump open '%s' failed\n", path);
+        return;
+    }
+    std::fwrite(data, sizeof(int32_t), n, f);
+    std::fclose(f);
+    fprintf(stderr, "qwen3_tts: dumped %s (%zu i32)\n", path, n);
+}
 
 struct g3t_hp {
     // Talker (Qwen3 backbone)
@@ -778,6 +837,24 @@ extern "C" int qwen3_tts_set_voice_prompt(struct qwen3_tts_context* ctx, const c
     return 0;
 }
 
+extern "C" float* qwen3_tts_run_text_proj(struct qwen3_tts_context* ctx, const int32_t* ids, int n_tokens, int* out_T,
+                                          int* out_d) {
+    if (out_T)
+        *out_T = 0;
+    if (out_d)
+        *out_d = 0;
+    if (!ctx || !ids || n_tokens <= 0)
+        return nullptr;
+    float* r = run_embed_text(ctx, ids, n_tokens);
+    if (!r)
+        return nullptr;
+    if (out_T)
+        *out_T = n_tokens;
+    if (out_d)
+        *out_d = (int)ctx->hp.d_model;
+    return r;
+}
+
 extern "C" int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, const char* text, int* out_n_codes) {
     if (out_n_codes)
         *out_n_codes = 0;
@@ -788,27 +865,43 @@ extern "C" int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, co
         return nullptr;
     }
 
+    const bool bench = env_bool("QWEN3_TTS_BENCH");
+    const bool dbg = env_bool("QWEN3_TTS_DEBUG");
+    const char* dump_dir = env_str("QWEN3_TTS_DUMP_DIR");
+
     auto prompt_ids = build_prompt_ids(ctx, text);
-    if (ctx->params.verbosity >= 1) {
+    if (ctx->params.verbosity >= 1 || dbg) {
         fprintf(stderr, "qwen3_tts: prompt %zu tokens\n", prompt_ids.size());
-        if (ctx->params.verbosity >= 2) {
+        if (ctx->params.verbosity >= 2 || dbg) {
             fprintf(stderr, "  ids:");
             for (auto id : prompt_ids)
                 fprintf(stderr, " %d", id);
             fprintf(stderr, "\n");
         }
     }
+    if (dump_dir)
+        dump_i32(dump_dir, "prompt_ids", prompt_ids.data(), prompt_ids.size());
 
     // Prefill: embed text via text_embedding + text_proj (the prompt is
     // text-only; the prompt builder ends with <|tts_bos|> which is also
     // a text-vocab token), then run the talker over the whole prefix.
+    double t0 = bench ? now_ms() : 0.0;
     float* embeds = run_embed_text(ctx, prompt_ids.data(), (int)prompt_ids.size());
     if (!embeds)
         return nullptr;
+    if (bench)
+        fprintf(stderr, "qwen3_tts: text_proj  %7.1f ms (T=%zu)\n", now_ms() - t0, prompt_ids.size());
+    if (dump_dir)
+        dump_f32(dump_dir, "text_proj_out", embeds, (size_t)ctx->hp.d_model * prompt_ids.size());
+    double t1 = bench ? now_ms() : 0.0;
     float* logits = run_talker_kv(ctx, embeds, (int)prompt_ids.size(), /*n_past=*/0);
     free(embeds);
     if (!logits)
         return nullptr;
+    if (bench)
+        fprintf(stderr, "qwen3_tts: prefill    %7.1f ms\n", now_ms() - t1);
+    if (dump_dir)
+        dump_f32(dump_dir, "talker_prefill_logits", logits, ctx->hp.vocab_size);
     int n_past = (int)prompt_ids.size();
 
     const int max_steps = ctx->params.max_codec_steps > 0 ? ctx->params.max_codec_steps : 1500;

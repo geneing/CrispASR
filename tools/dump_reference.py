@@ -98,6 +98,10 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     "cohere":     "reference_backends.cohere",
     "parakeet":   "reference_backends.parakeet",
     "gemma4":     "reference_backends.gemma4",
+    # Qwen3-TTS-12Hz Base. The audio arg is the voice-clone reference WAV
+    # (16 kHz mono); synth text + ref text come from env vars. See
+    # reference_backends/qwen3_tts.py for the full prompt contract.
+    "qwen3-tts":  "reference_backends.qwen3_tts",
     # VibeVoice-ASR 7B: two σ-VAE encoders + connectors + Qwen2 decoder.
     # NOTE: audio must be 16 kHz on entry (shared loader); the backend
     # resamples to 24 kHz internally.
