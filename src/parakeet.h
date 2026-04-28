@@ -116,6 +116,17 @@ float* parakeet_run_encoder(struct parakeet_context* ctx, const float* mel, int 
 // run it, and report the output T_enc. Returns T_enc on success or -1.
 int parakeet_test_encoder(struct parakeet_context* ctx, int T_mel);
 
+// Run the encoder and capture per-layer intermediates for diff testing.
+// Caller passes pre-allocated row-major (T_enc, d_model) buffers in `out`:
+//   out[0]    : after pre-encode (subsampling + projection)
+//   out[1..N] : after each conformer layer (where N = n_layers)
+// `out_count` must be at least n_layers+1; extra slots are ignored.
+// Sizes are reported back via *out_T_enc / *out_d_model. Returns 0 on
+// success, non-zero on failure. The C-side allocates and frees its own
+// scratch; the caller-provided buffers are written into directly.
+int parakeet_run_encoder_dump(struct parakeet_context* ctx, const float* mel, int n_mels, int T_mel, float** out,
+                              int out_count, int* out_T_enc, int* out_d_model);
+
 // Internal smoke test: take raw 16 kHz mono PCM, run mel + encoder, print
 // encoder-output statistics. Returns T_enc on success or -1.
 int parakeet_test_audio(struct parakeet_context* ctx, const float* samples, int n_samples);

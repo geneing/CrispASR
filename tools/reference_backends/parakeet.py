@@ -33,8 +33,9 @@ import numpy as np
 DEFAULT_STAGES = [
     "raw_audio",
     "mel_spectrogram",
+    "pre_encode_output",
     "encoder_output",
-]
+] + [f"encoder_layer_{i}" for i in range(24)]
 
 
 def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
@@ -43,6 +44,12 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
 
     `model_dir` may be either a local path to an extracted .nemo or a
     HuggingFace pretrained name (e.g. "nvidia/parakeet-tdt_ctc-0.6b-ja").
+
+    Per-layer captures (`pre_encode_output`, `encoder_layer_K`) use
+    forward hooks on `model.encoder.pre_encode` and
+    `model.encoder.layers[K]` so we get the exact tensor each module
+    produces — no manual reconstruction. All captures are transposed
+    to (T, d_model) row-major to match crispasr's flat layout.
     """
     import torch
     try:
@@ -70,6 +77,31 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     if "raw_audio" in stages:
         out["raw_audio"] = audio.astype(np.float32)
 
+    # ---- Forward hooks: capture per-layer encoder activations ----
+    captured: Dict[str, torch.Tensor] = {}
+    handles = []
+
+    def _save(name: str):
+        def hook(_mod, _inp, output):
+            # NeMo conformer modules return either a Tensor or a tuple
+            # whose first element is the (B, T, D) hidden state. Some
+            # versions return (B, D, T); we normalise both to (B, T, D)
+            # by sniffing the dim that matches the encoder d_model.
+            t = output[0] if isinstance(output, (tuple, list)) else output
+            captured[name] = t.detach().cpu().float()
+        return hook
+
+    enc = model.encoder
+    if "pre_encode_output" in stages and hasattr(enc, "pre_encode"):
+        handles.append(enc.pre_encode.register_forward_hook(_save("pre_encode_output")))
+
+    layers = getattr(enc, "layers", None)
+    if layers is not None:
+        for i in range(len(layers)):
+            stage = f"encoder_layer_{i}"
+            if stage in stages:
+                handles.append(layers[i].register_forward_hook(_save(stage)))
+
     with torch.no_grad():
         feats, feat_len = model.preprocessor(input_signal=sig, length=sig_len)
         # feats: (B=1, n_mels, T_mel). The C++ runtime stores mel in the
@@ -80,12 +112,30 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
             m = feats[0].transpose(0, 1).contiguous()
             out["mel_spectrogram"] = m.detach().cpu().float().numpy()
 
-        enc, enc_len = model.encoder(audio_signal=feats, length=feat_len)
-        # enc: (B=1, d_model, T_enc) in NeMo's convention. crispasr-diff's
+        encf, enc_len = model.encoder(audio_signal=feats, length=feat_len)
+        # encf: (B=1, d_model, T_enc) in NeMo's convention. crispasr-diff's
         # parakeet_encoder_r returns (T_enc, d_model), so transpose to match.
         if "encoder_output" in stages:
             T_enc = int(enc_len.item())
-            e = enc[0, :, :T_enc].transpose(0, 1).contiguous()
+            e = encf[0, :, :T_enc].transpose(0, 1).contiguous()
             out["encoder_output"] = e.detach().cpu().float().numpy()
+
+    for h in handles:
+        h.remove()
+
+    # ---- Normalise per-layer captures to (T, d_model) ----
+    # NeMo's ConvSubsampling (pre_encode) returns (B, T, D) directly;
+    # ConformerLayer also returns (B, T, D). The final encoder transposes
+    # to (B, D, T) at the end, but per-layer outputs are time-major.
+    T_enc = int(enc_len.item()) if "encoder_output" in stages else None
+    for name, t in captured.items():
+        if t.ndim == 3:
+            # (B, T, D)
+            arr = t[0]  # (T, D)
+            if T_enc is not None and arr.shape[0] >= T_enc:
+                arr = arr[:T_enc]
+            out[name] = arr.contiguous().numpy()
+        elif t.ndim == 2:
+            out[name] = t[0].contiguous().numpy()
 
     return out

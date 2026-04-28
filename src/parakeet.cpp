@@ -308,14 +308,20 @@ static bool parakeet_load_model(parakeet_model& model, parakeet_vocab& vocab, co
         e.norm_ff1_w = get("norm_ff1.weight");
         e.norm_ff1_b = get("norm_ff1.bias");
         e.ff1_l1_w = get("ff1.linear1.weight");
+        e.ff1_l1_b = try_("ff1.linear1.bias");
         e.ff1_l2_w = get("ff1.linear2.weight");
+        e.ff1_l2_b = try_("ff1.linear2.bias");
 
         e.norm_attn_w = get("norm_attn.weight");
         e.norm_attn_b = get("norm_attn.bias");
         e.attn_q_w = get("attn.q.weight");
+        e.attn_q_b = try_("attn.q.bias");
         e.attn_k_w = get("attn.k.weight");
+        e.attn_k_b = try_("attn.k.bias");
         e.attn_v_w = get("attn.v.weight");
+        e.attn_v_b = try_("attn.v.bias");
         e.attn_out_w = get("attn.out.weight");
+        e.attn_out_b = try_("attn.out.bias");
         e.attn_pos_w = get("attn.pos.weight");
         e.pos_bias_u = get("attn.pos_bias_u");
         e.pos_bias_v = get("attn.pos_bias_v");
@@ -323,9 +329,11 @@ static bool parakeet_load_model(parakeet_model& model, parakeet_vocab& vocab, co
         e.norm_conv_w = get("norm_conv.weight");
         e.norm_conv_b = get("norm_conv.bias");
         e.conv_pw1_w = get("conv.pw1.weight");
+        e.conv_pw1_b = try_("conv.pw1.bias");
         e.conv_dw_w = get("conv.dw.weight");
         e.conv_dw_b = get("conv.dw.bias"); // synthetic — populated by BN fold
         e.conv_pw2_w = get("conv.pw2.weight");
+        e.conv_pw2_b = try_("conv.pw2.bias");
         e.conv_bn_w = get("conv.bn.weight");
         e.conv_bn_b = get("conv.bn.bias");
         e.conv_bn_rm = get("conv.bn.running_mean");
@@ -334,11 +342,12 @@ static bool parakeet_load_model(parakeet_model& model, parakeet_vocab& vocab, co
         e.norm_ff2_w = get("norm_ff2.weight");
         e.norm_ff2_b = get("norm_ff2.bias");
         e.ff2_l1_w = get("ff2.linear1.weight");
+        e.ff2_l1_b = try_("ff2.linear1.bias");
         e.ff2_l2_w = get("ff2.linear2.weight");
+        e.ff2_l2_b = try_("ff2.linear2.bias");
 
         e.norm_out_w = get("norm_out.weight");
         e.norm_out_b = get("norm_out.bias");
-        (void)try_;
     }
 
     // Predictor
@@ -1257,6 +1266,135 @@ extern "C" float* parakeet_run_encoder(struct parakeet_context* ctx, const float
         return nullptr;
     std::memcpy(r, enc.data(), enc.size() * sizeof(float));
     return r;
+}
+
+// Build encoder graph with per-layer outputs tagged for read-back. Each
+// stage is named "dump_pre_encode" or "dump_layer_K" and marked with
+// ggml_set_output() so the scheduler keeps its buffer live after compute.
+// Mirrors parakeet_build_graph_encoder; kept separate so the production
+// path (single output) doesn't pay for graph-output bookkeeping.
+static ggml_cgraph* parakeet_build_graph_encoder_dump(parakeet_context* ctx, int T_mel) {
+    const auto& m = ctx->model;
+    const auto& hp = m.hparams;
+    const int n_mels = (int)hp.n_mels;
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 8192, false);
+
+    ggml_tensor* mel = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_mels, T_mel);
+    ggml_set_name(mel, "mel");
+    ggml_set_input(mel);
+
+    int T = 0;
+    ggml_tensor* cur = core_conformer::build_pre_encode(ctx0, mel, m.pre_encode, (int)hp.subsampling_channels, &T);
+
+    // Tag pre-encode output BEFORE the xscaling. NeMo's pre_encode forward
+    // also returns the post-projection output (the multiply by sqrt(d) is
+    // an attribute of the rel-pos encoder, not the subsampling module).
+    {
+        ggml_tensor* tag = ggml_cont(ctx0, cur);
+        ggml_set_name(tag, "dump_pre_encode");
+        ggml_set_output(tag);
+        ggml_build_forward_expand(gf, tag);
+    }
+
+    if (hp.xscaling) {
+        const float xscale = sqrtf((float)hp.d_model);
+        cur = ggml_scale(ctx0, cur, xscale);
+    }
+
+    ggml_tensor* pos_enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, (int)hp.d_model, 2 * T - 1);
+    ggml_set_name(pos_enc, "pos_enc");
+    ggml_set_input(pos_enc);
+
+    core_conformer::BlockParams bp = {
+        (int)hp.d_model, (int)hp.n_heads, (int)hp.head_dim, (int)hp.conv_kernel, kLayerNormEps,
+    };
+    for (uint32_t il = 0; il < hp.n_layers; il++) {
+        cur = core_conformer::build_block(ctx0, cur, pos_enc, T, m.enc[il], bp);
+        char nm[64];
+        snprintf(nm, sizeof(nm), "dump_layer_%u", il);
+        ggml_tensor* tag = ggml_cont(ctx0, cur);
+        ggml_set_name(tag, nm);
+        ggml_set_output(tag);
+        ggml_build_forward_expand(gf, tag);
+        cur = tag; // chain next layer off the tagged tensor (numerics fix)
+    }
+
+    ggml_set_name(cur, "enc_out");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
+extern "C" int parakeet_run_encoder_dump(struct parakeet_context* ctx, const float* mel, int n_mels, int T_mel,
+                                         float** out, int out_count, int* out_T_enc, int* out_d_model) {
+    if (!ctx || !mel || T_mel <= 0 || !out)
+        return 1;
+    if (n_mels != (int)ctx->model.hparams.n_mels) {
+        fprintf(stderr, "parakeet: mel feature mismatch (%d vs %d)\n", n_mels, (int)ctx->model.hparams.n_mels);
+        return 2;
+    }
+
+    if (!ctx->sched) {
+        ggml_backend_t backends[2] = {ctx->backend, ctx->backend_cpu};
+        int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
+        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 8192, false, false);
+    }
+    if (ctx->compute_meta.empty()) {
+        ctx->compute_meta.resize(ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false));
+    }
+
+    ggml_cgraph* gf = parakeet_build_graph_encoder_dump(ctx, T_mel);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "parakeet: dump: failed to alloc encoder graph\n");
+        return 3;
+    }
+
+    ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "mel");
+    ggml_backend_tensor_set(mel_in, mel, 0, (size_t)n_mels * T_mel * sizeof(float));
+
+    ggml_tensor* pos_in = ggml_graph_get_tensor(gf, "pos_enc");
+    int T_enc = (int)pos_in->ne[1];
+    T_enc = (T_enc + 1) / 2;
+    auto pe = core_conformer::make_pos_enc((int)ctx->model.hparams.d_model, T_enc);
+    ggml_backend_tensor_set(pos_in, pe.data(), 0, pe.size() * sizeof(float));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "parakeet: dump: encoder graph compute failed\n");
+        return 4;
+    }
+
+    const int d = (int)ctx->model.hparams.d_model;
+    if (out_T_enc)
+        *out_T_enc = T_enc;
+    if (out_d_model)
+        *out_d_model = d;
+
+    auto read_to = [&](const char* name, float* dst) {
+        ggml_tensor* t = ggml_graph_get_tensor(gf, name);
+        if (!t) {
+            fprintf(stderr, "parakeet: dump: missing %s tensor\n", name);
+            return false;
+        }
+        ggml_backend_tensor_get(t, dst, 0, (size_t)d * T_enc * sizeof(float));
+        return true;
+    };
+
+    if (out_count >= 1 && out[0])
+        read_to("dump_pre_encode", out[0]);
+    const int n_layers = (int)ctx->model.hparams.n_layers;
+    for (int il = 0; il < n_layers && (il + 1) < out_count; il++) {
+        if (!out[il + 1])
+            continue;
+        char nm[64];
+        snprintf(nm, sizeof(nm), "dump_layer_%d", il);
+        read_to(nm, out[il + 1]);
+    }
+    return 0;
 }
 
 extern "C" int parakeet_test_encoder(struct parakeet_context* ctx, int T_mel) {

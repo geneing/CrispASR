@@ -203,6 +203,38 @@ static StageResult parakeet_encoder_r(parakeet_context* ctx, const float* sample
     return r;
 }
 
+// Run the parakeet encoder on the REFERENCE mel rather than our C++ mel.
+// This isolates encoder-internal divergence from preprocessor divergence:
+// if `encoder_output_ref_mel` cos_mean ≈ 1.0, the residual encoder error
+// is pure mel propagation through residuals; if it stays at ~0.8, there's
+// a bug inside the FastConformer encoder itself. Reference mel is stored
+// as (T_mel, n_mels) row-major (matching parakeet_run_encoder's input
+// layout exactly — see tools/reference_backends/parakeet.py).
+static StageResult parakeet_encoder_with_ref_mel_r(parakeet_context* ctx, const crispasr_diff::Ref& ref) {
+    StageResult r;
+    auto pair = ref.get_f32("mel_spectrogram");
+    auto shp = ref.shape("mel_spectrogram");
+    if (!pair.first || shp.size() < 2) {
+        r.note = "reference mel_spectrogram not in archive";
+        return r;
+    }
+    // GGUF ne[0] is the fast axis; the dumper writes (T_mel, n_mels) with
+    // n_mels contiguous, so ne = [n_mels, T_mel].
+    const int n_mels = (int)shp[0];
+    const int T_mel = (int)shp[1];
+    int T_enc = 0, d_model = 0;
+    float* enc = parakeet_run_encoder(ctx, pair.first, n_mels, T_mel, &T_enc, &d_model);
+    if (!enc) {
+        r.note = "parakeet_run_encoder returned null";
+        return r;
+    }
+    r.shape = {T_enc, d_model};
+    r.data.assign(enc, enc + (size_t)T_enc * d_model);
+    free(enc);
+    r.ok = true;
+    return r;
+}
+
 // ---- canary (NeMo FastConformer + Transformer decoder) ----
 
 static StageResult canary_mel_r(canary_context* ctx, const float* samples, int n_samples) {
@@ -752,6 +784,56 @@ int main(int argc, char** argv) {
         } else {
             printf("[ERR ] encoder_output          %s\n", enc_r.note.c_str());
             n_fail++;
+        }
+
+        // Diagnostic: feed the reference mel to our encoder. If this passes
+        // while encoder_output (with our mel) fails, the encoder is OK and
+        // residual mel error is responsible. If it also fails, encoder bug.
+        auto enc_ref_r = parakeet_encoder_with_ref_mel_r(ctx, ref);
+        if (enc_ref_r.ok) {
+            auto rep = ref.compare("encoder_output", enc_ref_r.data.data(), enc_ref_r.data.size());
+            print_row("encoder_output_ref_mel", rep, COS_THRESHOLD);
+            record(rep);
+        } else {
+            printf("[SKIP] encoder_output_ref_mel  %s\n", enc_ref_r.note.c_str());
+        }
+
+        // Per-layer diff: localise the encoder bug. Uses the reference mel
+        // as input so we measure encoder-internal divergence only (no mel
+        // bleed-through). Captures pre_encode + every conformer layer.
+        if (ref.has("pre_encode_output") || ref.has("encoder_layer_0")) {
+            auto mel_pair = ref.get_f32("mel_spectrogram");
+            auto mel_shp = ref.shape("mel_spectrogram");
+            if (mel_pair.first && mel_shp.size() >= 2) {
+                const int n_mels = (int)mel_shp[0];
+                const int T_mel = (int)mel_shp[1];
+                const int n_layers = 24;
+                const int d_model = 1024;
+                // Predict T_enc as ceil_div(T_mel, 8) for sizing buffers — the
+                // exact value comes back from the runner. Allocate generous.
+                const int T_enc_max = (T_mel + 7) / 8 + 4;
+                std::vector<std::vector<float>> bufs(n_layers + 1,
+                                                     std::vector<float>((size_t)d_model * T_enc_max));
+                std::vector<float*> ptrs(n_layers + 1);
+                for (int i = 0; i < n_layers + 1; i++)
+                    ptrs[i] = bufs[i].data();
+                int T_enc = 0, d_out = 0;
+                int rc = parakeet_run_encoder_dump(ctx, mel_pair.first, n_mels, T_mel, ptrs.data(),
+                                                   (int)ptrs.size(), &T_enc, &d_out);
+                if (rc == 0 && T_enc > 0) {
+                    auto rep0 = ref.compare("pre_encode_output", ptrs[0],
+                                            (size_t)T_enc * d_out);
+                    print_row("pre_encode_output", rep0, COS_THRESHOLD);
+                    for (int il = 0; il < n_layers; il++) {
+                        char nm[64];
+                        snprintf(nm, sizeof(nm), "encoder_layer_%d", il);
+                        auto rep = ref.compare(nm, ptrs[il + 1], (size_t)T_enc * d_out);
+                        print_row(nm, rep, COS_THRESHOLD);
+                    }
+                } else {
+                    printf("[SKIP] encoder_layer_*       parakeet_run_encoder_dump rc=%d\n", rc);
+                }
+            }
         }
 
         parakeet_free(ctx);

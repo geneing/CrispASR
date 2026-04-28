@@ -202,6 +202,63 @@ center-pad, so this matches without changes. Worth noting because the
 "obvious" guess from the PyTorch defaults would be wrong, and reflect
 vs zero padding shifts the first/last few frames.
 
+### `use_bias=True` checkpoints fail silently with `try_get` + nullptr mm_bias
+
+`mm_bias` skips the bias add when the bias pointer is nullptr — this
+makes the FastConformer block builder backwards-compatible across
+parakeet variants that switch `use_bias` between True and False (v3
+trained with `use_bias=False`; tdt-0.6b-ja and canary-1b both have it
+True). The trap: if the loader uses `require()` for the *weight* and
+nothing at all for the *bias*, the field stays nullptr regardless of
+whether the tensor exists in the GGUF. A `use_bias=True` checkpoint
+loads cleanly, encoder output looks plausible, the model produces
+fluent-but-wrong transcripts. Specifically issue #37 / parakeet-ja:
+the loader was missing 10 biases per layer × 24 layers = 240 silently
+unloaded tensors. After fixing, `encoder_output cos_mean` jumped from
+**0.792 → 0.996** vs the NeMo reference on
+reazon_meal_11s (`crispasr-diff parakeet …`).
+
+The bias set that needs `try_get` (for parakeet/canary FastConformer):
+
+| Bias slot | GGUF name | Used by |
+|---|---|---|
+| `attn_q_b`/`k_b`/`v_b`/`out_b` | `attn.{q,k,v,out}.bias` | self-attention |
+| `ff1_l1_b`/`l2_b`, `ff2_l1_b`/`l2_b` | `{ff1,ff2}.linear{1,2}.bias` | macaron FFNs |
+| `conv_pw1_b`, `conv_pw2_b` | `conv.{pw1,pw2}.bias` | conv module |
+
+Norms (`norm_*.bias`), `pos_bias_u/v`, `conv.dw.bias`, and `conv.bn.bias`
+were already loaded via `require()` because they exist in every
+variant. Add `try_` for the rest, never `require()`, so v3-style
+checkpoints still load.
+
+### How to find this class of bug methodically
+
+`crispasr-diff` with per-layer captures is the only reliable detector.
+Steps that worked for issue #37:
+
+1. Add `pre_encode_output` and `encoder_layer_K` for K=0..N-1 to the
+   reference dump via `register_forward_hook` on `model.encoder.pre_encode`
+   and `model.encoder.layers[K]`. NeMo returns layers in time-major
+   `(B, T, D)`, which matches crispasr's flat layout — no transpose
+   gymnastics.
+2. Add a per-layer dump path to the C++ runtime that builds the
+   encoder graph with each layer's output marked as a graph output
+   (`ggml_set_name` + `ggml_set_output`), runs once, and reads each
+   intermediate back via `ggml_backend_tensor_get`.
+3. Add stages to the diff harness so each `encoder_layer_K` is
+   compared head-to-head with the reference.
+4. The first layer where `cos_mean` drops is where the bug lives.
+   For issue #37 the drop appeared at `encoder_layer_0` itself,
+   immediately after a bit-exact `pre_encode_output` — pinpointing
+   the bug to *inside* the conformer block, not the subsampling.
+   Reading the loader against the GGUF tensor list found the
+   missing biases in <30 seconds.
+
+The "feed reference mel into our encoder" stage
+(`encoder_output_ref_mel`) is also worth keeping in the harness —
+when its cos matches `encoder_output`'s, you know mel propagation
+isn't the issue and the bug is encoder-internal.
+
 ### Cohere's cblas_sgemm note (kept for the historical record)
 
 Cohere uses `cblas_sgemm` for the power→mel matmul. When we migrated
