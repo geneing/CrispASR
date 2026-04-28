@@ -130,6 +130,17 @@ def map_tensor_name(hf_name: str) -> str | None:
     name = name.replace(".mlp.up_proj.", ".ffn.up.")
     name = name.replace(".mlp.down_proj.", ".ffn.down.")
 
+    # Gemma4 double-wide MLP norms (used when use_double_wide_mlp=true,
+    # which the E2B-it config sets). Each layer has TWO MLP halves with
+    # their own pre/post norms — different from a vanilla SwiGLU.
+    name = name.replace(".pre_feedforward_layernorm_2.", ".pre_ffn_norm_2.")
+    name = name.replace(".post_feedforward_layernorm_1.", ".post_ffn_norm_1.")
+    name = name.replace(".post_feedforward_layernorm_2.", ".post_ffn_norm_2.")
+
+    # Per-attention norm tensors (q_norm/k_norm/v_norm). Gemma4 also has
+    # an optional v_norm that vanilla GQA/MQA models lack.
+    name = name.replace(".attn.v_norm.", ".attn.v_norm.")
+
     return name
 
 
@@ -209,6 +220,33 @@ def main():
     writer.add_float32("gemma4e2b.llm.rope_theta", tc.get("rope_theta", 10000.0))
     writer.add_float32("gemma4e2b.llm.final_logit_softcapping", tc.get("final_logit_softcapping", 30.0))
     writer.add_float32("gemma4e2b.llm.rms_norm_eps", tc.get("rms_norm_eps", 1e-6))
+
+    # Gemma4-specific architecture flags. These were missed by the
+    # original converter and are required for KV sharing, the
+    # sliding/full attention split, and the double-wide MLP.
+    writer.add_uint32("gemma4e2b.llm.hidden_size_per_layer_input",
+                      tc.get("hidden_size_per_layer_input", 256))
+    writer.add_uint32("gemma4e2b.llm.num_kv_shared_layers",
+                      tc.get("num_kv_shared_layers", 0))
+    writer.add_uint32("gemma4e2b.llm.global_head_dim",
+                      tc.get("global_head_dim", tc.get("head_dim", 256)))
+    writer.add_bool("gemma4e2b.llm.use_double_wide_mlp",
+                    tc.get("use_double_wide_mlp", False))
+    writer.add_bool("gemma4e2b.llm.attention_k_eq_v",
+                    tc.get("attention_k_eq_v", False))
+    # layer_types is a list of strings ("sliding_attention" / "full_attention").
+    # Persist as a 1-byte-per-layer mask: 1 = full, 0 = sliding.
+    layer_types = tc.get("layer_types", [])
+    if layer_types:
+        full_mask = [1 if t == "full_attention" else 0 for t in layer_types]
+        writer.add_array("gemma4e2b.llm.layer_full_mask", full_mask)
+    # rope_theta for the FULL-attention layers (the partial_rotary one).
+    rope_params = tc.get("rope_parameters", {}) or {}
+    full_rope = rope_params.get("full_attention", {}) or {}
+    writer.add_float32("gemma4e2b.llm.rope_theta_full",
+                       full_rope.get("rope_theta", 1000000.0))
+    writer.add_float32("gemma4e2b.llm.partial_rotary_factor",
+                       full_rope.get("partial_rotary_factor", 1.0))
 
     # Tokenizer: store BPE tokens from tokenizer.json
     tok_path = model_dir / "tokenizer.json"

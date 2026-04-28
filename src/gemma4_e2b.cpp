@@ -514,18 +514,36 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
     for (uint32_t il = 0; il < lhp.num_layers; il++) {
         const auto& b = m.llm_layers[il];
 
-        // ── PLE: Per-Layer Embeddings ──
+        // ── PLE (per-layer embedding adjustment) ──
+        // Gemma3n flow (per the HF modeling source):
+        //   gate = act_fn(per_layer_input_gate(hidden))    # 1536 → 256
+        //   gated = gate * per_layer_emb_for_this_layer    # element-wise (256,)
+        //   delta = per_layer_projection(gated)            # 256 → 1536
+        //   hidden += post_per_layer_input_norm(delta)
+        // (The full Gemma3n forward also runs AltUp + LAuREL between
+        // attention and FFN; those tensors are NOT extracted by our
+        // converter today, so the PLE here is a partial implementation
+        // that at least gets the dimensions right and stops the
+        // ggml_can_mul_mat assert.)
+        //
+        // ple_gate.weight  PyTorch (256, 1536)  → ggml ne[0]=1536, ne[1]=256.  Linear(1536→256).
+        // ple_proj.weight  PyTorch (1536, 256)  → ggml ne[0]=256, ne[1]=1536.  Linear(256→1536).
         if (ple_all && b.ple_gate && b.ple_proj) {
             // Slice this layer's PLE: [ple_dim, T] from [n_layers*ple_dim, T]
             ggml_tensor* ple_slice = ggml_view_2d(ctx0, ple_all, ple_dim, T, ple_all->nb[1],
                                                   (size_t)il * ple_dim * ggml_type_size(ple_all->type));
-            ggml_tensor* ple_g = ggml_sigmoid(ctx0, ggml_mul_mat(ctx0, b.ple_gate, ple_slice));
-            ggml_tensor* ple_p = ggml_mul_mat(ctx0, b.ple_proj, ple_slice);
-            cur = ggml_add(ctx0, cur, ggml_mul(ctx0, ple_g, ple_p));
+            // hidden → 256
+            ggml_tensor* gate = ggml_mul_mat(ctx0, b.ple_gate, cur);
+            gate = ggml_gelu(ctx0, gate); // Gemma3n act_fn = GELU (pytorch_tanh)
+            // 256 × 256 element-wise
+            ggml_tensor* gated = ggml_mul(ctx0, gate, ple_slice);
+            // 256 → hidden
+            ggml_tensor* delta = ggml_mul_mat(ctx0, b.ple_proj, gated);
             if (b.post_ple_norm) {
-                cur = ggml_rms_norm(ctx0, cur, eps);
-                cur = ggml_mul(ctx0, cur, b.post_ple_norm);
+                delta = ggml_rms_norm(ctx0, delta, eps);
+                delta = ggml_mul(ctx0, delta, b.post_ple_norm);
             }
+            cur = ggml_add(ctx0, cur, delta);
         }
 
         // ── Attention ──
