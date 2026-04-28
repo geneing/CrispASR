@@ -404,10 +404,11 @@ static void g4e_gen_mel_filterbank(int n_mels, int n_fft, int sr, std::vector<fl
 //   - magnitude (|stft|) projection through HTK no-norm filterbank
 //   - log(mel + mel_floor) (additive epsilon, natural log)
 //
-// Output layout: (n_mels, T_mel) row-major — i.e. data[m*T + t] —
-// matches what the encoder graph expects (ggml ne=(T_mel, n_mels)
-// memory layout). The crispasr-diff hook applies a transpose to
-// convert to HF's (T_mel, n_mels) reference layout.
+// Output layout: (T_mel, n_mels) row-major — data[t*n_mels + m]. This
+// matches HF's natural FE output and binds 1:1 to a ggml tensor of
+// ne=(n_mels, T_mel, 1, 1) (n_mels=fast), which is the conv2d input
+// shape that mirrors HF's (B, 1, T, n_mels) interpretation (T as H,
+// n_mels as W). The crispasr-diff hook passes this layout through.
 static std::vector<float> g4e_compute_mel_hf_faithful(
     const float* pcm, int n_samples, int n_fft, int win_length, int hop_length, int n_mels,
     const float* window /* size win_length */, const float* mel_filters /* (n_freqs, n_mels) */,
@@ -422,23 +423,19 @@ static std::vector<float> g4e_compute_mel_hf_faithful(
     }
     const int T = (total - frame_size) / hop_length + 1;
 
-    std::vector<float> mel_out((size_t)n_mels * T, 0.0f);
+    std::vector<float> mel_out((size_t)T * n_mels, 0.0f);
     std::vector<float> frame(n_fft, 0.0f);
     std::vector<float> fft_buf((size_t)n_fft * 2, 0.0f);
     std::vector<float> magnitude((size_t)n_freqs);
-    std::vector<float> mel_row((size_t)n_mels);
 
     for (int t = 0; t < T; t++) {
-        // Frame range in padded signal: [t*hop, t*hop + frame_size).
-        // Read pad_left zeros from the implicit padding, rest from pcm.
         std::fill(frame.begin(), frame.end(), 0.0f);
         for (int s = 0; s < win_length; s++) {
-            const int abs_idx = t * hop_length + s;       // in padded coord
-            const int pcm_idx = abs_idx - pad_left;        // in pcm coord
+            const int abs_idx = t * hop_length + s;
+            const int pcm_idx = abs_idx - pad_left;
             const float v = (pcm_idx >= 0 && pcm_idx < n_samples) ? pcm[pcm_idx] : 0.0f;
             frame[s] = v * window[s];
         }
-        // Right-pad to n_fft is implicit (frame buffer is zero-initialised).
         g4e_fft_wrapper(frame.data(), n_fft, fft_buf.data());
 
         for (int k = 0; k < n_freqs; k++) {
@@ -447,18 +444,18 @@ static std::vector<float> g4e_compute_mel_hf_faithful(
             magnitude[k] = std::sqrt(re * re + im * im);
         }
 
-        // Mel projection: mel[m] = sum_k magnitude[k] * fb[k * n_mels + m]
+        // Mel projection + log directly into (T, n_mels) layout.
+        float* row = mel_out.data() + (size_t)t * n_mels;
         for (int m = 0; m < n_mels; m++)
-            mel_row[m] = 0.0f;
+            row[m] = 0.0f;
         for (int k = 0; k < n_freqs; k++) {
             const float* fb_row = mel_filters + (size_t)k * n_mels;
             const float mag = magnitude[k];
             for (int m = 0; m < n_mels; m++)
-                mel_row[m] += mag * fb_row[m];
+                row[m] += mag * fb_row[m];
         }
-        // log(mel + mel_floor) — store in (n_mels, T_mel) row-major.
         for (int m = 0; m < n_mels; m++)
-            mel_out[(size_t)m * T + t] = std::log(mel_row[m] + mel_floor);
+            row[m] = std::log(row[m] + mel_floor);
     }
     out_T_mel = T;
     return mel_out;
@@ -1502,7 +1499,7 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     ggml_cgraph* enc_gf = ggml_new_graph_custom(ectx, 32768, false);
 
     // Input: mel [T_mel, n_mels, 1, 1] for conv2d
-    ggml_tensor* mel_in = ggml_new_tensor_4d(ectx, GGML_TYPE_F32, T_mel, n_mels, 1, 1);
+    ggml_tensor* mel_in = ggml_new_tensor_4d(ectx, GGML_TYPE_F32, n_mels, T_mel, 1, 1);
     ggml_set_name(mel_in, "mel");
     ggml_set_input(mel_in);
 
@@ -1543,17 +1540,16 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
         h = ggml_relu(ectx, h);
     }
 
-    // Flatten: [OW2, OH2, 32, 1] → [32*OH2, OW2] = [1024, T_sub]
-    int T_sub = (int)h->ne[0];
-    // h ne=(T_sub, M_sub, C_out, 1). HF's flatten produces per-frame
-    // features in (M, C) ordering with C as the FAST inner axis (after
-    // `permute(0, 2, 3, 1).reshape(B, T, -1)`). Our ggml axis order is
-    // (T, M, C) so we need to permute (M, C) → (C, M) before flatten so
-    // the C dim is the fast axis of the flattened feature vector.
-    h = ggml_cont(ectx, ggml_permute(ectx, h, 0, 2, 1, 3)); // (T_sub, C, M, 1)
-    int feat_dim = (int)h->ne[1] * (int)h->ne[2]; // = C * M = 32*32 = 1024
-    h = ggml_reshape_2d(ectx, h, T_sub, feat_dim);   // (T_sub, feat_dim)
-    h = ggml_cont(ectx, ggml_transpose(ectx, h));     // (feat_dim, T_sub)
+    // After two stride-2 convs, h has ggml ne=(M_sub, T_sub, C, 1).
+    // HF flattens (B, C, T, M) → (B, T, M, C) → (B, T, M*C) with C-fast.
+    // ggml_permute(a, p0, p1, p2, p3): pN = OUTPUT axis for INPUT axis N.
+    int T_sub = (int)h->ne[1];
+    int M_sub = (int)h->ne[0];
+    int C_out = (int)h->ne[2];
+    // M (input 0) → output 1; T (input 1) → output 2; C (input 2) → output 0.
+    h = ggml_cont(ectx, ggml_permute(ectx, h, 1, 2, 0, 3)); // (C, M, T, 1)
+    int feat_dim = C_out * M_sub;
+    h = ggml_reshape_2d(ectx, h, feat_dim, T_sub);
 
     // Input projection: Linear(1024→1024)
     if (m.sub_input_proj_w) {
@@ -1852,17 +1848,13 @@ extern "C" float* gemma4_e2b_compute_mel(struct gemma4_e2b_context* ctx, const f
     if (T_mel > 3000)
         T_mel = 3000;
 
-    // core_mel returns MelsTime layout: (n_mels, T_mel) row-major. The HF
-    // reference dump emits (T_mel, n_mels) row-major (HF FE's natural
-    // output). Transpose at the hook so the diff harness's per-frame
-    // cos comparison aligns one row per frame.
+    // mel is already in (T_mel, n_mels) row-major (matches HF FE's
+    // natural output layout). Pass through directly.
     const size_t n = (size_t)n_mels * (size_t)T_mel;
     float* out = (float*)malloc(n * sizeof(float));
     if (!out)
         return nullptr;
-    for (int t = 0; t < T_mel; t++)
-        for (int mi = 0; mi < n_mels; mi++)
-            out[(size_t)t * n_mels + mi] = mel[(size_t)mi * T_mel + t];
+    std::memcpy(out, mel.data(), std::min((size_t)mel.size(), n) * sizeof(float));
     *out_n_mels = n_mels;
     *out_T_mel = T_mel;
     return out;
@@ -1884,7 +1876,7 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
     ggml_context* ectx = ggml_init(enc_ip);
     ggml_cgraph* enc_gf = ggml_new_graph_custom(ectx, 32768, false);
 
-    ggml_tensor* mel_in = ggml_new_tensor_4d(ectx, GGML_TYPE_F32, T_mel, n_mels, 1, 1);
+    ggml_tensor* mel_in = ggml_new_tensor_4d(ectx, GGML_TYPE_F32, n_mels, T_mel, 1, 1);
     ggml_set_name(mel_in, "mel");
     ggml_set_input(mel_in);
 
@@ -1916,17 +1908,21 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
         h = ggml_relu(ectx, h);
     }
 
-    int T_sub = (int)h->ne[0];
-    // Flatten with C-fast, M-slow ordering to match HF's permute+reshape.
-    h = ggml_cont(ectx, ggml_permute(ectx, h, 0, 2, 1, 3)); // (T_sub, C, M, 1)
-    int feat_dim = (int)h->ne[1] * (int)h->ne[2];
-    h = ggml_reshape_2d(ectx, h, T_sub, feat_dim);
-    h = ggml_cont(ectx, ggml_transpose(ectx, h));
+    // h ne=(M_sub, T_sub, C, 1). Flatten (M, T, C) → (C, M, T) for HF's
+    // C-fast, M-slow per-frame feature ordering, then reshape (C*M, T).
+    // ggml_permute(a, p0, p1, p2, p3): pN = OUTPUT axis for INPUT axis N.
+    //   M (input 0) → output 1
+    //   T (input 1) → output 2
+    //   C (input 2) → output 0
+    int T_sub = (int)h->ne[1];
+    int M_sub = (int)h->ne[0];
+    int C_out = (int)h->ne[2];
+    h = ggml_cont(ectx, ggml_permute(ectx, h, 1, 2, 0, 3)); // (C, M, T, 1)
+    int feat_dim = C_out * M_sub;
+    h = ggml_reshape_2d(ectx, h, feat_dim, T_sub);
     if (m.sub_input_proj_w)
         h = ggml_mul_mat(ectx, m.sub_input_proj_w, h);
 
-    // Stage tap: post-subsample features (post input_proj). Used by the
-    // diff harness to localise audio-encoder bugs layer by layer.
     ggml_set_name(h, "audio_subsample_output");
     ggml_set_output(h);
 
