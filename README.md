@@ -41,6 +41,8 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 - [Adding a new backend](#adding-a-new-backend)
 - [HOWTO Quantize](#howto-quantize)
 - [Branch state & roadmap](#branch-state--roadmap)
+- [GPU backend selection](#gpu-backend-selection)
+- [Debugging & profiling](#debugging--profiling)
 - [Credits](#credits)
 
 ---
@@ -68,7 +70,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 | **firered-asr** | [`FireRedTeam/FireRedASR2-AED`](https://huggingface.co/FireRedTeam/FireRedASR2-AED) | Conformer encoder + CTC + beam search decoder; also LID (120 languages via FireRedLID GGUF) | Mandarin, English, 20+ Chinese dialects | Apache-2.0 |
 | **moonshine** | [`UsefulSensors/moonshine-{tiny,base}`](https://huggingface.co/cstr/moonshine-base-GGUF) | Conv stem + 6L transformer encoder + 6L decoder (288–416d, partial RoPE, SiLU); multilingual variants (ja, ko, zh, ar, vi, uk) | English + 6 langs | MIT |
 | **moonshine-streaming** | [`UsefulSensors/moonshine-streaming-{tiny,small,medium}`](https://huggingface.co/cstr/moonshine-streaming-tiny-GGUF) | Streaming ASR: raw-waveform frontend + sliding-window encoder + autoregressive decoder (34–245M, designed for edge/low-latency) | English | MIT |
-| **gemma4-e2b** (WIP) | [`google/gemma-4-E2B-it`](https://huggingface.co/cstr/gemma4-e2b-it-GGUF) | USM Conformer encoder (12L, 1024d) + Gemma4 LLM decoder (35L, 1536d, GQA, PLE); 128-bin log-mel, 30s max | 140+ langs | Apache-2.0 |
+| **gemma4-e2b** | [`google/gemma-4-E2B-it`](https://huggingface.co/cstr/gemma4-e2b-it-GGUF) | USM Conformer encoder (12L, 1024d) + Gemma4 LLM decoder (35L, 1536d, GQA, PLE); 128-bin log-mel, 30s max | 140+ langs | Apache-2.0 |
 | **omniasr** | [`facebook/omniASR-CTC-{300M,1B}`](https://huggingface.co/cstr/omniASR-CTC-1B-GGUF) | wav2vec2-style CNN + 24–48L transformer + CTC head | **1600+** | Apache-2.0 |
 | **omniasr** | [`omniASR-LLM-300M-v2`](https://huggingface.co/cstr/omniasr-llm-300m-v2-GGUF) | Same encoder + 12L LLaMA decoder (SwiGLU, RoPE); autoregressive, best quality | **1600+** | Apache-2.0 |
 | **vibevoice** | [`microsoft/VibeVoice-ASR`](https://huggingface.co/cstr/vibevoice-asr-GGUF) | σ-VAE ConvNeXt encoders + Qwen2.5-7B decoder; timestamps, diarization, hotwords | 50+ | MIT |
@@ -87,7 +89,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 | **FireRedPunc** | Punctuation restoration | BERT-base (12L, d=768), 5 classes | Chinese + English | Apache-2.0 | [`cstr/fireredpunc-GGUF`](https://huggingface.co/cstr/fireredpunc-GGUF) |
 | **fullstop-punc** | Punctuation restoration | XLM-RoBERTa-large (24L, d=1024), 6 classes | EN, DE, FR, IT | MIT | [`cstr/fullstop-punc-multilang-GGUF`](https://huggingface.co/cstr/fullstop-punc-multilang-GGUF) |
 
-All eighteen runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**, **glm-asr**, **kyutai-stt**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family (small through xxlarge, same architecture as the canary aligner) with greedy CTC decoding.
+All runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**, **glm-asr**, **kyutai-stt**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family (small through xxlarge, same architecture as the canary aligner) with greedy CTC decoding.
 
 ## Feature matrix
 
@@ -211,7 +213,7 @@ crispasr --backend cohere -m $TC/cohere-transcribe-q5_0.gguf \
 # crispasr: LID -> language = 'en' (whisper, p=0.977)
 ```
 
-Three LID providers are available:
+These LID providers are available:
 
 - `--lid-backend whisper` (default) — uses a small multilingual ggml-*.bin model via the whisper.cpp C API. Auto-downloads ~75 MB on first use. 99 languages.
 - `--lid-backend silero` — native GGUF port of Silero's 95-language classifier. 16 MB F32, pure C++. Faster and smaller than whisper-tiny but slightly less accurate on long audio (>20s).
@@ -220,7 +222,7 @@ Three LID providers are available:
   - [`cstr/ecapa-lid-commonlanguage-GGUF`](https://huggingface.co/cstr/ecapa-lid-commonlanguage-GGUF) — CommonLanguage, 40 MB F16, 45 languages, full names (English, German, ...).
 - `--lid-backend firered` — FireRedLID (Conformer encoder + Transformer decoder). Q4_K (544 MB), 120 languages including Chinese dialects. Slower but covers more languages.
 
-Two VAD providers are available:
+These VAD providers are available:
 
 - **Silero VAD** (default) — ~885 KB, auto-downloaded via `--vad`. Industry-standard, well-tested.
 - **FireRedVAD** — DFSMN-based, 2.4 MB, F1=97.57%. Pass `--vad -vm firered` to auto-download. Recommended.
@@ -1303,6 +1305,74 @@ Notes:
 - `--gpu-backend vulkan` selects the Vulkan backend, but it does not choose which physical GPU to use. Use `-dev N` to select the Vulkan device index.
 - On some Windows laptops, Vulkan device `0` is the Intel iGPU and the NVIDIA GPU is `1`. If Vulkan looks unexpectedly slow, rerun with `-dev 1`.
 - The Windows convenience script `build-vulkan.bat` creates a separate Vulkan-capable binary at `build-vulkan\bin\crispasr.exe`.
+
+---
+
+## Debugging & profiling
+
+For most backends, `-v` / `--verbose` surfaces per-stage timings and
+device picks. For headless / library use (where the CLI flag isn't
+plumbed through), set `CRISPASR_VERBOSE=1` instead.
+
+```bash
+# Per-stage timing breakdown (mel / encoder / prefill / decode):
+crispasr -v --backend gemma4-e2b -m model.gguf -f audio.wav
+# gemma4_e2b: mel 128x1099 (17.2 ms)
+# gemma4_e2b: encoder done: 1536x275 (719.0 ms)
+# gemma4_e2b: prefill done, first_token=3133 (1464.0 ms)
+# gemma4_e2b: decoded 25 tokens (7748.3 ms total)
+# crispasr: transcribed 11.0s audio in 7.75s (1.4x realtime)
+
+# Hugging Face access for gated models (Voxtral, Gemma4-E2B, …):
+HF_TOKEN=hf_xxx crispasr -m auto --backend gemma4-e2b -f audio.wav
+```
+
+The server has its own auth env: `CRISPASR_API_KEYS` (see
+[Server mode](#server-mode-persistent-model-http-api)).
+
+<details>
+<summary><b>Per-backend debug / bench / dump-dir env vars (developer)</b></summary>
+
+These are useful when porting a new backend or chasing a regression.
+The `*_BENCH=1` toggles emit per-stage timings even without `-v`; the
+`*_DEBUG=1` toggles emit per-step diagnostic prints; the `*_DUMP_DIR=`
+paths write per-stage F32 tensors for diff-testing against a PyTorch
+reference (see [Debug a new backend against PyTorch ground truth](#debug-a-new-backend-against-pytorch-ground-truth)).
+
+| Env var | Purpose |
+| --- | --- |
+| `CRISPASR_VERBOSE=1` | Forces verbose mode for any backend (parallel to the `-v` flag). |
+| `CRISPASR_DUMP_DIR=path/` | Generic per-stage F32 tensor dump for the `crispasr-diff` harness. |
+| `GEMMA4_E2B_BENCH=1` | Per-stage timings for the Gemma-4-E2B backend. |
+| `COHERE_BENCH=1` / `COHERE_DEBUG=1` | Cohere transcribe per-stage timings / per-step diagnostics. |
+| `COHERE_PROF=1` | Cohere graph-level profiling (per-op timings). |
+| `COHERE_THREADS=N` | Override thread count for the Cohere backend. |
+| `COHERE_DEVICE=cpu\|cuda\|metal\|vulkan` | Force the Cohere backend onto a specific device. |
+| `COHERE_DUMP_ATTN=path/` | Dump attention activations for Cohere (used by the diff harness). |
+| `FIRERED_BENCH=1` | Per-stage timings for the FireRedASR backend. |
+| `FIREREDPUNC_DEBUG=1` | Per-step diagnostics for the FireRed punctuation post-step. |
+| `MOONSHINE_STREAMING_BENCH=1` | Per-stage timings for moonshine-streaming. |
+| `OMNIASR_BENCH=1` / `OMNIASR_DEBUG=1` / `OMNIASR_DUMP_DIR=` | OmniASR per-stage timings, diagnostics, and stage dumps. |
+| `PARAKEET_DEBUG=1` | Parakeet TDT per-step diagnostics (joint network, blank-id sanity). |
+| `VIBEVOICE_BENCH=1` / `VIBEVOICE_DEBUG=1` / `VIBEVOICE_DUMP_DIR=` | VibeVoice ASR per-stage timings, diagnostics, and stage dumps. |
+| `VIBEVOICE_REF_FEATURES=path` | Replace the live encoder with a saved feature tensor (regression harness). |
+| `VIBEVOICE_TTS_DUMP=path/` | Per-step VibeVoice TTS diffusion dumps. |
+| `VIBEVOICE_VOICE_AUDIO=path.wav` | Reference voice WAV for 1.5B-base TTS without a `.gguf` voice cache. |
+| `VIBEVOICE_TTS_NOISE=path` | Override the diffusion noise sample (deterministic generation). |
+| `VIBEVOICE_VAE_BACKEND=cpu\|metal\|cuda\|vulkan` | Pin the VAE decoder onto a specific backend. |
+| `WAV2VEC2_BENCH=1` / `WAV2VEC2_VERBOSE=1` / `WAV2VEC2_DUMP_DIR=` | wav2vec2 per-stage timings, verbose graph traces, and stage dumps. |
+| `GRANITE_ENCODER_GRAPH=1` | Switch the granite_speech encoder from per-layer CPU loops to a single ggml graph. |
+| `CRISPASR_NO_REL_POS=1` | Ablate the relative-position bias in the Gemma-4 audio encoder (development only). |
+| `ECAPA_REF_FBANK=path` | Reference filterbank tensor for the ECAPA-TDNN LID model (regression harness). |
+| `CRISPASR_SHERPA_LID_BIN=path` | Override the auto-detected sherpa-onnx LID binary. |
+| `WHISPER_ARG_DEVICE=N` | Default GPU device index when `-dev` isn't passed. |
+| `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` | Let CUDA swap to RAM when VRAM is exhausted. |
+| `GGML_VK_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` | Standard ggml/CUDA device-visibility filters. |
+
+`HF_TOKEN` and `HUGGING_FACE_HUB_TOKEN` are both honoured for gated-model
+downloads (in that order).
+
+</details>
 
 ---
 
