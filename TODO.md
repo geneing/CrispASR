@@ -24,8 +24,10 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 | O7 | Speculative decoding | LLM backends | 2-4x decode | High | TODO |
 | O8 | FireRed single-graph encoder | firered-asr | ~15s GPU savings | High | TODO (needs rel_pos_attn refactor) |
 | O9 | Grouped conv graph integration | wav2vec2 family | ~300ms saved | Medium | BLOCKED (ggml view bounds) |
-| O10 | Gemma4 audio attention: replace block-wise manual attn with `flash_attn_ext` + bias mask | gemma4-e2b | ~5x encoder | Medium | TODO (~1% cos cost expected; current is correct but slow) |
-| O11 | Gemma4: reduce redundant `ggml_cont` calls in clipped_mul_mat (private_input flag wired) | gemma4-e2b | ~5-10% encoder | Low | Started — minor wins remain |
+| O10 | Gemma4 audio attention: replace block-wise manual attn with `flash_attn_ext` + bias mask | gemma4-e2b | ~5x encoder | Medium | TODO (now low-priority — encoder is 9% of total post-eos fix) |
+| O11 | Gemma4: reduce redundant `ggml_cont` calls in clipped_mul_mat (private_input flag wired) | gemma4-e2b | ~5-10% encoder | Low | Done in commit 4abb68f; further wins limited |
+| O12 | Gemma4: prefer `end_of_turn_id` over `eos_id` in greedy decode | gemma4-e2b | **8.7× total** | Trivial | **DONE** (commit e9420c5) |
+| O13 | Gemma4: avoid re-cont-ing donor K/V for KV-shared layers every decode step | gemma4-e2b | ~10-20% decode? | Medium | TODO (speculative; per-step memcpy of Lk×hd×n_kv F16 × 20 layers) |
 
 ## Pending features (v0.5.x)
 
@@ -320,11 +322,17 @@ each backend. High-value gaps to close:
   Resurrected — now used by the graph encoder path (`GRANITE_ENCODER_GRAPH=1`).
 
 ### gemma4-e2b
-- **[later]** Speed — currently ~0.2× realtime. Biggest wins: O10
-  (flash_attn_ext for the encoder block-wise attention) and O5
-  (pipelined mel+encode threading). Fused QKV (O2 infrastructure
-  is in `core/attention.h`) needs the Q4_K-aware converter-level
-  fuse before it pays off.
+- **[later]** Speed — now **1.4× realtime** after the `end_of_turn`
+  eos fix (was 0.2×; 8.7× speedup). 96% of the remaining time is
+  per-token LLM decode (~220 ms/tok on M1 Q4_K; 35 layers, PLE,
+  double-wide MLP). Encoder is only 9% of total now, so O10
+  (flash_attn_ext encoder) and O11 (cont reduction) are diminishing
+  returns. Real wins would come from reducing the per-token decode
+  cost — flash_attn for both shared and non-shared attention paths
+  is already in place, KV is F16, sched is reused. Possible next
+  ideas: skip the redundant `ggml_cont` of the donor's K/V for
+  shared layers (currently copied every step even though it doesn't
+  change), batch multiple PLE projections into a single matmul.
 - **[later]** Move audio mel/attention hparams to GGUF for multi-flavor
   support (currently hardcoded; Gemma-4 family ships several scales).
 - **[later]** Extract Gemma4 audio tower into a CrispAudio shared lib

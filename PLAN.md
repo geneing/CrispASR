@@ -173,9 +173,11 @@ Bugs fixed (full list in HISTORY.md and `LEARNINGS.md`):
     `Gemma4ClippableLinear.forward`. Stop-skipping in converter +
     runtime support; this was the dominant remaining bug.
 
-Open follow-ups (not blockers): see TODO under #50 — speed
-optimisation (currently 0.2× realtime), audio hparams to GGUF for
-multi-flavour support, CrispAudio shared-lib extraction.
+Open follow-ups (not blockers): see TODO under #50 — further per-token
+decode optimisation (now 1.4× realtime after the `end_of_turn` eos
+fix; ~220 ms/tok dominated by 35-layer + double-wide-MLP + PLE),
+audio hparams to GGUF for multi-flavour support, CrispAudio
+shared-lib extraction.
 
 ---
 

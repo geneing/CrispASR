@@ -433,6 +433,25 @@ These are each preserved in `HISTORY.md` with full context. Summary form:
    **Lesson:** When porting an unfamiliar ONNX model, dump intermediates
    at every graph boundary and diff against the native code BEFORE
    debugging individual ops. The bug is almost never where you expect.
+9. **Gemma4-E2B `eos_id` was wrong — model never stopped, ran to
+   `max_new_tokens=256` every time.** Gemma's chat template emits
+   `<end_of_turn>` (token 106) at the natural completion point, not
+   `<eos>` (token 212). Greedy decode was configured with
+   `cfg.eos_id = ctx->eos_id`, so the loop never matched and kept
+   generating filler tokens until the cap. For an 11s JFK utterance
+   the model produced ~25 real tokens then 231 wasted tokens —
+   correct transcript hidden inside, but **8.7× slower than it
+   should have been** (67.77 s → 7.75 s, 0.2× → 1.4× realtime).
+   Fix: `cfg.eos_id = ctx->end_of_turn_id >= 0 ? ctx->end_of_turn_id
+   : ctx->eos_id;`. **Lesson:** for chat-template models the natural
+   stop token is `<end_of_turn>` / `<|im_end|>` / `<|eot_id|>`,
+   NOT the tokenizer's declared `<eos>`. Always profile the
+   end-of-decode behaviour: if the token count is suspiciously
+   round (max_new_tokens), the model is over-running. The correct
+   fix is also generic — every chat-templated LLM backend should
+   prefer `end_of_turn_id` when it exists. (Long-term: extend
+   `core_greedy_decode::Config` to accept a list of stop tokens
+   so we don't have to choose.)
 
 ---
 

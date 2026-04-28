@@ -534,6 +534,19 @@ the alternative (eyeball end-to-end output, guess) wasted multiple
 sessions before we wired it up. See LEARNINGS for the methodology.
 
 HF: `cstr/gemma4-e2b-it-GGUF` re-uploaded with the QAT scalars and
-all the fixes above (F16, Q8_0, Q4_K, Q2_K). Speed currently 0.2×
-realtime — open as PLAN #50 follow-up (#17 in TODO: cont reduction,
-fused QKV, pipelined mel+enc).
+all the fixes above (F16, Q8_0, Q4_K, Q2_K).
+
+**Speed follow-up (same day):** end-to-end JFK transcription went
+from 0.2× realtime (67.77 s) → **1.4× realtime (7.75 s)** with a
+1-line fix. The model emits `<end_of_turn>` (token 106) at the
+natural completion point, but greedy decode was configured with
+`cfg.eos_id = ctx->eos_id` (token 212 = `<eos>`), so the loop
+never matched and ran to `max_new_tokens=256` every call. For an
+11s utterance that's 25 real tokens + 231 wasted ones. Fixed by
+preferring `end_of_turn_id` when the chat template defines one.
+Per-stage profile after the fix: mel 17 ms, encoder 719 ms,
+prefill 287 tok in 1.46 s, decode 25 tok in ~5.5 s (~220 ms/tok).
+The remaining encoder/decode optimisations (TODO O10/O11) are
+secondary now — at 1.4× realtime the model is usable; further
+work would target per-token decode cost. See LEARNINGS "Specific
+bugs that cost us a day each" #9.
