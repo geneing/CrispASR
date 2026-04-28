@@ -54,6 +54,23 @@ static inline ggml_tensor* swiglu_down_bias(ggml_context* ctx, ggml_tensor* x, g
     return out;
 }
 
+// GeGLU without biases (the GELU-gated variant — same shape as SwiGLU
+// but with `gelu_pytorch_tanh` as the gate activation). HF Gemma4TextMLP
+// uses this:
+//
+//   down_proj = self.down_proj(act_fn(self.gate_proj(x)) * self.up_proj(x))
+//   act_fn = ACT2FN["gelu_pytorch_tanh"]   # tanh-approximation GELU
+//
+// ggml_gelu is the tanh-approximation variant (matching pytorch's
+// `gelu_pytorch_tanh`); the exact erf-based GELU is `ggml_gelu_erf`.
+static inline ggml_tensor* geglu(ggml_context* ctx, ggml_tensor* x, ggml_tensor* gate_w, ggml_tensor* up_w,
+                                 ggml_tensor* down_w) {
+    ggml_tensor* gate = ggml_mul_mat(ctx, gate_w, x);
+    ggml_tensor* up = ggml_mul_mat(ctx, up_w, x);
+    ggml_tensor* mlp = ggml_mul(ctx, ggml_gelu(ctx, gate), up);
+    return ggml_mul_mat(ctx, down_w, mlp);
+}
+
 // Plain two-linear SiLU FFN:
 //   out = W2 @ silu(W1 @ x + b1) + b2
 //

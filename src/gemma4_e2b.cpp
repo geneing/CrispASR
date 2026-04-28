@@ -812,7 +812,11 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
         if (b.pre_ffn_norm)
             x = ggml_mul(ctx0, x, b.pre_ffn_norm);
 
-        ggml_tensor* mlp = core_ffn::swiglu(ctx0, x, b.gate_proj, b.up_proj, b.down_proj);
+        // Gemma4TextMLP uses gelu_pytorch_tanh as its gate activation
+        // (NOT silu) — see modeling_gemma4.py L1031 + config.json
+        // text_config.hidden_activation. ggml_gelu is the tanh-approximation
+        // variant matching pytorch's `gelu_pytorch_tanh`.
+        ggml_tensor* mlp = core_ffn::geglu(ctx0, x, b.gate_proj, b.up_proj, b.down_proj);
 
         if (b.post_ffn_norm) {
             mlp = ggml_rms_norm(ctx0, mlp, eps);
