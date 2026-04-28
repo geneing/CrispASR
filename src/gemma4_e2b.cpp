@@ -259,21 +259,27 @@ struct gemma4_e2b_context {
 
 // Apply Gemma4ClippableLinear semantics: x = clamp(x); y = W @ x; y = clamp(y).
 //
-// Important: ggml_clamp is an in-place op (returns a view of the input
-// and overwrites its data when the graph runs). We must NOT clamp the
-// caller's `x` directly because it's often shared between multiple
-// consumers (e.g. Q, K, V projections all read the same h). We
-// ggml_cont() to a fresh tensor first so the in-place clamp only
-// touches our copy, leaving the caller's `x` intact for sibling
-// projections.
-static inline ggml_tensor* g4e_clipped_mul_mat(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, const g4e_clip& c) {
+// Important: ggml_clamp is in-place — returns a view of the input and
+// overwrites its data when the graph runs. The caller is responsible
+// for ensuring `x` is a private buffer (not shared with sibling
+// consumers). For Q/K/V projections that share the same input, the
+// caller should pre-cont the shared input ONCE and pass the same
+// per-projection-private clone in. The output clamp is always safe in
+// place because mul_mat produces a fresh tensor.
+//
+// `private_input == false` triggers an internal ggml_cont() — convenient
+// for one-off uses where the caller doesn't want to manage the copy
+// (e.g. ffn1.up only uses h once).
+static inline ggml_tensor* g4e_clipped_mul_mat(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, const g4e_clip& c,
+                                              bool private_input = false) {
     if (std::isfinite(c.in_min) || std::isfinite(c.in_max)) {
-        x = ggml_cont(ctx, x);              // private copy
+        if (!private_input)
+            x = ggml_cont(ctx, x);                // private copy
         x = ggml_clamp(ctx, x, c.in_min, c.in_max);
     }
     ggml_tensor* y = ggml_mul_mat(ctx, w, x);
     if (std::isfinite(c.out_min) || std::isfinite(c.out_max))
-        y = ggml_clamp(ctx, y, c.out_min, c.out_max); // y is freshly produced, safe to clamp in place
+        y = ggml_clamp(ctx, y, c.out_min, c.out_max);
     return y;
 }
 
@@ -712,10 +718,17 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
     ggml_tensor* h = ggml_rms_norm(ctx, x, eps);
     h = ggml_mul(ctx, h, L.attn_pre_ln);
 
-    // Q/K/V projections + scaling.
-    ggml_tensor* Q = g4e_clipped_mul_mat(ctx, L.attn_q_w, h, L.clip_q); // (hd*n_h, T)
-    ggml_tensor* K = g4e_clipped_mul_mat(ctx, L.attn_k_w, h, L.clip_k);
-    ggml_tensor* V = g4e_clipped_mul_mat(ctx, L.attn_v_w, h, L.clip_v);
+    // Q/K/V projections + scaling. The Q/K/V proj inputs share `h` and
+    // the in-place clamp would corrupt sibling reads. Pre-cont once into
+    // 3 private clones (3 ops) instead of letting clipped_mul_mat cont
+    // 3 times (saves nothing here, BUT we now skip the redundant cont
+    // when input is already a private buffer).
+    ggml_tensor* h_q = ggml_cont(ctx, h);
+    ggml_tensor* h_k = ggml_cont(ctx, h);
+    ggml_tensor* h_v = ggml_cont(ctx, h);
+    ggml_tensor* Q = g4e_clipped_mul_mat(ctx, L.attn_q_w, h_q, L.clip_q, /*private_input=*/true);
+    ggml_tensor* K = g4e_clipped_mul_mat(ctx, L.attn_k_w, h_k, L.clip_k, /*private_input=*/true);
+    ggml_tensor* V = g4e_clipped_mul_mat(ctx, L.attn_v_w, h_v, L.clip_v, /*private_input=*/true);
 
     Q = ggml_reshape_3d(ctx, Q, hd, n_h, T);
     K = ggml_reshape_3d(ctx, K, hd, n_h, T);
