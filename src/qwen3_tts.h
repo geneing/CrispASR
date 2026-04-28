@@ -125,6 +125,17 @@ float* qwen3_tts_decode_codes(struct qwen3_tts_context* ctx,
                               const int32_t* codes, int n_codes,
                               int* out_n_samples);
 
+// Run the codec graph on `codes` and extract a named intermediate tensor
+// by `stage_name`. Useful for the diff harness — matches stage names that
+// `build_graph_codec_decode` sets via ggml_set_name:
+//   "codec_rvq_out", "codec_pre_conv_out", "codec_xfmr_out",
+//   "codec_up0_out", "codec_up1_out", "codec_in_conv_out",
+//   "codec_blk0_out", "pcm"
+// Returns malloc'd float array of *out_n elements. Caller frees with free().
+float* qwen3_tts_codec_extract_stage(struct qwen3_tts_context* ctx,
+                                     const int32_t* codes, int n_codes,
+                                     const char* stage_name, int* out_n);
+
 // Synthesise text → 24 kHz mono float32 PCM. Caller frees with
 // `qwen3_tts_pcm_free`. *out_n_samples is set on success.
 //

@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
         fprintf(stderr,
                 "usage: %s <backend> <model.gguf> <reference.gguf> <audio.wav>\n"
                 "\n"
-                "  backend       one of: voxtral, voxtral4b, qwen3, qwen3-tts, granite, parakeet, canary, cohere, gemma4\n"
+                "  backend       one of: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, granite, parakeet, canary, cohere, gemma4\n"
                 "  model.gguf    crispasr-compatible model weights\n"
                 "  reference.gguf  archive produced by tools/dump_reference.py\n"
                 "  audio.wav     16 kHz mono WAV\n",
@@ -737,6 +737,77 @@ int main(int argc, char** argv) {
         }
 
         qwen3_tts_free(ctx);
+
+    // ---- qwen3-tts-codec (Tokenizer-12Hz decoder stages) ----
+    // model_path = talker GGUF (for context init)
+    // codec GGUF path = env var QWEN3_TTS_CODEC_GGUF
+    // Runs the codec decoder on T=10 all-zero codes and compares
+    // each named intermediate tensor against the Python reference dump.
+    } else if (backend_name == "qwen3-tts-codec") {
+        const char* codec_gguf = std::getenv("QWEN3_TTS_CODEC_GGUF");
+        if (!codec_gguf) {
+            fprintf(stderr, "qwen3-tts-codec: set QWEN3_TTS_CODEC_GGUF=<path/to/codec.gguf>\n");
+            return 4;
+        }
+        auto cp = qwen3_tts_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        cp.use_gpu = false; // codec has Metal scheduler issues on M1
+        qwen3_tts_context* ctx = qwen3_tts_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load qwen3-tts model '%s'\n", model_path.c_str());
+            return 4;
+        }
+        if (qwen3_tts_set_codec_path(ctx, codec_gguf) != 0) {
+            fprintf(stderr, "failed to load codec from '%s'\n", codec_gguf);
+            qwen3_tts_free(ctx);
+            return 4;
+        }
+
+        // Build the same deterministic codes the Python dump used:
+        // T=10 frames × 16 codebooks, all code_val (default 0).
+        const int T_codec = 10, N_Q = 16;
+        const int code_val = 0;
+        std::vector<int32_t> codes(T_codec * N_Q, code_val); // [T, n_q] row-major
+
+        // Stage list matches DEFAULT_STAGES in qwen3_tts_codec.py
+        static const char* codec_stages[] = {
+            "codec_rvq_out",
+            "codec_pre_conv_out",
+            "codec_xfmr_out",
+            "codec_up0_out",
+            "codec_up1_out",
+            "codec_in_conv_out",
+            "codec_blk0_out",
+            "pcm",   // full PCM — matches "codec_pcm" in Python (renamed to "pcm" internally)
+        };
+        // The Python dump names the final output "codec_pcm", but internally it's "pcm".
+        // We compare "pcm" (C++ graph name) against "codec_pcm" (Python dump name).
+        const char* ref_name_override[] = {
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, "codec_pcm",
+        };
+        static_assert(sizeof(codec_stages) / sizeof(*codec_stages) == 8, "");
+
+        for (int si = 0; si < 8; si++) {
+            const char* stage = codec_stages[si];
+            const char* ref_name = ref_name_override[si] ? ref_name_override[si] : stage;
+
+            int n_stage = 0;
+            float* our_data = qwen3_tts_codec_extract_stage(ctx, codes.data(), T_codec * N_Q,
+                                                             stage, &n_stage);
+            if (!our_data) {
+                printf("[ERR ] %-22s  extract returned null\n", ref_name);
+                n_fail++;
+                continue;
+            }
+
+            auto rep = ref.compare(ref_name, our_data, (size_t)n_stage);
+            print_row(ref_name, rep, COS_THRESHOLD);
+            record(rep);
+            free(our_data);
+        }
+        qwen3_tts_free(ctx);
+
     } else if (backend_name == "granite") {
         auto cp = granite_speech_context_default_params();
         cp.n_threads = 4;
