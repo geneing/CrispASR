@@ -1286,19 +1286,61 @@ ggml_backend_tensor_get(e.conv_dw_b, dw_b.data(), 0, d * sizeof(float));
 dw_b[c] = (dw_b[c] - bn_mean[c]) * s[c] + bn_b[c];
 ```
 
-**TDT decoder issue** (unresolved): After the BN fold fix, the encoder
-runs correctly (verified: mel=581 frames, enc=73 frames, predictor
-init matches Python to 4 decimal places). But the TDT decoder emits
-1 token then all blanks. Joint logits collapse from -20 to -70 after
-the first emission. Needs NeMo reference comparison on the same audio
-(Kaggle gist written). Possible causes:
-- Encoder output scale differs from NeMo reference
-- The 80-mel FastConformer pre_encode (2560→1024) produces different
-  distributions than the 128-mel variant the code was originally tested with
-- Q4_K quantization of TDT joint weights causes decoder loop
+**TDT decoder issue** (resolved 2026-04-28): The actual cause was
+**missing `xscaling`**. NeMo's `RelPositionalEncoding` multiplies the
+encoder input by `sqrt(d_model) = 32` between the pre-encode and the
+first conformer block when `encoder.xscaling=true`. parakeet-tdt-0.6b-v3
+has `xscaling=false` (so the C++ runtime, which also didn't apply the
+scale, worked by accident). parakeet-tdt_ctc-0.6b-ja has `xscaling=true`
+and was producing near-random encoder activations (cos vs NeMo: 0.149)
+— the joint head, fed garbage, saw blank as the argmax for almost
+every frame after the first emission, hence "1 token then all blanks".
 
-**Lesson**: Never hardcode model hyperparameters in converters. Always
-read from the model config, falling back to defaults only as a last resort.
+**Verified bit-exact on a JSUT-basic5000 sample**:
+- NeMo:     `'水をマレーシアから買わなくてはならないのです。'`
+- crispasr: `'水をマレーシアから買わなくてはならないのです。'`  (F16, identical)
+
+The previous `predictor init matches Python to 4 decimal places`
+verification was misleading — at SOS the LSTM input is the blank
+token's embedding which is zero (NeMo's `padding_idx` semantics), so
+only the LSTM biases were being tested. Encoder weights and the
+xscale step weren't exercised by that check.
+
+**Q4_K JA still degrades after ~8 tokens** even with the xscaling fix
+— the 80-mel JA encoder is more quantization-sensitive than the v3
+128-mel one, and `joint.pred.weight` / `decoder.embed.weight` fall
+back to `q4_0` because their dimensions don't divide nicely for q4_k
+blocks. Re-quantizing from the new F16 to Q5_K, or marking those two
+tensors as F16, would fix this. F16 is bit-perfect.
+
+**Diagnostic protocol that finally cracked it**:
+1. Wrote `tools/reference_backends/parakeet.py` so `crispasr-diff
+   parakeet …` could compare mel + encoder against NeMo. Initial run
+   showed `cos_min=-0.71` on mel — but that was the reference
+   backend returning `(n_mels, T)` while the C++ stores `(T, n_mels)`,
+   layout mismatch only.
+2. Fixed the layout, mel cos became `0.994` (close, residual is
+   NeMo's `dither=1e-5 * randn` non-determinism).
+3. Encoder cos was `0.149` — too low to explain by mel drift alone.
+   Inspected `model_config.yaml`, saw `encoder.xscaling: true`, grep
+   confirmed C++ never multiplied by `sqrt(d_model)`.
+4. After the xscale fix encoder cos jumped to `0.812` and the JA
+   transcript matched NeMo bit-exact at F16.
+
+**Lessons**:
+- Never hardcode model hyperparameters in converters. Always read
+  from the model config, falling back to defaults only as a last
+  resort. (Already learned for `n_mels`; re-applied here for d_model,
+  ff_dim, pred_hidden, joint_hidden, AND xscaling.)
+- "Predictor init matches" is not the same as "predictor matches" —
+  if SOS feeds a zero embedding (padding_idx), only biases are tested.
+- A change that's a no-op for one model variant (v3, xscaling=false)
+  can be load-bearing for another (JA, xscaling=true). Always
+  surface bool/enum architecture flags in metadata.
+- `crispasr-diff <backend> <model.gguf> <ref.gguf> <audio.wav>` plus
+  a reference backend that captures the same layout the C++ uses is
+  the fastest way to localise an encoder discrepancy. Worth the
+  ~50 LOC `tools/reference_backends/<name>.py` upfront.
 
 ---
 

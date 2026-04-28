@@ -62,12 +62,21 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
   HF: `cstr/whisper-vad-encdec-asmr-GGUF`.
 - **4 VAD backends total**: Silero (default), FireRedVAD (recommended), MarbleNet, Whisper-VAD.
   All with auto-download keywords.
-- **Parakeet-JA** — **[IN PROGRESS]** `nvidia/parakeet-tdt_ctc-0.6b-ja` (CC-BY-4.0).
-  Converter fixed: reads n_mels from config (80 vs 128), handles pre-existing dw bias.
-  BN fold fixed: reads existing bias before folding. F16 (1.2 GB) + Q4_K (449 MB) on HF.
-  **Bug**: TDT decoder emits 1 token then all blanks. Encoder + predictor verified correct
-  via Python diff-testing. Needs NeMo ground truth comparison (Kaggle gist ready).
-  Possible causes: encoder output scale, joint network activation, or Q4_K TDT weight sensitivity.
+- **Parakeet-JA** — **[F16 BIT-EXACT, Q4_K STILL DEGENERATES]**
+  `nvidia/parakeet-tdt_ctc-0.6b-ja` (CC-BY-4.0). Converter fixed: reads
+  n_mels (80 vs 128) AND every other architecture hparam from
+  model_config.yaml, handles pre-existing dw bias, persists
+  `parakeet.xscaling` to GGUF metadata. Runtime fixed: applies
+  `*sqrt(d_model)` between pre_encode and the first conformer block
+  when xscaling=true (the JA model's setting; v3 has xscaling=false
+  which is why v3 worked without this fix). On a JSUT sample at F16,
+  crispasr now matches NeMo bit-exact:
+  `'水をマレーシアから買わなくてはならないのです。'`. The current Q4_K
+  GGUFs on HF were built with the old converter (no xscaling key) and
+  with quantization aggressive enough to degenerate after ~8 tokens
+  on JA. Need to re-convert and re-upload F16+Q4_K (use Q5_K or pin
+  joint.pred / decoder.embed to F16 since their dims fall back to
+  q4_0 in q4_k mode).
 - **Gemma-4-E2B** — **[IN PROGRESS]** Full forward pass implemented (encoder + LLM decoder).
   Needs testing with GGUF on Kaggle. Q4_K on HF. See TODO entry above.
 - **MiMo-V2.5-ASR** — **[IN PROGRESS]** Converters done, F16+Q4_K on HF.
