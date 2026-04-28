@@ -128,6 +128,15 @@ struct Params {
     // already padded the input.
     bool center_pad = true;
 
+    // Pre-emphasis coefficient: x[i] -= preemph * x[i-1] applied BEFORE
+    // center-padding (so the first sample is preserved as-is, matching
+    // NeMo's `torch.cat((x[:,0:1], x[:,1:] - α*x[:,:-1]))`). 0 disables.
+    // NeMo's AudioToMelSpectrogramPreprocessor defaults to 0.97 and applies
+    // the filter at inference time. The HF / Whisper cluster does NOT
+    // apply pre-emphasis. Pass 0.97 for the NeMo cluster (parakeet,
+    // canary, canary_ctc, cohere if their preprocessor configs match).
+    float preemph = 0.0f;
+
     // Drop the last STFT frame. Matches Whisper / HF feature extractor
     // convention that produces floor((n - n_fft) / hop + 1) - 1 frames
     // instead of the full count.

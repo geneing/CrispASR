@@ -15,6 +15,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 
 | Priority | Item | Effort | Status |
 |---|---|---|---|
+| **MEDIUM** | [#54 NeMo-cluster encoder cos](#54-nemo-cluster-encoder-cosine-divergence-parakeet-post-mel-fix) | Medium-Large | mel fix landed; encoder still cos~0.8 |
 | **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Medium | parakeet/cohere DONE; canary remaining |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
 | **LOW** | ~~#40b Moonshine streaming~~ | ~~High~~ | **DONE** (3 sizes) |
@@ -325,6 +326,87 @@ collection: [Qwen/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
 **Effort:** Large. ~1500 LOC across runtime + codec + reference
 backend. The two TTS targets (Qwen3-TTS and any future expansion)
 share enough that landing one substantially de-risks the other.
+
+---
+
+## 54. NeMo-cluster encoder cosine divergence (parakeet, post-mel-fix)
+
+After the preemph + Bessel-corrected PerFeatureZ fix
+(`mel_spectrogram cos_mean = 0.999451` on reazon_meal_11s, up from
+0.990, with the major-deletion symptom from issue #37 gone), the
+24-layer FastConformer encoder still diverges from NeMo:
+
+| sample              | mel cos_mean | enc cos_mean | enc cos_min |
+|---------------------|--------------|--------------|-------------|
+| reazon_meal_11s.wav | 0.999451     | 0.791530     | 0.476437    |
+| jsut 3.19s          | 0.998316     | 0.805847     | 0.258203    |
+
+**Why this matters:** transcripts on conversational JA still have
+small hallucinations (`本当` prefix on the meal sample) and partial
+syllables (`うん` → `どう`). The cos drop is too large to be pure
+mel propagation through residuals — likely a bug in one of the
+conformer pieces.
+
+**Where to look (highest-yield first):**
+
+1. **Add per-layer encoder captures to the diff harness.** The Python
+   reference (`tools/reference_backends/parakeet.py`) currently only
+   captures `encoder_output`. Add `encoder_layer_0..23` via
+   `register_forward_hook` on each `model.encoder.layers[i]`, plus
+   `pre_encode_output` after the dw_striding subsampling. Then add
+   matching extraction points in `examples/cli/crispasr_diff_main.cpp`
+   (or a new `parakeet-test-encoder` example that returns
+   intermediates by index). Cos drop layer-by-layer pinpoints whether
+   the bug is in subsampling, layer 0, or compounding through layers.
+
+2. **Pre-encode (subsampling) is the most likely culprit.** The
+   `core_conformer::build_pre_encode` ends with a permute+reshape
+   from `(W3, H3, C, 1)` to `(W3*C, H3)`. NeMo's `Subsampling`
+   module flattens differently — the order in which freq and channel
+   dimensions are zipped before the linear layer determines whether
+   `out_w` sees the same input as PyTorch. Triple-check vs
+   `nemo.collections.asr.modules.subsampling.ConvSubsampling`.
+
+3. **rel_shift's stride math.** The `(2T-1, T, H) → (T, T, H)` view in
+   `core_conformer::rel_shift` is correct in principle but easy to get
+   subtly off-by-one. The view uses
+   `nb1 = a->nb[1] - a->nb[0]` and `offset = (T-1) * a->nb[0]`. If
+   the offset or stride is wrong by one element it stays "almost
+   right" — cosine ~0.9 not catastrophic.
+
+4. **xscaling placement.** Current code applies `sqrt(d_model)` to
+   the pre-encode output BEFORE the rel-pos sinusoidal table is
+   added. NeMo's `RelPositionalEncoding` scales the input then adds
+   pos to keys/values, but the `pos_enc` we materialise is fed into
+   the BD branch of attention only. Verify that we're not
+   double-scaling or missing a scale somewhere in the rel-pos
+   contribution.
+
+5. **As a sanity check**, run the diff harness with `mel_spectrogram`
+   from the reference *substituted* for our C++ mel (requires a small
+   harness branch). If `encoder_output` cos jumps to ~1.0 with the
+   reference mel as input, the residual encoder error is pure mel
+   propagation through residuals and we should chase further mel
+   bit-exactness instead. If it stays at ~0.8, there's a real
+   encoder bug.
+
+**Why it wasn't caught earlier:** parakeet-tdt-0.6b-v3 (the English
+model) is robust to this divergence and produces correct transcripts.
+parakeet-tdt-0.6b-ja amplifies it on conversational audio because the
+Japanese subword vocabulary is denser per second, so each frame
+deletion from the encoder costs more transcript content.
+
+**Effort:** Medium-large. Step 1 (per-layer hooks + matching C++
+extraction) is ~150 LOC; the actual fix depends on what the diff
+shows. Likely 1-3 days end-to-end.
+
+**Files:**
+- `tools/reference_backends/parakeet.py` — add per-layer hooks
+- `examples/cli/crispasr_diff_main.cpp` — add `encoder_layer_K`
+  comparison stages for the parakeet branch
+- `src/parakeet.cpp` / `src/parakeet.h` — add a per-layer
+  `parakeet_run_encoder_to_layer(K)` entry point
+- `src/core/fastconformer.h` — likely fix once diff localises it
 
 ---
 

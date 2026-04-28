@@ -456,7 +456,9 @@ static std::vector<float> parakeet_compute_mel_impl(parakeet_context* ctx, const
 
     // Configure the shared helper for the NeMo cluster:
     //   ln + per-mel z-score, (T, n_mels) output, center-padded input,
-    //   log_eps = 2^-24 (NeMo log_zero_guard_value).
+    //   log_eps = 2^-24 (NeMo log_zero_guard_value), 0.97 pre-emphasis
+    //   (NeMo AudioToMelSpectrogramPreprocessor default — applied at
+    //   inference, missing it caused JA token deletions: issue #37).
     core_mel::Params p;
     p.n_fft = n_fft;
     p.hop_length = hop;
@@ -467,6 +469,7 @@ static std::vector<float> parakeet_compute_mel_impl(parakeet_context* ctx, const
     p.layout = core_mel::Layout::TimeMels;
     p.log_eps = (float)(1.0 / (1 << 24));
     p.center_pad = true;
+    p.preemph = 0.97f;
 
     auto mel = core_mel::compute(samples, n_samples, window_raw.data(), win, mel_fb.data(), n_freqs, parakeet_fft_r2c,
                                  p, T_out);
@@ -1421,24 +1424,77 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
 
     // ----- Group sub-word tokens into words -----
     //
-    // SentencePiece convention: a token starting with U+2581 (▁ → ' ') begins
-    // a new word. Punctuation tokens (e.g. ".", ",") attach to the *previous*
-    // word. Tokens that are pure punctuation and have no preceding word
-    // become a standalone word.
+    // Latin SentencePiece convention: a token starting with U+2581 (▁ → ' ')
+    // begins a new word. Punctuation tokens attach to the previous word.
+    //
+    // Japanese parakeet (and other no-space tokenizers) emit no leading-space
+    // markers because written Japanese has no inter-word spaces. In that
+    // mode every non-punctuation token is its own "word" — sufficient
+    // granularity for word-level SRT (issue #37).
     {
         std::vector<parakeet_word_data> words;
         words.reserve(r->n_tokens);
 
+        // Detect tokenizer style: count tokens that look like real
+        // word-starts (leading space + at least one more char). A
+        // standalone " " token (BOS-ish) doesn't count.
+        int n_space_word_starts = 0;
+        for (int i = 0; i < r->n_tokens; i++) {
+            const char* t = r->tokens[i].text;
+            if (t[0] == ' ' && t[1] != '\0')
+                n_space_word_starts++;
+        }
+        const bool space_prefix_style = (n_space_word_starts >= 2);
+
+        // Pure-punctuation detector. Recognises ASCII punct plus the
+        // common CJK punctuation (。、？！「」『』・,) so JA tokens
+        // like "、" attach to the previous word instead of forming their
+        // own subtitle entry.
         auto is_punct_only = [](const char* s) {
             if (!s || !*s)
                 return false;
-            for (const char* p = s; *p; p++) {
-                unsigned char c = (unsigned char)*p;
-                if (!(c == '.' || c == ',' || c == '?' || c == '!' || c == ';' || c == ':' || c == '\'' || c == '"' ||
-                      c == '(' || c == ')' || c == '-'))
+            const unsigned char* p = (const unsigned char*)s;
+            while (*p) {
+                unsigned char c = *p;
+                if (c < 0x80) {
+                    if (!(c == '.' || c == ',' || c == '?' || c == '!' || c == ';' || c == ':' || c == '\'' ||
+                          c == '"' || c == '(' || c == ')' || c == '-'))
+                        return false;
+                    p++;
+                } else if (c == 0xE3 && p[1] == 0x80 && p[2] >= 0x80 && p[2] <= 0xBF) {
+                    // U+3000–U+303F: CJK Symbols and Punctuation (。、「」『』 etc.)
+                    p += 3;
+                } else if (c == 0xE3 && p[1] == 0x83 && p[2] == 0xBB) {
+                    // U+30FB ・ (katakana middle dot)
+                    p += 3;
+                } else if (c == 0xEF && p[1] == 0xBC &&
+                           ((p[2] >= 0x81 && p[2] <= 0x8F) || p[2] == 0x9F)) {
+                    // U+FF01–U+FF0F (full-width !"#$%&'()*+,-./) and U+FF1F (？)
+                    p += 3;
+                } else {
                     return false;
+                }
             }
             return true;
+        };
+
+        // True end-of-sentence punct (for the gap-insertion pass below).
+        auto ends_with_sentence_punct = [](const char* s) {
+            size_t len = s ? strlen(s) : 0;
+            if (len == 0)
+                return false;
+            unsigned char last = (unsigned char)s[len - 1];
+            if (last == '.' || last == '!' || last == '?')
+                return true;
+            if (len >= 3) {
+                const unsigned char* tail = (const unsigned char*)(s + len - 3);
+                // U+3002 。 = E3 80 82, U+FF01 ！ = EF BC 81, U+FF1F ？ = EF BC 9F
+                if (tail[0] == 0xE3 && tail[1] == 0x80 && tail[2] == 0x82)
+                    return true;
+                if (tail[0] == 0xEF && tail[1] == 0xBC && (tail[2] == 0x81 || tail[2] == 0x9F))
+                    return true;
+            }
+            return false;
         };
 
         parakeet_word_data cur = {};
@@ -1448,11 +1504,22 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
             const auto& td = r->tokens[i];
             if (!td.text[0])
                 continue;
+            // Skip standalone space tokens (e.g. an initial " " BOS marker).
+            // Without this they leak through as empty word entries in
+            // no-space mode.
+            if (td.text[0] == ' ' && td.text[1] == '\0')
+                continue;
 
-            const bool is_word_start = (td.text[0] == ' ');
+            const bool has_leading_space = (td.text[0] == ' ');
             const bool is_punct = is_punct_only(td.text);
 
-            if (is_word_start && !is_punct && have_cur) {
+            // A token starts a new word if either:
+            //   - it has a Latin-style leading-space marker, or
+            //   - the segment is no-space style (e.g. JA) and the token
+            //     is not pure punctuation (so 、 attaches to prev word).
+            const bool is_new_word = !is_punct && (has_leading_space || !space_prefix_style);
+
+            if (is_new_word && have_cur) {
                 words.push_back(cur);
                 cur = {};
                 have_cur = false;
@@ -1464,8 +1531,8 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
             }
             cur.t1 = td.t1;
 
-            // Append, dropping the leading space
-            const char* src = td.text + (is_word_start ? 1 : 0);
+            // Append, dropping the leading space.
+            const char* src = td.text + (has_leading_space ? 1 : 0);
             size_t cur_len = strlen(cur.text);
             size_t cap = sizeof(cur.text) - cur_len - 1;
             size_t add = strlen(src);
@@ -1480,22 +1547,16 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
         // Post-process: insert minimum gaps after sentence-ending punctuation.
         // The TDT decoder often produces contiguous timestamps even across
         // sentence boundaries (e.g. "code." t1==6.400, "In" t0==6.400).
-        // When a word ends with .!? and the next word starts at the exact
-        // same frame, shrink the punctuated word's t1 by one frame duration
-        // to create a visible gap in subtitles.
+        // When a word ends with .!?。！？ and the next word starts at the
+        // exact same frame, shrink the punctuated word's t1 by one frame
+        // duration to create a visible gap in subtitles.
         for (size_t wi = 0; wi + 1 < words.size(); wi++) {
-            const char* txt = words[wi].text;
-            size_t len = strlen(txt);
-            if (len == 0)
+            if (!ends_with_sentence_punct(words[wi].text))
                 continue;
-            char last = txt[len - 1];
-            if (last == '.' || last == '!' || last == '?') {
-                if (words[wi].t1 >= words[wi + 1].t0 && words[wi].t1 > words[wi].t0) {
-                    // Shrink by one frame (80ms) but don't go below t0
-                    int64_t shrunk = words[wi].t1 - frame_dur_cs;
-                    if (shrunk > words[wi].t0)
-                        words[wi].t1 = shrunk;
-                }
+            if (words[wi].t1 >= words[wi + 1].t0 && words[wi].t1 > words[wi].t0) {
+                int64_t shrunk = words[wi].t1 - frame_dur_cs;
+                if (shrunk > words[wi].t0)
+                    words[wi].t1 = shrunk;
             }
         }
 

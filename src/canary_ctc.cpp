@@ -218,6 +218,7 @@ static std::vector<float> cc_compute_mel(canary_ctc_context* ctx, const float* s
     p.layout = core_mel::Layout::TimeMels;
     p.log_eps = (float)(1.0 / (1 << 24));
     p.center_pad = true;
+    p.preemph = 0.97f; // NeMo AudioToMelSpectrogramPreprocessor default (#37)
 
     return core_mel::compute(samples, n_samples, window_raw.data(), win, mel_fb.data(), n_freqs, cc_fft_r2c, p, T_out);
 }

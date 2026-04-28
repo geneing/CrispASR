@@ -17,7 +17,24 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
     const int nmels = p.n_mels;
 
     // -----------------------------------------------------------------
-    // 1. Optional center-pad of the input by n_fft/2 on each side.
+    // 1a. Optional pre-emphasis: y[0] = x[0]; y[i] = x[i] - α*x[i-1].
+    //     NeMo applies this to the raw input before center-padding,
+    //     so the high-pass filter sees the true first sample (not the
+    //     zero pad) — see NeMo FilterbankFeatures.forward.
+    // -----------------------------------------------------------------
+    std::vector<float> preemph_in;
+    const float* base_ptr = samples;
+    if (p.preemph != 0.0f && n_samples > 0) {
+        preemph_in.resize((size_t)n_samples);
+        preemph_in[0] = samples[0];
+        const float a = p.preemph;
+        for (int i = 1; i < n_samples; i++)
+            preemph_in[i] = samples[i] - a * samples[i - 1];
+        base_ptr = preemph_in.data();
+    }
+
+    // -----------------------------------------------------------------
+    // 1b. Optional center-pad of the input by n_fft/2 on each side.
     // -----------------------------------------------------------------
     std::vector<float> padded_in;
     const float* in_ptr;
@@ -25,11 +42,11 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
     if (p.center_pad) {
         const int pad = n_fft / 2;
         padded_in.assign((size_t)(pad + n_samples + pad), 0.0f);
-        std::memcpy(padded_in.data() + pad, samples, (size_t)n_samples * sizeof(float));
+        std::memcpy(padded_in.data() + pad, base_ptr, (size_t)n_samples * sizeof(float));
         in_ptr = padded_in.data();
         in_len = (int)padded_in.size();
     } else {
-        in_ptr = samples;
+        in_ptr = base_ptr;
         in_len = n_samples;
     }
 
@@ -163,7 +180,18 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
     // -----------------------------------------------------------------
     switch (p.norm) {
     case Normalization::PerFeatureZ: {
-        // Per-mel band z-score across time.
+        // Per-mel band z-score across time. Matches NeMo
+        // FilterbankFeatures.normalize_batch("per_feature"):
+        //   var = sum_sq / (T - 1)            # Bessel-corrected sample variance
+        //   std = sqrt(var); std = 0 if NaN   # NaN guard for T == 1
+        //   std += 1e-5                       # eps on std, OUTSIDE the sqrt
+        //   y = (x - mean) / std
+        // The placement of eps matters on low-variance mel bands
+        // (silence / high-freq during quiet speech). Adding it inside the
+        // sqrt under-amplifies those bands relative to NeMo, which can
+        // shift downstream encoder activations enough to cause TDT token
+        // deletions on conversational JA audio (issue #37).
+        const int denom = (T_final > 1) ? (T_final - 1) : 1;
         for (int m = 0; m < nmels; m++) {
             double sum = 0.0, sq = 0.0;
             for (int t = 0; t < T_final; t++)
@@ -173,7 +201,11 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
                 const double d = mel_tn[(size_t)t * nmels + m] - mean;
                 sq += d * d;
             }
-            const float inv_std = 1.0f / std::sqrt((float)(sq / T_final) + 1e-5f);
+            float std_val = std::sqrt((float)(sq / denom));
+            if (!(std_val == std_val))
+                std_val = 0.0f;
+            std_val += 1e-5f;
+            const float inv_std = 1.0f / std_val;
             for (int t = 0; t < T_final; t++) {
                 mel_tn[(size_t)t * nmels + m] = (float)(mel_tn[(size_t)t * nmels + m] - mean) * inv_std;
             }

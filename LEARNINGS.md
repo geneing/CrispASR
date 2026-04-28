@@ -144,20 +144,72 @@ Sub-variants you'll hit once per cluster:
 
 See `src/core/mel.h` for the parameterised version.
 
-### Cohere's cohere_fft_r2c + pre-emphasis
+### Pre-emphasis is not Cohere-specific — it's the NeMo cluster default
 
-Cohere is the one NeMo-cluster model that doesn't fit the others
-cleanly: it applies a `samples[i] = samples[i] - 0.97 * samples[i-1]`
-pre-emphasis filter before the STFT. Easy to handle — do the pre-
-emphasis in the model wrapper, then call `core_mel::compute` on the
-pre-emphasised signal.
+`AudioToMelSpectrogramPreprocessor` (and the underlying
+`FilterbankFeatures`) defaults `preemph=0.97` and applies the filter
+`y[i] = x[i] - 0.97 * x[i-1]` at inference time before STFT. **All four
+NeMo-cluster models inherit this default** unless their training config
+explicitly overrode it: parakeet, canary, canary_ctc, cohere.
 
-Cohere also uses `cblas_sgemm` for the power→mel matmul. When we
-migrated to the manual accumulator in `core_mel`, the summation order
-changes slightly and one SRT timestamp shifted by 80 ms (one encoder
-frame). The transcript text is bit-identical. If bit-exact BLAS
-output becomes a hard requirement, a BLAS-backed matmul path can be
-added to `core_mel` behind a feature flag.
+Originally we only had pre-emphasis on cohere (because cohere's
+inline mel code happened to include it) and missed it on the other
+three. Symptom on parakeet-tdt-0.6b-ja: short Japanese clips dropped
+content NeMo caught (issue #37 — reazon_meal_11s lost
+`お腹すいた … うん`). Stage-by-stage diff against
+`tools/dump_reference.py --backend parakeet` showed
+`mel_spectrogram cos_mean = 0.990` even before any encoder layer ran.
+
+Fix: add `preemph` field to `core_mel::Params`, apply BEFORE the
+center-pad (so `y[0] = x[0]` is preserved against the true first
+sample, matching NeMo's `torch.cat((x[:,0:1], x[:,1:] - α*x[:,:-1]))`).
+Set `p.preemph = 0.97f` in the parakeet / canary / canary_ctc wrappers.
+Cohere keeps its existing inline pre-emphasis (left it as-is to
+preserve a tested code path).
+
+Verified post-fix: `mel_spectrogram cos_mean = 0.999451` on the meal
+sample and the major deletion is gone. **If you add a new NeMo-cluster
+model, set `p.preemph = 0.97f` unless you have read its checkpoint's
+config and confirmed it overrides the default.**
+
+### NeMo PerFeatureZ uses Bessel-corrected std with eps OUTSIDE the sqrt
+
+`normalize_batch(x, "per_feature")` is:
+
+```python
+var = sum_sq / (T - 1)              # Bessel-corrected
+std = sqrt(var); std = 0 if NaN     # NaN guard for T == 1
+x = (x - mean) / (std + 1e-5)       # eps OUTSIDE the sqrt
+```
+
+Two pitfalls to avoid:
+1. Population variance `/N` instead of sample variance `/(N-1)`
+2. `sqrt(var + eps)` (eps inside the radical) instead of
+   `sqrt(var) + eps`
+
+Both shipped wrong originally and shifted low-variance mel bands enough
+to compound through 24 conformer layers. Effect was small on clean
+speech and noticeable on conversational JA (issue #37 again). The
+Bessel correction matters more on short clips where T is small;
+the eps placement matters on quiet silence-heavy bands at any T.
+
+### NeMo STFT uses zero-pad, not reflect-pad
+
+PyTorch's `torch.stft(center=True)` defaults to `pad_mode="reflect"`,
+but NeMo's `FilterbankFeatures.stft` explicitly passes
+`pad_mode="constant"` (= zero-pad). Our `core_mel` already does zero
+center-pad, so this matches without changes. Worth noting because the
+"obvious" guess from the PyTorch defaults would be wrong, and reflect
+vs zero padding shifts the first/last few frames.
+
+### Cohere's cblas_sgemm note (kept for the historical record)
+
+Cohere uses `cblas_sgemm` for the power→mel matmul. When we migrated
+to the manual accumulator in `core_mel`, the summation order changes
+slightly and one SRT timestamp shifted by 80 ms (one encoder frame).
+The transcript text is bit-identical. If bit-exact BLAS output becomes
+a hard requirement, a BLAS-backed matmul path can be added to
+`core_mel` behind a feature flag.
 
 ---
 
