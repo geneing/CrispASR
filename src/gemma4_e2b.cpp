@@ -281,9 +281,12 @@ static ggml_tensor* build_light_conv1d(ggml_context* ctx, ggml_tensor* x, const 
         ht = ggml_reshape_2d(ctx, ht, ht->ne[0], ht->ne[1]);
     h = ggml_cont(ctx, ggml_transpose(ctx, ht)); // back to [hidden, T]
 
-    // Conv norm + out projection
+    // Conv norm + activation + out projection. HF
+    // Gemma4AudioLightConv1d.forward (modeling_gemma4.py L477-480) applies
+    // the activation (SiLU) AFTER conv_norm, BEFORE linear_end.
     h = ggml_rms_norm(ctx, h, eps);
     h = ggml_mul(ctx, h, L.conv_ln);
+    h = ggml_silu(ctx, h);
     h = ggml_mul_mat(ctx, L.conv_out_w, h);
 
     return ggml_add(ctx, residual, h);
@@ -399,6 +402,45 @@ static void g4e_gen_hann_window(int n_fft, std::vector<float>& win) {
         win[i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * i / n_fft));
 }
 
+// Bake `q_scale * softplus(per_dim_scale)` into the audio attention's
+// per_dim_scale tensor, so the inference-time graph just multiplies Q by
+// it (matching HF Gemma4AudioAttention.forward L278).
+//
+// HF formula:
+//     q_scale = head_dim^-0.5 / log(2)
+//     softplus(x) = log(1 + exp(x))
+//     query_states *= q_scale * softplus(per_dim_scale)
+//
+// per_dim_scale is initialised to zeros and trained, so softplus(0) = log(2)
+// gives an effective initial scale of 1/sqrt(head_dim) — i.e. plain
+// 1/sqrt(d) attention. After training the per-dim values shift away from
+// zero. We do this once at load time because the input to softplus is a
+// (small, ~head_dim-sized) constant tensor that doesn't depend on the
+// activations, so there's no value in recomputing it every forward pass.
+static void g4e_bake_audio_per_dim_scale(g4e_model& m) {
+    const int hd = (int)(m.audio_hp.hidden_size / m.audio_hp.num_heads);
+    if (hd <= 0)
+        return;
+    const float q_scale = (1.0f / std::sqrt((float)hd)) / std::log(2.0f);
+    std::vector<float> buf((size_t)hd);
+    for (auto& L : m.audio_layers) {
+        if (!L.attn_per_dim_scale)
+            continue;
+        if ((int)L.attn_per_dim_scale->ne[0] != hd)
+            continue;
+        ggml_backend_tensor_get(L.attn_per_dim_scale, buf.data(), 0, (size_t)hd * sizeof(float));
+        for (int i = 0; i < hd; i++) {
+            const float x = buf[i];
+            // Numerically stable softplus: for x >> 0, log1p(exp(x)) ≈ x.
+            // For x << 0, log1p(exp(x)) ≈ exp(x) and is small. The general
+            // form below uses log1p + abs to avoid overflow at large x.
+            const float sp = (x > 20.0f) ? x : (x < -20.0f ? std::exp(x) : std::log1p(std::exp(x)));
+            buf[i] = q_scale * sp;
+        }
+        ggml_backend_tensor_set(L.attn_per_dim_scale, buf.data(), 0, (size_t)hd * sizeof(float));
+    }
+}
+
 // ── KV-cache sharing (Gemma4) ──────────────────────────────────────────────
 // Mirrors transformers/models/gemma4/modeling_gemma4.py:
 //
@@ -511,12 +553,23 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
     K = ggml_reshape_3d(ctx, K, hd, n_h, T);
     V = ggml_reshape_3d(ctx, V, hd, n_h, T);
 
-    // Per-dim scale: multiply each Q dimension by the learned scale
-    // per_dim_scale is [head_dim], broadcast across heads and time
+    // Q per-dim scale. HF Gemma4AudioAttention.forward L278:
+    //   query_states = query_states * q_scale * softplus(per_dim_scale)
+    //   q_scale      = head_dim^-0.5 / log(2)
+    // We bake `q_scale * softplus(per_dim_scale)` into attn_per_dim_scale
+    // on the host once at load time (see g4e_bake_audio_per_dim_scale),
+    // so this single ggml_mul reproduces the HF formula exactly.
     if (L.attn_per_dim_scale) {
-        // Reshape scale to [hd, 1, 1] for broadcast
         ggml_tensor* scale = ggml_reshape_3d(ctx, L.attn_per_dim_scale, hd, 1, 1);
         Q = ggml_mul(ctx, Q, scale);
+    }
+
+    // K constant scale. HF Gemma4AudioAttention L221+L279:
+    //   k_scale = log(1 + e) / log(2)        ≈ 1.88539
+    //   key_states = key_states * k_scale
+    {
+        const float k_scale = std::log1p(std::exp(1.0f)) / std::log(2.0f);
+        K = ggml_scale(ctx, K, k_scale);
     }
 
     // Permute to flash-attention layout: (hd, T, n_h)
@@ -524,8 +577,13 @@ static ggml_tensor* build_conformer_self_attn(ggml_context* ctx, ggml_tensor* x,
     K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
     V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
 
-    // Full bidirectional attention (no mask), with logit softcapping
-    float attn_scale = 1.0f; // per_dim_scale replaces 1/sqrt(d)
+    // Full bidirectional attention (no mask), with logit softcapping.
+    // HF uses chunked local attention with relative position bias — see
+    // Gemma4AudioAttention.forward — but for short audio (<chunk_size *
+    // num_blocks) full attention is a reasonable approximation. The Q/K
+    // scales above keep the softmax-input distribution in line with HF;
+    // the bigger numerical gap from chunking is its own follow-up.
+    float attn_scale = 1.0f; // per_dim_scale + k_scale replace 1/sqrt(d)
     ggml_tensor* attn = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, attn_scale, 0.0f, hp.attention_logit_cap);
     attn = ggml_reshape_2d(ctx, attn, hd * n_h, T);
 
@@ -1219,6 +1277,11 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
         }
     }
 
+    // Bake `q_scale * softplus(per_dim_scale)` into the audio attention's
+    // per_dim_scale tensor (HF Gemma4AudioAttention applies this every
+    // forward pass; we do it once at load).
+    g4e_bake_audio_per_dim_scale(m);
+
     // KV-share donor map (Gemma4: last `num_kv_shared_layers` layers reuse
     // K/V from the last earlier layer of the same `layer_type`).
     g4e_compute_kv_share_donor(lhp);
@@ -1354,25 +1417,28 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
     ggml_set_name(mel_in, "mel");
     ggml_set_input(mel_in);
 
-    // Conv2D subsampling layer 0: Conv2d(1→128, k=3, s=2, p=1) + RMSNorm + SiLU
+    // Conv2D subsampling layer 0: Conv2d(1→128, k=3, s=2, p=1) + LayerNorm + ReLU
+    // HF Gemma4AudioSubSampleConvProjectionLayer uses nn.LayerNorm (NOT
+    // RMSNorm) and nn.ReLU (NOT SiLU). The norm is over the channel dim
+    // with `elementwise_affine=True, bias=False`, so weight only — same
+    // shape as RMSNorm but with mean-centering.
     ggml_tensor* h = mel_in;
     if (m.sub_conv0_w) {
         h = ggml_conv_2d(ectx, m.sub_conv0_w, h, 2, 2, 1, 1, 1, 1);
         // h: [OW, OH, 128, 1] where OW≈T_mel/2, OH≈n_mels/2=64
         if (m.sub_norm0_w) {
-            // RMSNorm over channel dim: reshape to [C, spatial]
             int ow = (int)h->ne[0], oh = (int)h->ne[1], c = (int)h->ne[2];
             h = ggml_reshape_2d(ectx, h, ow * oh, c);
             h = ggml_cont(ectx, ggml_transpose(ectx, h)); // [c, ow*oh]
-            h = ggml_rms_norm(ectx, h, eps);
+            h = ggml_norm(ectx, h, eps);                  // LayerNorm (mean+var)
             h = ggml_mul(ectx, h, m.sub_norm0_w);
             h = ggml_cont(ectx, ggml_transpose(ectx, h)); // [ow*oh, c]
             h = ggml_reshape_4d(ectx, h, ow, oh, c, 1);
         }
-        h = ggml_silu(ectx, h);
+        h = ggml_relu(ectx, h);
     }
 
-    // Conv2D subsampling layer 1: Conv2d(128→32, k=3, s=2, p=1) + RMSNorm + SiLU
+    // Conv2D subsampling layer 1: Conv2d(128→32, k=3, s=2, p=1) + LayerNorm + ReLU
     if (m.sub_conv1_w) {
         h = ggml_conv_2d(ectx, m.sub_conv1_w, h, 2, 2, 1, 1, 1, 1);
         // h: [OW2, OH2, 32, 1] where OW2≈T_mel/4, OH2≈n_mels/4=32
@@ -1380,12 +1446,12 @@ extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const flo
             int ow = (int)h->ne[0], oh = (int)h->ne[1], c = (int)h->ne[2];
             h = ggml_reshape_2d(ectx, h, ow * oh, c);
             h = ggml_cont(ectx, ggml_transpose(ectx, h));
-            h = ggml_rms_norm(ectx, h, eps);
+            h = ggml_norm(ectx, h, eps);
             h = ggml_mul(ectx, h, m.sub_norm1_w);
             h = ggml_cont(ectx, ggml_transpose(ectx, h));
             h = ggml_reshape_4d(ectx, h, ow, oh, c, 1);
         }
-        h = ggml_silu(ectx, h);
+        h = ggml_relu(ectx, h);
     }
 
     // Flatten: [OW2, OH2, 32, 1] → [32*OH2, OW2] = [1024, T_sub]
@@ -1737,12 +1803,12 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
             int ow = (int)h->ne[0], oh = (int)h->ne[1], c = (int)h->ne[2];
             h = ggml_reshape_2d(ectx, h, ow * oh, c);
             h = ggml_cont(ectx, ggml_transpose(ectx, h));
-            h = ggml_rms_norm(ectx, h, eps);
+            h = ggml_norm(ectx, h, eps);
             h = ggml_mul(ectx, h, m.sub_norm0_w);
             h = ggml_cont(ectx, ggml_transpose(ectx, h));
             h = ggml_reshape_4d(ectx, h, ow, oh, c, 1);
         }
-        h = ggml_silu(ectx, h);
+        h = ggml_relu(ectx, h);
     }
     if (m.sub_conv1_w) {
         h = ggml_conv_2d(ectx, m.sub_conv1_w, h, 2, 2, 1, 1, 1, 1);
@@ -1750,12 +1816,12 @@ extern "C" float* gemma4_e2b_run_encoder(struct gemma4_e2b_context* ctx, const f
             int ow = (int)h->ne[0], oh = (int)h->ne[1], c = (int)h->ne[2];
             h = ggml_reshape_2d(ectx, h, ow * oh, c);
             h = ggml_cont(ectx, ggml_transpose(ectx, h));
-            h = ggml_rms_norm(ectx, h, eps);
+            h = ggml_norm(ectx, h, eps);
             h = ggml_mul(ectx, h, m.sub_norm1_w);
             h = ggml_cont(ectx, ggml_transpose(ectx, h));
             h = ggml_reshape_4d(ectx, h, ow, oh, c, 1);
         }
-        h = ggml_silu(ectx, h);
+        h = ggml_relu(ectx, h);
     }
 
     int T_sub = (int)h->ne[0];
