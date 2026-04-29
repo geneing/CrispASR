@@ -15,10 +15,11 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 
 | Priority | Item | Effort | Status |
 |---|---|---|---|
-| **DONE** | [#54 NeMo-cluster encoder cos](#54-nemo-cluster-encoder-cosine-divergence-parakeet-post-mel-fix) | Medium-Large | bias-load fix: cos_mean 0.79 → 0.996 |
+| **HIGH** | [#52 Qwen3-TTS](#52-qwen3-tts) — speaker_encoder forward | Medium | talker + code_predictor + codec done; ECAPA next |
+| **HIGH** | [#51 MiMo-V2.5-ASR runtime](#51-mimo-v25-asr-runtime) | Large | converters done; runtime is a stub |
 | **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Medium | parakeet/cohere DONE; canary remaining |
+| **MEDIUM** | [#53 core/audio_decoder.h](#53-coreaudio_decoderh--dry-across-tts--codec-backends) | Medium | DRY across qwen3-tts/mimo/vibevoice |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
-| **LOW** | ~~#40b Moonshine streaming~~ | ~~High~~ | **DONE** (3 sizes) |
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
 | **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
@@ -131,57 +132,6 @@ No response. HF model card has no license field.
 
 ---
 
-## 50. Gemma-4-E2B runtime refactor — **DONE** (April 2026)
-
-Working end-to-end. Q4_K transcribes JFK perfectly: *"And so my
-fellow Americans ask not what your country can do for you, ask
-what you can do for your country."*
-
-Per-stage cos vs HF reference:
-
-```
-mel_spectrogram          1.0000  bit-exact
-audio_subsample_output   1.0000
-audio_layer_0..7        >0.998
-audio_layer_11           0.969
-audio_tower_output       0.962
-encoder_output           0.966
-```
-
-Bugs fixed (full list in HISTORY.md and `LEARNINGS.md`):
-
-1. Attention scale = 1.0 (q_norm replaces 1/√d, not the other way around).
-2. v_norm RMSNorm-without-weight on V before flash-attn.
-3. layer_scalar applied ONCE at end of layer.
-4. PLE block at end of layer + per_layer_inputs prep stage.
-5. KV-share donor map (LAST 20 layers reuse, not first 20 — converter
-   metadata + runtime both honour it now).
-6. LLM MLP is GeGLU not SwiGLU (`gelu_pytorch_tanh`).
-7. Audio attn Q/K scaling (`q_scale·softplus(per_dim_scale)`,
-   `k_scale=log(1+e)/log(2)`).
-8. Audio subsample LayerNorm + ReLU (was RMSNorm + SiLU).
-9. Audio lconv1d SiLU between conv_norm and out_proj.
-10. Audio chunked-local attention with relative position bias
-    (block-wise manual attention; flash_attn_ext can't express the
-    softcap-before-mask order HF needs).
-11. Audio→LLM adapter pre-projection RMSNorm.
-12. HF-faithful mel FE (`fft_length=512`, `frame_length=320`,
-    semicausal pad, `log(mel + mel_floor=0.001)`, no Slaney norm).
-13. Subsample axis order: ne=(n_mels, T_mel) input, (M, T, C)→(C, M, T)
-    flatten with C-fast for HF's per-frame feature ordering.
-14. **ClippableLinear QAT scalars**: 480 trained scalars per audio
-    tower applied via `clamp(input)→matmul→clamp(output)` per HF's
-    `Gemma4ClippableLinear.forward`. Stop-skipping in converter +
-    runtime support; this was the dominant remaining bug.
-
-Open follow-ups (not blockers): see TODO under #50 — further per-token
-decode optimisation (now 1.4× realtime after the `end_of_turn` eos
-fix; ~220 ms/tok dominated by 35-layer + double-wide-MLP + PLE),
-audio hparams to GGUF for multi-flavour support, CrispAudio
-shared-lib extraction.
-
----
-
 ## 51. MiMo-V2.5-ASR runtime
 
 Converter done (`models/convert-mimo-asr-to-gguf.py` plus the
@@ -268,9 +218,18 @@ collection: [Qwen/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
        Converter rewritten (0 unmapped, 253 tensors, 0.25 GB F16 GGUF).
        C++ decoder: SplitRVQ → pre_conv → 8L XFMR(512d, sliding-window=72)
        → 2× ConvNeXt upsample → 4× SnakeBeta+tconv DecoderBlock → PCM.
-       Diff harness: 8/8 stages PASS (cos_min≥0.999). CPU verified.
-       Metal: GPU scheduler conflict on M1 — use_gpu=false for codec;
-       investigate separately as PLAN #52 open item.
+       Diff harness: 8/8 stages PASS (cos_min ≥ 0.999983) end-to-end
+       on Metal with `use_gpu=true`. The original M1 hang
+       (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`) was
+       fixed in our ggml fork — `kernel_conv_transpose_1d` was
+       iterating all IL input positions and filtering with an `if`,
+       doing ~160× wasted work which crossed the macOS GPU watchdog
+       (~5 sec). Patched to iterate only the
+       `i ∈ [ceil((j-K+1)/s0), floor(j/s0)] ∩ [0, IL-1]` range that
+       actually contributes. See LEARNINGS.md "Metal
+       conv_transpose_1d input range tightening" — MUST RE-APPLY
+       after every ggml bump. The runtime CPU-pin (`codec_sched`)
+       is kept as a safety net.
     2. **Runtime ECAPA speaker_encoder forward.** Removes the
        `bake-qwen3-tts-voice-pack.py` dependency for new voices —
        end users pass any ref WAV and we compute spk_embedding in
@@ -297,127 +256,6 @@ collection: [Qwen/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
 **Effort:** Large. ~1500 LOC across runtime + codec + reference
 backend. The two TTS targets (Qwen3-TTS and any future expansion)
 share enough that landing one substantially de-risks the other.
-
----
-
-## 54. NeMo-cluster encoder cosine divergence — **DONE** (April 2026)
-
-Resolved by loading the per-layer bias tensors that the parakeet
-loader was previously skipping. After the fix:
-
-| sample | mel cos | enc cos before | enc cos after |
-|---|---|---|---|
-| reazon_meal_11s | 0.999 | 0.792 | **0.996** |
-| jsut 3.19s | 0.998 | 0.806 | (similar) |
-
-Per-layer diff confirmed the divergence started at `encoder_layer_0`
-(immediately after a bit-exact `pre_encode_output`), localising the
-bug inside the conformer block. The GGUF stored `attn.{q,k,v,out}.bias`
-+ `{ff1,ff2}.linear{1,2}.bias` + `conv.{pw1,pw2}.bias` (10 biases per
-layer × 24 layers = 240 tensors), but `parakeet_load_weights` only
-loaded the weights — the bias slots stayed nullptr, and `mm_bias`
-silently skipped the bias add. The fix was 10 lines:
-`e.X_b = try_("…bias")` for each missing slot in `parakeet_load_weights`.
-
-`try_get()` rather than `require()` keeps the loader compatible with
-v3 (which has `use_bias=False` and stores no biases at all). v3 EN
-on JFK still passes regression. Documented in LEARNINGS.md.
-
-Residual issue (open follow-up, lower priority): on layers 17-22 the
-cos_mean stays high (~0.99) but cos_min crashes to negative values on
-specific frames — `encoder_layer_22` cos_min = -0.67. Indicates a
-small number of frames are catastrophically wrong while the bulk
-match. Suspects: rel_shift edge cases, specific position-encoding
-positions where numerical instability surfaces, or a buffer-aliasing
-issue in the dump path that masks an analogous issue in production.
-Not blocking the bug-report fix.
-
-The diagnostic infrastructure landed (per-layer captures in
-`reference_backends/parakeet.py`, `parakeet_run_encoder_dump` C-API,
-`encoder_output_ref_mel` + `encoder_layer_K` stages in the diff
-harness) is reusable for canary, canary_ctc, and any future
-NeMo-cluster runtime debug.
-
----
-
-## 54-historical. NeMo-cluster encoder cosine divergence (original analysis)
-
-After the preemph + Bessel-corrected PerFeatureZ fix
-(`mel_spectrogram cos_mean = 0.999451` on reazon_meal_11s, up from
-0.990, with the major-deletion symptom from issue #37 gone), the
-24-layer FastConformer encoder still diverges from NeMo:
-
-| sample              | mel cos_mean | enc cos_mean | enc cos_min |
-|---------------------|--------------|--------------|-------------|
-| reazon_meal_11s.wav | 0.999451     | 0.791530     | 0.476437    |
-| jsut 3.19s          | 0.998316     | 0.805847     | 0.258203    |
-
-**Why this matters:** transcripts on conversational JA still have
-small hallucinations (`本当` prefix on the meal sample) and partial
-syllables (`うん` → `どう`). The cos drop is too large to be pure
-mel propagation through residuals — likely a bug in one of the
-conformer pieces.
-
-**Where to look (highest-yield first):**
-
-1. **Add per-layer encoder captures to the diff harness.** The Python
-   reference (`tools/reference_backends/parakeet.py`) currently only
-   captures `encoder_output`. Add `encoder_layer_0..23` via
-   `register_forward_hook` on each `model.encoder.layers[i]`, plus
-   `pre_encode_output` after the dw_striding subsampling. Then add
-   matching extraction points in `examples/cli/crispasr_diff_main.cpp`
-   (or a new `parakeet-test-encoder` example that returns
-   intermediates by index). Cos drop layer-by-layer pinpoints whether
-   the bug is in subsampling, layer 0, or compounding through layers.
-
-2. **Pre-encode (subsampling) is the most likely culprit.** The
-   `core_conformer::build_pre_encode` ends with a permute+reshape
-   from `(W3, H3, C, 1)` to `(W3*C, H3)`. NeMo's `Subsampling`
-   module flattens differently — the order in which freq and channel
-   dimensions are zipped before the linear layer determines whether
-   `out_w` sees the same input as PyTorch. Triple-check vs
-   `nemo.collections.asr.modules.subsampling.ConvSubsampling`.
-
-3. **rel_shift's stride math.** The `(2T-1, T, H) → (T, T, H)` view in
-   `core_conformer::rel_shift` is correct in principle but easy to get
-   subtly off-by-one. The view uses
-   `nb1 = a->nb[1] - a->nb[0]` and `offset = (T-1) * a->nb[0]`. If
-   the offset or stride is wrong by one element it stays "almost
-   right" — cosine ~0.9 not catastrophic.
-
-4. **xscaling placement.** Current code applies `sqrt(d_model)` to
-   the pre-encode output BEFORE the rel-pos sinusoidal table is
-   added. NeMo's `RelPositionalEncoding` scales the input then adds
-   pos to keys/values, but the `pos_enc` we materialise is fed into
-   the BD branch of attention only. Verify that we're not
-   double-scaling or missing a scale somewhere in the rel-pos
-   contribution.
-
-5. **As a sanity check**, run the diff harness with `mel_spectrogram`
-   from the reference *substituted* for our C++ mel (requires a small
-   harness branch). If `encoder_output` cos jumps to ~1.0 with the
-   reference mel as input, the residual encoder error is pure mel
-   propagation through residuals and we should chase further mel
-   bit-exactness instead. If it stays at ~0.8, there's a real
-   encoder bug.
-
-**Why it wasn't caught earlier:** parakeet-tdt-0.6b-v3 (the English
-model) is robust to this divergence and produces correct transcripts.
-parakeet-tdt-0.6b-ja amplifies it on conversational audio because the
-Japanese subword vocabulary is denser per second, so each frame
-deletion from the encoder costs more transcript content.
-
-**Effort:** Medium-large. Step 1 (per-layer hooks + matching C++
-extraction) is ~150 LOC; the actual fix depends on what the diff
-shows. Likely 1-3 days end-to-end.
-
-**Files:**
-- `tools/reference_backends/parakeet.py` — add per-layer hooks
-- `examples/cli/crispasr_diff_main.cpp` — add `encoder_layer_K`
-  comparison stages for the parakeet branch
-- `src/parakeet.cpp` / `src/parakeet.h` — add a per-layer
-  `parakeet_run_encoder_to_layer(K)` entry point
-- `src/core/fastconformer.h` — likely fix once diff localises it
 
 ---
 

@@ -2208,29 +2208,63 @@ static float* codec_extract_stage(qwen3_tts_context* c, const int32_t* codes, in
 // For the SEANet encoder, tensors are in [T, C] format (ne[0]=T innermost).
 // ---------------------------------------------------------------------------
 
-// SEANet/Mimi causal conv1d (matches MimiConv1d semantics):
-// pad_left = K - stride (causal alignment) + extra_padding on RIGHT for stride
-// alignment so output length = ceil(T_in / stride) (not floor).
+// Replicate-pad a [T, C] tensor along the time axis: pad_left copies of x[0]
+// on the left, pad_right copies of x[T-1] on the right. Output is contiguous.
+static ggml_tensor* cenc_replicate_pad(ggml_context* ctx, ggml_tensor* x, int pad_left, int pad_right) {
+    if (pad_left == 0 && pad_right == 0) return x;
+    const int T = (int)x->ne[0];
+    const int C = (int)x->ne[1];
+    ggml_tensor* result = x;
+    if (pad_left > 0) {
+        // first frame: ggml_view_2d(x, ne0=1, ne1=C, nb1=x->nb[1], offset=0)
+        ggml_tensor* first = ggml_view_2d(ctx, x, 1, C, x->nb[1], 0);
+        // tile to [pad_left, C]
+        ggml_tensor* target = ggml_new_tensor_2d(ctx, x->type, pad_left, C);
+        ggml_tensor* left = ggml_repeat(ctx, first, target);
+        result = ggml_concat(ctx, left, result, 0); // concat along ne[0]=T
+    }
+    if (pad_right > 0) {
+        const int T_now = (int)result->ne[0];
+        ggml_tensor* last = ggml_view_2d(ctx, result, 1, C, result->nb[1],
+                                         (size_t)(T_now - 1) * result->nb[0]);
+        ggml_tensor* target = ggml_new_tensor_2d(ctx, x->type, pad_right, C);
+        ggml_tensor* right = ggml_repeat(ctx, last, target);
+        result = ggml_concat(ctx, result, right, 0);
+    }
+    (void)T; // suppress unused warning
+    return result;
+}
+
+// SEANet/Mimi causal conv1d.
 // Input: [T, C_in] → output [T_out, C_out].
-static ggml_tensor* cenc_conv1d(ggml_context* ctx, ggml_tensor* x, const g3t_cenc_conv& c, int stride) {
+// Causal padding (all on the left), plus optional extra-right padding
+// for stride alignment (matches MimiConv1d._get_extra_padding_for_conv1d).
+// pad_replicate: if true, use replicate (edge-value) padding instead of zero.
+static ggml_tensor* cenc_conv1d_ext(ggml_context* ctx, ggml_tensor* x, const g3t_cenc_conv& c, int stride,
+                                     bool pad_replicate) {
     const int K = (int)c.w->ne[0];
     const int pad_total = K - stride; // causal: all goes left
-    // Extra padding on right for stride alignment (matches MimiConv1d).
-    // Python: n_frames = ceil((T - K + pad_total)/stride + 1) - 1
-    //         ideal_length = n_frames * stride + K - pad_total
-    //         extra_padding = ideal_length - T
     const int T_in = (int)x->ne[0];
+
+    // PyTorch's exact formula:
+    //   n_frames = ceil((T - K + pad_total)/stride + 1) - 1
+    //   ideal    = n_frames * stride + K - pad_total
+    //   extra    = max(0, ideal - T_in)
     int extra_right = 0;
-    if (stride > 1) {
-        // (T - K + pad_total)/stride + 1, then ceil and subtract 1, then convert to ideal length
-        int numer = T_in - K + pad_total;
-        int n_frames = (numer + stride - 1) / stride; // ceil(numer/stride)
+    if (stride >= 1) {
+        // floats to mirror PyTorch's float ceil
+        double n_frames_f = (double)(T_in - K + pad_total) / (double)stride + 1.0;
+        int n_frames = (int)std::ceil(n_frames_f) - 1;
         int ideal = n_frames * stride + K - pad_total;
         extra_right = ideal - T_in;
         if (extra_right < 0) extra_right = 0;
     }
-    if (pad_total > 0 || extra_right > 0)
-        x = ggml_pad_ext(ctx, x, pad_total, extra_right, 0, 0, 0, 0, 0, 0);
+    if (pad_total > 0 || extra_right > 0) {
+        if (pad_replicate)
+            x = cenc_replicate_pad(ctx, x, pad_total, extra_right);
+        else
+            x = ggml_pad_ext(ctx, x, pad_total, extra_right, 0, 0, 0, 0, 0, 0);
+    }
     x = ggml_conv_1d(ctx, c.w, x, stride, 0, 1);
     if (ggml_n_dims(x) > 2)
         x = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1]);
@@ -2239,6 +2273,11 @@ static ggml_tensor* cenc_conv1d(ggml_context* ctx, ggml_tensor* x, const g3t_cen
         x = ggml_add(ctx, x, b);
     }
     return x;
+}
+
+// Convenience: zero-pad version (used by all SEANet convs).
+static ggml_tensor* cenc_conv1d(ggml_context* ctx, ggml_tensor* x, const g3t_cenc_conv& c, int stride) {
+    return cenc_conv1d_ext(ctx, x, c, stride, /*pad_replicate*/ false);
 }
 
 static ggml_tensor* cenc_elu(ggml_context* ctx, ggml_tensor* x) {
@@ -2257,14 +2296,28 @@ static ggml_tensor* cenc_resblk(ggml_context* ctx, ggml_tensor* x, const g3t_cen
 
 // Full SEANet encoder: audio [1, T] → features [T/960, 512].
 // Input: pcm in [T_audio, 1] format (1-channel raw PCM).
-static ggml_tensor* build_cenc_seanet(ggml_context* ctx, const g3t_cenc_seanet& se, ggml_tensor* pcm) {
+// graph parameter: if non-null, intra-SEANet checkpoints are added to the
+// graph as outputs (cenc_se_init, cenc_se_stride{0..3}, cenc_se_final).
+static ggml_tensor* build_cenc_seanet(ggml_context* ctx, const g3t_cenc_seanet& se, ggml_tensor* pcm,
+                                       ggml_cgraph* graph_for_checkpoints = nullptr) {
     static const int strides[] = {4, 5, 6, 8};
     ggml_tensor* x = pcm; // [T, 1]
     x = cenc_conv1d(ctx, x, se.init, 1); // → [T, 64]
+    if (graph_for_checkpoints) {
+        ggml_tensor* dump = ggml_cont(ctx, ggml_transpose(ctx, x));
+        ggml_set_name(dump, "cenc_se_init"); ggml_set_output(dump);
+        ggml_build_forward_expand(graph_for_checkpoints, dump);
+    }
     for (int i = 0; i < 4; i++) {
         x = cenc_resblk(ctx, x, se.resblk[i]);
         x = cenc_elu(ctx, x);
         x = cenc_conv1d(ctx, x, se.ds[i], strides[i]);
+        if (graph_for_checkpoints) {
+            ggml_tensor* dump = ggml_cont(ctx, ggml_transpose(ctx, x));
+            char name[32]; snprintf(name, sizeof(name), "cenc_se_s%d", i);
+            ggml_set_name(dump, name); ggml_set_output(dump);
+            ggml_build_forward_expand(graph_for_checkpoints, dump);
+        }
     }
     x = cenc_elu(ctx, x);
     x = cenc_conv1d(ctx, x, se.final, 1); // → [T/960, 512]
@@ -2365,7 +2418,7 @@ static ggml_cgraph* build_cenc_graph(qwen3_tts_context* c, int n_samples) {
 
     // Reshape to [n_samples, 1] for conv1d (b=[T, IC])
     ggml_tensor* x = ggml_reshape_2d(ctx0, pcm, n_samples, 1); // [T, IC=1]
-    x = build_cenc_seanet(ctx0, ce.seanet, x);      // [T_enc, 512] in ggml ne=[T_enc, 512]
+    x = build_cenc_seanet(ctx0, ce.seanet, x, gf);  // intra-SEANet checkpoints attached to gf
     // For diff harness: transpose to [C, T_enc] = ne=[512, T_enc] so the flat
     // memory layout matches Python's (T_enc, 512) numpy stored to GGUF.
     {
@@ -2383,9 +2436,10 @@ static ggml_cgraph* build_cenc_graph(qwen3_tts_context* c, int n_samples) {
         ggml_build_forward_expand(gf, dump);
     }
 
-    // Downsample using the same SEANet causal-pad convention.
+    // Downsample uses replicate padding (Mimi pad_mode='replicate' for this
+    // single layer, while all other encoder convs use 'constant' zero pad).
     g3t_cenc_conv ds_conv = {ce.downsample.w, ce.downsample.b};
-    ggml_tensor* tmp = cenc_conv1d(ctx0, x, ds_conv, 2); // ne=[T_frames, 512]
+    ggml_tensor* tmp = cenc_conv1d_ext(ctx0, x, ds_conv, 2, /*replicate*/ true); // ne=[T_frames, 512]
     {
         ggml_tensor* dump = ggml_cont(ctx0, ggml_transpose(ctx0, tmp)); // ne=[512, T_frames]
         ggml_set_name(dump, "cenc_ds_out");

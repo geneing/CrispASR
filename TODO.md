@@ -525,44 +525,7 @@ Full tracking is in `UPSTREAM.md`. Short summary:
 
 ---
 
-### GLM-ASR-Nano (#26) — DONE ✅
-- **Model:** zai-org/GLM-ASR-Nano-2512 (1.5B params, MIT, 17 languages)
-- **Architecture:** Whisper encoder (1280d, 32L, partial RoPE 0.5) + 4-frame projector + Llama LLM (2048d, 28L, GQA 16/4)
-- **Files:** src/glm_asr.{h,cpp}, models/convert-glm-asr-to-gguf.py, examples/cli/crispasr_backend_glm_asr.cpp
-- **GGUF:** F16 4.52 GB (747 tensors). Quantization supported via crispasr-quantize.
-- **State:** Correct transcription on jfk.wav. 12th backend.
-
-## Current session WIP (April 2026)
-
-### Silero LID native port (#56) — DONE ✅
-- **Files:** src/silero_lid.{h,cpp}, models/convert-silero-lid-to-gguf.py
-- **State:** Fully working. Detects English on jfk.wav, German on German samples, Latvian on Latvian samples. Matches ONNX reference model output.
-- **5 bugs fixed:** (1) front-end zero-pad 160/side not reflection-pad 320 left, (2) stride-2 output T=(T-1)/2+1 not T/2, (3) QKV split order K,Q,V not Q,K,V, (4) missing ReLU after stride-1 projections stages 4-7, (5) missing tanh in attention pooling.
-- **Architecture:** Learned STFT Conv1d(1→322,k=320,s=160) → magnitude → log(2^20×mag+1) → adaptive norm (17-tap reflected smooth) → 8×(12 dw-sep conv + post-norm transformer + stride-2/1 proj+ReLU) → attention pool (tanh+softmax) → 95-lang + 58-group classifiers.
-- **GGUF:** F32 16.1 MB, Q8_0 ~9 MB. Available at `cstr/silero-lid-lang95-GGUF`.
-
-### wav2vec2 ggml rewrite (#63) — DONE ✅
-- **Files:** src/wav2vec2-ggml.{h,cpp}
-- **State:** Layer-by-layer ggml graphs (~80 MB/layer, reused). CNN+posconv stay manual. Correct output on jfk.wav.
-- **Architecture:** Per-layer graph with `ggml_graph_compute_with_ctx` (proven to correctly reference external F16 weights). LM head via `ggml_linear_f32`.
-- **Root causes found:**
-  1. `ggml_gallocr`/`ggml_backend_sched` corrupt external F16 weight tensors (reallocate over them). Workaround: use `compute_with_ctx`.
-  2. Data layout confusion: ggml `[H,T]` stores `data[h+t*H]` = C's `data[t*H+h]` — SAME layout as `[T,H]` row-major. The original code had a spurious transpose that corrupted all data.
-  3. `flash_attn_ext` crashes with `mask=nullptr`. Replaced with `mul_mat`-based attention.
-  4. Logits `[V,T]` in ggml = `[T,V]` row-major — no transpose needed.
-- **Model:** `jonatasgrosman/wav2vec2-large-xlsr-53-english` (33 vocab, 1024 hidden, 24 layers).
-
-### Pyannote v3 native (#57) — DONE ✅
-- **Full runtime:** SincNet + 4× biLSTM + 3× Linear + LogSoftmax (440 lines C++)
-- **Wired into CLI:** `--diarize-method pyannote --sherpa-segment-model *.gguf` uses native path, falls back to subprocess for .onnx
-- **Tested:** 650 frames on jfk.wav, "(speaker 1)" assigned correctly
-
-### Granite speedup (#64) — CLOSED (hardware-blocked)
-- 33s for 11s audio at q4_k, 4 threads. Bottleneck: autoregressive LLM decode (26s of 33s).
-- `--gpu-backend` flag exists, granite uses `ggml_backend_init_best()`. No code changes needed — just add a GPU.
-
-### iOS + Android CI (#65) — DONE ✅
-- Cross-compilation gates for arm64 iOS (Xcode) + arm64-v8a Android (NDK r26d).
-
-### v0.1.0 release — SHIPPED ✅
-- Linux 660KB, macOS 484KB, Windows 1437KB — all 3 platforms built via GitHub Actions.
+<!-- Completed work moved to HISTORY.md:
+     #26 GLM-ASR-Nano, #56 Silero LID native, #57 pyannote v3 native,
+     #63 wav2vec2 ggml rewrite, #64 granite speedup (closed,
+     hardware-blocked), #65 iOS+Android CI, v0.1.0 release. -->

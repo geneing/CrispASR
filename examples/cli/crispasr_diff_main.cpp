@@ -829,8 +829,13 @@ int main(int argc, char** argv) {
         const int n_samp = (int)audio_pair.second;
         std::vector<float> audio_buf(audio_pair.first, audio_pair.first + n_samp);
 
-        // Compare each stage
+        // Compare each stage (intra-SEANet first to localize drift)
         static const char* stages[] = {
+            "cenc_se_init",
+            "cenc_se_s0",
+            "cenc_se_s1",
+            "cenc_se_s2",
+            "cenc_se_s3",
             "cenc_seanet_out",
             "cenc_xfmr_out",
             "cenc_ds_out",

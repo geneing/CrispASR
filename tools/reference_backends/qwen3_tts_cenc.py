@@ -27,6 +27,11 @@ import numpy as np
 
 DEFAULT_STAGES = [
     "cenc_input_audio",
+    "cenc_se_init",
+    "cenc_se_s0",
+    "cenc_se_s1",
+    "cenc_se_s2",
+    "cenc_se_s3",
     "cenc_seanet_out",
     "cenc_xfmr_out",
     "cenc_ds_out",
@@ -109,6 +114,27 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
                 # output is [B, 512, T_enc] — store as (T_enc, 512)
                 captures["cenc_seanet_out"] = t.detach().cpu().float().squeeze(0).T.numpy()
         encoder.encoder.register_forward_hook(cap_seanet)
+
+    # Intra-SEANet checkpoints. The encoder.encoder is a ModuleList where
+    # layer indices map to: 0=init conv, {3,6,9,12}=stride convs (s0..s3).
+    # Hooks on those four MimiConv1d modules give us per-stride outputs.
+    seanet_intra = {
+        "cenc_se_init": 0,
+        "cenc_se_s0":   3,
+        "cenc_se_s1":   6,
+        "cenc_se_s2":   9,
+        "cenc_se_s3":   12,
+    }
+    for name, idx in seanet_intra.items():
+        if name in stages:
+            def make_cap(nm):
+                def cap(_mod, _inp, out):
+                    if nm not in captures:
+                        t = out[0] if isinstance(out, tuple) else out
+                        # MimiConv1d returns [B, C, T] — store as (T, C)
+                        captures[nm] = t.detach().cpu().float().squeeze(0).T.numpy()
+                return cap
+            encoder.encoder.layers[idx].register_forward_hook(make_cap(name))
 
     # Hook 2: encoder_transformer output (post-hook on the transformer)
     # The transformer returns (last_hidden_state, ...) tuple where last_hidden_state

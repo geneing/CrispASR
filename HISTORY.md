@@ -550,3 +550,146 @@ The remaining encoder/decode optimisations (TODO O10/O11) are
 secondary now — at 1.4× realtime the model is usable; further
 work would target per-token decode cost. See LEARNINGS "Specific
 bugs that cost us a day each" #9.
+
+**NeMo-cluster encoder cosine fix — parakeet bias load (April 2026):**
+
+The 24-layer FastConformer encoder was producing cos_mean=0.79 vs the
+NeMo reference on Japanese audio (`reazon_meal_11s.wav`) and JSUT,
+even though `mel_spectrogram` matched at cos≈0.999 after the preemph
++ Bessel-corrected PerFeatureZ fix. Symptom was small but real: extra
+hallucinated prefixes (`本当`) and partial syllables on conversational
+JA (parakeet-tdt-0.6b-ja, issue #37).
+
+Root cause was a 10-line bug in `parakeet_load_weights`. The GGUF
+stored `attn.{q,k,v,out}.bias` + `{ff1,ff2}.linear{1,2}.bias` +
+`conv.{pw1,pw2}.bias` (10 biases per layer × 24 layers = 240 tensors)
+but the loader only fetched the weights — the bias slots stayed
+nullptr, and `mm_bias` silently skipped the bias add. Fix: add
+`e.X_b = try_("…bias")` for each missing slot. `try_get` rather than
+`require` keeps v3 (which has `use_bias=False`) compatible.
+
+Result: `encoder_output cos_mean: 0.792 → 0.996` on reazon_meal_11s,
+similar on JSUT. v3 EN regression on JFK still passes. Per-layer
+diff confirmed the divergence had started at `encoder_layer_0`
+(immediately after a bit-exact `pre_encode_output`), localising the
+bug inside the conformer block before grep'ing the loader.
+
+Residual: layers 17–22 keep cos_mean ≈ 0.99 but cos_min crashes to
+negative on specific frames (`encoder_layer_22` cos_min = −0.67).
+Suspects: rel_shift edge cases, position-encoding numerical
+instability on specific positions, or a buffer-aliasing issue in the
+dump path. Not blocking the bug-report fix; reusable diagnostic
+infra (per-layer captures in `reference_backends/parakeet.py`,
+`parakeet_run_encoder_dump`, `encoder_layer_K` stages in the diff
+harness) is in place for canary, canary_ctc, and any future
+NeMo-cluster runtime debug. Commit `e598767`.
+
+**Qwen3-TTS codec decoder — Metal kernel fix (April 2026):**
+
+The codec decoder (8L sliding-window transformer + ConvNeXt + 4×
+SnakeBeta+tconv → 24 kHz waveform) hung on M1 with
+`kIOGPUCommandBufferCallbackErrorImpactingInteractivity` whenever
+`use_gpu=true`.
+
+Root cause was instrumented via two env vars added to
+`src/qwen3_tts.cpp`:
+- `QWEN3_TTS_CODEC_TRACE=1` — prints per-node
+  `op / tensor name / shape -> backend` before each op, with
+  `ggml_backend_synchronize` after each so a hang attributes to the
+  last printed line.
+- `QWEN3_TTS_CODEC_FORCE_METAL=1` — re-routes codec weights and
+  compute through the Metal-capable `c->sched`, reproducing the
+  hang for triage.
+
+Trace localised the hang to op 536: `GGML_OP_CONV_TRANSPOSE_1D` in
+decoder block 1 (in-T=320, out-T=1605, C_out=384, stride=5,
+kernel=10). Block 0 (stride=8, in-T=40, out-T=320) ran fine. The
+SnakeBeta `sin`/`exp` and `conv_1d_dw` chains that were originally
+suspected all completed cleanly on Metal.
+
+The actual ggml-Metal `kernel_conv_transpose_1d` does
+`for i in 0..IL { if (j ∈ [i*s0, i*s0+K)) accumulate; }` — but at
+most `ceil(K/s0)` (=2 here) values of `i` ever satisfy that
+condition. The kernel was iterating all 320 input positions for each
+output element, doing ~160× the necessary work, which kept Metal
+command buffers above the macOS GPU watchdog's ~5 sec ceiling.
+
+**Fix landed in the ggml fork** (`ggml/src/ggml-metal/ggml-metal.metal`,
+marked `// CrispASR patch`): compute the contributing `i` range
+analytically before the input-channel loop and iterate only those
+positions. Bit-identical output, ~160× less work on the codec
+shape, comfortably under the watchdog. Documented in LEARNINGS.md
+under "Metal conv_transpose_1d input range tightening" with the
+"MUST RE-APPLY after every ggml bump" pattern (matches the existing
+"CUDA im2col grid overflow" entry).
+
+After the patch: 8/8 codec stages PASS with `use_gpu=true` end-to-end
+on Metal, cos_min ≥ 0.999983 against the Python reference (slightly
+tighter than the CPU path, presumably from F16 vs F32 mul/accum
+differences in non-conv ops).
+
+The original CPU-pin workaround (`codec_sched`, codec weights loaded
+onto `c->backend_cpu`) is kept as a runtime safety net in case the
+kernel patch is lost on a future ggml bump before the LEARNINGS
+"RE-APPLY" reminder is honoured. Trace env vars also stay — useful
+for debugging any future codec issue. PLAN #52 step 4 (ECAPA
+speaker_encoder) is unaffected since it uses regular conv1d, not
+transposed conv.
+
+**Aux runtimes — Silero LID / pyannote v3 / wav2vec2-ggml (April 2026):**
+
+Three small standalone runtimes landed alongside the main backend
+work. All shipped end-to-end-correct with public GGUFs.
+
+- **Silero LID native port (#56):** `src/silero_lid.{h,cpp}` plus
+  `models/convert-silero-lid-to-gguf.py`. 95-language detector, 16 MB
+  F32 GGUF (Q8_0 ~9 MB; quants below Q8_0 break accuracy on the small
+  conv tensors). Pure-C++ forward pass, no ggml graph (manual F32
+  loops, similar to pyannote_seg). Architecture: learned STFT
+  Conv1d(1→322,k=320,s=160) → magnitude → log(2²⁰·mag+1) → adaptive
+  norm (17-tap reflected smooth) → 8×(12 dw-sep conv + post-norm
+  transformer + stride-2/1 proj+ReLU) → attention pool (tanh+softmax)
+  → 95-lang + 58-group classifiers. Five bugs fixed during port:
+  (1) front-end zero-pad 160/side, not reflection-pad 320 left;
+  (2) stride-2 output `T = (T−1)/2 + 1`, not `T/2`; (3) QKV split
+  order K,Q,V (not Q,K,V); (4) missing ReLU after stride-1
+  projections stages 4–7; (5) missing tanh in attention pooling.
+  CLI: when `--lid-model *.gguf` is passed, the native path runs;
+  falls back to sherpa subprocess for `.onnx`. Verified across
+  English, German, and Latvian. HF: `cstr/silero-lid-lang95-GGUF`.
+
+- **Pyannote v3 native (#57):** SincNet + 4× biLSTM + 3× Linear +
+  LogSoftmax, ~440 lines of C++. Wired into the CLI as
+  `--diarize-method pyannote --sherpa-segment-model *.gguf` (native
+  path; subprocess fallback for `.onnx`). Verified on jfk.wav with
+  650 frames and correct "(speaker 1)" assignment.
+  HF: `cstr/pyannote-v3-segmentation-GGUF` (5.7 MB F32).
+
+- **wav2vec2 ggml rewrite (#63):** `src/wav2vec2-ggml.{h,cpp}`,
+  layer-by-layer ggml graphs (~80 MB/layer, reused) for the 24-layer
+  XLSR-53 transformer; CNN + pos_conv stay manual. Four root causes
+  during port: (1) `ggml_gallocr` / `ggml_backend_sched` corrupt
+  external F16 weight tensors (reallocate over them) — workaround
+  `ggml_graph_compute_with_ctx`; (2) ggml `[H,T]` stores
+  `data[h + t·H]` which is the SAME layout as `[T,H]` row-major in C
+  — the original code had a spurious transpose that corrupted all
+  data; (3) `flash_attn_ext` crashes with `mask=nullptr` —
+  replaced with mul_mat attention; (4) logits `[V,T]` in ggml =
+  `[T,V]` row-major, no transpose needed. Tested with
+  `jonatasgrosman/wav2vec2-large-xlsr-53-english` (33 vocab,
+  1024 hidden, 24 layers) — correct output on jfk.wav.
+
+**iOS + Android CI gates + v0.1.0 release (April 2026):**
+
+- iOS (arm64, Xcode) and Android (arm64-v8a, NDK r26d) cross-compile
+  gates added to GitHub Actions. Catches breakage early on the
+  lowest-traffic platforms.
+- v0.1.0 shipped via GitHub Actions: Linux 660 KB, macOS 484 KB,
+  Windows 1437 KB.
+
+**Granite speed (#64) — closed, hardware-blocked:** at Q4_K /
+4-thread CPU the 11s clip takes 33 s, and 26 s of that is
+autoregressive LLM decode. `--gpu-backend` already exists and
+granite uses `ggml_backend_init_best()` — no code change moves the
+needle without GPU hardware. Tracked in TODO under per-model
+follow-ups for OpenMP encoder annotations as a CPU-only nibble.
