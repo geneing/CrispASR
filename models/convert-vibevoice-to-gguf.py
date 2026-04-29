@@ -82,10 +82,30 @@ def main():
     print(f"  total downsample: {total_downsample}x, base_filters={n_filters}")
     tts_n_layers = cfg.get("tts_backbone_num_hidden_layers", 0)
 
-    actual_base_layers = n_lm_layers  # will be corrected after scanning tensors
     print(f"  vocab={vocab_size}, rope_theta={rope_theta}, head_dim={head_dim}")
     if tts_n_layers > 0:
         print(f"  TTS LM: {tts_n_layers} layers (streaming model)")
+
+    # Pre-scan tensors to detect ACTUAL base LM layer count before writing metadata.
+    # Realtime-0.5B's config says 24 base LM layers but ships only 4 — every metadata
+    # write happens once with the corrected value.
+    shard_files = sorted([f for f in os.listdir(model_dir) if f.endswith(".safetensors")])
+    detected_base_layers = set()
+    for shard in shard_files:
+        path = os.path.join(model_dir, shard)
+        with safe_open(path, framework="pt") as f:
+            for name in f.keys():
+                if "language_model.layers." in name and "tts_" not in name:
+                    try:
+                        layer = int(name.split("language_model.layers.")[1].split(".")[0])
+                        detected_base_layers.add(layer)
+                    except (ValueError, IndexError):
+                        pass
+    if detected_base_layers:
+        actual_base_layers = max(detected_base_layers) + 1
+        if actual_base_layers != n_lm_layers:
+            print(f"  NOTE: actual base LM layers = {actual_base_layers} (config says {n_lm_layers})")
+            n_lm_layers = actual_base_layers
 
     # Create GGUF
     model_name = os.path.basename(args.input.rstrip("/"))
@@ -192,32 +212,6 @@ def main():
         name = name.replace("tts_language_model.", "tts_lm.")
         name = name.replace("tts_input_types.", "tts_types.")
         return name
-
-    # Pre-scan: detect actual base LM layer count (Realtime model has 4, not 24)
-    shard_files = sorted([f for f in os.listdir(model_dir) if f.endswith(".safetensors")])
-    detected_base_layers = set()
-    for shard in shard_files:
-        path = os.path.join(model_dir, shard)
-        with safe_open(path, framework="pt") as f:
-            for name in f.keys():
-                if "language_model.layers." in name and "tts_" not in name:
-                    try:
-                        layer = int(name.split("language_model.layers.")[1].split(".")[0])
-                        detected_base_layers.add(layer)
-                    except (ValueError, IndexError):
-                        pass
-    if detected_base_layers:
-        actual_base_layers = max(detected_base_layers) + 1
-        if actual_base_layers != n_lm_layers:
-            print(f"  NOTE: actual base LM layers = {actual_base_layers} (config says {n_lm_layers})")
-            n_lm_layers = actual_base_layers
-            # vibevoice.n_lm_layers was already written above with the config value.
-            # Overwrite the stored entry directly (newer gguf rejects re-adding the same key).
-            kv_entry = writer.kv_data[0]["vibevoice.n_lm_layers"]
-            if hasattr(kv_entry, "value"):
-                kv_entry.value = n_lm_layers
-            else:
-                kv_entry["value"] = n_lm_layers
 
     # Load and write tensors
     tensor_count = 0
