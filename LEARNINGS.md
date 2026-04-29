@@ -3864,3 +3864,153 @@ dumps.
   `perframe_<stage>_f<NNN>.bin` per frame". Worth standardizing across
   AR-TTS backends.
 
+## Mimi/SEANet encoder: pad_mode varies per-layer (April 2026)
+
+Porting the Qwen3-TTS-Tokenizer-12Hz codec encoder (which inherits
+`MimiModel` from `transformers`) cost a session because we copied the
+"padding looks the same everywhere" assumption from kyutai_stt's encoder
+without checking. It isn't.
+
+### What broke
+
+The codec encoder's runtime-extracted RVQ codes weren't matching the
+Python-baked codes for the same audio. End-to-end synthesis with those
+codes hung the talker (it never emitted EOS). The diff harness reported:
+
+```
+cenc_se_init      cos_min=1.000000  PASS
+cenc_se_s0        cos_min=0.999339  PASS  (after stride-4 conv)
+cenc_se_s1        cos_min=0.973387        (after stride-5 conv)
+cenc_se_s2..s3    cos_min ≈ 0.997
+cenc_seanet_out   cos_min=0.981
+cenc_xfmr_out     cos_min=0.987
+cenc_ds_out       cos_min=0.553   ← huge drop, max_abs=11.4
+```
+
+`cenc_ds_out` is the stride-2 downsample applied AFTER the encoder
+transformer to halve the frame rate from `encodec_frame_rate` to
+`frame_rate` (25 Hz → 12.5 Hz here). That single layer was contributing
+nearly all of the encoded-codes divergence.
+
+### Why
+
+`MimiConv1d` takes `pad_mode` from `config.pad_mode` by default, which
+the Qwen3-TTS-Tokenizer config sets to `"constant"` (zero pad). All
+SEANet convs (init, residual, stride, final) and the encoder
+transformer's downsample inside the resblocks use that default.
+
+But `MimiModel.__init__` overrides this for the FRAME-RATE downsample:
+
+```python
+self.downsample = MimiConv1d(
+    config, hidden_size, hidden_size,
+    kernel_size=2 * int(encodec_frame_rate / frame_rate),
+    stride=2,
+    bias=False,
+    pad_mode="replicate",   # ← per-layer override
+    layer_idx=...,
+)
+```
+
+`pad_mode="replicate"` means PyTorch's `F.pad(x, (left, right),
+mode='replicate')` repeats the boundary values rather than zeroing
+them. For a `[1, 2, 3, 4, 5]` tail with `(left=2, right=1)`:
+
+- `'constant'`: `[0, 0, 1, 2, 3, 4, 5, 0]`
+- `'replicate'`: `[1, 1, 1, 2, 3, 4, 5, 5]`
+
+For a low-stride conv that operates near input boundaries (like the
+final 2× downsample), the difference in the boundary frames is the
+difference between "edge-frame fed real signal" and "edge-frame fed
+zeros" — and it propagates undamped through the rest of the codec
+because there's no further smoothing layer.
+
+### What fixed it
+
+Adding a `cenc_replicate_pad` helper (built from `ggml_view_2d`,
+`ggml_repeat`, and `ggml_concat`) and wiring an opt-in
+`cenc_conv1d_ext(..., bool pad_replicate)` on top of the existing
+zero-pad path.
+
+```cpp
+// Replicate-pad along T: pad_left copies of x[0], pad_right copies of x[T-1].
+static ggml_tensor* cenc_replicate_pad(ggml_context* ctx, ggml_tensor* x,
+                                        int pad_left, int pad_right) {
+    if (pad_left == 0 && pad_right == 0) return x;
+    const int T = (int)x->ne[0];
+    const int C = (int)x->ne[1];
+    ggml_tensor* result = x;
+    if (pad_left > 0) {
+        ggml_tensor* first = ggml_view_2d(ctx, x, 1, C, x->nb[1], 0);
+        ggml_tensor* target = ggml_new_tensor_2d(ctx, x->type, pad_left, C);
+        result = ggml_concat(ctx, ggml_repeat(ctx, first, target), result, 0);
+    }
+    if (pad_right > 0) {
+        const int Tn = (int)result->ne[0];
+        ggml_tensor* last = ggml_view_2d(ctx, result, 1, C, result->nb[1],
+                                          (size_t)(Tn - 1) * result->nb[0]);
+        ggml_tensor* target = ggml_new_tensor_2d(ctx, x->type, pad_right, C);
+        result = ggml_concat(ctx, result, ggml_repeat(ctx, last, target), 0);
+    }
+    return result;
+}
+```
+
+Only the downsample layer takes the replicate path; everything else
+keeps `ggml_pad_ext`. After the fix, `cenc_ds_out` jumped from
+**cos_min=0.553 → 0.998** (max_abs from 11.4 → 0.99, ~10× reduction).
+
+### Generalisable lesson
+
+When porting any HF model that builds its layer stack from a generic
+`Conv1d` wrapper (Mimi, EnCodec, SEANet, ConvNeXt, etc.), grep the
+constructor for **per-layer kwargs overrides**. The same wrapper class
+gets used 30+ times with `pad_mode='constant'` and once with
+`pad_mode='replicate'` (or `bias=False`, or `dilation=2`, or
+`groups=8`), and that one outlier is exactly where the bug hides.
+Don't assume "same class = same config" — diff against `__init__`
+keyword arguments at every call site.
+
+### Diff-harness stages were essential
+
+We could not have found this in any reasonable time without
+intra-SEANet checkpoints. The end-to-end `cenc_seanet_out` cos_min was
+0.981 and the final `cenc_ds_out` was 0.553 — those numbers alone tell
+you "something's off late in the pipeline" but not which layer. Adding
+five extra dumps (`cenc_se_init`, `cenc_se_s{0..3}`) localised the
+drift to `cenc_ds_out` exclusively, and `cenc_se_s0` PASS-ing
+confirmed the SEANet base wasn't the culprit. The cost was 30 lines of
+Python hooks plus 30 lines of C++ `ggml_set_output` calls; the payoff
+was finding the specific layer in one diff run.
+
+### Other Mimi/Qwen3-TTS-Tokenizer encoder issues this harness caught
+
+1. **Causal mask missing** in the encoder transformer. The Mimi
+   encoder uses causal sliding-window attention (`sliding_window=250`,
+   but typical T_enc < 250 so effectively just causal). Initial port
+   used `ggml_flash_attn_ext(..., mask=nullptr, ...)` = full attention.
+   Fix moved `cenc_xfmr_out` from cos_min=−0.37 to 0.987.
+2. **Diff-harness layout transposition.** ggml `ne=[T,C]` puts T as
+   the innermost (memory-fastest) dim, but Python `(T, C)` numpy puts
+   C innermost. The element-by-element comparison was reading
+   transposed bytes for every stage. Fix: insert
+   `ggml_cont(ggml_transpose(...))` to put the dump tensor in
+   `ne=[C,T]` so its flat memory layout matches the Python (T, C)
+   numpy layout's flat C-order.
+3. **`MimiConv1d`'s `extra_padding` ceil-alignment.** When `T_in %
+   stride != 0`, an extra zero is padded on the right so output
+   length is `ceil(T_in/stride)` not `floor`. The Python formula:
+   ```python
+   n_frames = ceil((length - K + pad_total)/stride + 1) - 1
+   ideal    = n_frames*stride + K - pad_total
+   extra    = max(0, ideal - length)
+   ```
+   For our T_enc=75 → 38 downsample, `extra=1`. Forgetting this gave
+   37 frames instead of 38 and silently truncated downstream
+   comparisons.
+
+The complete recipe — for any future audio codec port — is:
+**dump after every stride-changing layer, not just at module
+boundaries.** Module boundaries hide the conv-by-conv accumulation;
+intra-module dumps localise it.
+
