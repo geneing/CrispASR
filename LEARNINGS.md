@@ -730,6 +730,35 @@ add 10-30 MB to the header for no benefit in our use case.
 
 Affected converters: gemma4-e2b, mimo-asr (any model with >100K BPE vocab).
 
+### Metal conv_transpose_1d input range tightening (MUST RE-APPLY after every ggml bump)
+
+Upstream ggml's Metal `kernel_conv_transpose_1d` iterates **all** input
+positions (`for i in 0..IL`) and uses an `if` to filter the ones that
+contribute to each output position. Mathematically only `ceil(K/s0)`
+inputs ever contribute to a given output (the K-wide kernel "lands" on
+at most that many input strides). For typical Snake-decoder-style
+transposed convs (`K = 2*s0`) this is just 2 — but the kernel still
+runs the full IL-long loop and pays the branch + memory traffic.
+
+**Symptom:** Qwen3-TTS codec decoder block 1 (IL=320, K=10, s0=5,
+output [1605, 384]) hangs the M1 GPU command buffer with
+`kIOGPUCommandBufferCallbackErrorImpactingInteractivity` after ~5 sec
+because each output-element thread does 320 inner-loop iterations
+(of which only 2 contribute) instead of 2.
+
+**Fix (file: `ggml/src/ggml-metal/ggml-metal.metal`, kernel
+`kernel_conv_transpose_1d`):** compute the contributing range
+`i ∈ [ceil((j - K + 1)/s0), floor(j/s0)] ∩ [0, IL-1]` once before the
+input-channel loop and iterate only those positions. ~160× less work
+on the codec block-1 shape; brings the kernel well under the macOS
+GPU watchdog window. Kernel output is bit-identical to the original
+formulation since only the never-contributing iterations are skipped.
+
+After the patch, qwen3-tts codec runs end-to-end on Metal with
+cos_min ≥ 0.999983 against the Python reference (8/8 stages PASS).
+Marked with `// CrispASR patch` in the kernel. **MUST RE-APPLY after
+every ggml bump.**
+
 ### CUDA im2col grid overflow (MUST RE-APPLY after every ggml bump)
 
 Upstream ggml's CUDA im2col kernel uses `OW` (output width) directly as
@@ -3646,4 +3675,192 @@ bypasses `core_mel` because the combination of semicausal padding +
 unfold-by-frame_length+1 doesn't fit `core_mel`'s parameter set. The
 test that catches this is the `mel_spectrogram` stage cos: bit-exact
 or it isn't.
+
+## VibeVoice-Realtime-0.5B TTS quality regression — issue #39 (April 2026)
+
+User report: with-voice TTS sounded "very noisy" and "crackling"
+compared to the upstream microsoft/VibeVoice-Realtime-0.5B output, even
+though our ASR round-trip was perfect on every test sample.
+
+The bug count was four, and only the first showed up in a single-stage
+frame-0 cos diff. The latter three required either a per-frame diff
+across the autoregressive loop or a sample-wise audio cos against a
+noise-pinned official run.
+
+### #1 — CFG negative path was advanced by every text window
+
+**Location:** `src/vibevoice.cpp` `process_text_window` (with-voice path).
+
+The C++ runtime ran the negative TTS-LM forward with neg-base-hidden +
+type_emb[1] for every text window, advancing `neg_n_past` by the window
+size and writing 5 spurious tokens of K/V into `kv_neg` per window.
+
+The official inference loop in `microsoft/VibeVoice/vibevoice/modular/
+modeling_vibevoice_streaming_inference.py:600-900` only ever calls
+`forward_tts_lm` for the negative path inside the speech-frame loop
+(line 841). Text windows update positive only.
+
+The initial `neg_condition` in the official is
+`all_prefilled_outputs["neg_tts_lm"].last_hidden_state[-1]` — the
+prefilled state of running TTS LM forward on a single `<|image_pad|>`
+token at pos 0 with no past KV. Our voice .gguf stores `voice.neg_lm`
+and `voice.neg_tts_lm` (the past_key_values) but NOT
+`last_hidden_state`. The fix recomputes the prefill at runtime via the
+exact recipe (cheap — one IMAGE_PAD pass per synthesize call) and uses
+`run_lm_step` to also write the K/V into `kv_neg` so subsequent speech
+frames attend to the same content the official does.
+
+### #2 — DPM-Solver++ timesteps were spaced wrong
+
+**Location:** `src/vibevoice.cpp` `make_ddim_schedule`.
+
+The diffusers `DPMSolverMultistepScheduler` with the default
+`timestep_spacing="linspace"` does:
+
+```python
+timesteps = (
+    np.linspace(0, num_train - 1, num_inference_steps + 1)
+      .round()[::-1][:-1]
+)
+```
+
+For N=20 over T=1000 this is `[999, 949, 899, ..., 50]` — the LAST
+timestep is **50, not 0**. The final t=0 cleanup is implicit because
+`set_timesteps` appends a `sigma=0` to the sigma array
+(`final_sigmas_type="zero"` is the default), so the last solver step
+naturally lands on `x = x0`.
+
+Our schedule was `linspace(0, T-1, N).round()[::-1]` with the last
+forced to 0:
+
+```cpp
+s.timesteps[i] = round((T-1) * (1 - i / (N-1)));
+s.timesteps[N-1] = 0;
+```
+
+For N=20 this gives `[999, 946, 894, 841, ..., 53, 0]`. That's off by
+up to 50 from the official schedule. Per-frame ALPHAS_CUMPROD differs
+at every step → small per-step error → catastrophic accumulation:
+frame 0 still cos 0.999 (small drift), frame 2 v_cfg cos -0.289
+(opposite direction!), frames 3+ unsalvageable.
+
+The fix is one line:
+
+```cpp
+s.timesteps[i] = round((T-1) * (N-i) / N);  // i = 0..N-1
+```
+
+Lesson: **never substitute "what looks like the same linspace" for the
+diffusers reference behavior**. The +1 / drop-last / final-sigma=0
+combo encodes a specific final-step semantic that's invisible until
+you diff against an actual diffusers run.
+
+### #3 — Voice GGUF stores KV but not the prefilled last_hidden_state
+
+The official voice `.pt` files are full
+`{lm, tts_lm, neg_lm, neg_tts_lm}` dicts of `BaseModelOutputWithPast`
+objects, each containing `past_key_values` AND `last_hidden_state`. The
+inference loop reads `tts_lm_negative_outputs.last_hidden_state[-1]` as
+the initial negative_condition for frame 0 of the first speech window.
+
+Our `convert-vibevoice-voice-to-gguf.py` only writes the
+`past_key_values` tensors — `last_hidden_state` is dropped. So at
+runtime the C++ has to either (a) extend the voice file format, or
+(b) recompute the prefill from weights. Recompute is cheap (one
+1-token pass through 4 base + 20 TTS layers) and stays compatible
+with existing voice .gguf files. Bug #1's fix uses (b).
+
+### #4 — σ-VAE Block1D FFN uses GELU, not SiLU
+
+**Location:** `src/vibevoice.cpp` `build_block1d`.
+
+After fixing #1 and #2 the per-frame latent cos vs the official model
+was ≥ 0.9989 across 56 frames of the long test sentence. But audio cos
+at zero shift was only **0.8225**, and our amplitude was ~65% of
+reference. That mismatched the per-frame match: if the latents are
+right and the decoder is right, the audio is right.
+
+The decoder wasn't right. From `microsoft/VibeVoice/vibevoice/modular/
+modular_vibevoice_tokenizer.py:591`:
+
+```python
+class FFN(nn.Module):
+    def __init__(self, embed_dim, ffn_dim, bias=False):
+        self.linear1 = nn.Linear(embed_dim, ffn_dim, bias=bias)
+        self.gelu = ACT2FN["gelu"]            # ← GELU
+        self.linear2 = nn.Linear(ffn_dim, embed_dim, bias=bias)
+
+    def forward(self, x):
+        x = self.linear1(x); x = self.gelu(x); x = self.linear2(x)
+        return x
+```
+
+`build_block1d` had `ggml_silu` in the FFN. SiLU and GELU look similar
+on a single forward pass (cos ~0.999 element-wise on Gaussian inputs)
+but the σ-VAE decoder runs ~30 ConvNeXt blocks on the latent and the
+accumulated activation drift produces audible **crackling** — not
+broadband noise, not muffling, but something that sounds like clipped
+samples or sample-rate mismatch even though the waveform is in range
+and at 24 kHz. RMS comes out about 65% of reference because the gating
+non-linearity damps the residual stream slightly more than GELU.
+
+After the fix: audio cos vs official = **0.9991** at the 322 ms shift
+caused by C++'s leading-silence trim (essentially bit-exact modulo
+F16). Spectral profile bands now in family with reference across
+0-12 kHz.
+
+`build_block1d` is shared between the encoder and the decoder, so the
+ASR-side acoustic and semantic tokenizers also get GELU. The text LM
+that consumes the encoder hidden states is robust to small encoder
+drift, so we don't expect ASR behavior change — but worth a regression
+spot-check on a known sample.
+
+### Per-frame methodology vs single-stage cos
+
+The lesson worth carrying: **for autoregressive models, a single-stage
+cos diff at frame 0 is not enough.** Bugs #1 and #2 produced cos > 0.99
+at frame 0 stages (because the chain of errors hadn't accumulated yet)
+but cos ≈ 0 by frame 2. Bug #4 produced cos ≥ 0.999 at every per-frame
+*latent* stage but cos = 0.82 in the actual audio (the decoder had a
+constant per-block multiplicative error).
+
+Three orthogonal harnesses — only all three together pin a bug to a
+specific module:
+
+1. **Per-frame conditions/latents diff** (`tools/diff_vibevoice_tts.py`
+   + `VIBEVOICE_TTS_DUMP_PERFRAME=1` in C++ + hooks on the upstream
+   model in `tools/run_official_vibevoice.py`). Catches LM/CFG/AR
+   bugs (#1, #2).
+2. **Sample-wise audio cos at zero shift, then at the
+   cross-correlation peak.** Catches decoder-side bugs (#4) that
+   leave the latents intact.
+3. **Spectral band-power table.** Catches systematic activation /
+   weight scaling errors that a noise-pinned audio cos may miss when
+   the diffusion noise itself drives most of the variance.
+
+Pinning RNG is essential for sample-wise audio cos — both runs must
+consume the same Gaussian z per frame. The C++ has
+`VIBEVOICE_TTS_NOISE` to read a flat float32 table; the upstream-model
+hook captures `speech[0]` (the trajectory's actual seed row) inside
+sample_speech_tokens and writes it as `noise.bin` next to the per-frame
+dumps.
+
+### Reusable pieces extracted
+
+- `run_qwen2_prefill_no_kv` — Qwen2 transformer forward with no past KV
+  and a configurable `prefix` / `n_layers` / `has_final_norm`. Useful
+  for the negative-path prefill recipe and for any one-shot Qwen2
+  forward where you don't want to persist KV.
+- `tools/run_official_vibevoice.py` — pattern for "install upstream
+  library + monkey-patch internal methods to capture per-frame
+  intermediates". Reusable for any upstream HF model that exposes its
+  forward methods (here we patched `sample_speech_tokens` directly
+  rather than `forward_tts_lm` because the diffusion entry-point gave
+  the cleanest cut at conditions, noise, v_cfg, latent in one place).
+- `tools/diff_vibevoice_tts.py` — stage table; could be merged with
+  `crispasr-diff` once the no-voice path is stable enough to be the
+  reference.
+- `VIBEVOICE_TTS_DUMP_PERFRAME=1` — convention for "dump
+  `perframe_<stage>_f<NNN>.bin` per frame". Worth standardizing across
+  AR-TTS backends.
 
