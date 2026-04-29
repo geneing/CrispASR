@@ -365,12 +365,19 @@ static ggml_tensor* build_block1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor
 
     // FFN path: h is [C, T] (ne[0]=C). mul_mat operates on ne[0].
     // linear: mul_mat(w=[C_in, C_out], h=[C_in, T]) → [C_out, T]
+    //
+    // Official VibeVoice σ-VAE FFN (modular_vibevoice_tokenizer.py:591-608):
+    //     linear1 → GELU → linear2
+    // We previously used SiLU here — auditorily this manifested as "crackly"
+    // distortion in the decoded audio: latents matched cos≥0.999 vs the official
+    // model but the reconstructed waveform amplitude was ~65% of reference and
+    // per-frame audio cos was 0.7-0.9.
     residual = x;
     h = build_conv_rms_norm(ctx, x, ffn_norm_w);
     h = ggml_mul_mat(ctx, ffn_up_w, h); // [C, C_ffn] @ [C, T] → [C_ffn, T]
     if (ffn_up_b)
         h = ggml_add(ctx, h, ffn_up_b);
-    h = ggml_silu(ctx, h);
+    h = ggml_gelu(ctx, h);
     h = ggml_mul_mat(ctx, ffn_down_w, h); // [C_ffn, C] @ [C_ffn, T] → [C, T]
     if (ffn_down_b)
         h = ggml_add(ctx, h, ffn_down_b);
@@ -3561,6 +3568,9 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             ggml_backend_tensor_get(sf, &scaling_factor, 0, sizeof(float));
         if (bf)
             ggml_backend_tensor_get(bf, &bias_factor, 0, sizeof(float));
+        if (verbosity >= 2 || getenv("VIBEVOICE_TTS_TRACE"))
+            fprintf(stderr, "  speech_scaling=%g speech_bias=%g  (sf=%p bf=%p)\n",
+                    scaling_factor, bias_factor, (void*)sf, (void*)bf);
     }
 
     // Extract speech type embedding (type=0) for AR feedback
