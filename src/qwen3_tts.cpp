@@ -72,6 +72,7 @@
 #include "ggml.h"
 #include "gguf.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -3509,9 +3510,26 @@ extern "C" int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, co
 
     double t_loop = bench ? now_ms() : 0.0;
     int frame = 0;
+    // Mirror PyTorch generate(): top-k=50, temperature=0.9 sampling for
+    // cb0, with the official suppress_tokens mask (last 1024 logits
+    // except codec_eos_id are -inf — those are pad/silence/dialect
+    // semantic ids that produce silence frames if argmax lands on them)
+    // and min_new_tokens=2 (no codec_eos for the first two frames).
+    // Without these the talker can argmax-attract to a silence token at
+    // frame 0 and emit ~5 s of leading silence.
+    const int talker_top_k = 50;
+    const float talker_temp = 0.9f;
+    const int min_new_frames = 2;
+    const int suppress_lo = (int)hp.vocab_size - 1024; // 2048 with default config
     for (frame = 0; frame < max_frames; frame++) {
         // 1. Sample codebook-0 from talker logits.
-        int cb0 = argmax(logits, (int)hp.vocab_size);
+        for (int i = suppress_lo; i < (int)hp.vocab_size; i++) {
+            if (i != eos)
+                logits[i] = -INFINITY;
+        }
+        if (frame < min_new_frames)
+            logits[eos] = -INFINITY;
+        int cb0 = top_k_sample(logits, (int)hp.vocab_size, talker_top_k, talker_temp, &rng);
         free(logits);
         logits = nullptr;
         if (cb0 == eos) {

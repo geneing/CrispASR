@@ -210,10 +210,21 @@ struct whisper_params {
     // %USERPROFILE%/.cache/crispasr on Windows). Set via --cache-dir.
     std::string cache_dir;
 
-    // TTS mode: synthesize speech from text (vibevoice backend only).
-    // --tts "text" -m vibevoice-tts.gguf --voice voice.gguf -o output.wav
+    // TTS mode: synthesize speech from text. Supported backends:
+    //   --backend vibevoice     -m vibevoice.gguf --voice voice.gguf
+    //   --backend qwen3-tts     -m qwen3-tts.gguf [--codec-model X.gguf]
+    //                           --voice {voicepack.gguf | ref.wav --ref-text "..."}
+    //   crispasr --tts "text" --backend ... -o output.wav
     std::string tts_text;
     std::string tts_output; // output WAV file path (default: tts_output.wav)
-    std::string tts_voice;  // voice prompt GGUF path
-    int tts_steps = 20;     // DPM-Solver++ inference steps (10-20, default 20)
+    std::string tts_voice;  // voice prompt path: GGUF voice pack OR reference audio (.wav)
+    int tts_steps = 20;     // DPM-Solver++ inference steps (10-20, default 20; vibevoice)
+
+    // Qwen3-TTS extras
+    std::string tts_codec_model; // codec GGUF (defaults to sibling of -m)
+    std::string tts_ref_text;    // reference transcription when --voice is a .wav
+
+    // Output-side leading-silence trim. Default off — opt-in via
+    // --tts-trim-silence so existing callers see byte-identical WAVs.
+    bool tts_trim_silence = false;
 };

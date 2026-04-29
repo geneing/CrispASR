@@ -17,6 +17,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_fastconformer_ctc_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_wav2vec2_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_vibevoice_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_glm_asr_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_kyutai_stt_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_firered_asr_backend();
@@ -61,6 +62,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_wav2vec2_backend();
     if (name == "vibevoice")
         return crispasr_make_vibevoice_backend();
+    if (name == "qwen3-tts" || name == "qwen3_tts" || name == "qwen3tts")
+        return crispasr_make_qwen3_tts_backend();
     if (name == "glm-asr" || name == "glmasr" || name == "glm" || name == "glm_asr")
         return crispasr_make_glm_asr_backend();
     if (name == "kyutai-stt" || name == "kyutai" || name == "moshi-stt")
@@ -86,9 +89,9 @@ std::vector<std::string> crispasr_list_backends() {
         "cohere",      "granite",   "voxtral",
         "voxtral4b",   "qwen3",     "fastconformer-ctc",
         "wav2vec2",    "hubert",    "data2vec",
-        "vibevoice",   "glm-asr",   "kyutai-stt",
-        "firered-asr", "moonshine", "moonshine-streaming",
-        "gemma4-e2b",  "omniasr",   "omniasr-llm",
+        "vibevoice",   "qwen3-tts", "glm-asr",
+        "kyutai-stt",  "firered-asr", "moonshine",
+        "moonshine-streaming", "gemma4-e2b", "omniasr", "omniasr-llm",
     };
 }
 
@@ -116,6 +119,7 @@ static constexpr feature_col kFeatures[] = {
     {"punctuation", CAP_PUNCTUATION_TOGGLE},
     {"src/tgt lang", CAP_SRC_TGT_LANGUAGE},
     {"auto-dl", CAP_AUTO_DOWNLOAD},
+    {"tts", CAP_TTS},
 };
 
 void crispasr_print_backend_matrix() {
@@ -227,6 +231,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "cohere";
     if (contains_ci("qwen3") && contains_ci("asr"))
         return "qwen3";
+    if (contains_ci("qwen3") && contains_ci("tts"))
+        return "qwen3-tts";
     if (contains_ci("granite") && contains_ci("speech"))
         return "granite";
     if (contains_ci("glm") && contains_ci("asr"))
@@ -277,6 +283,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "cohere";
             else if (a == "qwen3-asr" || a == "qwen3_asr" || a == "qwen3asr")
                 result = "qwen3";
+            else if (a == "qwen3-tts" || a == "qwen3_tts" || a == "qwen3tts")
+                result = "qwen3-tts";
             else if (a == "voxtral")
                 result = "voxtral";
             else if (a == "voxtral4b" || a == "voxtral-4b" || a == "voxtral_4b")

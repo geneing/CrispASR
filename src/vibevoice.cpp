@@ -1486,24 +1486,59 @@ static uint32_t mt19937_next(mt19937_state& s) {
     return y;
 }
 
-// Generate standard normal (Gaussian) noise matching torch.randn()
-// PyTorch uses the Box-Muller transform on pairs of MT19937 uniform samples.
-static void fill_gaussian_noise(float* data, int n, mt19937_state& rng) {
-    for (int i = 0; i < n - 1; i += 2) {
-        float u1 = ((float)(mt19937_next(rng) >> 5) + 0.5f) / (float)(1u << 27);
-        float u2 = ((float)(mt19937_next(rng) >> 5) + 0.5f) / (float)(1u << 27);
-        if (u1 < 1e-10f)
-            u1 = 1e-10f;
-        float r = sqrtf(-2.0f * logf(u1));
-        data[i] = r * cosf(2.0f * (float)M_PI * u2);
-        data[i + 1] = r * sinf(2.0f * (float)M_PI * u2);
+// Generate standard normal (Gaussian) noise matching PyTorch's CPU
+// torch.randn(float32, contiguous, numel >= 16) path.
+//
+// PyTorch first fills the tensor with uniform floats in [0, 1), using the low
+// 24 bits from its MT19937 engine, then transforms every 16-float block:
+//   out[0..7]  = sqrt(-2 log(1-u[0..7])) * cos(2*pi*u[8..15])
+//   out[8..15] = sqrt(-2 log(1-u[0..7])) * sin(2*pi*u[8..15])
+// This exact trajectory matters for VibeVoice TTS: different valid Gaussian
+// generators land on different diffusion paths, and some paths create hot
+// first-frame latents that decode as audible onset clicks.
+static inline float mt_uniform_torch_float(mt19937_state& rng) {
+    return (float)(mt19937_next(rng) & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+}
+
+static void torch_normal_fill_16(float* data) {
+    for (int j = 0; j < 8; j++) {
+        const float u1 = 1.0f - data[j]; // [0, 1) -> (0, 1] for log.
+        const float u2 = data[j + 8];
+        const float radius = sqrtf(-2.0f * logf(u1));
+        const float theta = 2.0f * (float)M_PI * u2;
+        data[j] = radius * cosf(theta);
+        data[j + 8] = radius * sinf(theta);
     }
-    if (n % 2 != 0) {
-        float u1 = ((float)(mt19937_next(rng) >> 5) + 0.5f) / (float)(1u << 27);
-        float u2 = ((float)(mt19937_next(rng) >> 5) + 0.5f) / (float)(1u << 27);
-        if (u1 < 1e-10f)
-            u1 = 1e-10f;
-        data[n - 1] = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+}
+
+static void fill_gaussian_noise(float* data, int n, mt19937_state& rng) {
+    if (n <= 0)
+        return;
+
+    if (n < 16) {
+        float tmp[16];
+        for (int i = 0; i < 16; i++)
+            tmp[i] = mt_uniform_torch_float(rng);
+        torch_normal_fill_16(tmp);
+        memcpy(data, tmp, (size_t)n * sizeof(float));
+        return;
+    }
+
+    for (int i = 0; i < n; i++)
+        data[i] = mt_uniform_torch_float(rng);
+
+    int i = 0;
+    for (; i <= n - 16; i += 16)
+        torch_normal_fill_16(data + i);
+
+    if (i < n) {
+        // PyTorch recomputes the final overlapping block when numel is not a
+        // multiple of 16. VibeVoice's vae_dim is currently 64, but keep the
+        // helper faithful for other latent widths.
+        float* tail = data + n - 16;
+        for (int j = 0; j < 16; j++)
+            tail[j] = mt_uniform_torch_float(rng);
+        torch_normal_fill_16(tail);
     }
 }
 
@@ -2654,7 +2689,13 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
 
         std::vector<float> all_latents;
         mt19937_state rng;
-        mt19937_seed(rng, 42);
+        {
+            uint32_t seed = 42;
+            if (const char* sv = getenv("VIBEVOICE_TTS_SEED")) {
+                seed = (uint32_t)strtoul(sv, nullptr, 0);
+            }
+            mt19937_seed(rng, seed);
+        }
         float cfg_scale = 1.5f; // Lower CFG for base model (no proper negative conditioning)
         int speech_frames = 0;
         int max_speech_frames = std::max(12, (int)(text_ids.size() * 3));
@@ -3167,7 +3208,8 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
     int max_ctx = voice_ctx + prefix_len + n_frames + 16;
     int num_steps = ctx->params.tts_steps > 0 ? ctx->params.tts_steps : 20;
 
-    if (!ctx->kv_k || ctx->kv_max_ctx < max_ctx) {
+    const ggml_type tts_kv_type = GGML_TYPE_F32;
+    if (!ctx->kv_k || ctx->kv_max_ctx < max_ctx || ctx->kv_k->type != tts_kv_type) {
         if (ctx->kv_ctx)
             ggml_free(ctx->kv_ctx);
         if (ctx->kv_buf)
@@ -3177,12 +3219,12 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         if (ctx->kv_neg_buf)
             ggml_backend_buffer_free(ctx->kv_neg_buf);
         int hd = hp.head_dim, nkv = hp.n_kv_heads, nl = lm_n_layers;
-        size_t k_size = (size_t)ggml_type_size(GGML_TYPE_F16) * hd * max_ctx * nkv * nl;
+        size_t k_size = (size_t)ggml_type_size(tts_kv_type) * hd * max_ctx * nkv * nl;
         // Positive KV cache
         ggml_init_params kp = {2 * ggml_tensor_overhead(), nullptr, true};
         ctx->kv_ctx = ggml_init(kp);
-        ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
-        ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
+        ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, tts_kv_type, hd, max_ctx, nkv, nl);
+        ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, tts_kv_type, hd, max_ctx, nkv, nl);
         ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, 2 * k_size);
         uint8_t* base_pos = (uint8_t*)ggml_backend_buffer_get_base(ctx->kv_buf);
         ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base_pos);
@@ -3190,8 +3232,8 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         // Negative KV cache (for CFG)
         ggml_init_params kp2 = {2 * ggml_tensor_overhead(), nullptr, true};
         ctx->kv_neg_ctx = ggml_init(kp2);
-        ctx->kv_neg_k = ggml_new_tensor_4d(ctx->kv_neg_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
-        ctx->kv_neg_v = ggml_new_tensor_4d(ctx->kv_neg_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
+        ctx->kv_neg_k = ggml_new_tensor_4d(ctx->kv_neg_ctx, tts_kv_type, hd, max_ctx, nkv, nl);
+        ctx->kv_neg_v = ggml_new_tensor_4d(ctx->kv_neg_ctx, tts_kv_type, hd, max_ctx, nkv, nl);
         ctx->kv_neg_buf = ggml_backend_alloc_buffer(ctx->backend, 2 * k_size);
         uint8_t* base_neg = (uint8_t*)ggml_backend_buffer_get_base(ctx->kv_neg_buf);
         ggml_backend_tensor_alloc(ctx->kv_neg_buf, ctx->kv_neg_k, base_neg);
@@ -3218,9 +3260,12 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         auto copy_voice_kv = [&](const char* prefix, ggml_tensor* dst_k, ggml_tensor* dst_v, int seq_len) {
             // src: [hd, seq_len, nkv] contiguous F16
             // dst: [hd, max_ctx, nkv, nl] — max_ctx > seq_len, so copy per-head
-            size_t el_size = ggml_type_size(GGML_TYPE_F16);
-            size_t head_src_bytes = (size_t)hd * seq_len * el_size;
-            size_t head_dst_stride = (size_t)hd * max_ctx * el_size; // nb[2] in dst
+            size_t src_el_size = ggml_type_size(GGML_TYPE_F16);
+            size_t dst_el_size = ggml_type_size(dst_k->type);
+            size_t head_src_elems = (size_t)hd * seq_len;
+            size_t head_src_bytes = head_src_elems * src_el_size;
+            size_t head_dst_bytes = head_src_elems * dst_el_size;
+            size_t head_dst_stride = (size_t)hd * max_ctx * dst_el_size; // nb[2] in dst
 
             for (int il = 0; il < lm_n_layers; il++) {
                 for (int kv_type = 0; kv_type < 2; kv_type++) {
@@ -3242,7 +3287,15 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                     for (int ih = 0; ih < nkv; ih++) {
                         size_t src_head_off = (size_t)ih * head_src_bytes;
                         size_t dst_head_off = layer_off + (size_t)ih * head_dst_stride;
-                        ggml_backend_tensor_set(dst, tmp.data() + src_head_off, dst_head_off, head_src_bytes);
+                        if (dst->type == GGML_TYPE_F32) {
+                            std::vector<float> tmp_f32(head_src_elems);
+                            const ggml_fp16_t* src_h = (const ggml_fp16_t*)(tmp.data() + src_head_off);
+                            for (size_t i = 0; i < head_src_elems; i++)
+                                tmp_f32[i] = ggml_fp16_to_fp32(src_h[i]);
+                            ggml_backend_tensor_set(dst, tmp_f32.data(), dst_head_off, head_dst_bytes);
+                        } else {
+                            ggml_backend_tensor_set(dst, tmp.data() + src_head_off, dst_head_off, head_src_bytes);
+                        }
                     }
                 }
             }
@@ -3262,13 +3315,16 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             // Layer 0 starts at offset 0
             // Position t, head h: offset = h * hd * max_ctx * 2 + t * hd * 2 (bytes)
             size_t dump_pos = 5;
-            size_t dump_size = (size_t)hd * dump_pos * ggml_type_size(GGML_TYPE_F16);
+            size_t dump_size = (size_t)hd * dump_pos * ggml_type_size(ctx->kv_k->type);
             std::vector<uint8_t> kv_dump(dump_size);
             ggml_backend_tensor_get(ctx->kv_k, kv_dump.data(), 0, dump_size);
-            // Convert F16 to F32 for dumping
             std::vector<float> kv_f32(hd * dump_pos);
-            for (size_t i = 0; i < kv_f32.size(); i++)
-                kv_f32[i] = ggml_fp16_to_fp32(((ggml_fp16_t*)kv_dump.data())[i]);
+            if (ctx->kv_k->type == GGML_TYPE_F32) {
+                memcpy(kv_f32.data(), kv_dump.data(), kv_f32.size() * sizeof(float));
+            } else {
+                for (size_t i = 0; i < kv_f32.size(); i++)
+                    kv_f32[i] = ggml_fp16_to_fp32(((ggml_fp16_t*)kv_dump.data())[i]);
+            }
             vibevoice_dump_f32(dump_dir, "kv_cache_l0_h0_first5pos", kv_f32.data(), kv_f32.size());
         }
     }
@@ -3605,7 +3661,13 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
 
     std::vector<float> all_latents;
     mt19937_state rng;
-    mt19937_seed(rng, 42);
+    {
+        uint32_t seed = 42;
+        if (const char* sv = getenv("VIBEVOICE_TTS_SEED")) {
+            seed = (uint32_t)strtoul(sv, nullptr, 0);
+        }
+        mt19937_seed(rng, seed);
+    }
 
     std::vector<float> preloaded_noise;
     const char* noise_file = getenv("VIBEVOICE_TTS_NOISE");
@@ -3624,6 +3686,9 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
 
     int total_frames = 0;
     bool finished = false;
+    int trace_frame = -1;
+    if (const char* tf = getenv("VIBEVOICE_TTS_TRACE_FRAME"))
+        trace_frame = atoi(tf);
     double bench_sum_diff = 0, bench_sum_lm = 0;
     int bench_frames = 0;
 
@@ -3631,8 +3696,9 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         // Generate SPEECH_WINDOW frames
         int frames_this_window = std::min(SPEECH_WINDOW, n_frames - total_frames);
 
-        for (int si = 0; si < frames_this_window && !finished; si++) {
+        for (int si = 0; si < frames_this_window; si++) {
             int fi = total_frames + si;
+            const bool append_audio_frame = !finished;
             auto t_frame_start = std::chrono::high_resolution_clock::now();
             if (verbosity >= 1 && (fi == 0 || (fi + 1) % 5 == 0 || fi == n_frames - 1))
                 fprintf(stderr, "  frame %d/%d...\n", fi + 1, n_frames);
@@ -3709,11 +3775,23 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                     snprintf(nm, sizeof(nm), "perframe_v_cfg_step0_f%03d", fi);
                     vibevoice_dump_f32(dump_dir, nm, v_cfg.data(), v_cfg.size());
                 }
+                if (fi == trace_frame) {
+                    char nm[96];
+                    snprintf(nm, sizeof(nm), "trace_f%03d_v_cfg_s%02d", fi, step);
+                    vibevoice_dump_f32(dump_dir, nm, v_cfg.data(), v_cfg.size());
+                    snprintf(nm, sizeof(nm), "trace_f%03d_z_before_s%02d", fi, step);
+                    vibevoice_dump_f32(dump_dir, nm, z.data(), z.size());
+                }
 
                 // Convert v-prediction to x0 prediction
                 int t_cur = sched.timesteps[step];
                 std::vector<float> x0(vae_dim);
                 v_to_x0(z.data(), v_cfg.data(), x0.data(), vae_dim, sched.alphas_cumprod[t_cur]);
+                if (fi == trace_frame) {
+                    char nm[96];
+                    snprintf(nm, sizeof(nm), "trace_f%03d_x0_s%02d", fi, step);
+                    vibevoice_dump_f32(dump_dir, nm, x0.data(), x0.size());
+                }
 
                 // DPM-Solver++ update
                 bool is_last = (step == num_steps - 1);
@@ -3723,10 +3801,16 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                 } else {
                     dpm_second_order(sched, step, z.data(), x0.data(), prev_x0.data(), step - 1, vae_dim);
                 }
+                if (fi == trace_frame) {
+                    char nm[96];
+                    snprintf(nm, sizeof(nm), "trace_f%03d_z_after_s%02d", fi, step);
+                    vibevoice_dump_f32(dump_dir, nm, z.data(), z.size());
+                }
                 prev_x0 = x0;
             }
 
-            all_latents.insert(all_latents.end(), z.begin(), z.end());
+            if (append_audio_frame)
+                all_latents.insert(all_latents.end(), z.begin(), z.end());
             if (fi == 0) {
                 vibevoice_dump_f32(dump_dir, "tts_latent_frame0", z.data(), z.size());
             }
@@ -3746,6 +3830,11 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             }
             if (fi == 0) {
                 vibevoice_dump_f32(dump_dir, "tts_acoustic_embed_frame0", speech_embed.data(), speech_embed.size());
+            }
+            if (getenv("VIBEVOICE_TTS_DUMP_PERFRAME")) {
+                char nm[64];
+                snprintf(nm, sizeof(nm), "perframe_acoustic_embed_f%03d", fi);
+                vibevoice_dump_f32(dump_dir, nm, speech_embed.data(), speech_embed.size());
             }
 
             // c. Add speech type embedding (type=0) and feed to TTS LM
@@ -3770,7 +3859,8 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                 n_past++;
                 neg_n_past++;
 
-                // EOS classifier: sigmoid(fc2(silu(fc1(hidden)))) > 0.5 → stop
+                // EOS classifier: official BinaryClassifier is
+                // sigmoid(fc2(relu(fc1(hidden)))) > 0.5.
                 ggml_tensor* eos_fc1_w = G("tts_eos.fc1.weight");
                 ggml_tensor* eos_fc1_b = G("tts_eos.fc1.bias");
                 ggml_tensor* eos_fc2_w = G("tts_eos.fc2.weight");
@@ -3787,7 +3877,7 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                     ggml_tensor* e = ggml_mul_mat(ctx_e, eos_fc1_w, h_in);
                     if (eos_fc1_b)
                         e = ggml_add(ctx_e, e, eos_fc1_b);
-                    e = ggml_silu(ctx_e, e);
+                    e = ggml_relu(ctx_e, e);
                     e = ggml_mul_mat(ctx_e, eos_fc2_w, e);
                     if (eos_fc2_b)
                         e = ggml_add(ctx_e, e, eos_fc2_b);
@@ -3803,6 +3893,13 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                             ggml_backend_tensor_get(ggml_graph_get_tensor(gf_e, "eos_out"), &eos_logit, 0,
                                                     sizeof(float));
                             float eos_prob = 1.0f / (1.0f + expf(-eos_logit)); // sigmoid
+                            if (getenv("VIBEVOICE_TTS_DUMP_PERFRAME")) {
+                                char nm[64];
+                                snprintf(nm, sizeof(nm), "perframe_eos_logit_f%03d", fi);
+                                vibevoice_dump_f32(dump_dir, nm, &eos_logit, 1);
+                                snprintf(nm, sizeof(nm), "perframe_eos_prob_f%03d", fi);
+                                vibevoice_dump_f32(dump_dir, nm, &eos_prob, 1);
+                            }
                             if (eos_prob > 0.5f) {
                                 if (verbosity >= 1)
                                     fprintf(stderr, "  EOS at frame %d (prob=%.3f)\n", fi, eos_prob);
@@ -3997,6 +4094,18 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         return nullptr;
     memcpy(out_buf, raw_audio.data() + trim_start, (size_t)trimmed_len * sizeof(float));
 
+    // De-click the start. Some valid diffusion noise trajectories produce a
+    // hot first speech latent; trimming removes the decoder warmup, but the
+    // remaining audio can still begin with a non-zero impulse. A short equal-
+    // power fade-in removes the hard discontinuity without audibly changing
+    // normal speech attacks.
+    const int fade_in_samples = 480; // 20ms @ 24 kHz
+    int n_fade_in = std::min(fade_in_samples, trimmed_len);
+    for (int i = 0; i < n_fade_in; i++) {
+        float t = (float)i / (float)n_fade_in;
+        out_buf[i] *= t * t;
+    }
+
     // Linear fade-out over the last `fade_samples` to ensure a clean end.
     // The EOS classifier is sensitive to F16 drift in the conditions and can
     // fire 1-2 frames late vs the F32 reference, so the last decoded frame
@@ -4012,8 +4121,10 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
     }
 
     if (verbosity >= 1 && (trim_start > 0 || trim_end < total_audio))
-        fprintf(stderr, "vibevoice TTS: trimmed %d leading + %d trailing samples (kept %d / %d), %d-sample fade-out\n",
-                trim_start, total_audio - trim_end, trimmed_len, total_audio, n_fade);
+        fprintf(stderr,
+                "vibevoice TTS: trimmed %d leading + %d trailing samples (kept %d / %d), %d-sample fade-in, "
+                "%d-sample fade-out\n",
+                trim_start, total_audio - trim_end, trimmed_len, total_audio, n_fade_in, n_fade);
 
     if (out_n_samples)
         *out_n_samples = trimmed_len;

@@ -6,6 +6,7 @@ Captures (via `tools/reference_backends/_iter_capture.py`):
   - v_cfg_step0         — CFG-mixed eps at step 0 of every frame's diffusion
   - latent              — final z per frame
   - acoustic_embed      — connector output per frame
+  - eos_logit/prob      — explicit generation stop check after each speech frame
 
 Output is `<output_dir>/perframe_<stage>_f<NNN>.bin` (float32) plus
 `noise.bin` for the C++ side to replay via VIBEVOICE_TTS_NOISE.
@@ -48,7 +49,10 @@ def main():
     ap.add_argument("--output-dir", default=None,
                     help="Directory for per-frame .bin dumps (default: skip)")
     ap.add_argument("--model", default="microsoft/VibeVoice-Realtime-0.5B")
+    ap.add_argument("--tokenizer", default="Qwen/Qwen2.5-0.5B")
     ap.add_argument("--cfg-scale", type=float, default=3.0)
+    ap.add_argument("--trace-frame", type=int, default=-1,
+                    help="also dump per-diffusion-step tensors for this speech frame")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir) if args.output_dir else None
@@ -62,7 +66,7 @@ def main():
 
     print(f"loading voice: {args.voice}")
     all_prefilled_outputs = torch.load(args.voice, map_location=device, weights_only=False)
-    tokenizer = VibeVoiceTextTokenizerFast.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = VibeVoiceTextTokenizerFast.from_pretrained(args.tokenizer)
 
     text_with_nl = args.text + "\n"
     text_ids = tokenizer.encode(text_with_nl, add_special_tokens=False)
@@ -82,11 +86,16 @@ def main():
     #   2. forward_hook on acoustic_connector (acoustic_embed)
     # _iter_capture.append normalises detach/cpu/clone the same way for both.
     captured = {}
+    trace = {}
     handles = []
+
+    def append_trace(name, value):
+        trace.setdefault(name, []).append(value.detach().cpu().float().contiguous().clone())
 
     def make_hooked_sample(_orig):
         @torch.no_grad()
         def hooked_sample(condition, neg_condition, cfg_scale=3.0):
+            frame_idx = len(captured.get("noise", []))
             _iter_capture.append(captured, "pos_cond", condition[0])
             _iter_capture.append(captured, "neg_cond", neg_condition[0])
             model.model.noise_scheduler.set_timesteps(model.ddpm_inference_steps)
@@ -106,8 +115,20 @@ def main():
                 if first_step:
                     _iter_capture.append(captured, "v_cfg_step0", half_eps[0])
                     first_step = False
+                if frame_idx == args.trace_frame:
+                    append_trace("v_cfg", half_eps[0])
                 eps_full = torch.cat([half_eps, half_eps], dim=0)
+                if frame_idx == args.trace_frame:
+                    before = speech[0].detach().cpu().float().contiguous().clone()
+                    alpha_prod = model.model.noise_scheduler.alphas_cumprod[int(t.item())].to(speech)
+                    x0 = alpha_prod.sqrt() * speech[0] - (1 - alpha_prod).sqrt() * half_eps[0]
+                    append_trace("x0", x0)
                 speech = model.model.noise_scheduler.step(eps_full, t, speech).prev_sample
+                if frame_idx == args.trace_frame:
+                    # Reconstruct the x0/sample prediction using the scheduler's
+                    # current step index before step() advanced it.
+                    append_trace("z_before", before)
+                    append_trace("z_after", speech[0])
             final = speech[: len(speech) // 2]
             _iter_capture.append(captured, "latent", final[0])
             return final
@@ -116,6 +137,42 @@ def main():
 
     handles.append(_iter_capture.patch_method(model, "sample_speech_tokens", make_hooked_sample))
 
+    orig_forward_lm = model.forward_lm
+    orig_forward_tts_lm = model.forward_tts_lm
+    orig_eos_forward = model.tts_eos_classifier.forward
+    in_forward_tts_lm = 0
+
+    @torch.no_grad()
+    def hooked_forward_lm(*lm_args, **lm_kwargs):
+        out = orig_forward_lm(*lm_args, **lm_kwargs)
+        if hasattr(out, "last_hidden_state") and out.last_hidden_state is not None:
+            _iter_capture.append(captured, "base_text_hidden", out.last_hidden_state[0])
+        return out
+
+    @torch.no_grad()
+    def hooked_forward_tts_lm(*tts_args, **tts_kwargs):
+        nonlocal in_forward_tts_lm
+        in_forward_tts_lm += 1
+        try:
+            return orig_forward_tts_lm(*tts_args, **tts_kwargs)
+        finally:
+            in_forward_tts_lm -= 1
+
+    @torch.no_grad()
+    def hooked_eos_forward(x):
+        out = orig_eos_forward(x)
+        # forward_tts_lm also computes classifier logits internally. The stop
+        # decision in official generate() is the extra classifier call outside
+        # forward_tts_lm, after the positive speech LM update.
+        if in_forward_tts_lm == 0:
+            _iter_capture.append(captured, "eos_logit", out.reshape(-1))
+            _iter_capture.append(captured, "eos_prob", torch.sigmoid(out).reshape(-1))
+        return out
+
+    model.forward_lm = hooked_forward_lm
+    model.forward_tts_lm = hooked_forward_tts_lm
+    model.tts_eos_classifier.forward = hooked_eos_forward
+
     # acoustic_connector is a regular nn.Module; use a forward_hook that
     # appends per-call (= per speech frame).
     def hook_connector(_module, _inp, out_t):
@@ -123,20 +180,25 @@ def main():
     handles.append(model.model.acoustic_connector.register_forward_hook(hook_connector))
 
     print("running generate()...")
-    output = model.generate(
-        input_ids=input_ids,
-        attention_mask=torch.ones_like(input_ids),
-        tts_lm_input_ids=tts_lm_input_ids,
-        tts_lm_attention_mask=torch.ones_like(tts_lm_input_ids),
-        tts_text_ids=tts_text_ids,
-        all_prefilled_outputs=copy.deepcopy(all_prefilled_outputs),
-        cfg_scale=args.cfg_scale,
-        tokenizer=tokenizer,
-        return_speech=True,
-        max_new_tokens=1024,
-        show_progress_bar=False,
-    )
-    _iter_capture.drop_handles(handles)
+    try:
+        output = model.generate(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            tts_lm_input_ids=tts_lm_input_ids,
+            tts_lm_attention_mask=torch.ones_like(tts_lm_input_ids),
+            tts_text_ids=tts_text_ids,
+            all_prefilled_outputs=copy.deepcopy(all_prefilled_outputs),
+            cfg_scale=args.cfg_scale,
+            tokenizer=tokenizer,
+            return_speech=True,
+            max_new_tokens=1024,
+            show_progress_bar=False,
+        )
+    finally:
+        model.forward_lm = orig_forward_lm
+        model.forward_tts_lm = orig_forward_tts_lm
+        model.tts_eos_classifier.forward = orig_eos_forward
+        _iter_capture.drop_handles(handles)
 
     # ── audio out ─────────────────────────────────────────────────────────
     audio = output.speech_outputs[0].detach().cpu().float().squeeze().numpy()
@@ -152,6 +214,10 @@ def main():
     # ── per-frame dumps ───────────────────────────────────────────────────
     if out_dir is not None:
         n = _iter_capture.dump_perframe_dir(captured, out_dir)
+        if trace:
+            for name, vals in trace.items():
+                for i, arr in enumerate(vals):
+                    arr.numpy().tofile(out_dir / f"trace_f{args.trace_frame:03d}_{name}_s{i:02d}.bin")
         counts = {k: len(v) for k, v in captured.items()}
         print("  captured frames: " + " ".join(f"{k}={v}" for k, v in counts.items()))
         print(f"  wrote {n} per-frame .bin files to {out_dir} (+ noise.bin)")

@@ -70,6 +70,10 @@
 #include "vibevoice.h"
 #define CA_HAVE_VIBEVOICE 1
 #endif
+#if __has_include("qwen3_tts.h")
+#include "qwen3_tts.h"
+#define CA_HAVE_QWEN3_TTS 1
+#endif
 #if __has_include("glm_asr.h")
 #include "glm_asr.h"
 #define CA_HAVE_GLMASR 1
@@ -687,6 +691,8 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
         backend = "wav2vec2";
     else if (strcmp(arch, "vibevoice-asr") == 0 || strcmp(arch, "vibevoice") == 0)
         backend = "vibevoice";
+    else if (strcmp(arch, "qwen3-tts") == 0 || strcmp(arch, "qwen3_tts") == 0)
+        backend = "qwen3-tts";
 
     std::strncpy(out_name, backend, out_cap - 1);
     out_name[out_cap - 1] = '\0';
@@ -750,6 +756,10 @@ struct crispasr_session {
 #endif
 #ifdef CA_HAVE_VIBEVOICE
     vibevoice_context* vibevoice_ctx = nullptr;
+#endif
+#ifdef CA_HAVE_QWEN3_TTS
+    qwen3_tts_context* qwen3_tts_ctx = nullptr;
+    bool qwen3_tts_voice_loaded = false;
 #endif
 #ifdef CA_HAVE_GLMASR
     void* glmasr_ctx = nullptr;
@@ -940,6 +950,21 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         return s;
     }
 #endif
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->backend == "qwen3-tts" || s->backend == "qwen3_tts" || s->backend == "qwen3tts") {
+        qwen3_tts_context_params p = qwen3_tts_context_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = 0;
+        s->qwen3_tts_ctx = qwen3_tts_init_from_file(model_path, p);
+        if (!s->qwen3_tts_ctx) {
+            delete s;
+            return nullptr;
+        }
+        // Codec must be loaded before synthesise. Caller does so via
+        // `crispasr_session_set_codec_path` after open.
+        return s;
+    }
+#endif
 #ifdef CA_HAVE_GLMASR
     if (s->backend == "glm-asr" || s->backend == "glmasr" || s->backend == "glm" || s->backend == "glm_asr") {
         glm_asr_context_params p = glm_asr_context_default_params();
@@ -1091,6 +1116,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #endif
 #ifdef CA_HAVE_VIBEVOICE
     list += ",vibevoice";
+#endif
+#ifdef CA_HAVE_QWEN3_TTS
+    list += ",qwen3-tts";
 #endif
 #ifdef CA_HAVE_GLMASR
     list += ",glm-asr";
@@ -1970,6 +1998,91 @@ CA_EXPORT void crispasr_session_result_free(crispasr_session_result* r) {
         delete r;
 }
 
+// ---------------------------------------------------------------------------
+// TTS synthesis (vibevoice, qwen3-tts)
+// ---------------------------------------------------------------------------
+//
+// `crispasr_session_synthesize` returns malloc'd float32 PCM at 24 kHz mono.
+// `*out_n_samples` is set on success. Caller frees with `crispasr_pcm_free`.
+// Returns nullptr if the active backend doesn't support TTS or synthesis fails.
+//
+// `crispasr_session_set_voice` accepts:
+//   - a *.gguf voice pack (vibevoice or qwen3-tts), or
+//   - a *.wav reference audio. For qwen3-tts the reference transcription is
+//     required and goes through `ref_text_or_null`. Pass nullptr for a
+//     voice pack.
+//
+// `crispasr_session_set_codec_path` is qwen3-tts-only and is a no-op for
+// other backends. Required before the first synthesise call when a
+// qwen3-tts session is opened via the unified API.
+
+CA_EXPORT int crispasr_session_set_codec_path(crispasr_session* s, const char* path) {
+    if (!s || !path)
+        return -1;
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx)
+        return qwen3_tts_set_codec_path(s->qwen3_tts_ctx, path);
+#endif
+    return 0; // not applicable
+}
+
+CA_EXPORT int crispasr_session_set_voice(crispasr_session* s, const char* path, const char* ref_text_or_null) {
+    if (!s || !path)
+        return -1;
+    auto ends_with_wav = [](const char* p) {
+        size_t n = std::strlen(p);
+        if (n < 4)
+            return false;
+        const char* tail = p + n - 4;
+        return (tail[0] == '.' && (tail[1] == 'w' || tail[1] == 'W') && (tail[2] == 'a' || tail[2] == 'A') &&
+                (tail[3] == 'v' || tail[3] == 'V'));
+    };
+#ifdef CA_HAVE_VIBEVOICE
+    if (s->vibevoice_ctx) {
+        return vibevoice_load_voice(s->vibevoice_ctx, path);
+    }
+#endif
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx) {
+        if (ends_with_wav(path)) {
+            if (!ref_text_or_null)
+                return -2;
+            int rc = qwen3_tts_set_voice_prompt_with_text(s->qwen3_tts_ctx, path, ref_text_or_null);
+            if (rc == 0)
+                s->qwen3_tts_voice_loaded = true;
+            return rc;
+        }
+        int rc = qwen3_tts_load_voice_pack(s->qwen3_tts_ctx, path);
+        if (rc == 0)
+            s->qwen3_tts_voice_loaded = true;
+        return rc;
+    }
+#endif
+    return -3;
+}
+
+CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* text, int* out_n_samples) {
+    if (out_n_samples)
+        *out_n_samples = 0;
+    if (!s || !text)
+        return nullptr;
+#ifdef CA_HAVE_VIBEVOICE
+    if (s->vibevoice_ctx) {
+        return vibevoice_synthesize(s->vibevoice_ctx, text, out_n_samples);
+    }
+#endif
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx) {
+        return qwen3_tts_synthesize(s->qwen3_tts_ctx, text, out_n_samples);
+    }
+#endif
+    return nullptr;
+}
+
+CA_EXPORT void crispasr_pcm_free(float* pcm) {
+    free(pcm);
+}
+
 CA_EXPORT void crispasr_session_close(crispasr_session* s) {
     if (!s)
         return;
@@ -2015,6 +2128,10 @@ CA_EXPORT void crispasr_session_close(crispasr_session* s) {
 #ifdef CA_HAVE_VIBEVOICE
     if (s->vibevoice_ctx)
         vibevoice_free(s->vibevoice_ctx);
+#endif
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx)
+        qwen3_tts_free(s->qwen3_tts_ctx);
 #endif
 #ifdef CA_HAVE_GLMASR
     if (s->glmasr_ctx)

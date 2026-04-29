@@ -361,6 +361,23 @@ extern "C" {
     pub fn crispasr_session_result_free(r: *mut CrispasrSessionResult);
     pub fn crispasr_session_close(s: *mut CrispasrSession);
 
+    // --- TTS synthesis (vibevoice, qwen3-tts) ---
+    pub fn crispasr_session_set_codec_path(
+        s: *mut CrispasrSession,
+        path: *const c_char,
+    ) -> c_int;
+    pub fn crispasr_session_set_voice(
+        s: *mut CrispasrSession,
+        path: *const c_char,
+        ref_text_or_null: *const c_char,
+    ) -> c_int;
+    pub fn crispasr_session_synthesize(
+        s: *mut CrispasrSession,
+        text: *const c_char,
+        out_n_samples: *mut c_int,
+    ) -> *mut f32;
+    pub fn crispasr_pcm_free(pcm: *mut f32);
+
     pub fn crispasr_detect_backend_from_gguf(
         path: *const c_char,
         out_name: *mut c_char,

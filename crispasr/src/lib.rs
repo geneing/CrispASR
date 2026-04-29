@@ -14,7 +14,7 @@
 //! ```
 
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_float};
+use std::os::raw::{c_char, c_float, c_int};
 
 /// A transcription segment with timing information.
 #[derive(Debug, Clone)]
@@ -528,6 +528,55 @@ impl Session {
             }
             crispasr_sys::crispasr_session_result_free(res);
         }
+        Ok(out)
+    }
+
+    // ---------------------------------------------------------------------
+    // TTS synthesis (vibevoice, qwen3-tts)
+    // ---------------------------------------------------------------------
+
+    /// Load a separate codec GGUF (qwen3-tts only; no-op for others).
+    pub fn set_codec_path(&self, path: &str) -> Result<(), String> {
+        let cpath = CString::new(path).map_err(|e| e.to_string())?;
+        let rc = unsafe { crispasr_sys::crispasr_session_set_codec_path(self.handle, cpath.as_ptr()) };
+        if rc != 0 {
+            return Err(format!("set_codec_path failed (rc={})", rc));
+        }
+        Ok(())
+    }
+
+    /// Load a voice prompt: a baked GGUF voice pack OR a *.wav reference
+    /// (qwen3-tts requires `ref_text` for *.wav inputs).
+    pub fn set_voice(&self, path: &str, ref_text: Option<&str>) -> Result<(), String> {
+        let cpath = CString::new(path).map_err(|e| e.to_string())?;
+        let crt = match ref_text {
+            Some(t) => Some(CString::new(t).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        let rt_ptr = crt.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let rc = unsafe { crispasr_sys::crispasr_session_set_voice(self.handle, cpath.as_ptr(), rt_ptr) };
+        if rc != 0 {
+            return Err(format!("set_voice failed (rc={})", rc));
+        }
+        Ok(())
+    }
+
+    /// Synthesise `text` to 24 kHz mono PCM. Requires a TTS-capable backend
+    /// (`vibevoice`, `qwen3-tts`).
+    pub fn synthesize(&self, text: &str) -> Result<Vec<f32>, String> {
+        let ctext = CString::new(text).map_err(|e| e.to_string())?;
+        let mut n: c_int = 0;
+        let ptr = unsafe {
+            crispasr_sys::crispasr_session_synthesize(self.handle, ctext.as_ptr(), &mut n as *mut c_int)
+        };
+        if ptr.is_null() || n <= 0 {
+            return Err(format!(
+                "synthesize returned no audio for backend {:?}",
+                self.backend()
+            ));
+        }
+        let out = unsafe { std::slice::from_raw_parts(ptr, n as usize).to_vec() };
+        unsafe { crispasr_sys::crispasr_pcm_free(ptr) };
         Ok(out)
     }
 }

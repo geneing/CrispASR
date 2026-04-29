@@ -11,6 +11,59 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 
 ---
 
+## Qwen3-TTS CLI/wrapper integration **[next]**
+
+Bring qwen3-tts up to feature parity with vibevoice's `--tts` mode and
+fix the leading-silence regression in the talker. Order fixed by user
+direction; do not interleave.
+
+1. **CLI wiring.** Mirror `crispasr_backend_vibevoice.cpp`:
+   - New `examples/cli/crispasr_backend_qwen3_tts.cpp` implementing
+     `CrispasrBackend` with `CAP_TTS` set. `synthesize()` calls the
+     existing `qwen3_tts_synthesise` (or the runtime path that already
+     produced `crispasr_1..3.wav`) and returns 24 kHz PCM.
+   - Voice prompt path: piggy-back on `--voice` (current vibevoice
+     flag) for the GGUF voice pack, plus a new `--ref-audio` /
+     `--ref-text` pair for runtime cloning. Add fields to
+     `whisper_params.h` only if the existing `tts_voice` slot can't
+     carry both.
+   - Register the new factory in `examples/cli/crispasr_backend.cpp`
+     and add the row to `crispasr_list_backends()`.
+   - CMake: link `qwen3_tts` + the codec/talker static libs into the
+     `crispasr` target.
+   - Verify: `crispasr --backend qwen3-tts --tts "hello world" -of out`
+     produces the same WAV as `tools/qwen3_tts_e2e.py` (or whatever
+     the standalone tool was).
+
+2. **Wrappers / bindings.** Order: Python first (it's the one we
+   ground-truth diff against), then Rust, Go, Java, JS, Ruby. Each
+   wrapper just needs the new backend name surfaced — the synthesise
+   API already returns `float*` + length on the C ABI side.
+
+3. **Talker-side silence fix (default).** `crispasr_1.wav` had 4.79 s
+   of leading silence; Python ref has 0.31–0.56 s. Likely
+   stochastic-sampling artefact (top_k=50 / temp=0.9 picks padding
+   tokens early). Investigate:
+   - `min_new_tokens` / first-N-token logit biasing against pad/EOS.
+   - Whether the PyTorch reference biases differently or uses a
+     warmup prefill.
+   - As a fallback, force the first M decode steps to argmax.
+
+4. **Output-side silence trim (optional CLI flag).** `--tts-trim-silence`
+   (default off) on the dispatcher. RMS gate over a 20 ms window —
+   drop leading frames below e.g. -50 dBFS, keep a 50 ms head-room.
+   Same path applies to vibevoice for free.
+
+5. **Encoder `cos_min ≥ 0.999`.** Residual drift after the replicate-pad
+   fix lives in `cenc_se_s1` and propagates to `cenc_seanet_out`. RVQ
+   codes are sensitive to the embedding drift (`cos_mean=0.999` still
+   gives different discrete codes vs PyTorch). Add per-residual-block
+   checkpoints inside SEANet stage 1 (between `block.0`, `block.1`,
+   skip-add) to localise — same harness pattern that fixed the
+   replicate-pad bug.
+
+---
+
 ## Pending optimizations (v0.5.x)
 
 | # | Optimization | Backends | Expected gain | Effort | Status |

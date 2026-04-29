@@ -51,6 +51,17 @@ STAGES = [
     ("audio_output",         None,                         "f32", "final audio (python only)"),
 ]
 
+PERFRAME_STAGES = [
+    ("pos_cond",       "TTS LM positive condition"),
+    ("neg_cond",       "TTS LM negative condition"),
+    ("noise",          "diffusion init noise"),
+    ("v_cfg_step0",    "CFG prediction step 0"),
+    ("latent",         "denoised latent"),
+    ("acoustic_embed", "acoustic connector output"),
+    ("eos_logit",      "EOS stop-check logit"),
+    ("eos_prob",       "EOS stop-check probability"),
+]
+
 
 def load_bin(path: Path, dtype: str):
     if not path.exists():
@@ -104,6 +115,42 @@ def main():
     print(f"# python ref: {ref}")
     print(f"# C++ dump:   {cpp}")
     print()
+
+    if (ref / "perframe_noise_f000.bin").exists():
+        first_fail = None
+        for stage, label in PERFRAME_STAGES:
+            ref_files = sorted(ref.glob(f"perframe_{stage}_f*.bin"))
+            cpp_files = sorted(cpp.glob(f"perframe_{stage}_f*.bin"))
+            n_frames = min(len(ref_files), len(cpp_files))
+            if n_frames == 0:
+                print(f"{label}: SKIP ref_frames={len(ref_files)} cpp_frames={len(cpp_files)}")
+                if ref_files and first_fail is None:
+                    first_fail = label
+                continue
+
+            print(f"{label} ({n_frames} paired frames; ref={len(ref_files)} cpp={len(cpp_files)})")
+            worst = (1.0, -1, 0.0)
+            for i in range(n_frames):
+                ref_arr = load_bin(ref / f"perframe_{stage}_f{i:03d}.bin", "f32")
+                cpp_arr = load_bin(cpp / f"perframe_{stage}_f{i:03d}.bin", "f32")
+                cos, ra, rb, rd = cos_rms(ref_arr, cpp_arr)
+                if cos < worst[0]:
+                    worst = (cos, i, rd)
+                tiny_diff = rd < 1e-6
+                if cos < args.threshold and not tiny_diff and first_fail is None:
+                    first_fail = f"{label} frame {i}"
+                status = "PASS" if tiny_diff else fmt_status(cos)
+                print(f"  f{i:03d} cos={cos:8.5f} rms_ref={ra:9.4f} rms_cpp={rb:9.4f} "
+                      f"rms_diff={rd:9.4f} {status}")
+            print(f"  worst: frame {worst[1]} cos={worst[0]:.5f} rms_diff={worst[2]:.4f}")
+            print()
+
+        if first_fail:
+            print(f"first divergent stage: {first_fail}")
+            return 1
+        print("all per-frame stages within threshold")
+        return 0
+
     header = f"{'stage':<42} {'cos':>8} {'rms_ref':>9} {'rms_cpp':>9} {'rms_diff':>9}  status  shape"
     print(header)
     print("-" * len(header))

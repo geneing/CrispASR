@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -654,6 +655,33 @@ int crispasr_run_backend(const whisper_params& params_in) {
         if (audio.empty()) {
             fprintf(stderr, "crispasr: error: TTS synthesis failed\n");
             return 15;
+        }
+
+        // Optional leading-silence trim. RMS gate over a 20 ms window;
+        // drop frames below -50 dBFS (≈ 0.0032 RMS) until the gate
+        // opens, then back off 50 ms so we don't clip the consonant onset.
+        if (params.tts_trim_silence) {
+            const int sr_in = 24000;
+            const int win = sr_in / 50;          // 20 ms
+            const int headroom = sr_in / 20;     // 50 ms
+            const float rms_thresh = 0.0032f;    // ≈ -50 dBFS
+            size_t cut = 0;
+            for (size_t i = 0; i + (size_t)win < audio.size(); i += (size_t)win) {
+                double e = 0.0;
+                for (int k = 0; k < win; k++)
+                    e += (double)audio[i + (size_t)k] * (double)audio[i + (size_t)k];
+                float rms = (float)std::sqrt(e / (double)win);
+                if (rms >= rms_thresh) {
+                    cut = i > (size_t)headroom ? i - (size_t)headroom : 0;
+                    break;
+                }
+            }
+            if (cut > 0) {
+                if (!params.no_prints)
+                    fprintf(stderr, "crispasr: trimmed %.2fs of leading silence\n",
+                            (double)cut / (double)sr_in);
+                audio.erase(audio.begin(), audio.begin() + (std::ptrdiff_t)cut);
+            }
         }
 
         // Write output WAV (24 kHz mono)

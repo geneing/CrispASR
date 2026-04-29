@@ -32,9 +32,9 @@ except ImportError:
     import gguf
 
 
-def load_qwen_vocab(vocab_size):
+def load_qwen_vocab(vocab_size, tokenizer):
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B", trust_remote_code=True)
+    tok = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
     vocab_map = tok.get_vocab()  # str -> id
     inv = {v: k for k, v in vocab_map.items()}
     max_id = max(inv.keys())
@@ -42,7 +42,7 @@ def load_qwen_vocab(vocab_size):
     # filling unknowns with "<unk_<i>>". Runtime only needs IDs that the
     # model actually emits (all inside Qwen's defined range).
     vocab_list = [inv.get(i, f"<unk_{i}>") for i in range(max_id + 1)]
-    print(f"  loaded {len(vocab_list)} tokens from Qwen/Qwen2.5-7B (model vocab_size={vocab_size})")
+    print(f"  loaded {len(vocab_list)} tokens from {tokenizer} (model vocab_size={vocab_size})")
     return vocab_list
 
 
@@ -50,6 +50,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="existing VibeVoice GGUF without tokenizer")
     ap.add_argument("--output", required=True, help="path for the rewritten GGUF")
+    ap.add_argument("--tokenizer", default="Qwen/Qwen2.5-7B", help="Qwen tokenizer ID or local path")
     args = ap.parse_args()
 
     reader = gguf.GGUFReader(args.input)
@@ -65,7 +66,7 @@ def main():
     vs_field = reader.fields.get("vibevoice.vocab_size")
     vocab_size = int(vs_field.parts[vs_field.data[0]]) if vs_field else 152064
 
-    vocab_list = load_qwen_vocab(vocab_size)
+    vocab_list = load_qwen_vocab(vocab_size, args.tokenizer)
 
     writer = gguf.GGUFWriter(args.output, arch)
 

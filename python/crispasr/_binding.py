@@ -1066,6 +1066,60 @@ class Session:
         finally:
             self._lib.crispasr_session_result_free(res)
 
+    # ---------------------------------------------------------------------
+    # TTS synthesis (vibevoice, qwen3-tts)
+    # ---------------------------------------------------------------------
+
+    def set_codec_path(self, path: str) -> None:
+        """Load a separate codec GGUF (qwen3-tts only; no-op for others)."""
+        if not hasattr(self._lib, "crispasr_session_set_codec_path"):
+            raise RuntimeError("TTS API not present in this libcrispasr build")
+        self._lib.crispasr_session_set_codec_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self._lib.crispasr_session_set_codec_path.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_codec_path(self._handle, path.encode("utf-8"))
+        if rc != 0:
+            raise RuntimeError(f"set_codec_path failed (rc={rc}) for backend {self.backend!r}")
+
+    def set_voice(self, path: str, ref_text: Optional[str] = None) -> None:
+        """Load a voice prompt: a baked GGUF voice pack OR a *.wav reference.
+
+        For qwen3-tts a *.wav reference requires ``ref_text`` (the
+        transcription of the reference audio).
+        """
+        if not hasattr(self._lib, "crispasr_session_set_voice"):
+            raise RuntimeError("TTS API not present in this libcrispasr build")
+        self._lib.crispasr_session_set_voice.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+        self._lib.crispasr_session_set_voice.restype = ctypes.c_int
+        rt = ref_text.encode("utf-8") if ref_text else None
+        rc = self._lib.crispasr_session_set_voice(self._handle, path.encode("utf-8"), rt)
+        if rc != 0:
+            raise RuntimeError(f"set_voice failed (rc={rc}) for backend {self.backend!r}")
+
+    def synthesize(self, text: str) -> np.ndarray:
+        """Synthesise ``text`` to 24 kHz mono float32 PCM as a numpy array.
+
+        Requires a TTS-capable backend (``vibevoice``, ``qwen3-tts``).
+        For qwen3-tts call :meth:`set_codec_path` and :meth:`set_voice`
+        before the first synthesis.
+        """
+        if not hasattr(self._lib, "crispasr_session_synthesize"):
+            raise RuntimeError("TTS API not present in this libcrispasr build")
+        self._lib.crispasr_session_synthesize.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int),
+        ]
+        self._lib.crispasr_session_synthesize.restype = ctypes.POINTER(ctypes.c_float)
+        self._lib.crispasr_pcm_free.argtypes = [ctypes.POINTER(ctypes.c_float)]
+        self._lib.crispasr_pcm_free.restype = None
+        n = ctypes.c_int(0)
+        ptr = self._lib.crispasr_session_synthesize(self._handle, text.encode("utf-8"), ctypes.byref(n))
+        if not ptr or n.value <= 0:
+            raise RuntimeError(f"synthesize returned no audio for backend {self.backend!r}")
+        try:
+            arr = np.ctypeslib.as_array(ptr, shape=(n.value,)).copy()
+        finally:
+            self._lib.crispasr_pcm_free(ptr)
+        return arr
+
     def close(self) -> None:
         if getattr(self, "_handle", None):
             self._lib.crispasr_session_close(self._handle)
