@@ -143,8 +143,8 @@ static void compute_fbank(const float* pcm, int n_samples, std::vector<float>& f
     std::vector<float> fre(N_fft), fim(N_fft);
     for (int t = 0; t < n_frames; t++) {
         int off = t * hop;
-        std::fill(fre.begin(), fre.end(), 0);
-        std::fill(fim.begin(), fim.end(), 0);
+        std::fill(fre.begin(), fre.end(), 0.0f);
+        std::fill(fim.begin(), fim.end(), 0.0f);
         for (int i = 0; i < win_len; i++)
             fre[i] = pcm_padded[off + i] * window[i];
         fft512(fre.data(), fim.data());

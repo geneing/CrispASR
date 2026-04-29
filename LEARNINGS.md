@@ -759,6 +759,54 @@ cos_min ≥ 0.999983 against the Python reference (8/8 stages PASS).
 Marked with `// CrispASR patch` in the kernel. **MUST RE-APPLY after
 every ggml bump.**
 
+### Qwen3-TTS runtime voice prompt bug: RVQ encode layout mismatch
+
+For `qwen3-tts`, "runtime WAV clone sounds wrong, baked voice-pack
+works" was not a talker or Metal problem. The decisive diff pattern was:
+
+- `cenc_se_init` .. `cenc_ds_out` PASS
+- `cenc_codes` FAIL
+- `runtime_spk_emb` PASS
+- `runtime_ref_codes` FAIL
+- `runtime_talker_logits` FAIL as a downstream consequence
+
+That localizes the bug to the CPU-side RVQ encode step that turns
+encoder embeddings into the 16 reference codebooks. ECAPA, the SEANet
+encoder, the transformer, and the CLI wrapper can all be correct while
+this still fails.
+
+**Actual problem:** `run_cenc()` handed `cenc_rvq_encode()` embeddings in
+time-major row-major layout, but the helper functions still indexed them
+as if they were channel-major. The bad assumption existed in all three
+helpers:
+
+- `cpu_k1_proj()`
+- `rvq_nearest_neighbor()`
+- `rvq_subtract()`
+
+So nearest-neighbor search and residual subtraction were operating on
+the wrong vectors even though `cenc_ds_out` already matched the Python
+reference.
+
+**Fix (file: `src/qwen3_tts.cpp`):**
+
+1. Treat encoder RVQ inputs as `[T, C]` row-major throughout.
+2. Write projected tensors in the same `[T, C]` row-major layout.
+3. Run nearest-neighbor and residual subtraction against that layout.
+4. Keep semantic and acoustic RVQ as independent branches from the same
+   encoder embedding, matching `MimiSplitResidualVectorQuantizer.encode()`.
+
+If `qwen3-tts` repeats the reference text or otherwise sounds wrong, the
+most useful first diff is:
+
+- `cenc_se_init` .. `cenc_ds_out`
+- then `cenc_codes`
+- then `runtime_ref_codes`
+
+If the network stages pass but `cenc_codes` fails, the bug is almost
+certainly in the RVQ encode layout / residual logic, not the prompt
+builder.
+
 ### CUDA im2col grid overflow (MUST RE-APPLY after every ggml bump)
 
 Upstream ggml's CUDA im2col kernel uses `OW` (output width) directly as
@@ -4022,4 +4070,3 @@ The complete recipe — for any future audio codec port — is:
 **dump after every stride-changing layer, not just at module
 boundaries.** Module boundaries hide the conv-by-conv accumulation;
 intra-module dumps localise it.
-

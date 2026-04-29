@@ -246,8 +246,8 @@ static void compute_fbank_vad(const float* pcm, int n_samples, std::vector<float
         for (int i = win - 1; i > 0; i--)
             fr[i] -= preemph * fr[i - 1];
         fr[0] -= preemph * fr[0];
-        std::fill(fre.begin(), fre.end(), 0);
-        std::fill(fim.begin(), fim.end(), 0);
+        std::fill(fre.begin(), fre.end(), 0.0f);
+        std::fill(fim.begin(), fim.end(), 0.0f);
         for (int i = 0; i < win; i++)
             fre[i] = fr[i] * window[i];
         fft(fre.data(), fim.data(), n_fft);

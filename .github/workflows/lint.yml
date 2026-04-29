@@ -64,10 +64,12 @@ jobs:
         # don't have to guess from a bare count.
         run: |
           clang-format --version
-          OUT=$(find src examples/cli \
-               \( -name '*.cpp' -o -name '*.h' \) \
+          OUT=$(find src examples/cli crisp_audio \
+               \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \) \
                ! -name 'httplib.h' \
                ! -name 'miniaudio.h' \
+               ! -name 'json.hpp' \
+               ! -name 'stb_vorbis.c' \
                ! -path '*/coreml/*' \
                -print0 \
           | xargs -0 clang-format --dry-run --Werror 2>&1 || true)
@@ -159,4 +161,4 @@ jobs:
             --suppress=toomanyconfigs \
             --suppress=invalidFunctionArg \
             --quiet \
-            src/ examples/cli/
+            src/ examples/cli/ crisp_audio/

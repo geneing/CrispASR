@@ -79,8 +79,9 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 
 | Backend | Models | Architecture | Languages | License |
 |---------|--------|-------------|-----------|---------|
-| **vibevoice** | [`VibeVoice-Realtime-0.5B`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF) | 4L base + 20L TTS LM + DPM-Solver++ + σ-VAE decoder; pre-computed voice presets | en | MIT |
-| **vibevoice** | [`VibeVoice-1.5B`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF) | 28L Qwen2 LM + DPM-Solver++ + σ-VAE decoder; voice cloning from audio | en, zh | MIT |
+| **vibevoice-tts** | [`VibeVoice-Realtime-0.5B`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF) | 4L base + 20L TTS LM + DPM-Solver++ + σ-VAE decoder; pre-computed voice presets | en | MIT |
+| **vibevoice-tts** | [`VibeVoice-1.5B`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF) | 28L Qwen2 LM + DPM-Solver++ + σ-VAE decoder; voice cloning from audio | en, zh | MIT |
+| **qwen3-tts** | [`Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF) | Qwen3 talker LM + 12 Hz RVQ speech tokenizer; baked voice pack GGUF or runtime WAV + `--ref-text` | multilingual, per base model | Apache-2.0 |
 
 **Post-processing models** (work with all backends):
 
@@ -444,32 +445,55 @@ Streaming works with all backends. The `--stream-step` (default 3s), `--stream-l
 
 ### Text-to-Speech (TTS)
 
-CrispASR includes text-to-speech synthesis via Microsoft VibeVoice models.
+CrispASR currently exposes two TTS backends through the unified CLI:
+`vibevoice-tts` and `qwen3-tts`. Both write 24 kHz mono WAV via
+`--tts-output`.
 
-**Realtime-0.5B** (streaming model, pre-computed voice presets):
+**VibeVoice realtime** (`vibevoice-tts`, preset voice GGUF):
 ```bash
-crispasr --tts "Hello, how are you today?" \
-    -m vibevoice-realtime-0.5b-q4_k.gguf \
-    --voice vibevoice-voice-emma.gguf \
+./build/bin/crispasr \
+    --backend vibevoice-tts \
+    -m ~/.cache/crispasr/vibevoice-realtime-0.5b-q4_k.gguf \
+    --voice ~/.cache/crispasr/vibevoice-voice-emma.gguf \
+    --tts "Hello, how are you today?" \
     --tts-output hello.wav
 ```
 
-**1.5B** (base model, voice cloning from reference audio):
+**Qwen3-TTS** (`qwen3-tts`, runtime WAV clone):
 ```bash
-VIBEVOICE_VOICE_AUDIO=reference_voice.wav \
-crispasr --tts "Hello, how are you today?" \
-    -m vibevoice-1.5b-tts-q4_k.gguf \
+./build/bin/crispasr \
+    --backend qwen3-tts \
+    -m /Volumes/backups/ai/crispasr-models/qwen3-tts-0.6b-talker.gguf \
+    --codec-model /Volumes/backups/ai/crispasr-models/qwen3-tts-tokenizer-12hz.gguf \
+    --voice samples/qwen3_tts/clone.wav \
+    --ref-text "Okay, yeah. I resent you, I love you, I respect you. But you know what - You blew it, and thanks to you." \
+    --tts "Hello there" \
     --tts-output hello.wav
 ```
 
-Output: 24 kHz mono WAV. Both models produce perfect ASR round-trip on tested phrases.
+**Qwen3-TTS** (`qwen3-tts`, baked voice-pack GGUF):
+```bash
+./build/bin/crispasr \
+    --backend qwen3-tts \
+    -m /Volumes/backups/ai/crispasr-models/qwen3-tts-0.6b-talker.gguf \
+    --codec-model /Volumes/backups/ai/crispasr-models/qwen3-tts-tokenizer-12hz.gguf \
+    --voice /tmp/qwen3-tts-voice-pack.gguf \
+    --tts "Hello there" \
+    --tts-output hello.wav
+```
 
-| Model | Size (Q4_K) | Voice Input | Features |
-|-------|------------|------------|----------|
-| Realtime-0.5B | 607 MB | `.gguf` voice presets | Streaming, EOS classifier |
-| 1.5B | 1.6 GB | Reference WAV audio | Voice cloning, multi-speaker |
+Notes:
 
-GGUF downloads: [`cstr/vibevoice-realtime-0.5b-GGUF`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF), [`cstr/vibevoice-1.5b-GGUF`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF)
+- `vibevoice-tts` uses `--voice` for its voice prompt or preset. The realtime
+  `0.5B` flow is typically driven by a voice GGUF.
+- `qwen3-tts` always needs the separate codec GGUF. Pass it explicitly with
+  `--codec-model`, or place `qwen3-tts-tokenizer-12hz.gguf` next to the
+  talker model so the CLI can auto-discover it.
+- When `qwen3-tts --voice` points to a `.wav`, `--ref-text` is required.
+- When `qwen3-tts --voice` points to a `.gguf`, it is treated as a baked voice
+  pack and `--ref-text` is ignored.
+
+GGUF downloads: [`cstr/vibevoice-realtime-0.5b-GGUF`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF), [`cstr/vibevoice-1.5b-GGUF`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF), [`cstr/qwen3-tts-0.6b-base-GGUF`](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF), [`cstr/qwen3-tts-tokenizer-12hz-GGUF`](https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF)
 
 ### Server mode (persistent model, HTTP API)
 
