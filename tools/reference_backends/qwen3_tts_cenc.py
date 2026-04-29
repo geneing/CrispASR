@@ -42,9 +42,16 @@ DEFAULT_STAGES = [
 
 
 def _load_clone_audio() -> np.ndarray:
-    """Load clone.wav at 24kHz mono float32. Take first 3 seconds for speed."""
+    """Load a 24kHz mono float32 WAV.
+
+    Defaults to samples/qwen3_tts/clone.wav and trims to 3 seconds for speed.
+    Override with:
+      QWEN3_TTS_CENC_WAV=/path/to/file.wav
+      QWEN3_TTS_CENC_FULL=1   # keep full duration
+    """
     repo_root = Path(__file__).resolve().parents[2]
-    wav_path = repo_root / "samples" / "qwen3_tts" / "clone.wav"
+    wav_override = os.environ.get("QWEN3_TTS_CENC_WAV", "").strip()
+    wav_path = Path(wav_override) if wav_override else (repo_root / "samples" / "qwen3_tts" / "clone.wav")
     if not wav_path.exists():
         raise FileNotFoundError(f"clone.wav not at {wav_path}")
     # Read RIFF/WAVE — IEEE Float, mono, 24kHz
@@ -75,7 +82,9 @@ def _load_clone_audio() -> np.ndarray:
         pos += 8 + csz + (csz % 2)
     if samples is None or sr != 24000 or n_ch != 1:
         raise ValueError(f"expected 24kHz mono, got sr={sr} ch={n_ch}")
-    # Take first 3 seconds (smaller diff = faster, frame count divisible by all strides)
+    if os.environ.get("QWEN3_TTS_CENC_FULL", "") not in ("", "0"):
+        return samples.astype(np.float32)
+    # Default: take first 3 seconds (smaller diff = faster, frame count divisible by all strides)
     return samples[:24000 * 3].astype(np.float32)
 
 

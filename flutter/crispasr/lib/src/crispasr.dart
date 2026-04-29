@@ -1678,6 +1678,89 @@ class CrispasrSession {
     return out;
   }
 
+  // ---------------------------------------------------------------------------
+  // TTS synthesis (vibevoice, qwen3-tts)
+  // ---------------------------------------------------------------------------
+
+  /// Load a separate codec GGUF (qwen3-tts only; no-op for other backends).
+  void setCodecPath(String path) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_codec_path')) {
+      throw UnsupportedError('TTS codec API not available in this libcrispasr build');
+    }
+    final fn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<Utf8>),
+        int Function(Pointer<Void>, Pointer<Utf8>)>('crispasr_session_set_codec_path');
+    final p = path.toNativeUtf8();
+    try {
+      final rc = fn(_handle, p);
+      if (rc != 0) throw Exception('setCodecPath failed (rc=$rc) for backend $_backend');
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  /// Load a voice prompt: a baked GGUF voice pack OR a *.wav reference audio.
+  ///
+  /// For qwen3-tts a WAV reference requires [refText] (the transcription of
+  /// the reference audio). For vibevoice only GGUF voice packs are supported.
+  void setVoice(String path, {String? refText}) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_voice')) {
+      throw UnsupportedError('TTS voice API not available in this libcrispasr build');
+    }
+    final fn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>),
+        int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>('crispasr_session_set_voice');
+    final pathPtr = path.toNativeUtf8();
+    final refPtr = refText != null ? refText.toNativeUtf8() : nullptr;
+    try {
+      final rc = fn(_handle, pathPtr, refPtr.cast());
+      if (rc != 0) throw Exception('setVoice failed (rc=$rc) for backend $_backend');
+    } finally {
+      calloc.free(pathPtr);
+      if (refPtr != nullptr) calloc.free(refPtr);
+    }
+  }
+
+  /// Synthesise [text] to 24 kHz mono float32 PCM.
+  ///
+  /// Requires a TTS-capable backend (vibevoice, qwen3-tts).
+  /// For vibevoice call [setVoice] before the first synthesis.
+  Float32List synthesize(String text) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_synthesize')) {
+      throw UnsupportedError('TTS synthesize API not available in this libcrispasr build');
+    }
+    final synFn = _lib.lookupFunction<
+        Pointer<Float> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Int32>),
+        Pointer<Float> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Int32>)>(
+      'crispasr_session_synthesize',
+    );
+    final freeFn = _lib.lookupFunction<
+        Void Function(Pointer<Float>),
+        void Function(Pointer<Float>)>('crispasr_pcm_free');
+    final textPtr = text.toNativeUtf8();
+    final nPtr = calloc<Int32>();
+    try {
+      final pcmPtr = synFn(_handle, textPtr, nPtr);
+      final n = nPtr.value;
+      if (pcmPtr == nullptr || n <= 0) {
+        throw Exception('synthesize returned no audio for backend $_backend');
+      }
+      try {
+        return Float32List.fromList(
+          List.generate(n, (i) => pcmPtr[i]),
+        );
+      } finally {
+        freeFn(pcmPtr);
+      }
+    } finally {
+      calloc.free(textPtr);
+      calloc.free(nPtr);
+    }
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;

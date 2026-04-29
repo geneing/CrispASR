@@ -689,7 +689,8 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
         backend = "canary-ctc";
     else if (strcmp(arch, "wav2vec2") == 0)
         backend = "wav2vec2";
-    else if (strcmp(arch, "vibevoice-asr") == 0 || strcmp(arch, "vibevoice") == 0)
+    else if (strcmp(arch, "vibevoice-asr") == 0 || strcmp(arch, "vibevoice") == 0 ||
+             strcmp(arch, "vibevoice-tts") == 0)
         backend = "vibevoice";
     else if (strcmp(arch, "qwen3-tts") == 0 || strcmp(arch, "qwen3_tts") == 0)
         backend = "qwen3-tts";
@@ -937,11 +938,12 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     }
 #endif
 #ifdef CA_HAVE_VIBEVOICE
-    if (s->backend == "vibevoice") {
+    if (s->backend == "vibevoice" || s->backend == "vibevoice-tts") {
+        s->backend = "vibevoice";
         vibevoice_context_params p = vibevoice_context_default_params();
         p.n_threads = s->n_threads;
         p.verbosity = 0;
-        p.use_gpu = false;
+        p.use_gpu = true;
         s->vibevoice_ctx = vibevoice_init_from_file(model_path, p);
         if (!s->vibevoice_ctx) {
             delete s;
@@ -1115,7 +1117,7 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
     list += ",wav2vec2";
 #endif
 #ifdef CA_HAVE_VIBEVOICE
-    list += ",vibevoice";
+    list += ",vibevoice,vibevoice-tts";
 #endif
 #ifdef CA_HAVE_QWEN3_TTS
     list += ",qwen3-tts";

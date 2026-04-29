@@ -558,6 +558,14 @@ int main(int argc, char** argv) {
             fprintf(stderr, "failed to load qwen3-tts model\n");
             return 4;
         }
+        const char* codec_gguf = std::getenv("QWEN3_TTS_CODEC_GGUF");
+        if (codec_gguf && *codec_gguf) {
+            if (qwen3_tts_set_codec_path(ctx, codec_gguf) != 0) {
+                fprintf(stderr, "failed to load qwen3-tts codec '%s'\n", codec_gguf);
+                qwen3_tts_free(ctx);
+                return 4;
+            }
+        }
 
         // Stage: text_proj_out — text_embedding + text_projection on the
         // tokenised synth prompt. Read the int32 ids from the reference
@@ -736,6 +744,110 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Stage: runtime_voice_prompt — run the real WAV-prompt path
+        // used by the CLI (`set_voice_prompt_with_text`) and compare
+        // the resulting runtime ref_code / prefill / talker logits
+        // against the official prompt item dumped in the reference.
+        if (syn_text.empty() || ref_text.empty()) {
+            printf("[SKIP] runtime_voice_prompt    qwen3_tts_syn_text / qwen3_tts_ref_text not in reference\n");
+            n_skip++;
+        } else {
+            int rc = qwen3_tts_set_voice_prompt_with_text(ctx, audio_path.c_str(), ref_text.c_str());
+            if (rc != 0) {
+                printf("[SKIP] runtime_voice_prompt    set_voice_prompt_with_text failed on '%s'\n", audio_path.c_str());
+                n_skip++;
+            } else {
+                auto ref_codes_pair = ref.get_f32("ref_codes");
+                auto ref_codes_shape = ref.shape("ref_codes");
+                auto ref_spk_pair = ref.get_f32("ref_spk_embedding");
+                int n_spk = 0;
+                const float* my_spk = qwen3_tts_get_runtime_spk_emb(ctx, &n_spk);
+                if (ref_spk_pair.first && my_spk && n_spk > 0) {
+                    auto rep = ref.compare("ref_spk_embedding", my_spk, (size_t)n_spk);
+                    print_row("runtime_spk_emb", rep, COS_THRESHOLD);
+                    record(rep);
+                } else {
+                    printf("[SKIP] runtime_spk_emb       ref_spk_embedding missing or runtime speaker emb unavailable\n");
+                    n_skip++;
+                }
+                int n_codes = 0;
+                const int32_t* my_codes = qwen3_tts_get_runtime_ref_codes(ctx, &n_codes);
+                if (ref_codes_pair.first && ref_codes_shape.size() >= 2 && my_codes) {
+                    const int n_ref = (int)(ref_codes_shape[0] * ref_codes_shape[1]);
+                    std::vector<float> my_codes_f((size_t)n_codes);
+                    for (int i = 0; i < n_codes; i++)
+                        my_codes_f[i] = (float)my_codes[i];
+                    auto rep = ref.compare("ref_codes", my_codes_f.data(), (size_t)std::min(n_codes, n_ref));
+                    print_row("runtime_ref_codes", rep, COS_THRESHOLD);
+                    record(rep);
+                } else {
+                    printf("[SKIP] runtime_ref_codes     ref_codes missing or runtime codes unavailable\n");
+                    n_skip++;
+                }
+
+                int Tprefill_rt = 0;
+                float* rt_prefill = qwen3_tts_build_icl_prefill(ctx, syn_text.c_str(), ref_text.c_str(), &Tprefill_rt);
+                if (!rt_prefill) {
+                    printf("[ERR ] runtime_icl_prefill    build_icl_prefill returned null\n");
+                    n_fail++;
+                } else {
+                    if (embeds_pair.first && (int)embeds_shape[1] == Tprefill_rt) {
+                        const int dd = (int)embeds_shape[0];
+                        double max_pre = 0;
+                        for (size_t i = 0; i < (size_t)Tprefill_rt * dd; i++) {
+                            double diff = std::fabs(rt_prefill[i] - embeds_pair.first[i]);
+                            if (diff > max_pre)
+                                max_pre = diff;
+                        }
+                        printf("[INFO] runtime_icl_vs_ref     max_abs=%.4e (over T=%d × d=%d)\n", max_pre, Tprefill_rt, dd);
+                    }
+                    auto tl_r = qwen3_tts_talker_logits_r(ctx, rt_prefill, Tprefill_rt);
+                    free(rt_prefill);
+                    if (tl_r.ok) {
+                        auto ref_logits_pair = ref.get_f32("talker_logits");
+                        auto ref_logits_shape = ref.shape("talker_logits");
+                        if (!ref_logits_pair.first || ref_logits_shape.size() < 2) {
+                            printf("[SKIP] runtime_talker_logits  ref talker_logits missing\n");
+                            n_skip++;
+                        } else {
+                            const int vocab = (int)ref_logits_shape[0];
+                            const int Tref = (int)ref_logits_shape[1];
+                            const float* ref_last = ref_logits_pair.first + (size_t)(Tref - 1) * vocab;
+                            crispasr_diff::Report rep;
+                            rep.found = true;
+                            rep.n_elem = (size_t)vocab;
+                            rep.shape = {1, vocab};
+                            double dot = 0, na = 0, nb = 0, max_abs = 0, sum_abs = 0, sum_sq = 0;
+                            for (int i = 0; i < vocab; i++) {
+                                double a = tl_r.data[i], b = ref_last[i];
+                                dot += a * b;
+                                na += a * a;
+                                nb += b * b;
+                                double d = a - b;
+                                if (std::fabs(d) > max_abs)
+                                    max_abs = std::fabs(d);
+                                sum_abs += std::fabs(d);
+                                sum_sq += d * d;
+                            }
+                            rep.cos_min = (na > 0 && nb > 0) ? (float)(dot / std::sqrt(na * nb)) : 1.0f;
+                            rep.cos_mean = rep.cos_min;
+                            rep.max_abs = (float)max_abs;
+                            rep.mean_abs = (float)(sum_abs / vocab);
+                            rep.rms = (float)std::sqrt(sum_sq / vocab);
+                            char extra[64];
+                            snprintf(extra, sizeof(extra), "T_prefill=%d  argmax=%d", Tprefill_rt,
+                                     (int)(std::max_element(tl_r.data.begin(), tl_r.data.end()) - tl_r.data.begin()));
+                            print_row("runtime_talker_logits", rep, COS_THRESHOLD, extra);
+                            record(rep);
+                        }
+                    } else {
+                        printf("[ERR ] runtime_talker_logits  %s\n", tl_r.note.c_str());
+                        n_fail++;
+                    }
+                }
+            }
+        }
+
         qwen3_tts_free(ctx);
 
     // ---- qwen3-tts-spk (ECAPA speaker encoder) ----
@@ -854,12 +966,51 @@ int main(int argc, char** argv) {
             free(mine);
         }
 
-        // Final codes — set voice prompt to compute them, then compare
-        // (set_voice_prompt internally calls run_cenc which produces codes)
-        // For diff, we run the encoder and check codes via runtime_ref_codes.
-        // But set_voice_prompt expects 24kHz and the fixed audio is at 24kHz already.
-        // We'd need a way to feed audio buffer directly — for now, skip codes diff
-        // since the embeddings comparison is more diagnostic.
+        // Final codes from the raw-audio buffer path. This isolates the RVQ
+        // encoder math from the WAV reader used by set_voice_prompt().
+        {
+            int n = 0;
+            float* mine = qwen3_tts_cenc_extract_stage(qctx, audio_buf.data(), n_samp, "cenc_codes", &n);
+            if (!mine) {
+                printf("[ERR ] cenc_codes(raw)         extract returned null\n");
+                n_fail++;
+            } else {
+                auto rep = ref.compare("cenc_codes", mine, (size_t)n);
+                print_row("cenc_codes(raw)", rep, COS_THRESHOLD);
+                record(rep);
+                free(mine);
+            }
+        }
+
+        // Final codes — use the real WAV-path runtime prompt builder so we
+        // compare the exact row-major [T,16] codes the CLI path will later
+        // feed into ICL prefill.
+        {
+            int rc = qwen3_tts_set_voice_prompt(qctx, audio_path.c_str());
+            if (rc != 0) {
+                printf("[ERR ] cenc_codes(wav)         set_voice_prompt failed on '%s'\n", audio_path.c_str());
+                n_fail++;
+            } else {
+                auto ref_codes_pair = ref.get_f32("cenc_codes");
+                auto ref_codes_shape = ref.shape("cenc_codes");
+                int n_codes = 0;
+                const int32_t* my_codes = qwen3_tts_get_runtime_ref_codes(qctx, &n_codes);
+                if (!ref_codes_pair.first || ref_codes_shape.size() < 2 || !my_codes) {
+                    printf("[SKIP] cenc_codes(wav)         ref/runtime codes unavailable\n");
+                    n_skip++;
+                } else {
+                    const int T_ref = (int)ref_codes_shape[1];
+                    const int Q_ref = (int)ref_codes_shape[0];
+                    const int n_ref = T_ref * Q_ref;
+                    std::vector<float> my_codes_f((size_t)n_codes);
+                    for (int i = 0; i < n_codes; i++)
+                        my_codes_f[i] = (float)my_codes[i];
+                    auto rep = ref.compare("cenc_codes", my_codes_f.data(), (size_t)std::min(n_codes, n_ref));
+                    print_row("cenc_codes(wav)", rep, COS_THRESHOLD);
+                    record(rep);
+                }
+            }
+        }
 
         qwen3_tts_free(qctx);
     // Runs the codec decoder on T=10 all-zero codes and compares

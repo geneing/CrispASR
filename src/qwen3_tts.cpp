@@ -458,6 +458,8 @@ struct qwen3_tts_context {
     std::vector<std::string> vp_names;
     std::vector<std::string> vp_ref_texts;
     std::map<std::string, ggml_tensor*> vp_tensors;
+    ggml_context* vp_ctx_w = nullptr;
+    ggml_backend_buffer_t vp_buf_w = nullptr;
     int vp_active = -1; // index into vp_names; -1 = none selected
 
     int language_id = -1; // codec language id (-1 = auto / nothink path)
@@ -965,6 +967,25 @@ int argmax(const float* logits, int n) {
             best = i;
         }
     return best;
+}
+
+// Hugging Face repetition penalty processor:
+//   - positive logits are divided by the penalty
+//   - negative logits are multiplied by the penalty
+// Applied once per distinct previously generated token id.
+static void apply_repetition_penalty(float* logits, int n, const std::vector<int32_t>& prev_tokens, float penalty) {
+    if (!logits || n <= 0 || penalty <= 1.0f || prev_tokens.empty())
+        return;
+    std::vector<uint8_t> seen((size_t)n, 0);
+    for (int32_t tok : prev_tokens) {
+        if (tok < 0 || tok >= n || seen[(size_t)tok])
+            continue;
+        seen[(size_t)tok] = 1;
+        if (logits[tok] < 0.0f)
+            logits[tok] *= penalty;
+        else
+            logits[tok] /= penalty;
+    }
 }
 
 // Top-k + temperature sampler. Required for the code_predictor —
@@ -1522,15 +1543,6 @@ bool build_icl_prefill_embeds(qwen3_tts_context* c, const std::string& syn_text,
     off += bridge.size();
     std::memcpy(prefill_embeds.data() + off, icl_input.data(), (size_t)icl_len * d * sizeof(float));
 
-    free(tts_special_emb);
-    free(role_emb);
-
-    if (c->params.verbosity >= 1) {
-        fprintf(stderr,
-                "qwen3_tts: ICL prefill: role=3 + bridge=%d + icl=%d (text_lens=%d codec_lens=%d) = T=%d  "
-                "trailing=%d\n",
-                L_bridge, icl_len, text_lens, codec_lens, T_prefill, M_trailing);
-    }
     if (const char* dd = env_str("QWEN3_TTS_DUMP_DIR")) {
         dump_f32(dd, "icl_role", role_emb, (size_t)3 * d);
         dump_f32(dd, "icl_bridge", bridge.data(), bridge.size());
@@ -1543,6 +1555,14 @@ bool build_icl_prefill_embeds(qwen3_tts_context* c, const std::string& syn_text,
         dump_i32(dd, "syn_ids", syn_ids.data(), syn_ids.size());
         dump_i32(dd, "ref_ids", ref_ids.data(), ref_ids.size());
     }
+    if (c->params.verbosity >= 1) {
+        fprintf(stderr,
+                "qwen3_tts: ICL prefill: role=3 + bridge=%d + icl=%d (text_lens=%d codec_lens=%d) = T=%d  "
+                "trailing=%d\n",
+                L_bridge, icl_len, text_lens, codec_lens, T_prefill, M_trailing);
+    }
+    free(tts_special_emb);
+    free(role_emb);
     return true;
 }
 
@@ -2461,22 +2481,21 @@ static ggml_cgraph* build_cenc_graph(qwen3_tts_context* c, int n_samples) {
 // ---------------------------------------------------------------------------
 
 // Apply k=1 conv weight as matrix multiply on [IC, T] → [OC, T].
-// PyTorch Conv1d weight has shape (OC, IC, K=1) → flat layout w[oc*IC + ic].
+// FIXED: Expects x as [T, IC] row-major, outputs out as [T, OC] row-major.
 static void cpu_k1_proj(const float* x, int T, const float* w, int IC, int OC, float* out) {
-    // out[co, t] = sum_ci x[ci, t] * w[co, ci]  (standard linear: y = W @ x)
     for (int t = 0; t < T; t++) {
         for (int co = 0; co < OC; co++) {
             float s = 0.0f;
             const float* w_co = w + (size_t)co * IC; // row co of (OC, IC) matrix
             for (int ci = 0; ci < IC; ci++)
-                s += x[(size_t)ci * T + t] * w_co[ci];
-            out[(size_t)co * T + t] = s;
+                s += x[(size_t)t * IC + ci] * w_co[ci];
+            out[(size_t)t * OC + co] = s;
         }
     }
 }
 
 // Find nearest codebook entry for each T frame. cb: [2048, 256] row-major.
-// x: [256, T] channels-first. Returns codes [T].
+// FIXED: Expects x as [T, cdim] row-major.
 static void rvq_nearest_neighbor(const float* x, int T, const float* cb, int n_cb, int cdim,
                                   std::vector<int32_t>& codes) {
     codes.resize(T);
@@ -2485,7 +2504,7 @@ static void rvq_nearest_neighbor(const float* x, int T, const float* cb, int n_c
         for (int k = 0; k < n_cb; k++) {
             float d = 0;
             for (int c = 0; c < cdim; c++) {
-                float diff = x[(size_t)c * T + t] - cb[(size_t)k * cdim + c];
+                float diff = x[(size_t)t * cdim + c] - cb[(size_t)k * cdim + c];
                 d += diff * diff;
             }
             if (d < best) { best = d; best_k = k; }
@@ -2495,12 +2514,13 @@ static void rvq_nearest_neighbor(const float* x, int T, const float* cb, int n_c
 }
 
 // Subtract quantized entries from residual: residual -= cb[codes[t]] for each t.
+// FIXED: Expects residual as [T, cdim] row-major.
 static void rvq_subtract(float* residual, int T, const float* cb, int cdim,
                           const std::vector<int32_t>& codes) {
     for (int t = 0; t < T; t++) {
         const float* entry = cb + (size_t)codes[t] * cdim;
         for (int c = 0; c < cdim; c++)
-            residual[(size_t)c * T + t] -= entry[c];
+            residual[(size_t)t * cdim + c] -= entry[c];
     }
 }
 
@@ -2512,40 +2532,26 @@ static bool cenc_rvq_encode(qwen3_tts_context* c, const float* emb, int T,
     const int n_q = 16; // 1 semantic + 15 acoustic
     out_codes.assign((size_t)T * n_q, 0);
 
-    // Load k=1 projection weights from GPU tensors to CPU
-    std::vector<float> sem_in(dim * cdim), sem_out(cdim * dim);
-    std::vector<float> ac_in(dim * cdim), ac_out(cdim * dim);
-    // w has shape ne=[1, IC, OC] in ggml → IC×OC matrix at bytes [1..IC*OC]
+    // Load k=1 projection weights from GPU tensors to CPU.
+    // The encoder has two independent RVQ branches:
+    //   semantic: emb[512,T] -> sem_in -> [256,T] -> 1 residual codebook
+    //   acoustic: emb[512,T] -> ac_in  -> [256,T] -> 15 residual codebooks
+    // Residual subtraction happens inside each branch's 256-d space only.
+    std::vector<float> sem_in(dim * cdim);
+    std::vector<float> ac_in(dim * cdim);
     ggml_backend_tensor_get(ce.sem_in_proj.w, sem_in.data(), 0, sem_in.size()*sizeof(float));
-    ggml_backend_tensor_get(ce.sem_out_proj.w, sem_out.data(), 0, sem_out.size()*sizeof(float));
     ggml_backend_tensor_get(ce.ac_in_proj.w, ac_in.data(), 0, ac_in.size()*sizeof(float));
-    ggml_backend_tensor_get(ce.ac_out_proj.w, ac_out.data(), 0, ac_out.size()*sizeof(float));
 
-    // residual_512 starts as emb (copy to mutable buffer)
-    std::vector<float> residual(emb, emb + (size_t)dim * T);
-
-    // Step 1: Semantic encode (1 codebook)
+    // Step 1: Semantic branch (1 codebook).
     std::vector<float> z_sem(cdim * T);
-    cpu_k1_proj(residual.data(), T, sem_in.data(), dim, cdim, z_sem.data());
+    cpu_k1_proj(emb, T, sem_in.data(), dim, cdim, z_sem.data());
     std::vector<int32_t> sem_codes;
     rvq_nearest_neighbor(z_sem.data(), T, ce.sem_cb.data.data(), n_cb, cdim, sem_codes);
     for (int t = 0; t < T; t++) out_codes[(size_t)t * n_q + 0] = sem_codes[t];
-    // Subtract: reconstruct via output_proj, subtract from residual_512
-    // sem_q_256[t] = sem_cb[sem_codes[t]]; sem_q_512 = out_proj(sem_q_256)
-    std::vector<float> sem_q256(cdim * T, 0.0f);
-    for (int t = 0; t < T; t++) {
-        const float* entry = ce.sem_cb.data.data() + (size_t)sem_codes[t] * cdim;
-        for (int c = 0; c < cdim; c++)
-            sem_q256[(size_t)c * T + t] = entry[c];
-    }
-    std::vector<float> sem_q512(dim * T);
-    cpu_k1_proj(sem_q256.data(), T, sem_out.data(), cdim, dim, sem_q512.data());
-    for (size_t i = 0; i < (size_t)dim * T; i++)
-        residual[i] -= sem_q512[i];
 
-    // Step 2: Acoustic encode (15 codebooks, residual in 256-dim space)
+    // Step 2: Acoustic branch (15 residual codebooks in 256-dim space).
     std::vector<float> z_ac(cdim * T);
-    cpu_k1_proj(residual.data(), T, ac_in.data(), dim, cdim, z_ac.data());
+    cpu_k1_proj(emb, T, ac_in.data(), dim, cdim, z_ac.data());
     for (int q = 0; q < 15; q++) {
         std::vector<int32_t> ac_codes_q;
         rvq_nearest_neighbor(z_ac.data(), T, ce.ac_cb[q].data.data(), n_cb, cdim, ac_codes_q);
@@ -3273,6 +3279,13 @@ extern "C" const int32_t* qwen3_tts_get_runtime_ref_codes(struct qwen3_tts_conte
     return ctx->runtime_ref_codes.data();
 }
 
+extern "C" const float* qwen3_tts_get_runtime_spk_emb(struct qwen3_tts_context* ctx, int* out_n) {
+    if (out_n) *out_n = 0;
+    if (!ctx || ctx->runtime_spk_emb.empty()) return nullptr;
+    if (out_n) *out_n = (int)ctx->runtime_spk_emb.size();
+    return ctx->runtime_spk_emb.data();
+}
+
 // Run the codec encoder graph and extract a named intermediate tensor.
 extern "C" float* qwen3_tts_cenc_extract_stage(struct qwen3_tts_context* ctx,
                                                 const float* audio, int n_samples,
@@ -3282,6 +3295,22 @@ extern "C" float* qwen3_tts_cenc_extract_stage(struct qwen3_tts_context* ctx,
     if (!ctx->cenc.loaded) {
         fprintf(stderr, "qwen3_tts: cenc_extract_stage: encoder not loaded\n");
         return nullptr;
+    }
+    if (std::strcmp(stage_name, "cenc_codes") == 0) {
+        std::vector<int32_t> codes_i32;
+        int T_frames = 0;
+        if (!run_cenc(ctx, audio, n_samples, codes_i32, T_frames)) {
+            fprintf(stderr, "qwen3_tts: cenc_extract_stage: run_cenc failed for cenc_codes\n");
+            return nullptr;
+        }
+        float* out = (float*)malloc(codes_i32.size() * sizeof(float));
+        if (!out) return nullptr;
+
+        for (size_t i = 0; i < codes_i32.size(); ++i)
+            out[i] = (float)codes_i32[i];
+
+        if (out_n) *out_n = (int)codes_i32.size();
+        return out;
     }
     ggml_cgraph* gf = build_cenc_graph(ctx, n_samples);
     ggml_backend_sched_reset(ctx->sched);
@@ -3338,11 +3367,16 @@ extern "C" int qwen3_tts_load_voice_pack(struct qwen3_tts_context* ctx, const ch
         fprintf(stderr, "qwen3_tts: failed to load voice pack tensors from '%s'\n", path);
         return -1;
     }
+
+    if (ctx->vp_buf_w)
+        ggml_backend_buffer_free(ctx->vp_buf_w);
+    if (ctx->vp_ctx_w)
+        ggml_free(ctx->vp_ctx_w);
+    ctx->vp_tensors.clear();
+
     ctx->vp_tensors = std::move(wl.tensors);
-    // We ignore wl.ctx / wl.buf to keep cleanup simple — they leak
-    // until process exit, which is fine for the tiny voice-pack
-    // tensors (kilobytes total). If memory pressure becomes an
-    // issue, retain them and free on context destruction.
+    ctx->vp_ctx_w = wl.ctx;
+    ctx->vp_buf_w = wl.buf;
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "qwen3_tts: loaded voice pack %s with %zu voices\n", path, ctx->vp_names.size());
@@ -3519,9 +3553,13 @@ extern "C" int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, co
     // frame 0 and emit ~5 s of leading silence.
     const int talker_top_k = 50;
     const float talker_temp = 0.9f;
+    const float talker_repetition_penalty = 1.05f;
     const int min_new_frames = 2;
     const int suppress_lo = (int)hp.vocab_size - 1024; // 2048 with default config
+    std::vector<int32_t> talker_history;
+    talker_history.reserve((size_t)max_frames);
     for (frame = 0; frame < max_frames; frame++) {
+        apply_repetition_penalty(logits, (int)hp.vocab_size, talker_history, talker_repetition_penalty);
         // 1. Sample codebook-0 from talker logits.
         for (int i = suppress_lo; i < (int)hp.vocab_size; i++) {
             if (i != eos)
@@ -3539,6 +3577,7 @@ extern "C" int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, co
             past_hidden = nullptr;
             break;
         }
+        talker_history.push_back(cb0);
         // 2. Embed cb0 via talker.codec_embedding → last_id_hidden (d,)
         float* last_id_hidden = lookup_rows(ctx, ctx->talker.token_embd_w, &cb0, 1);
         if (!last_id_hidden) {
@@ -3636,6 +3675,46 @@ extern "C" float* qwen3_tts_decode_codes(struct qwen3_tts_context* ctx, const in
     return codec_decode_codes(ctx, codes, T_codec, out_n_samples);
 }
 
+static bool qwen3_tts_get_active_ref_codes(qwen3_tts_context* ctx, std::vector<int32_t>& ref_codes, int& T_ref) {
+    T_ref = 0;
+    ref_codes.clear();
+
+    const int n_q = (int)ctx->codec.hp.n_q;
+
+    if (!ctx->runtime_ref_codes.empty()) {
+        if ((int)ctx->runtime_ref_codes.size() % n_q != 0) {
+            fprintf(stderr, "qwen3_tts: runtime_ref_codes size %zu not divisible by n_q=%d\n",
+                    ctx->runtime_ref_codes.size(), n_q);
+            return false;
+        }
+        ref_codes = ctx->runtime_ref_codes;
+        T_ref = (int)ref_codes.size() / n_q;
+        return true;
+    }
+
+    if (ctx->vp_active < 0) {
+        return true;
+    }
+
+    const std::string& voice_name = ctx->vp_names[ctx->vp_active];
+    auto it = ctx->vp_tensors.find("voicepack.code." + voice_name + ".codes");
+    if (it == ctx->vp_tensors.end() || !it->second) {
+        fprintf(stderr, "qwen3_tts: active voice '%s' missing ref_code tensor\n", voice_name.c_str());
+        return false;
+    }
+
+    ggml_tensor* code_t = it->second;
+    if ((int)code_t->ne[0] != n_q) {
+        fprintf(stderr, "qwen3_tts: voicepack ref_code groups mismatch: %d vs %d\n", (int)code_t->ne[0], n_q);
+        return false;
+    }
+
+    T_ref = (int)code_t->ne[1];
+    ref_codes.resize((size_t)T_ref * n_q);
+    ggml_backend_tensor_get(code_t, ref_codes.data(), 0, ref_codes.size() * sizeof(int32_t));
+    return true;
+}
+
 extern "C" float* qwen3_tts_codec_extract_stage(struct qwen3_tts_context* ctx, const int32_t* codes, int n_codes,
                                                 const char* stage_name, int* out_n) {
     if (out_n)
@@ -3674,8 +3753,51 @@ extern "C" float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx, const char
         free(codes);
         return nullptr;
     }
-    const int T_codec = n_codes / n_q;
-    float* pcm = codec_decode_codes(ctx, codes, T_codec, out_n_samples);
+
+    std::vector<int32_t> ref_codes;
+    int T_ref = 0;
+    if (!qwen3_tts_get_active_ref_codes(ctx, ref_codes, T_ref)) {
+        free(codes);
+        return nullptr;
+    }
+
+    const int T_gen = n_codes / n_q;
+    float* pcm = nullptr;
+
+    if (!ref_codes.empty()) {
+        std::vector<int32_t> codes_for_decode;
+        codes_for_decode.reserve(ref_codes.size() + (size_t)n_codes);
+        codes_for_decode.insert(codes_for_decode.end(), ref_codes.begin(), ref_codes.end());
+        codes_for_decode.insert(codes_for_decode.end(), codes, codes + n_codes);
+
+        int n_pcm_full = 0;
+        pcm = codec_decode_codes(ctx, codes_for_decode.data(), T_ref + T_gen, &n_pcm_full);
+        if (!pcm || n_pcm_full <= 0) {
+            free(codes);
+            free(pcm);
+            return nullptr;
+        }
+
+        const int cut = (int)((double)T_ref / (double)std::max(T_ref + T_gen, 1) * n_pcm_full);
+        const int n_pcm_trim = std::max(0, n_pcm_full - cut);
+        float* trimmed = (float*)malloc((size_t)n_pcm_trim * sizeof(float));
+        if (!trimmed) {
+            free(codes);
+            free(pcm);
+            return nullptr;
+        }
+        if (n_pcm_trim > 0) {
+            std::memcpy(trimmed, pcm + cut, (size_t)n_pcm_trim * sizeof(float));
+        }
+        free(pcm);
+        pcm = trimmed;
+        if (out_n_samples) {
+            *out_n_samples = n_pcm_trim;
+        }
+    } else {
+        pcm = codec_decode_codes(ctx, codes, T_gen, out_n_samples);
+    }
+
     free(codes);
     return pcm;
 }
@@ -3703,6 +3825,10 @@ extern "C" void qwen3_tts_free(struct qwen3_tts_context* ctx) {
         ggml_backend_buffer_free(ctx->codec.buf_w);
     if (ctx->codec.ctx_w)
         ggml_free(ctx->codec.ctx_w);
+    if (ctx->vp_buf_w)
+        ggml_backend_buffer_free(ctx->vp_buf_w);
+    if (ctx->vp_ctx_w)
+        ggml_free(ctx->vp_ctx_w);
     if (ctx->buf_w)
         ggml_backend_buffer_free(ctx->buf_w);
     if (ctx->ctx_w)

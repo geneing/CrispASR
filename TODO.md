@@ -146,6 +146,53 @@ direction; do not interleave.
   returns nullptr with "not implemented". Forward pass is PLAN #52. Apache 2.0.
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
 - ~~**VibeVoice TTS**~~ — **DONE**: Realtime-0.5B (17 bugs, perfect round-trip) + 1.5B base model (voice cloning). HF: `cstr/vibevoice-realtime-0.5b-GGUF`, `cstr/vibevoice-1.5b-GGUF`
+
+## VibeVoice TTS — integration wiring (this session) **[next]**
+
+Recent session work (2026-04-29):
+
+- **ggml F32 conv fix** — `ggml_conv_1d` and `ggml_conv_transpose_1d` in
+  `ggml/src/ggml.c` now select F32 `im2col` type when either input is F32.
+  `ggml/src/ggml-cpu/ops.cpp` updated to handle both F16 and F32 `src1`.
+  Allows `vibevoice-realtime-0.5b-tts-f32.gguf` to run without crashing.
+
+- **Backend detector** — `crispasr_detect_backend_from_gguf` in `crispasr_c_api.cpp`
+  now maps `vibevoice-tts` arch → `vibevoice` backend (was only `vibevoice-asr`).
+
+- **Registry entry** — `vibevoice-tts` added to `crispasr_model_registry.cpp`:
+  model `vibevoice-realtime-0.5b-q4_k.gguf` (636 MB, `cstr/vibevoice-realtime-0.5b-GGUF`),
+  companion `vibevoice-voice-emma.gguf`.
+  Usage: `crispasr --backend vibevoice -m auto --auto-download --tts "..." --voice ~/.cache/crispasr/vibevoice-voice-emma.gguf`
+
+- **Dart binding** — `CrispasrSession` in `flutter/crispasr/lib/src/crispasr.dart`
+  gained `setVoice()`, `synthesize()`, `setCodecPath()` (mirrors Python + Rust).
+
+Still pending:
+
+- **[next] Verify Q4_K model on Metal M1.** The F16/F32 models run on CPU/Metal.
+  Q4_K model from HF has not been tested yet (no local copy; download needed).
+  Run: `crispasr --backend vibevoice -m auto --auto-download --tts "Hello, world" --voice ~/.cache/crispasr/vibevoice-voice-emma.gguf -of out.wav`
+
+- **[next] Frame-7 drift investigation (Task 2).** First strict divergence
+  (cos<0.999) hits v_cfg_step0 on frame 7. Root cause is accumulated F16
+  quantization error in the TTS-LM KV cache over 16 positions (vs 10 at
+  frame 6). To distinguish F16 quant noise from a structural bug: run the
+  full perframe diff with the F32 GGUF and compare — if frame 7 cos improves
+  significantly, it's pure quantization drift (acceptable). If it doesn't,
+  look at the text-window 5-token `run_lm_step` causal mask (n_tokens=5 path
+  in `run_lm_step`).
+
+- **[next] 2400-sample lag (Task 3).** Python `generate()` does NOT trim the
+  decoder warmup — it concatenates raw audio chunks. C++ strips 2400 samples
+  (100 ms @ 24 kHz) as quality improvement. For fair xcorr comparison update
+  `run_official_vibevoice.py` to accept `--trim-warmup` (strip first 2400
+  samples before saving the WAV). This makes the xcorr peak at lag=0 instead
+  of lag=2400 samples.
+
+- **[later] Voice auto-download for all voices.** Registry companion slot
+  holds one file (emma). Carter/Davis/Frank/de-Spk0/de-Spk1 voices require
+  manual `--voice` path. Consider a voice-registry parallel to the model
+  registry, or a `--list-voices` flag that prints the HF URLs.
 - **VibeVoice-7B TTS** — needs 32+ GB RAM for conversion (9.3B params). Same architecture as 1.5B.
 - **VibeVoice multi-speaker** — 1.5B/7B support up to 4 speakers; need prompt template for multi-speaker scripts
 - **VibeVoice negative conditioning** — base model uses zero negative; proper dual-LM CFG would improve quality

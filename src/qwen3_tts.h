@@ -61,6 +61,11 @@ int qwen3_tts_set_voice_prompt_with_text(struct qwen3_tts_context* ctx,
 // Do NOT free — buffer is owned by ctx.
 const int32_t* qwen3_tts_get_runtime_ref_codes(struct qwen3_tts_context* ctx, int* out_n);
 
+// Read-only pointer to the currently active runtime speaker embedding
+// (set by qwen3_tts_set_voice_prompt[_with_text]). Returns nullptr if no
+// runtime prompt is active. Buffer is owned by ctx; do not free.
+const float* qwen3_tts_get_runtime_spk_emb(struct qwen3_tts_context* ctx, int* out_n);
+
 // Run the codec encoder graph on `audio` (24 kHz mono float32) and extract
 // a named intermediate tensor by `stage_name`. Stage names match those set
 // via ggml_set_name in build_cenc_graph:

@@ -4472,12 +4472,16 @@ struct ggml_tensor * ggml_conv_1d(
         int                   s0,
         int                   p0,
         int                   d0) {
-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, GGML_TYPE_F16); // [N, OL, IC * K]
+    const enum ggml_type im2col_type = (a->type == GGML_TYPE_F32 || b->type == GGML_TYPE_F32) ? GGML_TYPE_F32 : GGML_TYPE_F16;
+    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, im2col_type); // [N, OL, IC * K]
+
+    struct ggml_tensor * a_mat = (im2col_type == GGML_TYPE_F32 && a->type != GGML_TYPE_F32) ?
+                                     ggml_cast(ctx, a, GGML_TYPE_F32) : a;
 
     struct ggml_tensor * result =
         ggml_mul_mat(ctx,
                 ggml_reshape_2d(ctx, im2col, im2col->ne[0], (im2col->ne[2] * im2col->ne[1])), // [N, OL, IC * K] => [N*OL, IC * K]
-                ggml_reshape_2d(ctx, a, (a->ne[0] * a->ne[1]), a->ne[2]));                    // [OC，IC, K] => [OC, IC * K]
+                ggml_reshape_2d(ctx, a_mat, (a_mat->ne[0] * a_mat->ne[1]), a_mat->ne[2]));    // [OC, IC, K] => [OC, IC * K]
 
     result = ggml_reshape_3d(ctx, result, im2col->ne[1], a->ne[2], im2col->ne[2]); // [N, OC, OL]
 
@@ -4506,9 +4510,15 @@ struct ggml_tensor * ggml_conv_1d_dw(
         int                   d0) {
     struct ggml_tensor * new_b = ggml_reshape_4d(ctx, b, b->ne[0], 1, b->ne[1], b->ne[2]);
 
-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, new_b, s0, 0, p0, 0, d0, 0, false, GGML_TYPE_F16);
+    const enum ggml_type im2col_type = (a->type == GGML_TYPE_F32 || b->type == GGML_TYPE_F32) ? GGML_TYPE_F32 : GGML_TYPE_F16;
+    struct ggml_tensor * im2col = ggml_im2col(ctx, a, new_b, s0, 0, p0, 0, d0, 0, false, im2col_type);
 
-    struct ggml_tensor * result = ggml_mul_mat(ctx, im2col, a);
+    // ggml_conv_1d_dw uses mul_mat(im2col, weight) where weight is src1.
+    // ggml_compute_forward_mul_mat requires src1 to be F32 when conversion is needed.
+    // Cast weight to F32 when im2col is F32 and weight is a non-F32 float type.
+    struct ggml_tensor * a_mat = (im2col_type == GGML_TYPE_F32 && a->type != GGML_TYPE_F32)
+                                     ? ggml_cast(ctx, a, GGML_TYPE_F32) : a;
+    struct ggml_tensor * result = ggml_mul_mat(ctx, im2col, a_mat);
 
     result = ggml_reshape_3d(ctx, result, result->ne[0], result->ne[2], 1);
 

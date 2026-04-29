@@ -209,7 +209,7 @@ extern "C" struct vibevoice_context* vibevoice_init_from_file(const char* path_m
     }
 
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(path_model, ctx->backend, "vibevoice-asr", wl)) {
+    if (!core_gguf::load_weights(path_model, ctx->backend, "vibevoice", wl)) {
         ggml_backend_free(ctx->backend);
         delete ctx;
         return nullptr;
@@ -245,24 +245,31 @@ extern "C" void vibevoice_free(struct vibevoice_context* ctx) {
         return;
     if (ctx->pred_graph_ctx)
         ggml_free(ctx->pred_graph_ctx);
-    if (ctx->kv_neg_ctx)
-        ggml_free(ctx->kv_neg_ctx);
     if (ctx->kv_neg_buf)
         ggml_backend_buffer_free(ctx->kv_neg_buf);
-    if (ctx->kv_ctx)
-        ggml_free(ctx->kv_ctx);
+    if (ctx->kv_neg_ctx)
+        ggml_free(ctx->kv_neg_ctx);
     if (ctx->kv_buf)
         ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
-    if (ctx->weight_ctx)
-        ggml_free(ctx->weight_ctx);
+    if (ctx->voice.buf)
+        ggml_backend_buffer_free(ctx->voice.buf);
+    if (ctx->voice.ctx)
+        ggml_free(ctx->voice.ctx);
     if (ctx->buf)
         ggml_backend_buffer_free(ctx->buf);
-    if (ctx->backend)
-        ggml_backend_free(ctx->backend);
+    if (ctx->weight_ctx)
+        ggml_free(ctx->weight_ctx);
     if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
         ggml_backend_free(ctx->backend_cpu);
+    // Free the primary backend last — buffers above were allocated against it,
+    // and on Metal an unreleased backend leaves the residency set live and
+    // trips ggml_metal_rsets_free's assert at process exit.
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
     delete ctx;
 }
 

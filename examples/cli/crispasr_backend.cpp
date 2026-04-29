@@ -60,7 +60,7 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_fastconformer_ctc_backend();
     if (name == "wav2vec2" || name == "hubert" || name == "data2vec")
         return crispasr_make_wav2vec2_backend();
-    if (name == "vibevoice")
+    if (name == "vibevoice" || name == "vibevoice-tts")
         return crispasr_make_vibevoice_backend();
     if (name == "qwen3-tts" || name == "qwen3_tts" || name == "qwen3tts")
         return crispasr_make_qwen3_tts_backend();

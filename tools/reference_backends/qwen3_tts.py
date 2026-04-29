@@ -44,6 +44,14 @@ DEFAULT_STAGES = [
     "text_input_ids",
     "ref_input_ids",
     "text_proj_out",
+    "icl_role",
+    "icl_bridge",
+    "icl_codec_input",
+    "icl_text_embed",
+    "icl_codec_embed",
+    "icl_input",
+    "ref_spk_embedding",
+    "ref_codes",
     # ICL-mode stages — capture the prefill embedding the official
     # generate_voice_clone path actually feeds into talker.model, plus
     # codec_head logits at the last position (= what greedy AR decode
@@ -68,6 +76,15 @@ _DEFAULT_SYN_TEXT = "Good one. Okay, fine, I'm just gonna leave this sock monkey
 _DEFAULT_LANG = "Auto"
 
 
+def _load_audio_preserve_sr(path: Path) -> tuple[np.ndarray, int]:
+    import soundfile as sf
+
+    wav, sr = sf.read(str(path), dtype="float32", always_2d=False)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=-1)
+    return np.ascontiguousarray(wav.astype(np.float32)), int(sr)
+
+
 def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
          max_new_tokens: int) -> Dict[str, np.ndarray]:
     """Run Qwen3-TTS forward + greedy decode, return captured stage tensors.
@@ -89,6 +106,7 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     syn_text = os.environ.get("QWEN3_TTS_SYN_TEXT", _DEFAULT_SYN_TEXT)
     ref_text = os.environ.get("QWEN3_TTS_REF_TEXT", _DEFAULT_REF_TEXT)
     language = os.environ.get("QWEN3_TTS_LANG", _DEFAULT_LANG)
+    ref_wav_override = os.environ.get("QWEN3_TTS_REF_WAV", "")
 
     print(f"  loading Qwen3-TTS Base from {model_dir} (CPU, fp32, eager attn)")
     tts = Qwen3TTSModel.from_pretrained(
@@ -103,6 +121,11 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     processor = tts.processor
 
     out: Dict[str, np.ndarray] = {}
+
+    prompt_audio = np.ascontiguousarray(audio.astype(np.float32))
+    prompt_sr = 16000
+    if ref_wav_override:
+        prompt_audio, prompt_sr = _load_audio_preserve_sr(Path(ref_wav_override))
 
     # ---- Tokenise the chat-template prompt + ref text ----
     syn_chat = tts._build_assistant_text(syn_text)  # noqa: SLF001
@@ -160,6 +183,7 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         ("talker_output_norm",  talker.model.norm),
         ("talker_logits",       talker.codec_head),
     ]
+    hook_stage_names = [name for name, _mod in layer_hook_map]
     handles.extend(_hooks.capture_modules(
         captures,
         [(name, mod) for name, mod in layer_hook_map if name in stages],
@@ -181,15 +205,139 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
                 captures["talker_inputs_embeds"] = embeds[0].detach().cpu().float()
         handles.append(talker.model.register_forward_pre_hook(cap_embeds, with_kwargs=True))
 
-    # ---- Run generate (greedy) for deterministic codes + activations ----
-    if any(s in stages for s in (*layer_hook_map.keys(),
-                                 "talker_inputs_embeds",
-                                 "generated_codes")):
+    # ---- Build the official ICL prefill sub-blocks for component diffing ----
+    prompt_items = None
+    if any(s in stages for s in (
+        "icl_role",
+        "icl_bridge",
+        "icl_codec_input",
+        "icl_text_embed",
+        "icl_codec_embed",
+        "icl_input",
+        "ref_spk_embedding",
+        "ref_codes",
+        *hook_stage_names,
+        "talker_inputs_embeds",
+        "generated_codes",
+    )):
         prompt_items = tts.create_voice_clone_prompt(
-            ref_audio=(audio.astype(np.float32), 16000),
+            ref_audio=(prompt_audio, prompt_sr),
             ref_text=ref_text,
             x_vector_only_mode=False,
         )
+
+    if prompt_items is not None and any(s in stages for s in (
+        "icl_role",
+        "icl_bridge",
+        "icl_codec_input",
+        "icl_text_embed",
+        "icl_codec_embed",
+        "icl_input",
+        "ref_spk_embedding",
+        "ref_codes",
+    )):
+        import torch
+
+        with torch.no_grad():
+            prompt0 = prompt_items[0]
+            ref_code = prompt0.ref_code.to(talker.device).clone()
+            ref_spk = prompt0.ref_spk_embedding.to(talker.device).to(talker.dtype).clone()
+
+            if "ref_spk_embedding" in stages:
+                out["ref_spk_embedding"] = ref_spk.detach().cpu().numpy().astype(np.float32)
+            if "ref_codes" in stages:
+                out["ref_codes"] = ref_code.detach().cpu().numpy().astype(np.int32).astype(np.float32)
+
+            tts_bos_embed, tts_eos_embed, tts_pad_embed = talker.text_projection(
+                talker.get_text_embeddings()(
+                    torch.tensor(
+                        [[model.config.tts_bos_token_id, model.config.tts_eos_token_id, model.config.tts_pad_token_id]],
+                        device=talker.device,
+                        dtype=syn_ids.dtype,
+                    )
+                )
+            ).chunk(3, dim=1)
+
+            codec_prefill_ids = torch.tensor(
+                [[
+                    model.config.talker_config.codec_nothink_id,
+                    model.config.talker_config.codec_think_bos_id,
+                    model.config.talker_config.codec_think_eos_id,
+                ]],
+                device=talker.device,
+                dtype=syn_ids.dtype,
+            )
+            codec_tail_ids = torch.tensor(
+                [[
+                    model.config.talker_config.codec_pad_id,
+                    model.config.talker_config.codec_bos_id,
+                ]],
+                device=talker.device,
+                dtype=syn_ids.dtype,
+            )
+
+            codec_input_embedding = torch.cat([
+                talker.get_input_embeddings()(codec_prefill_ids),
+                ref_spk.view(1, 1, -1),
+                talker.get_input_embeddings()(codec_tail_ids),
+            ], dim=1)
+
+            role = talker.text_projection(talker.get_text_embeddings()(syn_ids[:, :3]))
+            bridge = torch.cat((
+                tts_pad_embed.expand(-1, codec_input_embedding.shape[1] - 2, -1),
+                tts_bos_embed,
+            ), dim=1) + codec_input_embedding[:, :-1]
+
+            text_id = syn_ids[:, 3:-5]
+            ref_id = ref_ids[:, 3:-2]
+            text_embed = talker.text_projection(
+                talker.get_text_embeddings()(torch.cat([ref_id, text_id], dim=-1))
+            )
+            text_embed = torch.cat([text_embed, tts_eos_embed], dim=1)
+
+            codec_rows = []
+            for i in range(talker.config.num_code_groups):
+                if i == 0:
+                    codec_rows.append(talker.get_input_embeddings()(ref_code[:, :1]))
+                else:
+                    codec_rows.append(talker.code_predictor.get_input_embeddings()[i - 1](ref_code[:, i:i + 1]))
+            codec_embed = torch.cat(codec_rows, dim=1).sum(1).unsqueeze(0)
+            codec_bos = talker.get_input_embeddings()(
+                torch.tensor(
+                    [[model.config.talker_config.codec_bos_id]],
+                    device=talker.device,
+                    dtype=syn_ids.dtype,
+                )
+            )
+            codec_embed = torch.cat([codec_bos, codec_embed], dim=1)
+
+            icl_input, _trailing = model.generate_icl_prompt(
+                text_id=text_id,
+                ref_id=ref_id,
+                ref_code=ref_code,
+                tts_pad_embed=tts_pad_embed,
+                tts_eos_embed=tts_eos_embed,
+                non_streaming_mode=False,
+            )
+
+            if "icl_role" in stages:
+                out["icl_role"] = role[0].detach().cpu().numpy().astype(np.float32)
+            if "icl_bridge" in stages:
+                out["icl_bridge"] = bridge[0].detach().cpu().numpy().astype(np.float32)
+            if "icl_codec_input" in stages:
+                out["icl_codec_input"] = codec_input_embedding[0].detach().cpu().numpy().astype(np.float32)
+            if "icl_text_embed" in stages:
+                out["icl_text_embed"] = text_embed[0].detach().cpu().numpy().astype(np.float32)
+            if "icl_codec_embed" in stages:
+                out["icl_codec_embed"] = codec_embed[0].detach().cpu().numpy().astype(np.float32)
+            if "icl_input" in stages:
+                out["icl_input"] = icl_input[0].detach().cpu().numpy().astype(np.float32)
+
+    # ---- Run generate (greedy) for deterministic codes + activations ----
+    if any(s in stages for s in (*hook_stage_names,
+                                 "talker_inputs_embeds",
+                                 "generated_codes")):
+        assert prompt_items is not None
         with torch.no_grad():
             tts.generate_voice_clone(
                 text=syn_text,
