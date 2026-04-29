@@ -61,6 +61,18 @@ int qwen3_tts_set_voice_prompt_with_text(struct qwen3_tts_context* ctx,
 // Do NOT free — buffer is owned by ctx.
 const int32_t* qwen3_tts_get_runtime_ref_codes(struct qwen3_tts_context* ctx, int* out_n);
 
+// Run the codec encoder graph on `audio` (24 kHz mono float32) and extract
+// a named intermediate tensor by `stage_name`. Stage names match those set
+// via ggml_set_name in build_cenc_graph:
+//   "cenc_seanet_out"  — SEANet output [T_enc, 512]
+//   "cenc_xfmr_out"    — Encoder transformer output [T_enc, 512]
+//   "cenc_ds_out"      — After stride-2 downsample [T_frames, 512]
+//   "enc_emb"          — Final embeddings (channels-first) [512, T_frames]
+// Returns malloc'd float[*out_n] array. Caller frees with free().
+float* qwen3_tts_cenc_extract_stage(struct qwen3_tts_context* ctx,
+                                     const float* audio, int n_samples,
+                                     const char* stage_name, int* out_n);
+
 // Load a voice pack GGUF (produced by `models/bake-qwen3-tts-voice-pack.py`)
 // containing one or more `(spk_embedding, ref_code)` pairs extracted via
 // the official qwen-tts package. Required for voice-clone synthesis

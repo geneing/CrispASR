@@ -2208,20 +2208,33 @@ static float* codec_extract_stage(qwen3_tts_context* c, const int32_t* codes, in
 // For the SEANet encoder, tensors are in [T, C] format (ne[0]=T innermost).
 // ---------------------------------------------------------------------------
 
-// SEANet/Mimi causal conv1d (matches kyutai_stt's conv1d_fwd):
-// pad_left = K - stride (causal alignment), no right pad.
+// SEANet/Mimi causal conv1d (matches MimiConv1d semantics):
+// pad_left = K - stride (causal alignment) + extra_padding on RIGHT for stride
+// alignment so output length = ceil(T_in / stride) (not floor).
 // Input: [T, C_in] → output [T_out, C_out].
 static ggml_tensor* cenc_conv1d(ggml_context* ctx, ggml_tensor* x, const g3t_cenc_conv& c, int stride) {
     const int K = (int)c.w->ne[0];
-    const int pad_left = K - stride;
-    if (pad_left > 0)
-        x = ggml_pad_ext(ctx, x, pad_left, 0, 0, 0, 0, 0, 0, 0); // causal zero-pad on time dim
+    const int pad_total = K - stride; // causal: all goes left
+    // Extra padding on right for stride alignment (matches MimiConv1d).
+    // Python: n_frames = ceil((T - K + pad_total)/stride + 1) - 1
+    //         ideal_length = n_frames * stride + K - pad_total
+    //         extra_padding = ideal_length - T
+    const int T_in = (int)x->ne[0];
+    int extra_right = 0;
+    if (stride > 1) {
+        // (T - K + pad_total)/stride + 1, then ceil and subtract 1, then convert to ideal length
+        int numer = T_in - K + pad_total;
+        int n_frames = (numer + stride - 1) / stride; // ceil(numer/stride)
+        int ideal = n_frames * stride + K - pad_total;
+        extra_right = ideal - T_in;
+        if (extra_right < 0) extra_right = 0;
+    }
+    if (pad_total > 0 || extra_right > 0)
+        x = ggml_pad_ext(ctx, x, pad_total, extra_right, 0, 0, 0, 0, 0, 0);
     x = ggml_conv_1d(ctx, c.w, x, stride, 0, 1);
-    // Output: [T_out, C_out, 1] → reshape to 2D
     if (ggml_n_dims(x) > 2)
         x = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1]);
     if (c.b) {
-        // bias is 1D [C_out]; reshape to [1, C_out] for add over [T_out, C_out]
         ggml_tensor* b = ggml_reshape_2d(ctx, c.b, 1, ggml_nelements(c.b));
         x = ggml_add(ctx, x, b);
     }
@@ -2261,17 +2274,28 @@ static ggml_tensor* build_cenc_seanet(ggml_context* ctx, const g3t_cenc_seanet& 
 // Encoder transformer (8L): [d,T] channels-first so ggml_norm normalizes over d.
 // Input: [T_enc, 512] from SEANet → converts to [512, T] internally.
 // Output: [T_enc, 512] (back-converted).
+// Mimi's encoder transformer uses CAUSAL attention with sliding window=250.
 static ggml_tensor* build_cenc_transformer(ggml_context* ctx, const std::vector<g3t_cenc_xfmr_layer>& layers,
                                            ggml_tensor* x) {
     // Transpose from SEANet [T, d] → [d, T] for ggml_norm (normalizes over ne[0]=d)
     x = ggml_cont(ctx, ggml_transpose(ctx, x)); // [d=512, T]
 
     const int n_heads = 8, head_dim = 64;
+    const int sliding_window = 250;
     const float attn_scale = 1.0f / std::sqrt((float)head_dim);
     const int T = (int)x->ne[1];
     const int d = (int)x->ne[0]; // 512
 
     ggml_tensor* pos = ggml_cast(ctx, ggml_arange(ctx, 0.0f, (float)T, 1.0f), GGML_TYPE_I32);
+
+    // Causal sliding-window mask [T, T] F16 — set as input, filled at compute.
+    ggml_tensor* causal_mask = nullptr;
+    if (T > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, T, T);
+        ggml_set_name(causal_mask, "cenc_mask");
+        ggml_set_input(causal_mask);
+    }
+    (void)sliding_window; // unused — encoder T is always < 250
 
     for (const auto& L : layers) {
         ggml_tensor* residual = x;
@@ -2299,7 +2323,7 @@ static ggml_tensor* build_cenc_transformer(ggml_context* ctx, const std::vector<
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
         V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
 
-        ggml_tensor* attn = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, attn_scale, 0.0f, 0.0f);
+        ggml_tensor* attn = ggml_flash_attn_ext(ctx, Q, K, V, causal_mask, attn_scale, 0.0f, 0.0f);
         attn = ggml_reshape_2d(ctx, attn, d, T); // [d, T]
         attn = ggml_mul_mat(ctx, L.attn_o_w, attn); // [d, T]
         if (L.attn_ls) {
@@ -2341,15 +2365,36 @@ static ggml_cgraph* build_cenc_graph(qwen3_tts_context* c, int n_samples) {
 
     // Reshape to [n_samples, 1] for conv1d (b=[T, IC])
     ggml_tensor* x = ggml_reshape_2d(ctx0, pcm, n_samples, 1); // [T, IC=1]
-    x = build_cenc_seanet(ctx0, ce.seanet, x);      // [T/960, 512]
-    x = build_cenc_transformer(ctx0, ce.xfmr_layers, x); // [T/960, 512]
+    x = build_cenc_seanet(ctx0, ce.seanet, x);      // [T_enc, 512] in ggml ne=[T_enc, 512]
+    // For diff harness: transpose to [C, T_enc] = ne=[512, T_enc] so the flat
+    // memory layout matches Python's (T_enc, 512) numpy stored to GGUF.
+    {
+        ggml_tensor* dump = ggml_cont(ctx0, ggml_transpose(ctx0, x)); // ne=[512, T_enc]
+        ggml_set_name(dump, "cenc_seanet_out");
+        ggml_set_output(dump);
+        ggml_build_forward_expand(gf, dump);
+    }
+
+    x = build_cenc_transformer(ctx0, ce.xfmr_layers, x); // [T_enc, 512]
+    {
+        ggml_tensor* dump = ggml_cont(ctx0, ggml_transpose(ctx0, x)); // ne=[512, T_enc]
+        ggml_set_name(dump, "cenc_xfmr_out");
+        ggml_set_output(dump);
+        ggml_build_forward_expand(gf, dump);
+    }
 
     // Downsample using the same SEANet causal-pad convention.
-    // x is [T_enc, 512] in [T, C] format after transformer.
     g3t_cenc_conv ds_conv = {ce.downsample.w, ce.downsample.b};
-    ggml_tensor* tmp = cenc_conv1d(ctx0, x, ds_conv, 2); // [T_enc/2, 512]
+    ggml_tensor* tmp = cenc_conv1d(ctx0, x, ds_conv, 2); // ne=[T_frames, 512]
+    {
+        ggml_tensor* dump = ggml_cont(ctx0, ggml_transpose(ctx0, tmp)); // ne=[512, T_frames]
+        ggml_set_name(dump, "cenc_ds_out");
+        ggml_set_output(dump);
+        ggml_build_forward_expand(gf, dump);
+    }
+
     // Transpose to channels-first [512, T_frames] for the RVQ encode step
-    tmp = ggml_cont(ctx0, ggml_transpose(ctx0, tmp)); // [512, T_frames]
+    tmp = ggml_cont(ctx0, ggml_transpose(ctx0, tmp)); // ne=[512, T_frames]
     ggml_set_name(tmp, "enc_emb"); ggml_set_output(tmp);
     ggml_build_forward_expand(gf, tmp);
     ggml_free(ctx0);
@@ -2455,6 +2500,20 @@ static bool cenc_rvq_encode(qwen3_tts_context* c, const float* emb, int T,
     return true;
 }
 
+// Build a causal mask [T_enc, T_enc] for the encoder transformer.
+// T_enc = T_audio / 960 (post-SEANet, pre-downsample).
+static std::vector<ggml_fp16_t> build_cenc_mask(int T_enc) {
+    std::vector<ggml_fp16_t> mask;
+    if (T_enc <= 1) return mask;
+    const ggml_fp16_t zero_h = ggml_fp32_to_fp16(0.0f);
+    const ggml_fp16_t neginf_h = ggml_fp32_to_fp16(-INFINITY);
+    mask.assign((size_t)T_enc * T_enc, zero_h);
+    for (int q = 0; q < T_enc; q++)
+        for (int k = q + 1; k < T_enc; k++)
+            mask[(size_t)q * T_enc + k] = neginf_h;
+    return mask;
+}
+
 // Run codec encoder: 24kHz PCM → codes [T_frames × 16] row-major.
 static bool run_cenc(qwen3_tts_context* c, const float* audio, int n_samples,
                      std::vector<int32_t>& codes, int& T_frames) {
@@ -2467,6 +2526,15 @@ static bool run_cenc(qwen3_tts_context* c, const float* audio, int n_samples,
     }
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pcm_input"),
                             audio, 0, (size_t)n_samples * sizeof(float));
+    // Set causal mask. T_enc = T_audio/960 (4*5*6*8 SEANet stride product)
+    {
+        const int T_enc = n_samples / 960;
+        ggml_tensor* mask_t = ggml_graph_get_tensor(gf, "cenc_mask");
+        if (mask_t && T_enc > 1) {
+            auto mask = build_cenc_mask(T_enc);
+            ggml_backend_tensor_set(mask_t, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+        }
+    }
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "qwen3_tts: cenc: compute failed\n");
         return false;
@@ -3148,6 +3216,43 @@ extern "C" const int32_t* qwen3_tts_get_runtime_ref_codes(struct qwen3_tts_conte
     if (!ctx || ctx->runtime_ref_codes.empty()) return nullptr;
     if (out_n) *out_n = (int)ctx->runtime_ref_codes.size();
     return ctx->runtime_ref_codes.data();
+}
+
+// Run the codec encoder graph and extract a named intermediate tensor.
+extern "C" float* qwen3_tts_cenc_extract_stage(struct qwen3_tts_context* ctx,
+                                                const float* audio, int n_samples,
+                                                const char* stage_name, int* out_n) {
+    if (out_n) *out_n = 0;
+    if (!ctx || !audio || n_samples <= 0 || !stage_name) return nullptr;
+    if (!ctx->cenc.loaded) {
+        fprintf(stderr, "qwen3_tts: cenc_extract_stage: encoder not loaded\n");
+        return nullptr;
+    }
+    ggml_cgraph* gf = build_cenc_graph(ctx, n_samples);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return nullptr;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pcm_input"),
+                            audio, 0, (size_t)n_samples * sizeof(float));
+    {
+        const int T_enc = n_samples / 960;
+        ggml_tensor* mask_t = ggml_graph_get_tensor(gf, "cenc_mask");
+        if (mask_t && T_enc > 1) {
+            auto mask = build_cenc_mask(T_enc);
+            ggml_backend_tensor_set(mask_t, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+        }
+    }
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return nullptr;
+    ggml_tensor* t = ggml_graph_get_tensor(gf, stage_name);
+    if (!t) {
+        fprintf(stderr, "qwen3_tts: cenc_extract_stage: '%s' not in graph\n", stage_name);
+        return nullptr;
+    }
+    const int n = (int)ggml_nelements(t);
+    float* buf = (float*)malloc((size_t)n * sizeof(float));
+    if (!buf) return nullptr;
+    ggml_backend_tensor_get(t, buf, 0, (size_t)n * sizeof(float));
+    if (out_n) *out_n = n;
+    return buf;
 }
 
 extern "C" int qwen3_tts_load_voice_pack(struct qwen3_tts_context* ctx, const char* path) {

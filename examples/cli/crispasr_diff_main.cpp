@@ -804,9 +804,59 @@ int main(int argc, char** argv) {
         }
         qwen3_tts_free(ctx);
 
-    // ---- qwen3-tts-codec (Tokenizer-12Hz decoder stages) ----
-    // model_path = talker GGUF (for context init)
-    // codec GGUF path = env var QWEN3_TTS_CODEC_GGUF
+    // ---- qwen3-tts-cenc (codec ENCODER: audio → codes) ----
+    // Uses the same fixed 3s slice of clone.wav as the Python reference.
+    } else if (backend_name == "qwen3-tts-cenc") {
+        const char* codec_gguf = std::getenv("QWEN3_TTS_CODEC_GGUF");
+        if (!codec_gguf) {
+            fprintf(stderr, "qwen3-tts-cenc: set QWEN3_TTS_CODEC_GGUF=<codec.gguf>\n");
+            return 4;
+        }
+        auto cp = qwen3_tts_context_default_params();
+        cp.n_threads = 4; cp.verbosity = 0; cp.use_gpu = false;
+        qwen3_tts_context* qctx = qwen3_tts_init_from_file(model_path.c_str(), cp);
+        if (!qctx) { fprintf(stderr, "failed to load talker\n"); return 4; }
+        if (qwen3_tts_set_codec_path(qctx, codec_gguf) != 0) {
+            fprintf(stderr, "failed to load codec\n"); qwen3_tts_free(qctx); return 4;
+        }
+
+        // Read input audio from the reference (cenc_input_audio is the fixed 3s slice)
+        auto audio_pair = ref.get_f32("cenc_input_audio");
+        if (!audio_pair.first) {
+            printf("[ERR ] cenc_input_audio not in reference\n");
+            qwen3_tts_free(qctx); return 5;
+        }
+        const int n_samp = (int)audio_pair.second;
+        std::vector<float> audio_buf(audio_pair.first, audio_pair.first + n_samp);
+
+        // Compare each stage
+        static const char* stages[] = {
+            "cenc_seanet_out",
+            "cenc_xfmr_out",
+            "cenc_ds_out",
+        };
+        for (const char* s : stages) {
+            int n = 0;
+            float* mine = qwen3_tts_cenc_extract_stage(qctx, audio_buf.data(), n_samp, s, &n);
+            if (!mine) {
+                printf("[ERR ] %-22s extract returned null\n", s);
+                n_fail++;
+                continue;
+            }
+            auto rep = ref.compare(s, mine, (size_t)n);
+            print_row(s, rep, COS_THRESHOLD);
+            record(rep);
+            free(mine);
+        }
+
+        // Final codes — set voice prompt to compute them, then compare
+        // (set_voice_prompt internally calls run_cenc which produces codes)
+        // For diff, we run the encoder and check codes via runtime_ref_codes.
+        // But set_voice_prompt expects 24kHz and the fixed audio is at 24kHz already.
+        // We'd need a way to feed audio buffer directly — for now, skip codes diff
+        // since the embeddings comparison is more diagnostic.
+
+        qwen3_tts_free(qctx);
     // Runs the codec decoder on T=10 all-zero codes and compares
     // each named intermediate tensor against the Python reference dump.
     } else if (backend_name == "qwen3-tts-codec") {
