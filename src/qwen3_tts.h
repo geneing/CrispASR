@@ -42,11 +42,24 @@ struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_model, struc
 // Required before the first `qwen3_tts_synthesize` call. Returns 0 on success.
 int qwen3_tts_set_codec_path(struct qwen3_tts_context* ctx, const char* path);
 
-// Optional: reference-audio path (16 kHz mono WAV) for voice cloning
-// (Base / CustomVoice variants). Pass nullptr / "" to use the model's
-// built-in default voice. Currently a no-op until the speaker_encoder
-// forward lands.
+// Set a reference voice from a 24 kHz mono WAV plus its transcription.
+// Computes both the ECAPA speaker embedding AND the RVQ codec codes from
+// the audio (replacing the baked voice-pack workflow). The ref_text is
+// the transcription of wav_path — required for the ICL prefill to match
+// the reference audio with text. Pass nullptr / "" to clear the prompt.
+// Returns 0 on success.
 int qwen3_tts_set_voice_prompt(struct qwen3_tts_context* ctx, const char* wav_path);
+
+// Same as set_voice_prompt but also stores the reference transcription.
+// Required for synthesis when no voice pack is loaded.
+int qwen3_tts_set_voice_prompt_with_text(struct qwen3_tts_context* ctx,
+                                          const char* wav_path,
+                                          const char* ref_text);
+
+// Debug: get the runtime ref codes after set_voice_prompt. Returns pointer
+// to internal int32 buffer of *out_n elements ([T_codec, 16] row-major).
+// Do NOT free — buffer is owned by ctx.
+const int32_t* qwen3_tts_get_runtime_ref_codes(struct qwen3_tts_context* ctx, int* out_n);
 
 // Load a voice pack GGUF (produced by `models/bake-qwen3-tts-voice-pack.py`)
 // containing one or more `(spk_embedding, ref_code)` pairs extracted via

@@ -150,16 +150,28 @@ def precompute_codebooks(name2h: dict) -> dict[str, np.ndarray]:
     """Returns dict {gguf_name: codebook_array (F32)}."""
     out = {}
 
-    # rvq_first: one codebook
+    # Decoder: rvq_first (1 semantic) + rvq_rest (15 acoustic)
     emb  = get_np(name2h, "decoder.quantizer.rvq_first.vq.layers.0._codebook.embedding_sum")
     use  = get_np(name2h, "decoder.quantizer.rvq_first.vq.layers.0._codebook.cluster_usage")
     out["codec.dec.rvq_first.codebook"] = emb / np.maximum(use[:, None], 1e-5)
-
-    # rvq_rest: 15 codebooks
     for i in range(15):
         emb = get_np(name2h, f"decoder.quantizer.rvq_rest.vq.layers.{i}._codebook.embedding_sum")
         use = get_np(name2h, f"decoder.quantizer.rvq_rest.vq.layers.{i}._codebook.cluster_usage")
         out[f"codec.dec.rvq_rest.{i}.codebook"] = emb / np.maximum(use[:, None], 1e-5)
+
+    # Encoder: semantic (1 codebook) + acoustic (15 codebooks used for n_q=16)
+    # encoder.quantizer.semantic_residual_vector_quantizer.layers.0.codebook.{embed_sum,cluster_usage}
+    # encoder.quantizer.acoustic_residual_vector_quantizer.layers.{0..14}.codebook.*
+    try:
+        emb = get_np(name2h, "encoder.quantizer.semantic_residual_vector_quantizer.layers.0.codebook.embed_sum")
+        use = get_np(name2h, "encoder.quantizer.semantic_residual_vector_quantizer.layers.0.codebook.cluster_usage")
+        out["codec.enc.rvq.sem.cb"] = emb / np.maximum(use[:, None], 1e-5)
+        for i in range(15):
+            emb = get_np(name2h, f"encoder.quantizer.acoustic_residual_vector_quantizer.layers.{i}.codebook.embed_sum")
+            use = get_np(name2h, f"encoder.quantizer.acoustic_residual_vector_quantizer.layers.{i}.codebook.cluster_usage")
+            out[f"codec.enc.rvq.ac.{i}.cb"] = emb / np.maximum(use[:, None], 1e-5)
+    except KeyError as e:
+        print(f"  [WARN] encoder codebook missing: {e}")
 
     return out
 
@@ -169,17 +181,90 @@ def precompute_codebooks(name2h: dict) -> dict[str, np.ndarray]:
 #   Returns (gguf_name, force_f32) or None to skip.
 # ---------------------------------------------------------------------------
 
+def map_encoder_tensor(name: str) -> tuple[str, bool] | None:
+    """Map encoder.* safetensors → (gguf_name, force_f32). None = skip."""
+    n = name
+
+    # SEANet: layer index → (stage, role)
+    # layers.0  → init conv
+    # layers.{1,4,7,10}.block.{1,3} → resblocks stage 0..3
+    # layers.{3,6,9,12} → stride convs stage 0..3
+    # layers.14 → final conv
+    layer_to_stage = {1: 0, 4: 1, 7: 2, 10: 3}
+    stride_to_stage = {3: 0, 6: 1, 9: 2, 12: 3}
+
+    m = re.match(r"encoder\.encoder\.layers\.(\d+)\.(.*)", n)
+    if m:
+        li, rest = int(m.group(1)), m.group(2)
+        if li == 0:
+            if rest == "conv.weight": return "codec.enc.seanet.init_w", False
+            if rest == "conv.bias":   return "codec.enc.seanet.init_b", True
+        elif li in layer_to_stage:
+            s = layer_to_stage[li]
+            bmap = {"block.1.conv.weight": (f"codec.enc.seanet.blk.{s}.short_w", False),
+                    "block.1.conv.bias":   (f"codec.enc.seanet.blk.{s}.short_b", True),
+                    "block.3.conv.weight": (f"codec.enc.seanet.blk.{s}.exp_w",   False),
+                    "block.3.conv.bias":   (f"codec.enc.seanet.blk.{s}.exp_b",   True)}
+            return bmap.get(rest)
+        elif li in stride_to_stage:
+            s = stride_to_stage[li]
+            if rest == "conv.weight": return f"codec.enc.seanet.ds.{s}.w", False
+            if rest == "conv.bias":   return f"codec.enc.seanet.ds.{s}.b", True
+        elif li == 14:
+            if rest == "conv.weight": return "codec.enc.seanet.final_w", False
+            if rest == "conv.bias":   return "codec.enc.seanet.final_b", True
+        return None
+
+    # Encoder transformer
+    m = re.match(r"encoder\.encoder_transformer\.layers\.(\d+)\.(.*)", n)
+    if m:
+        L, rest = m.group(1), m.group(2)
+        tmap = {
+            "input_layernorm.weight":          (f"codec.enc.xfmr.blk.{L}.norm1_w",  True),
+            "input_layernorm.bias":            (f"codec.enc.xfmr.blk.{L}.norm1_b",  True),
+            "post_attention_layernorm.weight": (f"codec.enc.xfmr.blk.{L}.norm2_w",  True),
+            "post_attention_layernorm.bias":   (f"codec.enc.xfmr.blk.{L}.norm2_b",  True),
+            "self_attn.q_proj.weight":         (f"codec.enc.xfmr.blk.{L}.attn_q_w", False),
+            "self_attn.k_proj.weight":         (f"codec.enc.xfmr.blk.{L}.attn_k_w", False),
+            "self_attn.v_proj.weight":         (f"codec.enc.xfmr.blk.{L}.attn_v_w", False),
+            "self_attn.o_proj.weight":         (f"codec.enc.xfmr.blk.{L}.attn_o_w", False),
+            "self_attn_layer_scale.scale":     (f"codec.enc.xfmr.blk.{L}.attn_ls",  True),
+            "mlp.fc1.weight":                  (f"codec.enc.xfmr.blk.{L}.fc1_w",    False),
+            "mlp.fc2.weight":                  (f"codec.enc.xfmr.blk.{L}.fc2_w",    False),
+            "mlp_layer_scale.scale":           (f"codec.enc.xfmr.blk.{L}.ffn_ls",   True),
+        }
+        if rest in tmap: return tmap[rest]
+        return None
+
+    # Downsample
+    if n == "encoder.downsample.conv.weight": return "codec.enc.ds_w", False
+
+    # Encoder quantizer projections — force F32 since C++ side reads them
+    # to a CPU buffer for nearest-neighbor search and residual subtraction.
+    if n == "encoder.quantizer.semantic_residual_vector_quantizer.input_proj.weight":
+        return "codec.enc.rvq.sem.in_w", True
+    if n == "encoder.quantizer.semantic_residual_vector_quantizer.output_proj.weight":
+        return "codec.enc.rvq.sem.out_w", True
+    if n == "encoder.quantizer.acoustic_residual_vector_quantizer.input_proj.weight":
+        return "codec.enc.rvq.ac.in_w", True
+    if n == "encoder.quantizer.acoustic_residual_vector_quantizer.output_proj.weight":
+        return "codec.enc.rvq.ac.out_w", True
+
+    return None  # other encoder tensors (codebook data, initialized flag) → skip
+
+
 def map_decoder_tensor(name: str) -> tuple[str, bool] | None:
-    """Map one safetensors name → (gguf_name, force_f32).  None = skip."""
+    """Map decoder.* safetensors → (gguf_name, force_f32). None = skip."""
 
     n = name
 
-    # Skip encoder entirely — synthesis path only needs the decoder.
+    # Encoder tensors are handled by map_encoder_tensor.
     if n.startswith("encoder."):
         return None
 
     # Skip cluster_usage and embedding_sum — handled by precompute_codebooks.
-    if "_codebook.cluster_usage" in n or "_codebook.embedding_sum" in n:
+    if "_codebook.cluster_usage" in n or "_codebook.embedding_sum" in n or \
+       ".codebook.embed_sum" in n or ".codebook.initialized" in n:
         return None
 
     # Skip quantizer input_proj — encoder-only path.
@@ -413,7 +498,8 @@ def main():
     # Names that are consumed by the codebook precomputation pass — skip silently.
     codebook_consumed = set()
     for k in name2h:
-        if "_codebook.embedding_sum" in k or "_codebook.cluster_usage" in k:
+        if "_codebook.embedding_sum" in k or "_codebook.cluster_usage" in k or \
+           ".codebook.embed_sum" in k or ".codebook.initialized" in k:
             codebook_consumed.add(k)
         if re.search(r"\.quantizer\.rvq_(first|rest)\.input_proj\.", k):
             codebook_consumed.add(k)
@@ -422,15 +508,19 @@ def main():
         if hf_name in codebook_consumed:
             n_skipped += 1
             continue
-        if hf_name.startswith("encoder."):
-            n_skipped += 1
-            continue
 
-        result = map_decoder_tensor(hf_name)
-        if result is None:
-            n_unmapped += 1
-            print(f"  [WARN unmapped] {hf_name}", file=sys.stderr)
-            continue
+        # Try encoder mapping first, then decoder
+        if hf_name.startswith("encoder."):
+            result = map_encoder_tensor(hf_name)
+            if result is None:
+                n_skipped += 1  # silently skip unmapped encoder tensors
+                continue
+        else:
+            result = map_decoder_tensor(hf_name)
+            if result is None:
+                n_unmapped += 1
+                print(f"  [WARN unmapped] {hf_name}", file=sys.stderr)
+                continue
 
         gname, force_f32 = result
         arr = name2h[hf_name].get_tensor(hf_name).to(torch.float32).numpy()
