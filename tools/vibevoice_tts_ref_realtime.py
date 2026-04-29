@@ -480,8 +480,12 @@ def run_manual_pipeline(args, tokenizer, out):
     torch.manual_seed(42)
 
     all_latents = []
+    all_noises = []
     for fi in range(n_frames):
         z = torch.randn(vae_dim)
+        all_noises.append(z.detach().clone())
+        if fi == 0:
+            dump_f32(out / "noise_frame0.bin", z)
 
         for si, t_int in enumerate(timesteps):
             t_val = float(t_int)
@@ -537,6 +541,11 @@ def run_manual_pipeline(args, tokenizer, out):
     all_lat = torch.stack(all_latents)  # [N, vae_dim]
     dump_f32(out / "all_latents.bin", all_lat)
     print(f"  all latents: shape={list(all_lat.shape)}, rms={all_lat.norm()/all_lat.numel()**0.5:.4f}")
+
+    # Dump per-frame init noise — C++ side reads this via VIBEVOICE_TTS_NOISE
+    # to replay the same Gaussian z[fi] each frame (PyTorch RNG ≠ C++ MT19937).
+    all_noise = torch.stack(all_noises)  # [N, vae_dim]
+    dump_f32(out / "noise.bin", all_noise)
 
     # Scale and decode
     sf = state.get("model.speech_scaling_factor", torch.tensor(0.196))

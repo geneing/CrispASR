@@ -211,7 +211,13 @@ def main():
         if actual_base_layers != n_lm_layers:
             print(f"  NOTE: actual base LM layers = {actual_base_layers} (config says {n_lm_layers})")
             n_lm_layers = actual_base_layers
-            writer.add_uint32("vibevoice.n_lm_layers", n_lm_layers)
+            # vibevoice.n_lm_layers was already written above with the config value.
+            # Overwrite the stored entry directly (newer gguf rejects re-adding the same key).
+            kv_entry = writer.kv_data[0]["vibevoice.n_lm_layers"]
+            if hasattr(kv_entry, "value"):
+                kv_entry.value = n_lm_layers
+            else:
+                kv_entry["value"] = n_lm_layers
 
     # Load and write tensors
     tensor_count = 0

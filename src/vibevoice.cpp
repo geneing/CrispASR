@@ -1554,12 +1554,17 @@ static ddim_schedule make_ddim_schedule(int num_inference_steps) {
         s.alphas_cumprod[i] = a_prod;
     }
 
-    // Linearly spaced timesteps from T-1 down to 0
+    // Match diffusers DPMSolverMultistepScheduler.set_timesteps with
+    // timestep_spacing="linspace" (the default the official model uses):
+    //   ts = linspace(0, num_train_steps - 1, num_inference_steps + 1).round()[::-1][:-1]
+    // For 20 steps over 1000 this produces [999, 949, 899, ..., 50] — note the LAST
+    // timestep is 50, NOT 0. The final cleanup to t=0 is implicit via the appended
+    // sigma=0 (final_sigmas_type="zero"); see dpm_first_order_update for that path.
     s.timesteps.resize(num_inference_steps);
-    for (int i = 0; i < num_inference_steps; i++)
-        s.timesteps[i] =
-            (int)roundf((float)(s.num_train_steps - 1) * (1.0f - (float)i / (float)(num_inference_steps - 1)));
-    s.timesteps[num_inference_steps - 1] = 0;
+    for (int i = 0; i < num_inference_steps; i++) {
+        s.timesteps[i] = (int)roundf((float)(s.num_train_steps - 1) * (float)(num_inference_steps - i) /
+                                     (float)num_inference_steps);
+    }
 
     return s;
 }
@@ -1982,6 +1987,115 @@ static ggml_cgraph* build_vae_decoder_graph(vibevoice_context* ctx, int n_frames
 // If all_positions=false, returns last token only [d_lm].
 // If all_positions=true, returns all tokens [n_tokens * d_lm].
 // Single prefill pass with full self-attention (no KV cache needed).
+// Run a Qwen2-style transformer prefill (no KV cache, full self-attention) on a stack of
+// pre-computed embeddings. Used for the negative-path prefill recipe described in
+// microsoft/VibeVoice modeling_vibevoice_streaming_inference.py:
+//   neg_base_hidden  = run_qwen2_prefill_no_kv(ctx, embed(IMAGE_PAD), 1, "lm",     n_lm_layers, false)
+//   neg_condition    = run_qwen2_prefill_no_kv(ctx, neg_base_hidden + type_text, 1, "tts_lm", tts_n_layers, true)
+// Returns hidden states for the LAST token (or all tokens if all_positions=true).
+static std::vector<float> run_qwen2_prefill_no_kv(vibevoice_context* ctx, const float* embeds_in, int n_tokens,
+                                                  const char* prefix, int n_layers, bool has_final_norm,
+                                                  bool all_positions) {
+    auto& hp = ctx->model.hp;
+    auto& ts = ctx->model.tensors;
+    auto G = [&](const std::string& name) -> ggml_tensor* {
+        auto it = ts.find(name);
+        return it != ts.end() ? it->second : nullptr;
+    };
+
+    size_t mem = ctx->compute_meta.size();
+    ggml_init_params ip = {mem, ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
+
+    ggml_tensor* emb_t = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hp.d_lm, n_tokens);
+    ggml_set_name(emb_t, "qpf_input");
+    ggml_set_input(emb_t);
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+    ggml_set_name(positions, "qpf_pos");
+    ggml_set_input(positions);
+
+    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_tokens, n_tokens);
+    ggml_set_name(causal_mask, "qpf_mask");
+    ggml_set_input(causal_mask);
+
+    ggml_tensor* cur = emb_t;
+    for (int il = 0; il < n_layers; il++) {
+        char p[64];
+        snprintf(p, sizeof(p), "%s.layers.%d", prefix, il);
+        ggml_tensor* residual = cur;
+        cur = ggml_rms_norm(ctx0, cur, 1e-6f);
+        cur = ggml_mul(ctx0, cur, G(std::string(p) + ".attn_ln.weight"));
+        {
+            ggml_tensor* Q = ggml_mul_mat(ctx0, G(std::string(p) + ".attn.q_proj.weight"), cur);
+            if (auto* qb = G(std::string(p) + ".attn.q_proj.bias"))
+                Q = ggml_add(ctx0, Q, qb);
+            ggml_tensor* K = ggml_mul_mat(ctx0, G(std::string(p) + ".attn.k_proj.weight"), cur);
+            if (auto* kb = G(std::string(p) + ".attn.k_proj.bias"))
+                K = ggml_add(ctx0, K, kb);
+            ggml_tensor* V = ggml_mul_mat(ctx0, G(std::string(p) + ".attn.v_proj.weight"), cur);
+            if (auto* vb = G(std::string(p) + ".attn.v_proj.bias"))
+                V = ggml_add(ctx0, V, vb);
+            Q = ggml_reshape_3d(ctx0, Q, hp.head_dim, hp.n_heads, n_tokens);
+            K = ggml_reshape_3d(ctx0, K, hp.head_dim, hp.n_kv_heads, n_tokens);
+            V = ggml_reshape_3d(ctx0, V, hp.head_dim, hp.n_kv_heads, n_tokens);
+            Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hp.head_dim, GGML_ROPE_TYPE_NEOX, 0, hp.rope_theta, 1.0f,
+                              0.0f, 1.0f, 0.0f, 0.0f);
+            K = ggml_rope_ext(ctx0, K, positions, nullptr, hp.head_dim, GGML_ROPE_TYPE_NEOX, 0, hp.rope_theta, 1.0f,
+                              0.0f, 1.0f, 0.0f, 0.0f);
+            Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
+            K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
+            V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
+            float scale = 1.0f / sqrtf((float)hp.head_dim);
+            ggml_tensor* attn_out = ggml_flash_attn_ext(ctx0, Q, K, V, causal_mask, scale, 0.0f, 0.0f);
+            attn_out = ggml_reshape_2d(ctx0, attn_out, hp.d_lm, n_tokens);
+            attn_out = ggml_mul_mat(ctx0, G(std::string(p) + ".attn.o_proj.weight"), attn_out);
+            cur = ggml_add(ctx0, residual, attn_out);
+        }
+        residual = cur;
+        cur = ggml_rms_norm(ctx0, cur, 1e-6f);
+        cur = ggml_mul(ctx0, cur, G(std::string(p) + ".ffn_ln.weight"));
+        ggml_tensor* ffn =
+            core_ffn::swiglu(ctx0, cur, G(std::string(p) + ".ffn.gate.weight"), G(std::string(p) + ".ffn.up.weight"),
+                             G(std::string(p) + ".ffn.down.weight"));
+        cur = ggml_add(ctx0, residual, ffn);
+    }
+    if (has_final_norm) {
+        if (auto* nw = G(std::string(prefix) + ".norm.weight")) {
+            cur = ggml_rms_norm(ctx0, cur, 1e-6f);
+            cur = ggml_mul(ctx0, cur, nw);
+        }
+    }
+    if (!all_positions)
+        cur = ggml_view_1d(ctx0, cur, hp.d_lm, (size_t)(n_tokens - 1) * hp.d_lm * sizeof(float));
+    ggml_set_name(cur, "qpf_hidden");
+    ggml_set_output(cur);
+    ggml_build_forward_expand(gf, cur);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return {};
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "qpf_input"), embeds_in, 0,
+                            (size_t)hp.d_lm * n_tokens * sizeof(float));
+    std::vector<int32_t> pos(n_tokens);
+    for (int i = 0; i < n_tokens; i++)
+        pos[i] = i;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "qpf_pos"), pos.data(), 0, pos.size() * sizeof(int32_t));
+    std::vector<ggml_fp16_t> mask((size_t)n_tokens * n_tokens, ggml_fp32_to_fp16(0.0f));
+    ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+    for (int q = 0; q < n_tokens; q++)
+        for (int k = q + 1; k < n_tokens; k++)
+            mask[(size_t)q * n_tokens + k] = neg_inf;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "qpf_mask"), mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return {};
+    int out_size = all_positions ? hp.d_lm * n_tokens : hp.d_lm;
+    std::vector<float> out(out_size);
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "qpf_hidden"), out.data(), 0, (size_t)out_size * sizeof(float));
+    return out;
+}
+
 static std::vector<float> run_lm_hidden_states(vibevoice_context* ctx, const int32_t* token_ids, int n_tokens,
                                                bool all_positions = false) {
     auto& hp = ctx->model.hp;
@@ -3325,23 +3439,55 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
     int neg_n_past = has_voice ? ctx->voice.neg_tts_seq_len : 0;
     std::vector<float> hidden;
 
-    // Helper: process a text window through base LM + TTS LM
+    // Initial negative condition for CFG. Per the official
+    // microsoft/VibeVoice modeling_vibevoice_streaming_inference.py the negative path is
+    // PREFILLED ONCE with a single <|image_pad|> token (no past KV) and is NEVER updated
+    // by text windows — only by speech frames. We therefore recompute that prefill
+    // here (deterministic, identical to what voice.neg_lm/voice.neg_tts_lm cache).
+    //
+    // Recipe:
+    //   1. neg_base_pad_hidden = neg base LM forward(IMAGE_PAD at pos 0, no past KV)
+    //   2. neg_prefill_input   = neg_base_pad_hidden + tts_input_types[1]
+    //   3. neg_condition       = neg TTS LM forward(neg_prefill_input at pos 0, no past KV).last
     std::vector<float> neg_condition(d_lm, 0.0f);
-
-    // Pre-computed base LM hidden states (filled by the base LM block above for voice mode)
-    // all_base_hidden is populated in the "base LM with voice KV" code block above.
-    // For neg path, compute neg base hidden on <|image_pad|> tokens:
-    std::vector<float> all_neg_base_hidden;
-    if (has_voice && has_tts_lm) {
+    if (has_tts_lm) {
         const int32_t IMAGE_PAD = 151655;
-        int n_all = (int)text_ids.size();
-        std::vector<int32_t> pad_ids((size_t)n_all, IMAGE_PAD);
-        auto nbh = run_lm_hidden_states(ctx, pad_ids.data(), n_all, true);
-        if ((int)nbh.size() == n_all * d_lm)
-            all_neg_base_hidden = nbh;
+        int32_t pad_id = IMAGE_PAD;
+        // Run the negative base LM prefill (1 IMAGE_PAD token, no past KV, no final norm).
+        // Realtime base LM has no final norm — pass false.
+        auto pad_emb = run_token_embedding_lookup(ctx, &pad_id, 1);
+        std::vector<float> neg_base_pad_hidden =
+            run_qwen2_prefill_no_kv(ctx, pad_emb.data(), 1, "lm", hp.n_lm_layers, /*has_final_norm=*/false,
+                                    /*all_positions=*/true);
+        if ((int)neg_base_pad_hidden.size() != d_lm) {
+            fprintf(stderr, "vibevoice TTS: neg base prefill failed\n");
+            return nullptr;
+        }
+        // Build TTS LM prefill input: neg_base_pad_hidden + type_text. The official
+        // forward_tts_lm replaces the entire input embedding tail with lm_last_hidden_state,
+        // then adds tts_input_types(tts_text_masks=1). For a 1-token input, the entire
+        // embedding is replaced; tts_emb(IMAGE_PAD) is unused.
+        std::vector<float> neg_prefill_input(d_lm);
+        for (int j = 0; j < d_lm; j++)
+            neg_prefill_input[j] = neg_base_pad_hidden[j] + text_type_emb[j];
+        // TTS LM has final norm.
+        neg_condition = run_qwen2_prefill_no_kv(ctx, neg_prefill_input.data(), 1, "tts_lm", hp.tts_n_layers,
+                                                /*has_final_norm=*/true, /*all_positions=*/false);
+        if ((int)neg_condition.size() != d_lm) {
+            fprintf(stderr, "vibevoice TTS: neg TTS LM prefill failed\n");
+            return nullptr;
+        }
+        if (verbosity >= 2 || getenv("VIBEVOICE_TTS_TRACE")) {
+            float rms = sqrtf(std::inner_product(neg_condition.begin(), neg_condition.end(), neg_condition.begin(),
+                                                 0.0f) /
+                              d_lm);
+            fprintf(stderr, "  neg_condition prefill (IMAGE_PAD): rms=%.4f\n", rms);
+        }
     }
 
-    // Process a text window: uses pre-computed base hidden states
+    // Process a text window: ONLY the positive path is advanced. The negative path is
+    // never updated by text windows (matches the official inference loop in
+    // modeling_vibevoice_streaming_inference.py).
     auto process_text_window = [&](int cursor, int win_len) -> bool {
         if (win_len <= 0)
             return true;
@@ -3356,26 +3502,10 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             for (int j = 0; j < d_lm; j++)
                 win_embeds[(size_t)i * d_lm + j] += text_type_emb[j];
 
-        // Run TTS LM (positive path)
+        // Run TTS LM (positive path) ONLY.
         if (!run_lm_step(win_embeds.data(), win_len, n_past, hidden, 0))
             return false;
         n_past += win_len;
-
-        // Build neg input: neg_base_hidden[cursor:cursor+win_len] + type_emb[1]
-        std::vector<float> neg_win((size_t)win_len * d_lm, 0.0f);
-        if (!all_neg_base_hidden.empty()) {
-            memcpy(neg_win.data(), all_neg_base_hidden.data() + (size_t)cursor * d_lm,
-                   (size_t)win_len * d_lm * sizeof(float));
-        }
-        for (int i = 0; i < win_len; i++)
-            for (int j = 0; j < d_lm; j++)
-                neg_win[(size_t)i * d_lm + j] += text_type_emb[j];
-        std::vector<float> neg_h;
-        if (!run_lm_step(neg_win.data(), win_len, neg_n_past, neg_h, 1))
-            return false;
-        neg_condition = neg_h;
-        neg_n_past += win_len;
-
         return true;
     };
 
@@ -3390,6 +3520,7 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         }
         text_cursor = first_win;
         vibevoice_dump_f32(dump_dir, "tts_prefill_hidden", hidden.data(), hidden.size());
+        vibevoice_dump_f32(dump_dir, "tts_neg_condition_frame0", neg_condition.data(), neg_condition.size());
     }
 
     const auto t_prefill_done = std::chrono::high_resolution_clock::now();
@@ -3436,107 +3567,6 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
     }
 
     // neg_condition is computed inside process_text_window
-    if (has_tts_lm && !has_voice) { // DISABLED: old non-voice neg path
-        // Without voice: compute neg from <|image_pad|> tokens (old path, kept for reference)
-        const int32_t IMAGE_PAD = 151655;
-        int n_text = (int)text_ids.size();
-        std::vector<int32_t> neg_ids(n_text, IMAGE_PAD);
-        auto it_emb = m.tensors.find("tts_lm.tok_emb.weight");
-        std::vector<float> neg_embeds = prefix_embeds;
-
-        if (it_emb != m.tensors.end() && it_emb->second) {
-            size_t mem = ctx->compute_meta.size();
-            ggml_init_params ip_neg = {mem, ctx->compute_meta.data(), true};
-            ggml_context* ctx_neg = ggml_init(ip_neg);
-            ggml_cgraph* gf_neg = ggml_new_graph_custom(ctx_neg, 256, false);
-            ggml_tensor* inp = ggml_new_tensor_1d(ctx_neg, GGML_TYPE_I32, n_text);
-            ggml_set_name(inp, "neg_ids");
-            ggml_set_input(inp);
-            ggml_tensor* out = ggml_get_rows(ctx_neg, it_emb->second, inp);
-            ggml_set_name(out, "neg_emb");
-            ggml_set_output(out);
-            ggml_build_forward_expand(gf_neg, out);
-            ggml_backend_sched_reset(ctx->sched);
-            if (ggml_backend_sched_alloc_graph(ctx->sched, gf_neg)) {
-                ggml_backend_tensor_set(ggml_graph_get_tensor(gf_neg, "neg_ids"), neg_ids.data(), 0,
-                                        n_text * sizeof(int32_t));
-                if (ggml_backend_sched_graph_compute(ctx->sched, gf_neg) == GGML_STATUS_SUCCESS) {
-                    std::vector<float> null_embs((size_t)n_text * d_lm);
-                    ggml_backend_tensor_get(ggml_graph_get_tensor(gf_neg, "neg_emb"), null_embs.data(), 0,
-                                            null_embs.size() * sizeof(float));
-                    int start_idx = prefix_len - n_text;
-                    if (start_idx >= 0)
-                        memcpy(neg_embeds.data() + (size_t)start_idx * d_lm, null_embs.data(),
-                               (size_t)n_text * d_lm * sizeof(float));
-                }
-            }
-        }
-        std::vector<float> neg_hidden;
-        int neg_voice_offset = ctx->voice.neg_tts_seq_len;
-        if (run_lm_step(neg_embeds.data(), prefix_len, neg_voice_offset, neg_hidden, 1))
-            neg_condition = neg_hidden;
-        vibevoice_dump_f32(dump_dir, "tts_neg_condition", neg_condition.data(), neg_condition.size());
-        if (verbosity >= 1)
-            fprintf(stderr, "  neg CFG condition (rms=%.4f)\n",
-                    sqrtf(std::inner_product(neg_condition.begin(), neg_condition.end(), neg_condition.begin(), 0.0f) /
-                          d_lm));
-    }
-    if (false && has_tts_lm && has_voice) { // DISABLED: handled in process_text_window
-        // With voice: neg KV cache is pre-filled from voice.neg_tts_lm.
-        // Run TTS LM on <|image_pad|> embeddings (same count as text tokens) to get neg condition.
-        const int32_t IMAGE_PAD = 151655;
-        int n_text = (int)text_ids.size();
-        std::vector<int32_t> neg_ids(n_text, IMAGE_PAD);
-        // Embed <|image_pad|> tokens with TTS LM embedding
-        auto neg_emb = [&]() -> std::vector<float> {
-            auto it = m.tensors.find("tts_lm.tok_emb.weight");
-            if (it == m.tensors.end())
-                return std::vector<float>(n_text * d_lm, 0.0f);
-            size_t mem = ctx->compute_meta.size();
-            ggml_init_params ip = {mem, ctx->compute_meta.data(), true};
-            ggml_context* cx = ggml_init(ip);
-            ggml_cgraph* gf = ggml_new_graph_custom(cx, 256, false);
-            ggml_tensor* inp = ggml_new_tensor_1d(cx, GGML_TYPE_I32, n_text);
-            ggml_set_name(inp, "npad_ids");
-            ggml_set_input(inp);
-            ggml_tensor* out = ggml_get_rows(cx, it->second, inp);
-            ggml_set_name(out, "npad_emb");
-            ggml_set_output(out);
-            ggml_build_forward_expand(gf, out);
-            ggml_backend_sched_reset(ctx->sched);
-            if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
-                return std::vector<float>(n_text * d_lm, 0.0f);
-            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "npad_ids"), neg_ids.data(), 0, n_text * sizeof(int32_t));
-            if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
-                return std::vector<float>(n_text * d_lm, 0.0f);
-            std::vector<float> embs(n_text * d_lm);
-            ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "npad_emb"), embs.data(), 0, embs.size() * sizeof(float));
-            return embs;
-        }();
-        // Add text type embedding (type=1) since these are "text" positions
-        // (In the official pipeline, tts_text_masks=1 for text window positions)
-        // Actually for neg path, the mask might be different... let's add type=1 to match pos path
-        // Use precomputed all_neg_base_hidden (computed once upfront).
-        // No need to rebuild temp KV cache or run base LM again.
-        if (!all_neg_base_hidden.empty()) {
-            neg_emb.assign(all_neg_base_hidden.begin(), all_neg_base_hidden.begin() + (size_t)n_text * d_lm);
-        }
-
-        // Add type embedding (text=1)
-        for (int i = 0; i < n_text; i++)
-            for (int j = 0; j < d_lm; j++)
-                neg_emb[(size_t)i * d_lm + j] += text_type_emb[j];
-        int neg_voice_offset = ctx->voice.neg_tts_seq_len;
-        std::vector<float> neg_hidden;
-        if (run_lm_step(neg_emb.data(), n_text, neg_voice_offset, neg_hidden, 1))
-            neg_condition = neg_hidden;
-        neg_n_past = neg_voice_offset + n_text;
-        vibevoice_dump_f32(dump_dir, "tts_neg_condition", neg_condition.data(), neg_condition.size());
-        if (verbosity >= 1)
-            fprintf(stderr, "  neg CFG condition with voice (rms=%.4f)\n",
-                    sqrtf(std::inner_product(neg_condition.begin(), neg_condition.end(), neg_condition.begin(), 0.0f) /
-                          d_lm));
-    }
     float cfg_scale = 3.0f;
 
     std::vector<float> all_latents;
@@ -3583,6 +3613,16 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             }
             if (fi == 0)
                 vibevoice_dump_f32(dump_dir, "tts_noise_frame0", z.data(), z.size());
+            // Per-frame conditions/noise dump (VIBEVOICE_TTS_DUMP_PERFRAME=1).
+            if (getenv("VIBEVOICE_TTS_DUMP_PERFRAME")) {
+                char nm[64];
+                snprintf(nm, sizeof(nm), "perframe_pos_cond_f%03d", fi);
+                vibevoice_dump_f32(dump_dir, nm, hidden.data(), hidden.size());
+                snprintf(nm, sizeof(nm), "perframe_neg_cond_f%03d", fi);
+                vibevoice_dump_f32(dump_dir, nm, neg_condition.data(), neg_condition.size());
+                snprintf(nm, sizeof(nm), "perframe_noise_f%03d", fi);
+                vibevoice_dump_f32(dump_dir, nm, z.data(), z.size());
+            }
 
             for (int step = 0; step < num_steps; step++) {
                 float t = (float)sched.timesteps[step];
@@ -3629,6 +3669,12 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                 }
                 if (fi == 0 && step == 0)
                     vibevoice_dump_f32(dump_dir, "tts_v_cfg_step0", v_cfg.data(), v_cfg.size());
+                // Per-frame step-0 v_cfg dump (VIBEVOICE_TTS_DUMP_PERFRAME=1).
+                if (step == 0 && getenv("VIBEVOICE_TTS_DUMP_PERFRAME")) {
+                    char nm[64];
+                    snprintf(nm, sizeof(nm), "perframe_v_cfg_step0_f%03d", fi);
+                    vibevoice_dump_f32(dump_dir, nm, v_cfg.data(), v_cfg.size());
+                }
 
                 // Convert v-prediction to x0 prediction
                 int t_cur = sched.timesteps[step];
@@ -3649,6 +3695,11 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             all_latents.insert(all_latents.end(), z.begin(), z.end());
             if (fi == 0) {
                 vibevoice_dump_f32(dump_dir, "tts_latent_frame0", z.data(), z.size());
+            }
+            if (getenv("VIBEVOICE_TTS_DUMP_PERFRAME")) {
+                char nm[64];
+                snprintf(nm, sizeof(nm), "perframe_latent_f%03d", fi);
+                vibevoice_dump_f32(dump_dir, nm, z.data(), z.size());
             }
 
             auto t_diff_end = std::chrono::high_resolution_clock::now();
