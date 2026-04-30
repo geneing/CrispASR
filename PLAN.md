@@ -3,7 +3,7 @@
 Pending roadmap items. Each is self-contained with files, approach, and
 effort estimate. Completed items have been moved to `HISTORY.md`.
 
-**Current state (April 2026, v0.5.3):** 21 ASR backends + TTS, unified CLI,
+**Current state (April 2026, v0.5.4):** 21 ASR backends + TTS, unified CLI,
 OpenAI-compatible server, shared `src/core/` library, FireRedPunc
 post-processor, C-ABI + Python/Rust/Dart wrappers, CI on 6 platforms.
 All backends support `-m auto --auto-download`. Three new ggml ops
@@ -377,10 +377,10 @@ is complete.
 
 | Wrapper | Pre-flight | Blocker |
 |---|---|---|
-| Python `crispasr` 0.4.9 | sdist + wheel build clean | PyPI trusted-publisher must be configured |
-| Dart `crispasr` 0.4.9 | `dart pub publish --dry-run` passes (warnings only) | pub.dev automated publishing must be configured |
-| Rust `crispasr-sys` 0.1.7 | `cargo publish --dry-run` clean (5.9 KiB) | needs `CARGO_REGISTRY_TOKEN` repo secret |
-| Rust `crispasr` 0.1.7 | publish-order dependent on `crispasr-sys` | same |
+| Python `crispasr` 0.5.4 | sdist + wheel build clean | PyPI trusted-publisher must be configured |
+| Dart `crispasr` 0.5.4 | `dart pub publish --dry-run` passes (warnings only) | pub.dev automated publishing must be configured |
+| Rust `crispasr-sys` 0.5.4 | `cargo publish --dry-run` clean (5.9 KiB) | needs `CARGO_REGISTRY_TOKEN` repo secret |
+| Rust `crispasr` 0.5.4 | publish-order dependent on `crispasr-sys` | same |
 
 ### One-time registry setup (must happen before first tag)
 

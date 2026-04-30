@@ -333,6 +333,14 @@ Moved here once shipped. See git history for code diffs.
 - **Qwen Omni ASR** — NOT PLANNED (split GGUF, too large, already in llama.cpp).
 - **#30 PazaBench assessment** — 16 model families assessed. 7 already covered, 4 easy wins identified.
 
+### v0.5.4 (April 2026)
+
+**Maintenance:**
+- **Sync versioning**: Synchronized version numbers across CMake, Rust (crispasr, crispasr-sys), Python, and Dart wrappers to 0.5.4.
+- **CI/Lint cleanup**: Resolved all remaining clang-tidy and clang-format violations using LLVM 18.
+- **Improved Static Analysis**: Updated `.clang-tidy` to exclude third-party headers, reducing noise in CI reports.
+- **Code Quality**: Fixed multiple implicit widening conversion warnings and enforced braces for all control flow statements in core core files.
+
 ### v0.5.0 (April 2026)
 
 **Features:**

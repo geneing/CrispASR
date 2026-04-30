@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10...3.29)
 project("whisper.cpp" C CXX)
-project("whisper.cpp" VERSION 1.8.4)
+project("whisper.cpp" VERSION 0.5.4)
 include(CheckIncludeFileCXX)
 
 set(SOVERSION 1)

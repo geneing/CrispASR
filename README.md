@@ -925,7 +925,7 @@ final words = crispasr.alignWords(
   alignerModel: ctcPath, transcript: text, pcm: pcm);
 ```
 
-Reference application: **[CrisperWeaver](https://github.com/CrispStrobe/CrisperWeaver)** — a cross-platform Flutter desktop/mobile transcription app built on `package:crispasr`. Ships with model browser + downloader (all 10 backends + quants), drag-and-drop files, mic capture, SRT/VTT/TXT export, per-run performance metrics, and full en/de i18n. The v0.1.7 release uses the new `transcribeVad` path so every non-whisper backend benefits from stitched Silero VAD with zero CrisperWeaver-side work.
+Reference application: **[CrisperWeaver](https://github.com/CrispStrobe/CrisperWeaver)** — a cross-platform Flutter desktop/mobile transcription app built on `package:crispasr`. Ships with model browser + downloader (all 10 backends + quants), drag-and-drop files, mic capture, SRT/VTT/TXT export, per-run performance metrics, and full en/de i18n. The v0.5.4 release uses the new `transcribeVad` path so every non-whisper backend benefits from stitched Silero VAD with zero CrisperWeaver-side work.
 
 ### Mobile
 
