@@ -28,7 +28,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_OPENBLAS=ON -DCRISPASR_BUILD_TESTS=OFF -DGGML_NATIVE=OFF
 
       - name: Build
-        run: cmake --build build --target crispasr crispasr-diff crispasr-quantize -j $(nproc)
+        run: cmake --build build --target crispasr-cli crispasr-diff crispasr-quantize -j $(nproc)
 
       - name: Smoke test - help
         run: ./build/bin/crispasr --help
@@ -61,7 +61,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DCRISPASR_BUILD_TESTS=OFF
 
       - name: Build
-        run: cmake --build build --target crispasr -j $(nproc)
+        run: cmake --build build --target crispasr-cli -j $(nproc)
 
       - name: Smoke test
         run: ./build/bin/crispasr --list-backends
@@ -80,7 +80,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON -DCRISPASR_BUILD_TESTS=OFF
 
       - name: Build
-        run: cmake --build build --target crispasr -j $(sysctl -n hw.logicalcpu)
+        run: cmake --build build --target crispasr-cli -j $(sysctl -n hw.logicalcpu)
 
       - name: Smoke test
         run: ./build/bin/crispasr --list-backends
@@ -99,7 +99,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCRISPASR_BUILD_TESTS=OFF
 
       - name: Build
-        run: cmake --build build --config Release --target crispasr -j $env:NUMBER_OF_PROCESSORS
+        run: cmake --build build --config Release --target crispasr-cli -j $env:NUMBER_OF_PROCESSORS
 
       - name: Smoke test
         run: .\build\bin\Release\crispasr.exe --list-backends

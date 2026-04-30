@@ -264,18 +264,18 @@ static void qwen3_prof_print(const char* tag, const qwen3_prof_state& ps, int n_
             pct(ps.mul_mat.t_us, total), ps.mul_mat.count);
     fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "flash_attn", ps.flash_attn.t_us / 1e3,
             pct(ps.flash_attn.t_us, total), ps.flash_attn.count);
-    fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "norm", ps.norm.t_us / 1e3,
-            pct(ps.norm.t_us, total), ps.norm.count);
-    fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "rope", ps.rope.t_us / 1e3,
-            pct(ps.rope.t_us, total), ps.rope.count);
+    fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "norm", ps.norm.t_us / 1e3, pct(ps.norm.t_us, total),
+            ps.norm.count);
+    fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "rope", ps.rope.t_us / 1e3, pct(ps.rope.t_us, total),
+            ps.rope.count);
     fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "add/mul/sc", ps.add.t_us / 1e3,
             pct(ps.add.t_us, total), ps.add.count);
     fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "unary", ps.unary.t_us / 1e3,
             pct(ps.unary.t_us, total), ps.unary.count);
     fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "cpy", ps.cpy.t_us / 1e3, pct(ps.cpy.t_us, total),
             ps.cpy.count);
-    fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "cont", ps.cont.t_us / 1e3,
-            pct(ps.cont.t_us, total), ps.cont.count);
+    fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "cont", ps.cont.t_us / 1e3, pct(ps.cont.t_us, total),
+            ps.cont.count);
     fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "get_rows", ps.get_rows.t_us / 1e3,
             pct(ps.get_rows.t_us, total), ps.get_rows.count);
     fprintf(stderr, "qwen3_tts:  %-12s %7.1f ms %5.1f%% n=%d\n", "repeat", ps.repeat.t_us / 1e3,
@@ -675,14 +675,14 @@ struct qwen3_tts_context {
     // O15: persistent T=1 code_pred graph. cp_lm_head_slot is a writable Metal
     // buffer into which we blit lm_head[i] before each T=1 step, allowing all
     // 13 skip steps per frame to reuse the cached graph (no reset/alloc).
-    ggml_context*         cp_lm_slot_ctx  = nullptr;
-    ggml_backend_buffer_t cp_lm_slot_buf  = nullptr;
-    ggml_tensor*          cp_lm_head_slot = nullptr;
-    ggml_cgraph*          cp_t1_gf        = nullptr;
+    ggml_context* cp_lm_slot_ctx = nullptr;
+    ggml_backend_buffer_t cp_lm_slot_buf = nullptr;
+    ggml_tensor* cp_lm_head_slot = nullptr;
+    ggml_cgraph* cp_t1_gf = nullptr;
 
     // Fused Q+K+V weights for the talker (F16/F32 only, runtime-built from
     // the unfused tensors so Q4_K/Q8_0 talkers fall back to the 3-matmul path).
-    ggml_context*         fused_ctx = nullptr;
+    ggml_context* fused_ctx = nullptr;
     ggml_backend_buffer_t fused_buf = nullptr;
 
     // Loaded voice pack (zero-copy: `vp_tensors` references the
@@ -994,10 +994,10 @@ ggml_cgraph* build_graph_code_pred_kv(qwen3_tts_context* c, int n_past, int n_to
         // For T=1 graphs, fix the KV-read length to cp_kv_max_ctx so that all
         // T=1 steps share the same graph topology (enabling graph reuse in O15).
         const int fixed_kv = (T == 1) ? c->cp_kv_max_ctx : 0;
-        ggml_tensor* attn = core_attn::kv_self_attn(
-            ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w, b.attn_q_norm_w, b.attn_k_norm_w,
-            positions, causal_mask, c->cp_kv_k, c->cp_kv_v, (int)il, n_past, kvp,
-            /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv);
+        ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
+                                                    b.attn_q_norm_w, b.attn_k_norm_w, positions, causal_mask,
+                                                    c->cp_kv_k, c->cp_kv_v, (int)il, n_past, kvp,
+                                                    /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv);
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
@@ -1406,7 +1406,7 @@ float* run_code_pred_kv(qwen3_tts_context* c, const float* embeds, int n_tokens,
     const int d = (int)hp.cp_d_model;
     const int vocab = (int)hp.cp_vocab_size;
     const int actual_Lk = n_past + n_tokens;
-    const int fixed_Lk = c->cp_kv_max_ctx;  // matches build_graph_code_pred_kv
+    const int fixed_Lk = c->cp_kv_max_ctx; // matches build_graph_code_pred_kv
 
     std::vector<int32_t> positions(n_tokens);
     for (int i = 0; i < n_tokens; i++) {
@@ -1448,7 +1448,7 @@ float* run_code_pred_kv(qwen3_tts_context* c, const float* embeds, int n_tokens,
             return nullptr;
         }
         if (use_slot) {
-            c->cp_t1_gf = gf;  // cache for future skip_plan calls within this frame
+            c->cp_t1_gf = gf; // cache for future skip_plan calls within this frame
         }
     }
 
@@ -1497,7 +1497,7 @@ float* run_code_pred_kv(qwen3_tts_context* c, const float* embeds, int n_tokens,
         static int count = 0;
         sum_build += t_build1 - t_build0;
         sum_reset += t_reset1 - t_reset0;
-        sum_alloc += t_alloc1 - t_reset1;   // alloc_graph only (excludes reset)
+        sum_alloc += t_alloc1 - t_reset1; // alloc_graph only (excludes reset)
         sum_compute += t_compute1 - t_alloc1;
         sum_read += now_ms() - t_compute1;
         count++;
@@ -2039,7 +2039,7 @@ static bool copy_cp_weights_to_cpu(qwen3_tts_context* c, enum ggml_type dst_type
         ptrs.push_back(&b.ffn_down_w);
     }
 
-    auto copy_type_for = [&](ggml_tensor* orig) -> enum ggml_type {
+    auto copy_type_for = [&](ggml_tensor * orig)->enum ggml_type {
         return dst_type == GGML_TYPE_COUNT ? orig->type : dst_type;
     };
     auto tensor_nbytes_for_type = [&](ggml_tensor* orig, enum ggml_type type) -> size_t {
@@ -2061,10 +2061,9 @@ static bool copy_cp_weights_to_cpu(qwen3_tts_context* c, enum ggml_type dst_type
         }
     }
     // talker.token_embd_w copy (kept separately, doesn't overwrite original)
-    const size_t embd_bytes = c->talker.token_embd_w
-                                  ? tensor_nbytes_for_type(c->talker.token_embd_w,
-                                                           copy_type_for(c->talker.token_embd_w))
-                                  : 0;
+    const size_t embd_bytes =
+        c->talker.token_embd_w ? tensor_nbytes_for_type(c->talker.token_embd_w, copy_type_for(c->talker.token_embd_w))
+                               : 0;
     total_bytes += embd_bytes;
     n_tensors += (embd_bytes > 0) ? 1 : 0;
 
@@ -4099,8 +4098,10 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
     // single mul_mat instead of three. Only applies to F16/F32 talkers —
     // quantized formats (Q8_0/Q4_K) keep the 3-matmul path because their
     // block layout would need a converter-side fuse to be safe.
-    // Set QWEN3_TTS_NO_FUSED_QKV=1 to skip (for A/B benchmarking).
-    if (!env_bool("QWEN3_TTS_NO_FUSED_QKV")) {
+    // Off by default: a first (contended-machine) bench suggested the
+    // fused path regresses at T=1 on M1 Metal; flip on with
+    // QWEN3_TTS_FUSED_QKV=1 to A/B test on a quiet machine.
+    if (env_bool("QWEN3_TTS_FUSED_QKV")) {
         auto& blocks = c->talker.blocks;
         if (!blocks.empty() && blocks[0].attn_q_w && blocks[0].attn_k_w && blocks[0].attn_v_w &&
             (blocks[0].attn_q_w->type == GGML_TYPE_F32 || blocks[0].attn_q_w->type == GGML_TYPE_F16)) {
@@ -4114,8 +4115,7 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
                 for (auto& b : blocks) {
                     b.attn_qkv_w = ggml_new_tensor_2d(c->fused_ctx, b.attn_q_w->type, hidden, qkv_out);
                 }
-                c->fused_buf =
-                    ggml_backend_alloc_ctx_tensors_from_buft(c->fused_ctx, ggml_backend_cpu_buffer_type());
+                c->fused_buf = ggml_backend_alloc_ctx_tensors_from_buft(c->fused_ctx, ggml_backend_cpu_buffer_type());
                 if (c->fused_buf) {
                     for (auto& b : blocks) {
                         const size_t qb = ggml_nbytes(b.attn_q_w);
@@ -4127,8 +4127,8 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
                         ggml_backend_tensor_set(b.attn_qkv_w, tmp.data(), 0, tmp.size());
                     }
                     if (params.verbosity >= 1) {
-                        fprintf(stderr, "qwen3_tts: fused QKV for %zu talker layers (%d+%d+%d→%d)\n",
-                                blocks.size(), q_out, k_out, k_out, qkv_out);
+                        fprintf(stderr, "qwen3_tts: fused QKV for %zu talker layers (%d+%d+%d→%d)\n", blocks.size(),
+                                q_out, k_out, k_out, qkv_out);
                     }
                 } else {
                     for (auto& b : blocks) {
@@ -4191,8 +4191,7 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
         if (c->cp_lm_slot_buf) {
             ggml_init_params sp = {ggml_tensor_overhead(), nullptr, /*no_alloc=*/true};
             c->cp_lm_slot_ctx = ggml_init(sp);
-            c->cp_lm_head_slot = ggml_new_tensor_2d(c->cp_lm_slot_ctx, proto->type,
-                                                     proto->ne[0], proto->ne[1]);
+            c->cp_lm_head_slot = ggml_new_tensor_2d(c->cp_lm_slot_ctx, proto->type, proto->ne[0], proto->ne[1]);
             void* base = ggml_backend_buffer_get_base(c->cp_lm_slot_buf);
             ggml_backend_tensor_alloc(c->cp_lm_slot_buf, c->cp_lm_head_slot, base);
         }
@@ -4649,7 +4648,8 @@ extern "C" int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, co
     int max_frames = ctx->params.max_codec_steps > 0 ? ctx->params.max_codec_steps : 1500;
     if (const char* mf = getenv("QWEN3_TTS_MAX_FRAMES")) {
         const int v = std::atoi(mf);
-        if (v > 0) max_frames = v;
+        if (v > 0)
+            max_frames = v;
     }
     const int eos = (int)hp.codec_eos_id;
 

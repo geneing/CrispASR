@@ -4,12 +4,12 @@ on:
     branches: [main]
     paths:
       - examples/addon.node/**
-      - whisper.h
+      - crispasr.h
   pull_request:
     branches: [main]
     paths:
       - examples/addon.node/**
-      - whisper.h
+      - crispasr.h
 
 jobs:
   addon_node-ubuntu-22:
@@ -32,7 +32,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
 
       - name: Install package.json dependencies
         working-directory: ./examples/addon.node

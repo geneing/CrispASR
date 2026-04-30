@@ -9,11 +9,11 @@ import (
 // CGO
 
 /*
-#cgo LDFLAGS: -lwhisper -lggml -lggml-base -lggml-cpu -lm -lstdc++
+#cgo LDFLAGS: -lcrispasr -lggml -lggml-base -lggml-cpu -lm -lstdc++
 #cgo linux LDFLAGS: -fopenmp
 #cgo darwin LDFLAGS: -lggml-metal -lggml-blas
 #cgo darwin LDFLAGS: -framework Accelerate -framework Metal -framework Foundation -framework CoreGraphics
-#include <whisper.h>
+#include <crispasr.h>
 #include <stdlib.h>
 
 extern void callNewSegment(void* user_data, int new);

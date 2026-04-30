@@ -35,7 +35,7 @@ ARG CRISPASR_BUILD_JOBS
 RUN jobs="${CRISPASR_BUILD_JOBS:-$(nproc)}" && \
     cmake -S . -B build -G Ninja -DCRISPASR_BUILD_TESTS=OFF -DGGML_CUDA=1 \
         -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;120-real;120-virtual" && \
-    cmake --build build -j"${jobs}" --target crispasr
+    cmake --build build -j"${jobs}" --target crispasr-cli
 
 RUN find /app/build -name "*.o" -delete && \
     find /app/build -name "*.a" -delete && \

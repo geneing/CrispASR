@@ -822,6 +822,90 @@ many ASR models do. Current CrispASR testing found:
 Practical rule: if you must save memory, quantize the talker first and keep the
 tokenizer / codec at `f16`.
 
+### Qwen3-TTS speed optimization tracking (2026-04-30, partial)
+
+The qwen3-tts AR loop runs `1× talker + 15× code_predictor` per 80 ms audio
+frame. Profiling showed talker compute dominates (~50-60% of frame time;
+28L Qwen3 vs 5L code_predictor). The talker also rebuilds its full graph
+and re-allocs the scheduler every frame because `n_past` grows by 1 — the
+O15-style graph reuse trick used for code_predictor (cache one T=1 graph,
+blit per-step `lm_head` weights) cannot be applied as-is because the
+talker's `Lk = n_past + 1` changes on every step.
+
+**Optional optimization paths landed in the code (default-on except where
+noted), each with an env switch so a clean A/B is reproducible once a
+quiet machine is available:**
+
+1. **Quantized talker GGUFs** — converters work end-to-end:
+   - `qwen3-tts-0.6b-talker-q8_0.gguf` (986 MB, 1.86× smaller than F16)
+   - `qwen3-tts-0.6b-talker-q4_k.gguf` (533 MB, 3.44× smaller than F16)
+   Run any of them via `-m <path>`; auto-detected. Quality guidance from
+   the section above still applies (Q8_0 is the recommended default; Q4_K
+   sounds usable but drifts in strict diffs).
+
+2. **Fused Q+K+V matmul on F16/F32 talker** — same pattern as qwen3_asr.
+   At load time we concatenate `attn_{q,k,v}.weight` per layer into a
+   single `attn_qkv_w` on a CPU buffer (Apple Silicon's unified memory
+   makes this Metal-readable without explicit copies). The shared
+   helper `core_attn::kv_self_attn` already accepts `qkv_w`; we pass it
+   from `build_graph_talker_kv`. Default OFF; enable with
+   `QWEN3_TTS_FUSED_QKV=1` (the contended-machine bench below was
+   inconclusive, so the safer default is the unchanged 3-matmul path
+   until a quiet-machine A/B confirms a win). Quantized talkers
+   (Q4_K/Q8_0) skip the fuse automatically — their block layout would
+   need a converter-side fuse.
+
+   **Bug found while wiring this up:** `core_attn::kv_self_attn`'s
+   fused-QKV path used `ggml_view_2d` to split the `[qkv_out, T]` matmul
+   output into Q/K/V views. Each view inherits `nb[1] = qkv->nb[1] =
+   qkv_out * type_size`, so its rows are non-contiguous (gaps for the
+   other Q/K/V). The downstream `ggml_reshape_3d` asserts
+   `ggml_is_contiguous(a)` and aborts. qwen3_asr never hit this because
+   its LLM only runs at T=1 (single row → trivially contiguous). qwen3-tts
+   has a T=147 ICL prefill pass, which immediately exposed the bug.
+   Fixed by inserting `ggml_cont` on Q/K/V when T>1; T=1 stays
+   zero-copy. Both backends share the helper, so qwen3_asr is unaffected.
+
+3. **`QWEN3_TTS_MAX_FRAMES=N` runtime cap** — short-text TTS regularly
+   runs to `max_codec_steps=1500` because the talker rarely emits
+   `codec_eos` for a few-word prompt; benchmarks need a hard frame cap
+   or they take 4× longer than the audio they produce. The CLI doesn't
+   surface `max_codec_steps`; the env var is the bench-only override.
+
+4. **`.local/bench-qwen3/run_all.sh`** — sequential A/B/C/D harness for
+   `f16_nofuse`, `f16_fused`, `q8_0`, `q4_k`. Reads JFK 24 kHz as the
+   voice prompt, feeds a fixed test sentence, caps at 100 frames.
+   Records per-variant `ar_loop` / `ar_breakdown` lines for comparison.
+
+**What we did not learn yet (machine was contended by a Granite GGUF
+conversion + other parallel work):** absolute or relative numbers for
+fused QKV on M1 Metal. A first noisy run had `f16_nofuse` ≈ 237 ms/frame
+and `f16_fused` ≈ 273 ms/frame, suggesting fusion may regress at T=1
+on Metal (where 3 small matmuls can launch in parallel and the single
+fused matmul has the same memory traffic but worse parallelism). This
+is consistent with Apple's M1 having 8 GPU cores that benefit from
+finer kernel granularity at low T. **Re-run on a quiet machine before
+making the fused path the default.** Until then, keep the env switch.
+
+**Still on the optimization roadmap (not yet implemented):**
+
+- **Talker Lk bucketing.** Pre-build talker graphs at `Lk ∈ {256, 512,
+  1024, 2048, 4096}`, dispatch each AR step to the smallest bucket
+  where `n_past + T ≤ Lk_bucket`, mask the unfilled slots to `-∞` via
+  the existing `causal_mask` input. Each bucket allocs once, computes
+  many times — eliminates the per-frame Metal command-buffer rebuild.
+  Naive "fixed Lk = max_ctx" is a net loss: every step would do
+  17-50× more KV traffic. Bucketing keeps the worst-case overhead at
+  2× current.
+- **F16 → Q8_0 KV cache.** Halve KV bandwidth for free precision-wise
+  (the helper writes via `ggml_cpy(F16 → Q8_0_view)`); needs the read
+  path to `ggml_cont` Q8_0 → F16 before flash_attn (currently
+  `kv_self_attn` already does a cont in `GQA_MANUAL_CONT` mode, so the
+  upgrade is local).
+- **Q4_K talker fused QKV.** Converter-side concat respects the Q4_K
+  block boundary (rows of size `q_dim=2048`, `kv_dim=1024` divide by
+  256 cleanly). Worth doing once the F16 fused-QKV win is established.
+
 ### CUDA im2col grid overflow (MUST RE-APPLY after every ggml bump)
 
 Upstream ggml's CUDA im2col kernel uses `OW` (output width) directly as

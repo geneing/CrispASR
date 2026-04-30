@@ -8,7 +8,7 @@ import (
 // CGO
 
 /*
-#include <whisper.h>
+#include <crispasr.h>
 */
 import "C"
 

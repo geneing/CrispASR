@@ -323,8 +323,7 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
                                         ggml_tensor* k_w, ggml_tensor* v_w, ggml_tensor* o_w, ggml_tensor* q_norm_w,
                                         ggml_tensor* k_norm_w, ggml_tensor* positions, ggml_tensor* causal_mask,
                                         ggml_tensor* kv_k, ggml_tensor* kv_v, int il, int n_past,
-                                        const KvSelfAttnParams& p, ggml_tensor* qkv_w = nullptr,
-                                        int fixed_kv_len = 0) {
+                                        const KvSelfAttnParams& p, ggml_tensor* qkv_w = nullptr, int fixed_kv_len = 0) {
     const int hd = p.head_dim;
     const int n_q = p.n_heads;
     const int n_kv = p.n_kv_heads;

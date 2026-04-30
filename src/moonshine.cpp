@@ -952,7 +952,9 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
     ctx->timing.encode_ms = std::chrono::duration<double, std::milli>(t_encode_done - t_start).count();
 
     // Encoder output no longer needed after cross-KV precompute
-    { std::vector<float>().swap(ctx->encoder_out); }
+    {
+        std::vector<float>().swap(ctx->encoder_out);
+    }
 
     // 4. Pre-allocate decoder compute buffer with max-size graph
     ggml_gallocr_t gallocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));

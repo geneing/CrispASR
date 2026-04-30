@@ -33,7 +33,7 @@ whisper: mkdir
 	cmake -S ../.. -B ../../${BUILD_DIR} \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_SHARED_LIBS=OFF
-	cmake --build ../../${BUILD_DIR} --target whisper
+	cmake --build ../../${BUILD_DIR} --target crispasr
 
 test: model-small whisper modtidy
 ifeq ($(UNAME_S),Darwin)

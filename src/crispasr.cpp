@@ -135,10 +135,10 @@ static void whisper_log_callback_default(ggml_log_level level, const char* text,
 #define CRISPASR_LOG_DEBUG(...)
 #endif
 
-#define CRISPASR_ASSERT(x)                                                                                              \
+#define CRISPASR_ASSERT(x)                                                                                             \
     do {                                                                                                               \
         if (!(x)) {                                                                                                    \
-            CRISPASR_LOG_ERROR("CRISPASR_ASSERT: %s:%d: %s\n", __FILE__, __LINE__, #x);                                  \
+            CRISPASR_LOG_ERROR("CRISPASR_ASSERT: %s:%d: %s\n", __FILE__, __LINE__, #x);                                \
             abort();                                                                                                   \
         }                                                                                                              \
     } while (0)
@@ -802,12 +802,18 @@ static const whisper_ahead g_aheads_large_v3[] = {{7, 0},   {10, 17}, {12, 18}, 
 static const whisper_ahead g_aheads_large_v3_turbo[] = {{2, 4}, {2, 11}, {3, 3}, {3, 6}, {3, 11}, {3, 14}};
 
 static const std::map<whisper_alignment_heads_preset, whisper_aheads> g_aheads{
-    {CRISPASR_AHEADS_TINY_EN, {8, g_aheads_tiny_en}},      {CRISPASR_AHEADS_TINY, {6, g_aheads_tiny}},
-    {CRISPASR_AHEADS_BASE_EN, {5, g_aheads_base_en}},      {CRISPASR_AHEADS_BASE, {8, g_aheads_base}},
-    {CRISPASR_AHEADS_SMALL_EN, {19, g_aheads_small_en}},   {CRISPASR_AHEADS_SMALL, {10, g_aheads_small}},
-    {CRISPASR_AHEADS_MEDIUM_EN, {18, g_aheads_medium_en}}, {CRISPASR_AHEADS_MEDIUM, {6, g_aheads_medium}},
-    {CRISPASR_AHEADS_LARGE_V1, {9, g_aheads_large_v1}},    {CRISPASR_AHEADS_LARGE_V2, {23, g_aheads_large_v2}},
-    {CRISPASR_AHEADS_LARGE_V3, {10, g_aheads_large_v3}},   {CRISPASR_AHEADS_LARGE_V3_TURBO, {6, g_aheads_large_v3_turbo}},
+    {CRISPASR_AHEADS_TINY_EN, {8, g_aheads_tiny_en}},
+    {CRISPASR_AHEADS_TINY, {6, g_aheads_tiny}},
+    {CRISPASR_AHEADS_BASE_EN, {5, g_aheads_base_en}},
+    {CRISPASR_AHEADS_BASE, {8, g_aheads_base}},
+    {CRISPASR_AHEADS_SMALL_EN, {19, g_aheads_small_en}},
+    {CRISPASR_AHEADS_SMALL, {10, g_aheads_small}},
+    {CRISPASR_AHEADS_MEDIUM_EN, {18, g_aheads_medium_en}},
+    {CRISPASR_AHEADS_MEDIUM, {6, g_aheads_medium}},
+    {CRISPASR_AHEADS_LARGE_V1, {9, g_aheads_large_v1}},
+    {CRISPASR_AHEADS_LARGE_V2, {23, g_aheads_large_v2}},
+    {CRISPASR_AHEADS_LARGE_V3, {10, g_aheads_large_v3}},
+    {CRISPASR_AHEADS_LARGE_V3_TURBO, {6, g_aheads_large_v3_turbo}},
 };
 
 static std::vector<uint32_t> get_alignment_heads_by_layer(const whisper_context_params& cparams, int il,
@@ -1566,8 +1572,9 @@ static bool aheads_masks_init(const whisper_context_params& cparams, const whisp
             return false;
         }
     } else {
-        const auto aheads = cparams.dtw_aheads_preset == CRISPASR_AHEADS_CUSTOM ? cparams.dtw_aheads
-                                                                               : g_aheads.at(cparams.dtw_aheads_preset);
+        const auto aheads = cparams.dtw_aheads_preset == CRISPASR_AHEADS_CUSTOM
+                                ? cparams.dtw_aheads
+                                : g_aheads.at(cparams.dtw_aheads_preset);
         if (cparams.dtw_aheads_preset == CRISPASR_AHEADS_CUSTOM) {
             if (aheads.n_heads == 0) {
                 CRISPASR_LOG_ERROR("%s: dtw_aheads.n_heads should be > 0", __func__);
@@ -1580,8 +1587,9 @@ static bool aheads_masks_init(const whisper_context_params& cparams, const whisp
         }
         for (size_t i = 0; i < aheads.n_heads; ++i) {
             if (aheads.heads[i].n_text_layer >= n_text_layer) {
-                CRISPASR_LOG_ERROR("%s: tried to set alignment head on text layer %d, but model only has %d text layers",
-                                  __func__, aheads.heads[i].n_text_layer + 1, n_text_layer);
+                CRISPASR_LOG_ERROR(
+                    "%s: tried to set alignment head on text layer %d, but model only has %d text layers", __func__,
+                    aheads.heads[i].n_text_layer + 1, n_text_layer);
                 return false;
             }
             if (aheads.heads[i].n_text_layer < 0) {
@@ -1590,7 +1598,7 @@ static bool aheads_masks_init(const whisper_context_params& cparams, const whisp
             }
             if (aheads.heads[i].n_head >= n_head) {
                 CRISPASR_LOG_ERROR("%s: tried to set alignment head on head %d, but model only has %d heads", __func__,
-                                  aheads.heads[i].n_head + 1, n_head);
+                                   aheads.heads[i].n_head + 1, n_head);
                 return false;
             }
             if (aheads.heads[i].n_head < 0) {
@@ -1694,7 +1702,7 @@ static ggml_backend_t whisper_backend_init_gpu(const whisper_context_params& par
             CRISPASR_LOG_INFO("%s: device %zu: %s (type: %d)\n", __func__, i, dev_name, dev_type);
             if (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
                 CRISPASR_LOG_INFO("%s: found GPU device %zu: %s (type: %d, cnt: %d)\n", __func__, i, dev_name, dev_type,
-                                 cnt);
+                                  cnt);
                 if (cnt == params.gpu_device) {
                     dev = dev_cur;
                 }
@@ -1968,7 +1976,7 @@ static bool whisper_model_load(struct whisper_model_loader* loader, whisper_cont
         CRISPASR_LOG_INFO("%s: ftype         = %d\n", __func__, model.hparams.ftype);
         CRISPASR_LOG_INFO("%s: qntvr         = %d\n", __func__, qntvr);
         CRISPASR_LOG_INFO("%s: type          = %d (%s%s)\n", __func__, model.type, g_model_name.at(model.type).c_str(),
-                         mver.c_str());
+                          mver.c_str());
     }
 
     // load mel filters
@@ -2304,7 +2312,7 @@ static bool whisper_model_load(struct whisper_model_loader* loader, whisper_cont
 
             size_t size_main = ggml_backend_buffer_get_size(buf);
             CRISPASR_LOG_INFO("%s: %12s total size = %8.2f MB\n", __func__, ggml_backend_buffer_name(buf),
-                             size_main / 1e6);
+                              size_main / 1e6);
         }
     }
 
@@ -2351,7 +2359,7 @@ static bool whisper_model_load(struct whisper_model_loader* loader, whisper_cont
             if (ggml_nelements(tensor) != nelements) {
                 CRISPASR_LOG_ERROR("%s: tensor '%s' has wrong size in model file\n", __func__, name.data());
                 CRISPASR_LOG_ERROR("%s: shape: [%d, %d, %d], expected: [%d, %d, %d]\n", __func__, ne[0], ne[1], ne[2],
-                                  (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2]);
+                                   (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2]);
                 return false;
             }
 
@@ -2367,7 +2375,7 @@ static bool whisper_model_load(struct whisper_model_loader* loader, whisper_cont
 
             if ((nelements * bpe) / ggml_blck_size(tensor->type) != ggml_nbytes(tensor)) {
                 CRISPASR_LOG_ERROR("%s: tensor '%s' has wrong size in model file: got %zu, expected %zu\n", __func__,
-                                  name.data(), ggml_nbytes(tensor), nelements * bpe);
+                                   name.data(), ggml_nbytes(tensor), nelements * bpe);
                 return false;
             }
 
@@ -2392,10 +2400,10 @@ static bool whisper_model_load(struct whisper_model_loader* loader, whisper_cont
 
         if (model.n_loaded == 0) {
             CRISPASR_LOG_WARN("%s: WARN no tensors loaded from model file - assuming empty model for testing\n",
-                             __func__);
+                              __func__);
         } else if (model.n_loaded != (int)model.tensors.size()) {
             CRISPASR_LOG_ERROR("%s: ERROR not all tensors loaded from model file - expected %zu, got %d\n", __func__,
-                              model.tensors.size(), model.n_loaded);
+                               model.tensors.size(), model.n_loaded);
             return false;
         }
     }
@@ -3802,7 +3810,7 @@ struct whisper_state* whisper_init_state(whisper_context* ctx) {
         }
 
         CRISPASR_LOG_INFO("%s: compute buffer (conv)   = %7.2f MB\n", __func__,
-                         whisper_sched_size(state->sched_conv) / 1e6);
+                          whisper_sched_size(state->sched_conv) / 1e6);
     }
 
     // encoder allocator
@@ -3817,7 +3825,7 @@ struct whisper_state* whisper_init_state(whisper_context* ctx) {
         }
 
         CRISPASR_LOG_INFO("%s: compute buffer (encode) = %7.2f MB\n", __func__,
-                         whisper_sched_size(state->sched_encode) / 1e6);
+                          whisper_sched_size(state->sched_encode) / 1e6);
     }
 
     // cross allocator
@@ -3832,7 +3840,7 @@ struct whisper_state* whisper_init_state(whisper_context* ctx) {
         }
 
         CRISPASR_LOG_INFO("%s: compute buffer (cross)  = %7.2f MB\n", __func__,
-                         whisper_sched_size(state->sched_cross) / 1e6);
+                          whisper_sched_size(state->sched_cross) / 1e6);
     }
 
     // decoder allocator
@@ -3856,7 +3864,7 @@ struct whisper_state* whisper_init_state(whisper_context* ctx) {
         }
 
         CRISPASR_LOG_INFO("%s: compute buffer (decode) = %7.2f MB\n", __func__,
-                         whisper_sched_size(state->sched_decode) / 1e6);
+                          whisper_sched_size(state->sched_decode) / 1e6);
     }
 
     return state;
@@ -4209,7 +4217,7 @@ int whisper_set_mel_with_state(struct whisper_context* ctx, struct whisper_state
                                int n_mel) {
     if (n_mel != ctx->model.filters.n_mel) {
         CRISPASR_LOG_ERROR("%s: invalid number of mel bands: %d (expected %d)\n", __func__, n_mel,
-                          ctx->model.filters.n_mel);
+                           ctx->model.filters.n_mel);
         return -1;
     }
 
@@ -4343,7 +4351,7 @@ int whisper_lang_auto_detect_with_state(struct whisper_context* ctx, struct whis
 
     if (seek >= state->mel.n_len_org) {
         CRISPASR_LOG_ERROR("%s: offset %dms is past the end of the audio (%dms)\n", __func__, offset_ms,
-                          state->mel.n_len_org * 10);
+                           state->mel.n_len_org * 10);
         return -2;
     }
 
@@ -4576,15 +4584,15 @@ void whisper_print_timings(struct whisper_context* ctx) {
         CRISPASR_LOG_INFO("%s:     fallbacks = %3d p / %3d h\n", __func__, ctx->state->n_fail_p, ctx->state->n_fail_h);
         CRISPASR_LOG_INFO("%s:      mel time = %8.2f ms\n", __func__, ctx->state->t_mel_us / 1000.0f);
         CRISPASR_LOG_INFO("%s:   sample time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__,
-                         1e-3f * ctx->state->t_sample_us, n_sample, 1e-3f * ctx->state->t_sample_us / n_sample);
+                          1e-3f * ctx->state->t_sample_us, n_sample, 1e-3f * ctx->state->t_sample_us / n_sample);
         CRISPASR_LOG_INFO("%s:   encode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__,
-                         1e-3f * ctx->state->t_encode_us, n_encode, 1e-3f * ctx->state->t_encode_us / n_encode);
+                          1e-3f * ctx->state->t_encode_us, n_encode, 1e-3f * ctx->state->t_encode_us / n_encode);
         CRISPASR_LOG_INFO("%s:   decode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__,
-                         1e-3f * ctx->state->t_decode_us, n_decode, 1e-3f * ctx->state->t_decode_us / n_decode);
+                          1e-3f * ctx->state->t_decode_us, n_decode, 1e-3f * ctx->state->t_decode_us / n_decode);
         CRISPASR_LOG_INFO("%s:   batchd time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__,
-                         1e-3f * ctx->state->t_batchd_us, n_batchd, 1e-3f * ctx->state->t_batchd_us / n_batchd);
+                          1e-3f * ctx->state->t_batchd_us, n_batchd, 1e-3f * ctx->state->t_batchd_us / n_batchd);
         CRISPASR_LOG_INFO("%s:   prompt time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__,
-                         1e-3f * ctx->state->t_prompt_us, n_prompt, 1e-3f * ctx->state->t_prompt_us / n_prompt);
+                          1e-3f * ctx->state->t_prompt_us, n_prompt, 1e-3f * ctx->state->t_prompt_us / n_prompt);
     }
     CRISPASR_LOG_INFO("%s:    total time = %8.2f ms\n", __func__, (t_end_us - ctx->t_start_us) / 1000.0f);
 }
@@ -5259,7 +5267,7 @@ struct whisper_vad_context* whisper_vad_init_with_params(struct whisper_model_lo
 
             size_t size_main = ggml_backend_buffer_get_size(buf);
             CRISPASR_LOG_INFO("%s: %12s total size = %8.2f MB\n", __func__, ggml_backend_buffer_name(buf),
-                             size_main / 1e6);
+                              size_main / 1e6);
         }
     }
 
@@ -5304,7 +5312,7 @@ struct whisper_vad_context* whisper_vad_init_with_params(struct whisper_model_lo
             if (ggml_nelements(tensor) != nelements) {
                 CRISPASR_LOG_ERROR("%s: tensor '%s' has wrong size in model file\n", __func__, name.data());
                 CRISPASR_LOG_ERROR("%s: shape: [%d, %d, %d], expected: [%d, %d, %d]\n", __func__, ne[0], ne[1], ne[2],
-                                  (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2]);
+                                   (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2]);
                 return nullptr;
             }
 
@@ -5320,7 +5328,7 @@ struct whisper_vad_context* whisper_vad_init_with_params(struct whisper_model_lo
 
             if ((nelements * bpe) / ggml_blck_size(tensor->type) != ggml_nbytes(tensor)) {
                 CRISPASR_LOG_ERROR("%s: tensor '%s' has wrong size in model file: got %zu, expected %zu\n", __func__,
-                                  name.data(), ggml_nbytes(tensor), nelements * bpe);
+                                   name.data(), ggml_nbytes(tensor), nelements * bpe);
                 return nullptr;
             }
 
@@ -5345,10 +5353,10 @@ struct whisper_vad_context* whisper_vad_init_with_params(struct whisper_model_lo
 
         if (model.n_loaded == 0) {
             CRISPASR_LOG_WARN("%s: WARN no tensors loaded from model file - assuming empty model for testing\n",
-                             __func__);
+                              __func__);
         } else if (model.n_loaded != (int)model.tensors.size()) {
             CRISPASR_LOG_ERROR("%s: ERROR not all tensors loaded from model file - expected %zu, got %d\n", __func__,
-                              model.tensors.size(), model.n_loaded);
+                               model.tensors.size(), model.n_loaded);
             return nullptr;
         }
     }
@@ -5614,14 +5622,14 @@ struct whisper_vad_segments* whisper_vad_segments_from_probs(struct whisper_vad_
             }
         }
         CRISPASR_LOG_INFO("%s: Merged %d adjacent segments, now have %d segments\n", __func__, merged_count,
-                         (int)speeches.size());
+                          (int)speeches.size());
     }
 
     // Double-check for minimum speech duration
     for (int i = 0; i < (int)speeches.size(); i++) {
         if (speeches[i].end - speeches[i].start < min_speech_samples) {
             CRISPASR_LOG_INFO("%s: Removing segment %d (too short: %d samples)\n", __func__, i,
-                             speeches[i].end - speeches[i].start);
+                              speeches[i].end - speeches[i].start);
 
             speeches.erase(speeches.begin() + i);
             i--;
@@ -5677,8 +5685,8 @@ struct whisper_vad_segments* whisper_vad_segments_from_probs(struct whisper_vad_
         segments[i].end = samples_to_cs(speeches[i].end);
 
         CRISPASR_LOG_INFO("%s: VAD segment %d: start = %.2f, end = %.2f (duration: %.2f)\n", __func__, i,
-                         segments[i].start / 100.0, segments[i].end / 100.0,
-                         (segments[i].end - segments[i].start) / 100.0);
+                          segments[i].start / 100.0, segments[i].end / 100.0,
+                          (segments[i].end - segments[i].start) / 100.0);
     }
 
     whisper_vad_segments* vad_segments = new whisper_vad_segments;
@@ -6923,7 +6931,7 @@ static bool whisper_vad(struct whisper_context* ctx, struct whisper_state* state
         int total_samples_needed = filtered_n_samples + total_silence_samples;
 
         CRISPASR_LOG_INFO("%s: total duration of speech segments: %.2f seconds\n", __func__,
-                         (float)filtered_n_samples / CRISPASR_SAMPLE_RATE);
+                          (float)filtered_n_samples / CRISPASR_SAMPLE_RATE);
 
         try {
             filtered_samples.resize(total_samples_needed);
@@ -7009,11 +7017,11 @@ static bool whisper_vad(struct whisper_context* ctx, struct whisper_state* state
         }
 
         CRISPASR_LOG_INFO("%s: Created time mapping table with %d points\n", __func__,
-                         (int)state->vad_mapping_table.size());
+                          (int)state->vad_mapping_table.size());
 
         filtered_n_samples = offset;
         CRISPASR_LOG_INFO("%s: Reduced audio from %d to %d samples (%.1f%% reduction)\n", __func__, n_samples,
-                         filtered_n_samples, 100.0f * (1.0f - (float)filtered_n_samples / n_samples));
+                          filtered_n_samples, 100.0f * (1.0f - (float)filtered_n_samples / n_samples));
     }
 
     whisper_vad_free_segments(vad_segments);
@@ -7049,7 +7057,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
         params.language = whisper_lang_str(lang_id);
 
         CRISPASR_LOG_INFO("%s: auto-detected language: %s (p = %f)\n", __func__, params.language,
-                         probs[whisper_lang_id(params.language)]);
+                          probs[whisper_lang_id(params.language)]);
         if (params.detect_language) {
             return 0;
         }
@@ -7075,7 +7083,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
 
     if (seek_end < seek_start + delta_min) {
         CRISPASR_LOG_WARN("%s: input is too short - %d ms < 100 ms. consider padding the input audio with silence\n",
-                         __func__, (seek_end - seek_start) * 10);
+                          __func__, (seek_end - seek_start) * 10);
         return 0;
     }
 
@@ -7106,7 +7114,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
 
     if (n_decoders > CRISPASR_MAX_DECODERS) {
         CRISPASR_LOG_ERROR("%s: too many decoders requested (%d), max = %d\n", __func__, n_decoders,
-                          CRISPASR_MAX_DECODERS);
+                           CRISPASR_MAX_DECODERS);
         return -4;
     }
 
@@ -7178,7 +7186,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
     // overwrite audio_ctx, max allowed is hparams.n_audio_ctx
     if (params.audio_ctx > whisper_n_audio_ctx(ctx)) {
         CRISPASR_LOG_ERROR("%s: audio_ctx is larger than the maximum allowed (%d > %d)\n", __func__, params.audio_ctx,
-                          whisper_n_audio_ctx(ctx));
+                           whisper_n_audio_ctx(ctx));
         return -5;
     }
     state->exp_n_audio_ctx = params.audio_ctx;
@@ -7289,7 +7297,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
             n_decoders_cur = std::max(1, n_decoders_cur);
 
             CRISPASR_LOG_DEBUG("\n%s: strategy = %d, decoding with %d decoders, temperature = %.2f\n", __func__,
-                              params.strategy, n_decoders_cur, t_cur);
+                               params.strategy, n_decoders_cur, t_cur);
 
             // TAGS: CRISPASR_DECODER_INIT
             for (int j = 0; j < n_decoders_cur; ++j) {
@@ -7350,7 +7358,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
                 CRISPASR_LOG_DEBUG("\n\n");
                 for (int i = 0; i < (int)prompt.size(); i++) {
                     CRISPASR_LOG_DEBUG("%s: prompt[%d] = %s\n", __func__, i,
-                                      ctx->vocab.id_to_token.at(prompt[i]).c_str());
+                                       ctx->vocab.id_to_token.at(prompt[i]).c_str());
                 }
                 CRISPASR_LOG_DEBUG("\n\n");
 
@@ -7544,10 +7552,10 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
                         whisper_kv_cache_seq_cp(state->kv_self, cur.decoder_idx, CRISPASR_MAX_DECODERS + j, -1, -1);
 
                         CRISPASR_LOG_DEBUG("%s: beam search: decoder %d: from decoder %d: token = %10s, plog = %8.5f, "
-                                          "sum_logprobs = %8.5f\n",
-                                          __func__, j, cur.decoder_idx,
-                                          ctx->vocab.id_to_token.at(decoder.sequence.tokens.back().id).c_str(),
-                                          decoder.sequence.tokens.back().plog, decoder.sequence.sum_logprobs_all);
+                                           "sum_logprobs = %8.5f\n",
+                                           __func__, j, cur.decoder_idx,
+                                           ctx->vocab.id_to_token.at(decoder.sequence.tokens.back().id).c_str(),
+                                           decoder.sequence.tokens.back().plog, decoder.sequence.sum_logprobs_all);
                     }
 
                     for (int j = 0; j < n_decoders_cur; ++j) {
@@ -7590,7 +7598,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
                             // do not allow to go back in time
                             if (has_ts && seek_delta > seek_delta_new && result_len < i) {
                                 CRISPASR_LOG_DEBUG("%s: decoder %d: failed due to seek_delta (%d > %d)\n", __func__, j,
-                                                  seek_delta, seek_delta_new);
+                                                   seek_delta, seek_delta_new);
                                 failed = true; // TODO: maybe this is not a failure ?
                                 continue;
                             }
@@ -7606,9 +7614,9 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
                         {
                             const auto tt = token.pt > 0.10 ? ctx->vocab.id_to_token.at(token.tid) : "[?]";
                             CRISPASR_LOG_DEBUG("%s: id = %3d, decoder = %d, token = %6d, p = %6.3f, ts = %10s, %6.3f, "
-                                              "result_len = %4d '%s'\n",
-                                              __func__, i, j, token.id, token.p, tt.c_str(), token.pt, result_len,
-                                              ctx->vocab.id_to_token.at(token.id).c_str());
+                                               "result_len = %4d '%s'\n",
+                                               __func__, i, j, token.id, token.p, tt.c_str(), token.pt, result_len,
+                                               ctx->vocab.id_to_token.at(token.id).c_str());
                         }
 #endif
 
@@ -7778,7 +7786,7 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
 
                     if (decoder.sequence.result_len > 32 && decoder.sequence.entropy < params.entropy_thold) {
                         CRISPASR_LOG_DEBUG("%s: decoder %2d: failed due to entropy %8.5f < %8.5f\n", __func__, j,
-                                          decoder.sequence.entropy, params.entropy_thold);
+                                           decoder.sequence.entropy, params.entropy_thold);
 
                         decoder.failed = true;
                         state->n_fail_h++;
@@ -7805,9 +7813,10 @@ int whisper_full_with_state(struct whisper_context* ctx, struct whisper_state* s
 
                 if (decoder.failed || (decoder.sequence.avg_logprobs < params.logprob_thold &&
                                        state->no_speech_prob < params.no_speech_thold)) {
-                    CRISPASR_LOG_DEBUG("%s: failed due to avg_logprobs %8.5f < %8.5f and no_speech_prob %8.5f < %8.5f\n",
-                                      __func__, decoder.sequence.avg_logprobs, params.logprob_thold,
-                                      state->no_speech_prob, params.no_speech_thold);
+                    CRISPASR_LOG_DEBUG(
+                        "%s: failed due to avg_logprobs %8.5f < %8.5f and no_speech_prob %8.5f < %8.5f\n", __func__,
+                        decoder.sequence.avg_logprobs, params.logprob_thold, state->no_speech_prob,
+                        params.no_speech_thold);
                     success = false;
                     state->n_fail_p++;
                 }
@@ -8930,8 +8939,9 @@ static std::vector<uint32_t> get_alignment_heads_by_layer(const whisper_context_
             }
         }
     } else {
-        const auto aheads = cparams.dtw_aheads_preset == CRISPASR_AHEADS_CUSTOM ? cparams.dtw_aheads
-                                                                               : g_aheads.at(cparams.dtw_aheads_preset);
+        const auto aheads = cparams.dtw_aheads_preset == CRISPASR_AHEADS_CUSTOM
+                                ? cparams.dtw_aheads
+                                : g_aheads.at(cparams.dtw_aheads_preset);
         for (size_t i = 0; i < aheads.n_heads; ++i) {
             if (aheads.heads[i].n_text_layer == il) {
                 ret.push_back(aheads.heads[i].n_head);

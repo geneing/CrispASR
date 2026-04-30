@@ -10,7 +10,7 @@
 #include "crispasr_vad.h"
 
 #include "firered_vad.h" // FireRedVAD (DFSMN) — alternative to Silero
-#include "crispasr.h"     // whisper_vad_* API (Silero VAD)
+#include "crispasr.h"    // whisper_vad_* API (Silero VAD)
 #if __has_include("marblenet_vad.h")
 #include "marblenet_vad.h" // NVIDIA MarbleNet VAD (1D separable CNN)
 #define CA_HAVE_MARBLENET_VAD 1

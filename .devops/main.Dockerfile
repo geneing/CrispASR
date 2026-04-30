@@ -9,7 +9,7 @@ COPY . .
 ARG CRISPASR_BUILD_JOBS
 RUN jobs="${CRISPASR_BUILD_JOBS:-$(nproc)}" && \
   cmake -S . -B build -G Ninja -DCRISPASR_BUILD_TESTS=OFF && \
-  cmake --build build -j"${jobs}" --target crispasr
+  cmake --build build -j"${jobs}" --target crispasr-cli
 
 FROM ubuntu:22.04 AS runtime
 WORKDIR /app

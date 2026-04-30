@@ -17,7 +17,7 @@ RUN apt-get update && \
 COPY . .
 # Enable muBLAS
 RUN cmake -B build -DCRISPASR_BUILD_TESTS=OFF -DGGML_MUSA=1 && \
-    cmake --build build -j"$(nproc)" --target crispasr
+    cmake --build build -j"$(nproc)" --target crispasr-cli
 
 RUN find /app/build -name "*.o" -delete && \
     find /app/build -name "*.a" -delete && \

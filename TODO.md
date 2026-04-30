@@ -141,6 +141,15 @@ direction; do not interleave.
 - **Qwen3-TTS** — **[IN PROGRESS]** Both converters done (LM + RVQ codec).
   Runtime is scaffolded (loads cleanly) but `qwen3_tts_synthesise`
   returns nullptr with "not implemented". Forward pass is PLAN #52. Apache 2.0.
+  Speed work (2026-04-30): Q8_0/Q4_K talker GGUFs converted; fused Q+K+V
+  in talker landed (env-gated `QWEN3_TTS_NO_FUSED_QKV=1` to skip);
+  contiguity bug in `core_attn::kv_self_attn` fused path fixed (T>1
+  needed `ggml_cont`); `QWEN3_TTS_MAX_FRAMES=N` bench cap added; A/B
+  harness at `.local/bench-qwen3/run_all.sh`. Fused-QKV may regress at
+  T=1 on M1 Metal (one noisy run showed ~15% slower) — needs a quiet-
+  machine re-run before flipping the default. See LEARNINGS.md
+  "Qwen3-TTS speed optimization tracking" for the full roadmap (Lk
+  bucketing, Q8_0 KV cache, Q4_K fused-QKV remaining).
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
 - ~~**VibeVoice TTS**~~ — **DONE**: Realtime-0.5B (17 bugs, perfect round-trip) + 1.5B base model (voice cloning). HF: `cstr/vibevoice-realtime-0.5b-GGUF`, `cstr/vibevoice-1.5b-GGUF`
 

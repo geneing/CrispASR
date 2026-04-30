@@ -7,7 +7,7 @@ RUN apt-get update && \
 
 COPY . .
 RUN cmake -B build -DCRISPASR_BUILD_TESTS=OFF -DGGML_VULKAN=1 && \
-  cmake --build build -j"$(nproc)" --target crispasr
+  cmake --build build -j"$(nproc)" --target crispasr-cli
 
 FROM ubuntu:24.04 AS runtime
 WORKDIR /app
