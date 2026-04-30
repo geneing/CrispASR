@@ -158,26 +158,30 @@ direction; do not interleave.
    - `QWEN3_TTS_MAX_FRAMES=N` — bench-only frame cap
   README's TTS section has the full env-switch table.
 
-  **[next] Fine-grained code-pred diff harness.** O15 currently passes
-  the prefill diff (`cos_min=1.0` for all 4 path combos) but breaks
-  end-to-end (talker never emits `codec_eos`, 20-s noise). The diff
-  harness only covers T>1 prefill stages; the O15 changes live in the
-  T=1 AR loop. Concrete plan (LEARNINGS.md "Qwen3-TTS speed
-  optimization tracking"):
-   1. extend `tools/reference_backends/qwen3_tts.py` to dump
-      `cp_step{0..14}_input_embed` + `cp_step{i}_logits` for frame 0;
-   2. expose `qwen3_tts_run_code_pred_step` on the C ABI;
-   3. add 15 stages to `crispasr_diff_main.cpp` that call it.
-  With this, run the harness under `QWEN3_TTS_O15=1` — the first
-  stage that drops below cos≈0.999 names exactly which O15
-  sub-feature broke things (always-mask vs fixed-Lk vs slot-blit vs
-  graph-cache reuse). Effort: ~1-2 h. Do this BEFORE re-enabling O15
-  by default.
+  **O15 graph-cache reuse fixed (this commit).** The fine-grained
+  cp_step diff harness landed (Python ref dumps 15
+  `cp_step{i}_input_embed` + `cp_step{i}_logits` stages, C ABI exposes
+  `qwen3_tts_run_code_pred_step`, harness drives them in order to
+  match `code_pred_generate_15`'s `skip_plan=(i>=2)`). It pinned the
+  bug to the cached-graph reuse: `core_attn::kv_self_attn` baked
+  `n_past` into a `ggml_view_4d` byte-offset, so a graph cached at
+  step 1 (n_past=2) clobbered slot 2 again at step 2 (n_past=3). Fix:
+  added an opt-in `kv_indices` arg to `kv_self_attn` that switches the
+  K/V write from static-offset `ggml_cpy` to runtime-indexed
+  `ggml_set_rows`; `build_graph_code_pred_kv` passes the existing
+  `positions` tensor (already `[n_past, n_past+T)`) as the indices when
+  `O15` is on. Default callers (qwen3-asr / voxtral / granite / etc.)
+  pass nullptr and stay on the byte-identical legacy path.
+  Validation: 15/15 cp_step PASS cos≥0.9999 under O15, and end-to-end
+  TTS under `QWEN3_TTS_O15=1` produces the same 78-frame / 6.24 s
+  output as default (was: 20 s of noise, never emitted EOS).
 
   **[next] Re-validate FUSED_QKV** end-to-end with the same harness.
   Prefill diff was bit-identical, and at seed=42 we saw byte-identical
   WAV vs default — strong signal it's correct at T=1 too, but a
-  per-step diff closes the loop.
+  per-step diff closes the loop. Run the harness under
+  `QWEN3_TTS_FUSED_QKV=1` and `QWEN3_TTS_O15=1 QWEN3_TTS_FUSED_QKV=1`
+  to close the 4-variant matrix.
 
   **[later] Speed roadmap** (LEARNINGS.md): Lk bucketing for talker,
   Q8_0 KV cache, converter-side Q4_K fused QKV. Each requires the

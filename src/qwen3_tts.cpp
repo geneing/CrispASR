@@ -999,13 +999,16 @@ ggml_cgraph* build_graph_code_pred_kv(qwen3_tts_context* c, int n_past, int n_to
 
         // O15: pin Lk to cp_kv_max_ctx at T=1 so the topology is invariant
         // across n_past; otherwise fall through to the helper's natural
-        // Lk = n_past + T.
+        // Lk = n_past + T. Also pass `positions` as kv_indices so the K/V
+        // cache write becomes a runtime-indexed scatter — required for the
+        // cached-graph reuse path (skip_plan) to be correct across n_past.
         const int fixed_kv = (o15 && T == 1) ? c->cp_kv_max_ctx : 0;
         ggml_tensor* eff_mask = (T == 1 && !o15) ? nullptr : causal_mask;
+        ggml_tensor* eff_kv_indices = o15 ? positions : nullptr;
         ggml_tensor* attn =
             core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w, b.attn_q_norm_w,
                                     b.attn_k_norm_w, positions, eff_mask, c->cp_kv_k, c->cp_kv_v, (int)il, n_past, kvp,
-                                    /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv);
+                                    /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv, /*kv_indices=*/eff_kv_indices);
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
@@ -4647,6 +4650,35 @@ extern "C" float* qwen3_tts_run_talker_with_embeds(struct qwen3_tts_context* ctx
     }
     if (out_vocab) {
         *out_vocab = (int)ctx->hp.vocab_size;
+    }
+    return logits;
+}
+
+extern "C" float* qwen3_tts_run_code_pred_step(struct qwen3_tts_context* ctx, const float* embeds, int n_tokens,
+                                                int n_past, int lm_head_idx, int* out_vocab) {
+    if (out_vocab) {
+        *out_vocab = 0;
+    }
+    if (!ctx || !embeds || n_tokens <= 0 || n_past < 0) {
+        return nullptr;
+    }
+    auto& cp = ctx->code_pred;
+    if (lm_head_idx < 0 || lm_head_idx >= (int)cp.lm_head.size() || !cp.lm_head[lm_head_idx]) {
+        fprintf(stderr, "qwen3_tts: code_pred.lm_head[%d] missing\n", lm_head_idx);
+        return nullptr;
+    }
+    // Mirror code_pred_generate_15's call pattern: skip_plan=true at steps
+    // i>=2 with T=1 enables the cached-graph reuse path. Without this the
+    // diff harness would only exercise the fixed-Lk topology + lm_head
+    // slot blit, missing the graph-cache reuse that's the actual source
+    // of the O15 AR-loop regression.
+    const bool skip_plan = (n_tokens == 1 && lm_head_idx >= 2);
+    float* logits = run_code_pred_kv(ctx, embeds, n_tokens, n_past, cp.lm_head[lm_head_idx], skip_plan);
+    if (!logits) {
+        return nullptr;
+    }
+    if (out_vocab) {
+        *out_vocab = (int)ctx->hp.cp_vocab_size;
     }
     return logits;
 }

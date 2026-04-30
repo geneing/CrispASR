@@ -927,39 +927,72 @@ zero-inits buffers by default, so my Mac never saw it. Fix:
 `ggml_backend_buffer_clear(cp_kv_buf, 0)` immediately after alloc in
 `cp_kv_alloc`. Unconditional; one-time memset per session.
 
-**Diff harness blind spot (also 2026-04-30):** even after the buffer
-clear, end-to-end synthesis under `QWEN3_TTS_O15=1` produces 20-s of
-noise on Metal (talker never emits `codec_eos`, runs to the
-`QWEN3_TTS_MAX_FRAMES=250` cap) — yet the prefill diff harness
-returns `cos_min=1.0` for default, `O15`, `FUSED_QKV`, and
-`O15+FUSED_QKV` alike. The harness only exercises the T>1 prefill
-path (`text_proj_out`, `talker_logits`, `talker_logits_via_icl`); the
-O15 graph changes live entirely in the T=1 AR loop, which the
-harness can't see. Until the harness covers per-step code-pred
-logits, "diff PASS" is a necessary but not sufficient correctness
-signal for any change to the AR path.
+**Diff harness blind spot — closed (2026-04-30, harness in this commit):**
+the prefill diff couldn't see the AR loop, so all four O15/FUSED_QKV
+combos returned `cos_min=1.0` while end-to-end O15 produced 20 s of
+noise. Filled the gap with `cp_step{0..14}_{input_embed,logits}`
+stages: Python ref dumps each step via `forward_pre_hook` on
+`code_predictor.small_to_mtp_projection` (input) + per-`lm_head[i]`
+`forward_hook` (output); C ABI exposes
+`qwen3_tts_run_code_pred_step(ctx, embeds, T, n_past, lm_head_idx)`
+which mirrors `code_pred_generate_15`'s `skip_plan=(i>=2)` so the
+harness drives the same cached-graph reuse path the AR loop does.
+This pinned the broken O15 sub-feature exactly: under `QWEN3_TTS_O15=1`
+on Q8_0 talker, `cp_step0` (skip_plan=false) and `cp_step1` (graph
+builds + caches) both PASS at cos≥0.9999, then `cp_step2` (first
+`skip_plan=true` reuse) drops to cos=0.946 and step 3+ collapses to
+cos<0 — i.e. the cached-graph reuse, not always-mask / fixed-Lk /
+lm_head-slot.
 
-**Status of the optional perf paths (commit 7298dd5 onward, all
-default-OFF, opt-in via env):**
+**Root cause and fix (2026-04-30):** `core_attn::kv_self_attn` wrote the
+new K/V into the persistent cache via `ggml_cpy` against a
+`ggml_view_4d` whose byte offset was `il*nb[3] + n_past*nb[1]` — a
+*compile-time literal baked into the graph*. With the O15 cache reuse,
+a graph built at step 1 (n_past=2) was reused at step 2 (n_past=3),
+so the K/V scatter still wrote into slot 2, clobbering history.
+`positions` (already a runtime input populated with `[n_past, n_past+T)`
+for RoPE) carries the indices we need; switched the K/V write to
+`ggml_set_rows(layer_view, K_new_perm, kv_indices)` when an opt-in
+`kv_indices` arg is passed to `kv_self_attn` (default-null path
+unchanged for qwen3-asr / voxtral / granite / etc.). `build_graph_code_pred_kv`
+passes `positions` as `kv_indices` whenever `O15` is on. Metal kernel
+`kernel_set_rows_f16_i32` handles the F32→F16 store natively.
 
-- `QWEN3_TTS_O15=1` — diff harness PASS at prefill, e2e BROKEN.
-  Talker fed wrong cb1..15 by code-pred → wrong `next_emb` → talker
-  drifts → no EOS → noise. Needs the per-step cp diff stage to
-  bisect (always-mask vs fixed-Lk vs slot-blit vs graph-cache reuse).
+After the fix, all 15 cp_step stages PASS at cos≥0.999924 under both
+default and `QWEN3_TTS_O15=1`, and end-to-end synthesis under O15
+produces the same 78-frame / 6.24 s output as the default path
+(previously: 20 s noise + no EOS) for the "speed benchmark"
+prompt against the JFK 24 kHz voice prompt.
+
+**Lessons:**
+
+1. **A literal byte offset baked into a ggml view is graph-state, not
+   runtime input.** Anything that wants graph-cache reuse across
+   varying `n_past` must use a runtime-indexed scatter
+   (`ggml_set_rows`) instead of `ggml_cpy(view_with_offset)`.
+2. **The diff harness must exercise the same code paths as the
+   production AR loop.** Even prefill-equivalent stages can hide AR-loop
+   bugs because the prefill builds a fresh graph; the AR loop reuses
+   one. Cover both in any future per-step diff.
+3. **`positions` does double duty for free.** It's already a runtime
+   I32 tensor with values `[n_past, n_past+T)`; passing it as both the
+   RoPE positions input AND the `set_rows` indices avoids any new
+   graph-input plumbing in `run_code_pred_kv`.
+
+**Status of the optional perf paths (post-fix):**
+
+- `QWEN3_TTS_O15=1` — diff harness PASS (all 15 cp_step), e2e PASS.
+  Now the documented perf path actually works.
 - `QWEN3_TTS_FUSED_QKV=1` — diff harness PASS at prefill, byte-
   identical WAV vs default observed at seed=42 / "Hello world…"
   (likely correct at T=1 too, but not yet exercised by a per-step
   diff). Speed: contended-machine bench was inconclusive.
-- Both flags together: same as O15 alone (broken in AR loop).
+- Both flags together: same correctness profile as each on its own
+  (no per-step diff yet that tests their interaction across the 4
+  variants).
 
 **Still on the optimization roadmap (not yet implemented):**
 
-- **Per-step code-pred diff harness stage** — required to make any
-  further claim about the AR path. Concrete plan: dump
-  `cp_step{0..14}_input_embed` and `cp_step{i}_logits` from
-  `tools/reference_backends/qwen3_tts.py`, expose
-  `qwen3_tts_run_code_pred_step(ctx, embeds, T, n_past, lm_head_idx)`
-  on the C ABI, wire 15 stages into `crispasr_diff_main.cpp`. ~1-2 h.
 - **Talker Lk bucketing.** Pre-build talker graphs at `Lk ∈ {256, 512,
   1024, 2048, 4096}`, dispatch each AR step to the smallest bucket
   where `n_past + T ≤ Lk_bucket`, mask the unfilled slots to `-∞` via

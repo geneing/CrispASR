@@ -64,6 +64,16 @@ DEFAULT_STAGES = [
     "talker_layer_27_out",
     "talker_output_norm",
     "generated_codes",
+    # Per-step code-predictor stages (frame 0 of generate_voice_clone).
+    # cp_step{i}_input_embed is the (T, cp_d_model) tensor fed to the
+    # code_predictor's small_to_mtp_projection at AR step i — T=2 for
+    # step 0 (past_hidden + last_id_hidden), T=1 for steps 1..14.
+    # cp_step{i}_logits is the lm_head[i] output at the LAST position
+    # (= what greedy AR sampling would pick from). Together they pin
+    # the T=1 AR loop so the diff harness can bisect any O15 graph
+    # change to the exact step where it diverges.
+    *(f"cp_step{i}_input_embed" for i in range(15)),
+    *(f"cp_step{i}_logits" for i in range(15)),
 ]
 
 # Defaults match the official examples/test_model_12hz_base.py smoke
@@ -177,6 +187,9 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     captures: Dict[str, "torch.Tensor | np.ndarray"] = {}
     handles = []
 
+    cp_in_names = [f"cp_step{i}_input_embed" for i in range(15)]
+    cp_out_names = [f"cp_step{i}_logits" for i in range(15)]
+
     layer_hook_map = [
         ("talker_layer_0_out",  talker.model.layers[0]),
         ("talker_layer_27_out", talker.model.layers[-1]),
@@ -205,6 +218,52 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
                 captures["talker_inputs_embeds"] = embeds[0].detach().cpu().float()
         handles.append(talker.model.register_forward_pre_hook(cap_embeds, with_kwargs=True))
 
+    # ---- Per-step code-predictor capture ----
+    #
+    # The code_predictor.generate(...) call inside the talker AR loop runs
+    # 15 forward passes per talker frame (1 prefill at T=2 + 14 gen steps
+    # at T=1). The C++ run_code_pred_kv mirrors this exactly. We capture
+    # the input embeds (pre small_to_mtp_projection — for the 0.6B base
+    # this is Identity, so equivalent to the post-projection tensor our
+    # C++ graph consumes) and the lm_head[i] output at each step, but
+    # only for the FIRST talker frame. Subsequent frames overflow the
+    # counter and are skipped, since the diff harness only compares
+    # frame 0.
+    if any(name in stages for name in cp_in_names + cp_out_names):
+        cp_step_counter = {"i": 0}
+
+        def cp_input_pre_hook(_mod, args):
+            i = cp_step_counter["i"]
+            if i >= 15:
+                return
+            x = args[0]
+            if isinstance(x, torch.Tensor):
+                # x shape: (1, T, hidden_size). Save flat (T, hidden_size).
+                captures[f"cp_step{i}_input_embed"] = x[0].detach().cpu().float()
+            cp_step_counter["i"] += 1
+
+        handles.append(
+            talker.code_predictor.small_to_mtp_projection
+                  .register_forward_pre_hook(cp_input_pre_hook)
+        )
+
+        def make_lm_head_hook(idx):
+            def hook(_mod, _args, output):
+                key = f"cp_step{idx}_logits"
+                if key in captures:
+                    return
+                if isinstance(output, torch.Tensor):
+                    # output: (1, T, vocab). Last position only — matches
+                    # what build_graph_code_pred_kv emits at the "logits"
+                    # output node.
+                    captures[key] = output[0, -1].detach().cpu().float()
+            return hook
+
+        for i in range(len(talker.code_predictor.lm_head)):
+            handles.append(
+                talker.code_predictor.lm_head[i].register_forward_hook(make_lm_head_hook(i))
+            )
+
     # ---- Build the official ICL prefill sub-blocks for component diffing ----
     prompt_items = None
     if any(s in stages for s in (
@@ -219,6 +278,8 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         *hook_stage_names,
         "talker_inputs_embeds",
         "generated_codes",
+        *cp_in_names,
+        *cp_out_names,
     )):
         prompt_items = tts.create_voice_clone_prompt(
             ref_audio=(prompt_audio, prompt_sr),
@@ -336,7 +397,9 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     # ---- Run generate (greedy) for deterministic codes + activations ----
     if any(s in stages for s in (*hook_stage_names,
                                  "talker_inputs_embeds",
-                                 "generated_codes")):
+                                 "generated_codes",
+                                 *cp_in_names,
+                                 *cp_out_names)):
         assert prompt_items is not None
         with torch.no_grad():
             tts.generate_voice_clone(

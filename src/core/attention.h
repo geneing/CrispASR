@@ -319,11 +319,21 @@ struct KvSelfAttnParams {
 // fixed_kv_len > 0: override the KV-read length (Lk) to a constant, keeping
 // topology identical across calls with different n_past.  Unwritten slots are
 // masked to -inf by causal_mask so they never affect output.
+//
+// kv_indices != nullptr: scatter the new K/V into the cache via ggml_set_rows
+// keyed by the runtime indices tensor instead of the default static-offset
+// ggml_cpy.  Required for graph-cache reuse across calls at different n_past:
+// the static-offset path bakes n_past into the graph as a literal byte offset,
+// so a cached graph built at n_past=A would write to slot A even when reused at
+// n_past=B; the dynamic-index path makes the destination a runtime input. Pass
+// the same `positions` tensor that's already populated with [n_past, n_past+T)
+// for RoPE — the indices required for set_rows are bit-equivalent.
 static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggml_tensor* x, ggml_tensor* q_w,
                                         ggml_tensor* k_w, ggml_tensor* v_w, ggml_tensor* o_w, ggml_tensor* q_norm_w,
                                         ggml_tensor* k_norm_w, ggml_tensor* positions, ggml_tensor* causal_mask,
                                         ggml_tensor* kv_k, ggml_tensor* kv_v, int il, int n_past,
-                                        const KvSelfAttnParams& p, ggml_tensor* qkv_w = nullptr, int fixed_kv_len = 0) {
+                                        const KvSelfAttnParams& p, ggml_tensor* qkv_w = nullptr, int fixed_kv_len = 0,
+                                        ggml_tensor* kv_indices = nullptr) {
     const int hd = p.head_dim;
     const int n_q = p.n_heads;
     const int n_kv = p.n_kv_heads;
@@ -399,12 +409,27 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
     ggml_tensor* V_new_perm = ggml_permute(ctx0, V, 0, 2, 1, 3);
 
     // ---- Write into the persistent KV cache at [n_past, n_past+T) ----
-    ggml_tensor* k_view = ggml_view_4d(ctx0, kv_k, hd, T, n_kv, 1, kv_k->nb[1], kv_k->nb[2], kv_k->nb[3],
-                                       (size_t)il * kv_k->nb[3] + (size_t)n_past * kv_k->nb[1]);
-    ggml_tensor* v_view = ggml_view_4d(ctx0, kv_v, hd, T, n_kv, 1, kv_v->nb[1], kv_v->nb[2], kv_v->nb[3],
-                                       (size_t)il * kv_v->nb[3] + (size_t)n_past * kv_v->nb[1]);
-    ggml_build_forward_expand(gf, ggml_cpy(ctx0, K_new_perm, k_view));
-    ggml_build_forward_expand(gf, ggml_cpy(ctx0, V_new_perm, v_view));
+    if (kv_indices) {
+        // Scatter via ggml_set_rows: destination row indices come from the
+        // runtime kv_indices tensor, so the same graph plan is correct for
+        // any n_past. ggml_set_rows requires F32 source rows; K_new_perm /
+        // V_new_perm are F32 throughout the helper (mul_mat → reshape →
+        // optional rms_norm/mul → rope_ext, all type-preserving), and the
+        // F32→F16 store into the cache is handled by the op itself.
+        ggml_tensor* k_layer = ggml_view_3d(ctx0, kv_k, hd, kv_k->ne[1], n_kv, kv_k->nb[1], kv_k->nb[2],
+                                            (size_t)il * kv_k->nb[3]);
+        ggml_tensor* v_layer = ggml_view_3d(ctx0, kv_v, hd, kv_v->ne[1], n_kv, kv_v->nb[1], kv_v->nb[2],
+                                            (size_t)il * kv_v->nb[3]);
+        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, k_layer, K_new_perm, kv_indices));
+        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, v_layer, V_new_perm, kv_indices));
+    } else {
+        ggml_tensor* k_view = ggml_view_4d(ctx0, kv_k, hd, T, n_kv, 1, kv_k->nb[1], kv_k->nb[2], kv_k->nb[3],
+                                           (size_t)il * kv_k->nb[3] + (size_t)n_past * kv_k->nb[1]);
+        ggml_tensor* v_view = ggml_view_4d(ctx0, kv_v, hd, T, n_kv, 1, kv_v->nb[1], kv_v->nb[2], kv_v->nb[3],
+                                           (size_t)il * kv_v->nb[3] + (size_t)n_past * kv_v->nb[1]);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, K_new_perm, k_view));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, V_new_perm, v_view));
+    }
 
     // ---- Read full K/V history from cache ----
     ggml_tensor* Kfull =

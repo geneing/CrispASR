@@ -519,7 +519,7 @@ topology, so unset is the safe choice if you hit unexpected output.
 
 | Variable | Default | Effect when set |
 | --- | --- | --- |
-| `QWEN3_TTS_O15` | unset | Pin code-predictor `Lk = cp_kv_max_ctx` and reuse one cached T=1 graph across steps 2..14 (saves ~7 ms/frame on Mac/Metal). With it unset, the per-step graph uses the original dynamic `Lk = n_past + T`. Some non-Metal backends have produced garbled output with O15 on; leave unset until you confirm parity on your platform. |
+| `QWEN3_TTS_O15` | unset | Pin code-predictor `Lk = cp_kv_max_ctx` and reuse one cached T=1 graph across steps 2..14 (saves ~7 ms/frame on Mac/Metal). With it unset, the per-step graph uses the original dynamic `Lk = n_past + T`. The graph-cache reuse path went through one regression — a static `n_past` byte-offset in the K/V write — that's now fixed by routing the scatter through `ggml_set_rows` with `positions` as the runtime indices; both default and O15 pass the per-step cp diff at cos≥0.999 and produce the same end-to-end output. Still default-off pending a clean A/B on Metal speed. |
 | `QWEN3_TTS_FUSED_QKV` | unset | Concatenate Q+K+V weights into one `attn_qkv_w` per talker layer at load time (F16/F32 talker only; auto-skipped for quantized talkers). Bit-identical output on M1 Metal but a contended-machine bench was inconclusive on speed; leave unset until you have a clean A/B. |
 | `QWEN3_TTS_MAX_FRAMES` | `1500` | Hard cap on AR decode steps. Useful for benchmarks where short prompts would otherwise run to the default 1500-frame ceiling without emitting `codec_eos`. |
 | `QWEN3_TTS_BENCH` | unset | Print per-call build/alloc/compute/read timings for `talker_kv` and `code_pred_kv`. |

@@ -122,6 +122,27 @@ float* qwen3_tts_run_text_proj(struct qwen3_tts_context* ctx, const int32_t* ids
 float* qwen3_tts_run_talker_with_embeds(struct qwen3_tts_context* ctx, const float* embeds, int n_tokens,
                                         int* out_vocab);
 
+// Run a single code-predictor AR step against caller-supplied embeds.
+// Mirrors the per-step calls inside `code_pred_generate_15`, but exposes
+// each step as an isolated entry point so the diff harness can compare
+// against the PyTorch `Qwen3TTSTalkerCodePredictorModelForConditionalGeneration.forward`
+// reference at every step of the AR loop.
+//
+//   embeds      — row-major float32, shape (n_tokens, cp_d_model).
+//   n_tokens    — 2 for step 0 (past_hidden + last_id_hidden); 1 for
+//                 steps 1..14.
+//   n_past      — current cp_kv cache offset; 0 for step 0, 2..15 for
+//                 steps 1..14.
+//   lm_head_idx — index in [0, num_code_groups-1) selecting which
+//                 `code_pred.lm_head[i]` to apply. Step k uses lm_head[k].
+//
+// The cp_kv cache state persists across calls — call steps in order
+// 0..14 to drive a full AR frame. Returns malloc'd float[*out_vocab]
+// logits (last-position only). *out_vocab is set to cp_vocab_size on
+// success. Caller frees with free().
+float* qwen3_tts_run_code_pred_step(struct qwen3_tts_context* ctx, const float* embeds, int n_tokens, int n_past,
+                                    int lm_head_idx, int* out_vocab);
+
 // Build the full ICL prefill embedding from a (syn_text, ref_text) pair
 // using the active voice pack's spk_embedding + ref_code. Returns a
 // freshly malloc'd float buffer of shape (T, hidden_size). *out_T is

@@ -873,6 +873,49 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- cp_step{0..14}: per-step code-predictor diff ----
+        //
+        // Drives the 15-step AR loop on the C++ side using PyTorch-dumped
+        // input embeds at each step, so any divergence between paths
+        // (default / O15 / FUSED_QKV / ...) is localised to the exact step
+        // it first appears at instead of being smeared across the prefill.
+        //
+        // Schedule mirrors run_code_pred_kv inside code_pred_generate_15:
+        //   step 0        : T=2, n_past=0,    lm_head_idx=0
+        //   step k (1..14): T=1, n_past=k+1,  lm_head_idx=k
+        //
+        // The cp_kv cache state persists across calls — so we MUST run them
+        // in order from step 0. The cache was zero-initialised at init and
+        // none of the prior stages above touch cp_kv, so step 0 starts on
+        // a clean slate.
+        for (int k = 0; k < 15; k++) {
+            char in_name[32], out_name[32];
+            snprintf(in_name, sizeof(in_name), "cp_step%d_input_embed", k);
+            snprintf(out_name, sizeof(out_name), "cp_step%d_logits", k);
+            char stage_label[32];
+            snprintf(stage_label, sizeof(stage_label), "cp_step%d", k);
+
+            auto in_pair = ref.get_f32(in_name);
+            if (!in_pair.first) {
+                printf("[SKIP] %-15s %s missing (re-dump ref with cp_step stages)\n", stage_label, in_name);
+                n_skip++;
+                break; // subsequent steps depend on this step's cp_kv state
+            }
+            const int T_in = (k == 0) ? 2 : 1;
+            const int n_past = (k == 0) ? 0 : (k + 1);
+            int vocab = 0;
+            float* logits = qwen3_tts_run_code_pred_step(ctx, in_pair.first, T_in, n_past, /*lm_head_idx=*/k, &vocab);
+            if (!logits || vocab <= 0) {
+                printf("[ERR ] %-15s qwen3_tts_run_code_pred_step returned null\n", stage_label);
+                n_fail++;
+                break;
+            }
+            auto rep = ref.compare(out_name, logits, (size_t)vocab);
+            print_row(stage_label, rep, COS_THRESHOLD);
+            record(rep);
+            free(logits);
+        }
+
         qwen3_tts_free(ctx);
 
         // ---- qwen3-tts-spk (ECAPA speaker encoder) ----
@@ -1189,6 +1232,42 @@ int main(int argc, char** argv) {
                     n_fail++;
                 }
                 free(enc_out);
+
+                // ---- LLM editing forward ----
+                // Reference-input path: fetch the upstream's audio embeds
+                // and slot IDs from the dump and run our LLM forward
+                // against them. Isolates LLM-only error from upstream
+                // mel/encoder/projector divergence.
+                auto audio_pair = ref.get_f32("audio_embs_for_llm");
+                auto ids_pair = ref.get_f32("text_ids_with_slots");
+                if (audio_pair.first && ids_pair.first) {
+                    auto audio_shape = ref.shape("audio_embs_for_llm");
+                    int n_audio = audio_shape.size() >= 1 ? (int)audio_shape[audio_shape.size() - 2] : 0;
+                    int audio_d = audio_shape.empty() ? 0 : (int)audio_shape.back();
+                    int n_text = (int)ids_pair.second;
+
+                    std::vector<int32_t> text_ids((size_t)n_text);
+                    for (int i = 0; i < n_text; i++)
+                        text_ids[i] = (int32_t)std::lround(ids_pair.first[i]);
+
+                    int edit_n = 0, edit_V = 0;
+                    float* edit_logits = granite_nle_run_llm_editing(ctx, audio_pair.first, n_audio, text_ids.data(),
+                                                                     n_text, &edit_n, &edit_V);
+                    if (edit_logits && edit_n > 0 && edit_V > 0) {
+                        auto rep5 = ref.compare("editing_logits", edit_logits, (size_t)edit_n * edit_V);
+                        print_row("editing_logits", rep5, COS_THRESHOLD);
+                        record(rep5);
+                        auto rep5b = ref.compare_argmax("editing_logits", edit_logits, (size_t)edit_n * edit_V);
+                        print_row("editing_logits_top1", rep5b, COS_THRESHOLD);
+                        free(edit_logits);
+                    } else {
+                        printf("[ERR ] editing_logits          granite_nle_run_llm_editing returned null\n");
+                        n_fail++;
+                    }
+                    (void)audio_d;
+                } else {
+                    printf("[SKIP] editing_logits          ref missing audio_embs_for_llm/text_ids_with_slots\n");
+                }
             } else {
                 printf("[ERR ] encoder_output          granite_nle_run_encoder returned null\n");
                 n_fail++;
