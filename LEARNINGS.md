@@ -914,8 +914,52 @@ unusable at this prompt length / frame budget — it may recover with
 longer warmup, but for short TTS workloads Q8_0 is the floor and Q4_K
 is "ship only when disk space is the binding constraint."
 
+**Field regression on non-Metal backends (2026-04-30, fixed in 7298dd5):**
+The same O15 graph-reuse change that landed for performance broke
+end-to-end synthesis on backends whose `ggml_backend_alloc_buffer`
+returns *uninitialised* memory (CUDA, parts of CPU). The fixed-Lk
+code-pred graph reads `cp_kv_max_ctx` slots even when only `n_past+T`
+are populated, masking the rest with `-inf`. If the never-written
+slots happen to contain NaN-coded bytes, `Q·K → score+(-inf)=NaN`
+because IEEE-754 NaN propagates through addition; softmax then
+returns NaN and the whole talker output turns into noise. Metal
+zero-inits buffers by default, so my Mac never saw it. Fix:
+`ggml_backend_buffer_clear(cp_kv_buf, 0)` immediately after alloc in
+`cp_kv_alloc`. Unconditional; one-time memset per session.
+
+**Diff harness blind spot (also 2026-04-30):** even after the buffer
+clear, end-to-end synthesis under `QWEN3_TTS_O15=1` produces 20-s of
+noise on Metal (talker never emits `codec_eos`, runs to the
+`QWEN3_TTS_MAX_FRAMES=250` cap) — yet the prefill diff harness
+returns `cos_min=1.0` for default, `O15`, `FUSED_QKV`, and
+`O15+FUSED_QKV` alike. The harness only exercises the T>1 prefill
+path (`text_proj_out`, `talker_logits`, `talker_logits_via_icl`); the
+O15 graph changes live entirely in the T=1 AR loop, which the
+harness can't see. Until the harness covers per-step code-pred
+logits, "diff PASS" is a necessary but not sufficient correctness
+signal for any change to the AR path.
+
+**Status of the optional perf paths (commit 7298dd5 onward, all
+default-OFF, opt-in via env):**
+
+- `QWEN3_TTS_O15=1` — diff harness PASS at prefill, e2e BROKEN.
+  Talker fed wrong cb1..15 by code-pred → wrong `next_emb` → talker
+  drifts → no EOS → noise. Needs the per-step cp diff stage to
+  bisect (always-mask vs fixed-Lk vs slot-blit vs graph-cache reuse).
+- `QWEN3_TTS_FUSED_QKV=1` — diff harness PASS at prefill, byte-
+  identical WAV vs default observed at seed=42 / "Hello world…"
+  (likely correct at T=1 too, but not yet exercised by a per-step
+  diff). Speed: contended-machine bench was inconclusive.
+- Both flags together: same as O15 alone (broken in AR loop).
+
 **Still on the optimization roadmap (not yet implemented):**
 
+- **Per-step code-pred diff harness stage** — required to make any
+  further claim about the AR path. Concrete plan: dump
+  `cp_step{0..14}_input_embed` and `cp_step{i}_logits` from
+  `tools/reference_backends/qwen3_tts.py`, expose
+  `qwen3_tts_run_code_pred_step(ctx, embeds, T, n_past, lm_head_idx)`
+  on the C ABI, wire 15 stages into `crispasr_diff_main.cpp`. ~1-2 h.
 - **Talker Lk bucketing.** Pre-build talker graphs at `Lk ∈ {256, 512,
   1024, 2048, 4096}`, dispatch each AR step to the smallest bucket
   where `n_past + T ≤ Lk_bucket`, mask the unfilled slots to `-∞` via

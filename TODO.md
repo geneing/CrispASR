@@ -138,26 +138,52 @@ direction; do not interleave.
 - **MiMo-V2.5-ASR** — **[IN PROGRESS]** Converters done, F16+Q4_K on HF.
   Runtime is scaffolded (loads cleanly) but `mimo_asr_transcribe` is
   a stub. Forward pass is PLAN #51. MIT.
-- **Qwen3-TTS** — **[WORKS]** End-to-end synthesis working. HF release
+- **Qwen3-TTS** — **[WORKS, default path]** End-to-end synthesis is
+  functional and correct on default settings. HF release
   `cstr/qwen3-tts-0.6b-base-GGUF` ships F16 + Q8_0 + Q4_K talker;
   `cstr/qwen3-tts-tokenizer-12hz-GGUF` ships F16 + Q8_0 codec. Default
-  auto-download is Q8_0 talker + F16 codec (LEARNINGS-recommended
-  deployment quant). `crispasr --backend qwen3-tts -m auto
-  --auto-download --tts "..." --voice <ref.wav> --ref-text "..."`
-  works out of the box. PLAN #52 still has open items: ECAPA
-  speaker_encoder forward (PLAN #52 step 4) to remove the
-  `bake-qwen3-tts-voice-pack.py` dependency for new voices. Apache 2.0.
+  auto-download is Q8_0 talker + F16 codec.
+  `crispasr --backend qwen3-tts -m auto --auto-download --tts "..."
+  --voice <ref.wav> --ref-text "..."` works out of the box. JFK
+  round-trip ASR test confirms exact-match transcription. Apache 2.0.
 
-  Speed work (2026-04-30): Q8_0/Q4_K talker GGUFs converted and shipped;
-  fused Q+K+V in talker landed (off by default, opt-in
-  `QWEN3_TTS_FUSED_QKV=1`); contiguity bug in
-  `core_attn::kv_self_attn` fused path fixed (T>1 needed `ggml_cont`);
-  `QWEN3_TTS_MAX_FRAMES=N` bench cap added; A/B harness at
-  `.local/bench-qwen3/run_all.sh`. Fused-QKV may regress at T=1 on
-  M1 Metal (one noisy run showed ~15% slower) — needs a quiet-machine
-  re-run before flipping the default. See LEARNINGS.md "Qwen3-TTS
-  speed optimization tracking" for the full roadmap (Lk bucketing,
-  Q8_0 KV cache, Q4_K fused-QKV remaining).
+  **Field regression fixed (commit 7298dd5):** earlier today's commits
+  introduced an O15 graph-reuse path that read uninitialised KV slots
+  and produced noise on backends that don't zero-init alloc'd buffers
+  (CUDA, parts of CPU). Patched with `ggml_backend_buffer_clear` after
+  `cp_kv_alloc`. Same commit gates all today's perf paths behind env
+  switches so the default reproduces yesterday's known-good behaviour:
+   - `QWEN3_TTS_O15=1`        — fixed-Lk + cached T=1 code_pred graph
+   - `QWEN3_TTS_FUSED_QKV=1`  — fused Q+K+V matmul in talker (F16/F32)
+   - `QWEN3_TTS_MAX_FRAMES=N` — bench-only frame cap
+  README's TTS section has the full env-switch table.
+
+  **[next] Fine-grained code-pred diff harness.** O15 currently passes
+  the prefill diff (`cos_min=1.0` for all 4 path combos) but breaks
+  end-to-end (talker never emits `codec_eos`, 20-s noise). The diff
+  harness only covers T>1 prefill stages; the O15 changes live in the
+  T=1 AR loop. Concrete plan (LEARNINGS.md "Qwen3-TTS speed
+  optimization tracking"):
+   1. extend `tools/reference_backends/qwen3_tts.py` to dump
+      `cp_step{0..14}_input_embed` + `cp_step{i}_logits` for frame 0;
+   2. expose `qwen3_tts_run_code_pred_step` on the C ABI;
+   3. add 15 stages to `crispasr_diff_main.cpp` that call it.
+  With this, run the harness under `QWEN3_TTS_O15=1` — the first
+  stage that drops below cos≈0.999 names exactly which O15
+  sub-feature broke things (always-mask vs fixed-Lk vs slot-blit vs
+  graph-cache reuse). Effort: ~1-2 h. Do this BEFORE re-enabling O15
+  by default.
+
+  **[next] Re-validate FUSED_QKV** end-to-end with the same harness.
+  Prefill diff was bit-identical, and at seed=42 we saw byte-identical
+  WAV vs default — strong signal it's correct at T=1 too, but a
+  per-step diff closes the loop.
+
+  **[later] Speed roadmap** (LEARNINGS.md): Lk bucketing for talker,
+  Q8_0 KV cache, converter-side Q4_K fused QKV. Each requires the
+  fine-grained harness above to land safely. Also still pending:
+  ECAPA speaker_encoder forward (PLAN #52 step 4) to remove the
+  `bake-qwen3-tts-voice-pack.py` dependency for new voices.
 - **VibeVoice-ASR 7B** — blocked on ≥16 GB RAM for conversion
 - ~~**VibeVoice TTS**~~ — **DONE**: Realtime-0.5B (17 bugs, perfect round-trip) + 1.5B base model (voice cloning). HF: `cstr/vibevoice-realtime-0.5b-GGUF`, `cstr/vibevoice-1.5b-GGUF`
 
