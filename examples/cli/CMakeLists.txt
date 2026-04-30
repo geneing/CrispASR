@@ -133,6 +133,7 @@ target_link_libraries(crispasr-diff PRIVATE
     canary
     cohere
     granite_speech
+    granite_nle
     voxtral
     voxtral4b
     qwen3_asr

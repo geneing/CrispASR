@@ -4349,7 +4349,7 @@ architectures despite the shared "4.1-2b" name:
 |---------|-----------------|-------------------------|---------------------------------------|-------|--------|
 | base    | Granite-1B (AR) | —                       | text                                  |   1×  | shipped |
 | plus    | Granite-1B (AR) | `cat_hidden_layers:[3]` | text + speaker labels + word timing   |   1×  | not yet |
-| nar     | NLENARDecoder   | self-conditioning + CTC | text                                  | 5–20× | not yet |
+| nar     | NLENARDecoder   | self-conditioning + CTC | text                                  | 5–20× | encoder DONE |
 
 - **plus** is the smallest delta: encoder forward concatenates the
   layer-3 output with the final layer output, so the projector input

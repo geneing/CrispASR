@@ -249,6 +249,19 @@ struct granite_nle_context {
     ggml_backend_sched_t sched = nullptr;
     std::vector<uint8_t> compute_meta;
 
+    // Precomputed Shaw RPE lookup, per encoder layer:
+    //   rpe_per_layer[il][(c*ctx_size + r) * head_dim + d] =
+    //     rel_pos_emb_table[clamp(c-r, -ctx_size, ctx_size) + max_pos_emb][d]
+    // Built once at load time (RPE weights don't change at inference).
+    std::vector<std::vector<float>> rpe_per_layer;
+
+    // Parsed + normalised encoder_layer_indices (HF tuple convention):
+    //   index 0 = post-input_linear hidden state
+    //   index N (1..n_layers) = output of conformer block N (after the
+    //     mid-CTC residual at idx==self_conditioning_layer if applicable)
+    //   negative values are normalised to (n_layers + 1 + idx) at load time
+    std::vector<int> enc_layer_indices_parsed;
+
     // CTC tokenizer (char-level, 348 vocab). Built from the
     // `granite_nle.ctc.vocab` newline-joined string at load time.
     std::vector<std::string> ctc_id_to_str;
@@ -435,6 +448,7 @@ static bool granite_nle_load_model(granite_nle_model& model, const char* path, g
     // Encoder roots
     model.encoder.input_w = get("enc.input.weight");
     model.encoder.input_b = get("enc.input.bias");
+    model.encoder.mel_filters = get("audio.mel_filters");
     model.encoder.ctc_out_w = get("enc.ctc_out.weight");
     model.encoder.ctc_out_b = get("enc.ctc_out.bias");
     model.encoder.ctc_mid_w = get("enc.ctc_mid.weight");
@@ -629,6 +643,139 @@ extern "C" struct granite_nle_context* granite_nle_init_from_file(const char* pa
         }
     }
 
+    // Parse encoder_layer_indices ("4,8,12,-1") into normalised tuple
+    // indices.  HF semantics:
+    //   all_hidden_states[0]   = post-input_linear hidden state
+    //   all_hidden_states[N]   = output of conformer block N (1-indexed),
+    //                            including any self-conditioning residual
+    //                            if N == self_conditioning_layer
+    //   negative idx           = idx + (n_layers + 1)
+    {
+        const std::string& s = ctx->model.hparams.proj_encoder_layer_indices;
+        const int n_layers = (int)ctx->model.hparams.enc_n_layers;
+        size_t i = 0;
+        while (i < s.size()) {
+            size_t j = s.find(',', i);
+            if (j == std::string::npos)
+                j = s.size();
+            std::string tok = s.substr(i, j - i);
+            while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t'))
+                tok.pop_back();
+            while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t'))
+                tok.erase(0, 1);
+            if (!tok.empty()) {
+                try {
+                    int v = std::stoi(tok);
+                    if (v < 0)
+                        v += n_layers + 1;
+                    ctx->enc_layer_indices_parsed.push_back(v);
+                } catch (...) {
+                    fprintf(stderr, "granite_nle: ignoring unparseable encoder_layer_indices entry '%s'\n",
+                            tok.c_str());
+                }
+            }
+            i = j + 1;
+        }
+        if (params.verbosity >= 1) {
+            fprintf(stderr, "granite_nle: encoder_layer_indices=[");
+            for (size_t k = 0; k < ctx->enc_layer_indices_parsed.size(); k++)
+                fprintf(stderr, "%s%d", k > 0 ? "," : "", ctx->enc_layer_indices_parsed[k]);
+            fprintf(stderr, "] (normalised; n_layers=%d)\n", n_layers);
+        }
+    }
+
+    // Fold batch norm into scale+shift tensors (load-time, once)
+    //   y = gamma * (x - mean) / sqrt(var + eps) + beta
+    //     = x * scale + shift
+    // where scale = gamma / sqrt(var + eps), shift = beta - mean*scale.
+    {
+        const float eps = 1e-5f;
+        const int inner = 2 * (int)ctx->model.hparams.enc_d_model;
+        int folded = 0;
+        for (uint32_t il = 0; il < ctx->model.hparams.enc_n_layers; il++) {
+            auto& b = ctx->model.encoder.blocks[il];
+            if (!b.conv_bn_w || !b.conv_bn_b || !b.conv_bn_mean || !b.conv_bn_var)
+                continue;
+            std::vector<float> gamma(inner), beta(inner), mean(inner), var(inner);
+            ggml_backend_tensor_get(b.conv_bn_w, gamma.data(), 0, inner * sizeof(float));
+            ggml_backend_tensor_get(b.conv_bn_b, beta.data(), 0, inner * sizeof(float));
+            ggml_backend_tensor_get(b.conv_bn_mean, mean.data(), 0, inner * sizeof(float));
+            ggml_backend_tensor_get(b.conv_bn_var, var.data(), 0, inner * sizeof(float));
+            std::vector<float> scale(inner), shift(inner);
+            for (int c = 0; c < inner; c++) {
+                scale[c] = gamma[c] / std::sqrt(var[c] + eps);
+                shift[c] = beta[c] - mean[c] * scale[c];
+            }
+            ggml_backend_tensor_set(b.conv_bn_w, scale.data(), 0, inner * sizeof(float));
+            ggml_backend_tensor_set(b.conv_bn_b, shift.data(), 0, inner * sizeof(float));
+            folded++;
+        }
+        if (params.verbosity >= 1)
+            fprintf(stderr, "granite_nle: BN folded for %d encoder layers\n", folded);
+    }
+
+    // Precompute per-layer Shaw RPE lookup table.
+    {
+        const int C = (int)ctx->model.hparams.enc_context_size;
+        const int max_pos = (int)ctx->model.hparams.enc_max_pos_emb;
+        const int hd = (int)ctx->model.hparams.enc_head_dim;
+        const int emb_size = 2 * max_pos + 1;
+        const int n_layers = (int)ctx->model.hparams.enc_n_layers;
+
+        std::vector<int> dists((size_t)C * C);
+        for (int c = 0; c < C; c++)
+            for (int r = 0; r < C; r++) {
+                int dd = c - r;
+                if (dd < -C)
+                    dd = -C;
+                if (dd > C)
+                    dd = C;
+                dists[c * C + r] = dd + max_pos;
+            }
+
+        ctx->rpe_per_layer.assign(n_layers, {});
+        for (int il = 0; il < n_layers; il++) {
+            ggml_tensor* rpe_w = ctx->model.encoder.blocks[il].attn_rel_pos_w;
+            if (!rpe_w)
+                continue;
+            std::vector<float> emb_table((size_t)emb_size * hd);
+            if (rpe_w->type == GGML_TYPE_F32) {
+                ggml_backend_tensor_get(rpe_w, emb_table.data(), 0, emb_table.size() * sizeof(float));
+            } else {
+                std::vector<uint8_t> raw(ggml_nbytes(rpe_w));
+                ggml_backend_tensor_get(rpe_w, raw.data(), 0, raw.size());
+                const struct ggml_type_traits* tt = ggml_get_type_traits(rpe_w->type);
+                if (tt && tt->to_float) {
+                    tt->to_float(raw.data(), emb_table.data(), (int64_t)emb_table.size());
+                } else {
+                    fprintf(stderr, "granite_nle: unsupported RPE type %s at layer %d — skipping\n",
+                            ggml_type_name(rpe_w->type), il);
+                    continue;
+                }
+            }
+            ctx->rpe_per_layer[il].resize((size_t)C * C * hd);
+            for (int c = 0; c < C; c++)
+                for (int r = 0; r < C; r++) {
+                    int idx = dists[c * C + r];
+                    for (int d = 0; d < hd; d++)
+                        ctx->rpe_per_layer[il][(size_t)(c * C + r) * hd + d] = emb_table[(size_t)idx * hd + d];
+                }
+        }
+        if (params.verbosity >= 1)
+            fprintf(stderr, "granite_nle: RPE lookup precomputed (%d layers × %d × %d × %d)\n", n_layers, C, C, hd);
+    }
+
+    // Create backend scheduler
+    {
+        int n_be = 0;
+        ggml_backend_t backends[2];
+        backends[n_be++] = ctx->backend;
+        if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
+            backends[n_be++] = ctx->backend_cpu;
+        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
+    }
+    ctx->compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
+
     if (params.verbosity >= 1) {
         const auto& hp = ctx->model.hparams;
         fprintf(stderr, "granite_nle: loaded %s (enc %u layers, proj %u layers, llm %u layers, vocab %u)\n", path,
@@ -730,16 +877,488 @@ extern "C" float* granite_nle_compute_mel(struct granite_nle_context* ctx, const
     return result;
 }
 
-extern "C" float* granite_nle_run_encoder(struct granite_nle_context* ctx, const float* /*mel*/, int /*n_mels*/,
-                                          int /*T_mel*/, int* out_T, int* out_dim) {
-    if (!ctx)
+// ===========================================================================
+// Encoder helpers (graph-dispatch + CPU primitives) — ported from the base
+// granite_speech runtime, which proved their correctness against PyTorch
+// at cos_min ≥ 0.999 on JFK across base / 4.1 / PLUS variants. The shapes,
+// fused-norm-then-matmul trick, and Shaw block attention all carry over.
+// ===========================================================================
+
+// Apply: out = W @ x [+ bias]. x is (d_in, T), W is the GGUF tensor, out is
+// (d_out, T).
+static bool nle_run_matmul(granite_nle_context* ctx, float* out, const float* x, int d_in, int T, ggml_tensor* W,
+                           ggml_tensor* bias, int d_out) {
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 64, false);
+
+    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d_in, T);
+    ggml_set_name(inp, "mm_in");
+    ggml_set_input(inp);
+
+    ggml_tensor* r = ggml_mul_mat(ctx0, W, inp);
+    if (bias)
+        r = ggml_add(ctx0, r, bias);
+    ggml_set_name(r, "mm_out");
+    ggml_build_forward_expand(gf, r);
+    ggml_free(ctx0);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return false;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mm_in"), x, 0, (size_t)d_in * T * sizeof(float));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return false;
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "mm_out"), out, 0, (size_t)d_out * T * sizeof(float));
+    return true;
+}
+
+// Fused norm + Q/KV pair: layernorm(x) then split-feed into two matmuls in
+// a single graph dispatch. Skips the CPU-side layernorm pass and saves one
+// scheduler reset per encoder layer.
+static bool nle_run_norm_matmul_pair(granite_nle_context* ctx, float* out_a, ggml_tensor* W_a, int d_out_a,
+                                     float* out_b, ggml_tensor* W_b, int d_out_b, const float* x, int d_in, int T,
+                                     ggml_tensor* norm_w, ggml_tensor* norm_b, float eps) {
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 64, false);
+
+    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d_in, T);
+    ggml_set_name(inp, "nmm_in");
+    ggml_set_input(inp);
+
+    ggml_tensor* normed = ggml_norm(ctx0, inp, eps);
+    if (norm_w)
+        normed = ggml_mul(ctx0, normed, norm_w);
+    if (norm_b)
+        normed = ggml_add(ctx0, normed, norm_b);
+
+    ggml_tensor* r_a = ggml_mul_mat(ctx0, W_a, normed);
+    ggml_set_name(r_a, "nmm_out_a");
+    ggml_set_output(r_a);
+
+    ggml_tensor* r_b = ggml_mul_mat(ctx0, W_b, normed);
+    ggml_set_name(r_b, "nmm_out_b");
+    ggml_set_output(r_b);
+
+    ggml_build_forward_expand(gf, r_a);
+    ggml_build_forward_expand(gf, r_b);
+    ggml_free(ctx0);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return false;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "nmm_in"), x, 0, (size_t)d_in * T * sizeof(float));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return false;
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "nmm_out_a"), out_a, 0, (size_t)d_out_a * T * sizeof(float));
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "nmm_out_b"), out_b, 0, (size_t)d_out_b * T * sizeof(float));
+    return true;
+}
+
+// Conformer FFN module (Macaron half-step):
+//   y = down(silu(up(layernorm(x)))) (+ optional biases)
+static bool nle_run_ffn(granite_nle_context* ctx, float* out, const float* x, int d, int T, ggml_tensor* norm_w,
+                        ggml_tensor* norm_b, ggml_tensor* up_w, ggml_tensor* up_b, ggml_tensor* down_w,
+                        ggml_tensor* down_b) {
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 64, false);
+
+    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+    ggml_set_name(inp, "ffn_in");
+    ggml_set_input(inp);
+
+    ggml_tensor* cur = ggml_norm(ctx0, inp, 1e-5f);
+    if (norm_w)
+        cur = ggml_mul(ctx0, cur, norm_w);
+    if (norm_b)
+        cur = ggml_add(ctx0, cur, norm_b);
+    cur = ggml_mul_mat(ctx0, up_w, cur);
+    if (up_b)
+        cur = ggml_add(ctx0, cur, up_b);
+    cur = ggml_silu(ctx0, cur);
+    cur = ggml_mul_mat(ctx0, down_w, cur);
+    if (down_b)
+        cur = ggml_add(ctx0, cur, down_b);
+
+    ggml_set_name(cur, "ffn_out");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return false;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "ffn_in"), x, 0, (size_t)d * T * sizeof(float));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return false;
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "ffn_out"), out, 0, (size_t)d * T * sizeof(float));
+    return true;
+}
+
+// Conformer convolution module:
+//   layernorm → pointwise up (1×1 conv = matmul) → GLU → depthwise 1D conv
+//   → folded BN → SiLU → pointwise down. BN was folded into bn_w / bn_b at
+//   load time so the compute path is mul + add.
+static bool nle_run_conv_module(granite_nle_context* ctx, float* out, const float* x, int d, int T,
+                                const granite_nle_enc_block& b) {
+    const int inner = d * 2;
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 256, false);
+
+    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+    ggml_set_name(inp, "conv_in");
+    ggml_set_input(inp);
+
+    ggml_tensor* cur = ggml_norm(ctx0, inp, 1e-5f);
+    if (b.conv_norm_w)
+        cur = ggml_mul(ctx0, cur, b.conv_norm_w);
+    if (b.conv_norm_b)
+        cur = ggml_add(ctx0, cur, b.conv_norm_b);
+
+    if (b.conv_up_w) {
+        int in_ch = (int)b.conv_up_w->ne[1], out_ch = (int)b.conv_up_w->ne[2];
+        cur = ggml_mul_mat(ctx0, ggml_reshape_2d(ctx0, b.conv_up_w, in_ch, out_ch), cur);
+        if (b.conv_up_b)
+            cur = ggml_add(ctx0, cur, b.conv_up_b);
+    }
+
+    int half = (int)cur->ne[0] / 2;
+    ggml_tensor* x1 = ggml_cont(ctx0, ggml_view_2d(ctx0, cur, half, T, cur->nb[1], 0));
+    ggml_tensor* x2 = ggml_cont(ctx0, ggml_view_2d(ctx0, cur, half, T, cur->nb[1], half * sizeof(float)));
+    cur = ggml_mul(ctx0, x1, ggml_sigmoid(ctx0, x2));
+
+    if (b.conv_dw_w) {
+        int K = (int)b.conv_dw_w->ne[0];
+        ggml_tensor* dw_w = ggml_cast(ctx0, b.conv_dw_w, GGML_TYPE_F32);
+        ggml_tensor* dw_w_4d = ggml_reshape_4d(ctx0, dw_w, K, 1, 1, inner);
+        ggml_tensor* x_t = ggml_cont(ctx0, ggml_transpose(ctx0, cur));
+        x_t = ggml_reshape_4d(ctx0, x_t, T, 1, inner, 1);
+        x_t = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, x_t, 1, 1, K / 2, 0, 1, 1);
+        cur = ggml_cont(ctx0, ggml_permute(ctx0, x_t, 1, 2, 0, 3));
+        cur = ggml_reshape_2d(ctx0, cur, inner, T);
+    }
+
+    if (b.conv_bn_w && b.conv_bn_b) {
+        cur = ggml_mul(ctx0, cur, b.conv_bn_w);
+        cur = ggml_add(ctx0, cur, b.conv_bn_b);
+    }
+    cur = ggml_silu(ctx0, cur);
+
+    if (b.conv_down_w) {
+        int in_ch = (int)b.conv_down_w->ne[1], out_ch = (int)b.conv_down_w->ne[2];
+        cur = ggml_mul_mat(ctx0, ggml_reshape_2d(ctx0, b.conv_down_w, in_ch, out_ch), cur);
+        if (b.conv_down_b)
+            cur = ggml_add(ctx0, cur, b.conv_down_b);
+    }
+
+    ggml_set_name(cur, "conv_out");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return false;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "conv_in"), x, 0, (size_t)d * T * sizeof(float));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return false;
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "conv_out"), out, 0, (size_t)d * T * sizeof(float));
+    return true;
+}
+
+// CPU LayerNorm in (d, T) layout. Parallel over time frames.
+static void nle_cpu_layernorm(float* out, const float* x, const float* w, const float* b, int d, int T, float eps) {
+#pragma omp parallel for schedule(static)
+    for (int t = 0; t < T; t++) {
+        const float* xt = x + (size_t)t * d;
+        float* ot = out + (size_t)t * d;
+        float mean = 0, var = 0;
+        for (int i = 0; i < d; i++)
+            mean += xt[i];
+        mean /= d;
+        for (int i = 0; i < d; i++) {
+            float v = xt[i] - mean;
+            var += v * v;
+        }
+        var /= d;
+        float inv = 1.0f / std::sqrt(var + eps);
+        for (int i = 0; i < d; i++)
+            ot[i] = (xt[i] - mean) * inv * (w ? w[i] : 1.0f) + (b ? b[i] : 0.0f);
+    }
+}
+
+// Block-local Shaw RPE attention on CPU.
+//   attn[c,r] = (Q[c]·K[r] + Q[c]·RPE[c,r]) * scale, softmax along r,
+//   out[c]    = sum_r softmax * V[r]
+// All within a (block_start, block_start + ctx_size) window. The last
+// block may have `remainder` valid frames; positions beyond it are
+// computed but their values are unused by the caller (residual writes
+// out of bounds happen against zeroed tail data).
+static void nle_shaw_block_attention_cpu(float* out, const float* Q_data, const float* K_data, const float* V_data,
+                                         const float* rpe, int T, int n_heads, int hd, int ctx_size, float scale,
+                                         int remainder) {
+    const int d = n_heads * hd;
+    const int n_blocks = (T + ctx_size - 1) / ctx_size;
+
+#pragma omp parallel for collapse(2) schedule(static)
+    for (int blk = 0; blk < n_blocks; blk++) {
+        for (int h = 0; h < n_heads; h++) {
+            const int blk_start = blk * ctx_size;
+            const int blk_len = (blk == n_blocks - 1 && remainder > 0) ? remainder : ctx_size;
+            std::vector<float> scores((size_t)ctx_size * ctx_size);
+
+            for (int c = 0; c < blk_len; c++) {
+                for (int r = 0; r < blk_len; r++) {
+                    float qk = 0.0f;
+                    float pos = 0.0f;
+                    for (int dd = 0; dd < hd; dd++) {
+                        int q_idx = (h * hd + dd) + (blk_start + c) * d;
+                        int k_idx = (h * hd + dd) + (blk_start + r) * d;
+                        float q_val = Q_data[q_idx];
+                        float k_val = K_data[k_idx];
+                        qk += q_val * k_val;
+                        if (rpe)
+                            pos += q_val * rpe[(size_t)(c * ctx_size + r) * hd + dd];
+                    }
+                    scores[c * blk_len + r] = (qk + pos) * scale;
+                }
+            }
+
+            for (int c = 0; c < blk_len; c++) {
+                float max_val = -1e30f;
+                for (int r = 0; r < blk_len; r++)
+                    if (scores[c * blk_len + r] > max_val)
+                        max_val = scores[c * blk_len + r];
+                float sum = 0.0f;
+                for (int r = 0; r < blk_len; r++) {
+                    scores[c * blk_len + r] = std::exp(scores[c * blk_len + r] - max_val);
+                    sum += scores[c * blk_len + r];
+                }
+                float inv_sum = 1.0f / (sum + 1e-10f);
+                for (int r = 0; r < blk_len; r++)
+                    scores[c * blk_len + r] *= inv_sum;
+            }
+
+            for (int c = 0; c < blk_len; c++) {
+                for (int dd = 0; dd < hd; dd++) {
+                    float sum = 0.0f;
+                    for (int r = 0; r < blk_len; r++) {
+                        int v_idx = (h * hd + dd) + (blk_start + r) * d;
+                        sum += scores[c * blk_len + r] * V_data[v_idx];
+                    }
+                    out[(h * hd + dd) + (blk_start + c) * d] = sum;
+                }
+            }
+        }
+    }
+}
+
+extern "C" float* granite_nle_run_encoder(struct granite_nle_context* ctx, const float* mel, int n_mels, int T_mel,
+                                          int* out_T, int* out_dim) {
+    if (!ctx || !mel || n_mels != (int)ctx->model.hparams.enc_input_dim)
         return nullptr;
-    fprintf(stderr, "granite_nle: run_encoder not yet implemented\n");
+    granite_nle_bench_stage _b("run_encoder");
+
+    const auto& hp = ctx->model.hparams;
+    const int d = (int)hp.enc_d_model;
+    const int n_heads = (int)hp.enc_n_heads;
+    const int hd = (int)hp.enc_head_dim;
+    const int n_layers = (int)hp.enc_n_layers;
+    const int ctx_size = (int)hp.enc_context_size;
+    const int self_cond_layer_1based = (int)hp.enc_self_conditioning_layer; // upstream is 1-indexed
+    const float attn_scale = 1.0f / std::sqrt((float)hd);
+    const int T = T_mel;
+    const int remainder = T % ctx_size;
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "  encoder: per-layer T=%d d=%d layers=%d ctx=%d self_cond=%d\n", T, d, n_layers, ctx_size,
+                self_cond_layer_1based);
+
+    // Snapshots for the encoder_layer_indices output. snapshots[k] is the
+    // hidden-state copy at the requested HF tuple index. Index 0 is taken
+    // after input_linear; index N (1..n_layers) is taken after the post-
+    // norm AND any self-conditioning residual at layer N.
+    const auto& want = ctx->enc_layer_indices_parsed;
+    std::vector<std::vector<float>> snapshots(want.size());
+
+    // Input linear: mel (160, T) → hidden (d, T)
+    std::vector<float> hidden((size_t)d * T);
+    nle_run_matmul(ctx, hidden.data(), mel, n_mels, T, ctx->model.encoder.input_w, ctx->model.encoder.input_b, d);
+
+    for (size_t k = 0; k < want.size(); k++) {
+        if (want[k] == 0)
+            snapshots[k].assign(hidden.begin(), hidden.end());
+    }
+
+    if (ctx->params.verbosity >= 2) {
+        float mn = 1e30, mx = -1e30, s = 0;
+        for (size_t i = 0; i < (size_t)d * T; i++) {
+            mn = std::min(mn, hidden[i]);
+            mx = std::max(mx, hidden[i]);
+            s += hidden[i];
+        }
+        fprintf(stderr, "  input_linear: min=%.4f max=%.4f mean=%.6f\n", mn, mx, s / (d * T));
+    }
+
+    // Buffers reused across layers.
+    std::vector<float> ffn_out((size_t)d * T);
+    std::vector<float> Q((size_t)d * T), KV((size_t)d * 2 * T);
+    std::vector<float> attn_out((size_t)d * T);
+    std::vector<float> conv_out((size_t)d * T);
+    std::vector<float> proj_out((size_t)d * T);
+
+    for (int il = 0; il < n_layers; il++) {
+        const auto& b = ctx->model.encoder.blocks[il];
+
+        // FFN1 (Macaron half-step)
+        nle_run_ffn(ctx, ffn_out.data(), hidden.data(), d, T, b.ff1_norm_w, b.ff1_norm_b, b.ff1_up_w, b.ff1_up_b,
+                    b.ff1_down_w, b.ff1_down_b);
+        for (size_t i = 0; i < (size_t)d * T; i++)
+            hidden[i] += 0.5f * ffn_out[i];
+
+        // Attention: norm + Q/KV (fused graph) → Shaw block attention on CPU
+        nle_run_norm_matmul_pair(ctx, Q.data(), b.attn_q_w, d, KV.data(), b.attn_kv_w, d * 2, hidden.data(), d, T,
+                                 b.attn_norm_w, b.attn_norm_b, 1e-5f);
+
+        std::vector<float> K((size_t)d * T), V((size_t)d * T);
+        for (int t = 0; t < T; t++) {
+            std::memcpy(K.data() + (size_t)t * d, KV.data() + (size_t)t * 2 * d, d * sizeof(float));
+            std::memcpy(V.data() + (size_t)t * d, KV.data() + (size_t)t * 2 * d + d, d * sizeof(float));
+        }
+
+        nle_shaw_block_attention_cpu(attn_out.data(), Q.data(), K.data(), V.data(),
+                                     ctx->rpe_per_layer[il].empty() ? nullptr : ctx->rpe_per_layer[il].data(), T,
+                                     n_heads, hd, ctx_size, attn_scale, remainder);
+
+        nle_run_matmul(ctx, proj_out.data(), attn_out.data(), d, T, b.attn_out_w, b.attn_out_b, d);
+        for (size_t i = 0; i < (size_t)d * T; i++)
+            hidden[i] += proj_out[i];
+
+        // Conv module
+        nle_run_conv_module(ctx, conv_out.data(), hidden.data(), d, T, b);
+        for (size_t i = 0; i < (size_t)d * T; i++)
+            hidden[i] += conv_out[i];
+
+        // FFN2 (Macaron half-step)
+        nle_run_ffn(ctx, ffn_out.data(), hidden.data(), d, T, b.ff2_norm_w, b.ff2_norm_b, b.ff2_up_w, b.ff2_up_b,
+                    b.ff2_down_w, b.ff2_down_b);
+        for (size_t i = 0; i < (size_t)d * T; i++)
+            hidden[i] += 0.5f * ffn_out[i];
+
+        // Post LayerNorm
+        {
+            std::vector<float> nw(d), nb(d);
+            if (b.post_norm_w)
+                ggml_backend_tensor_get(b.post_norm_w, nw.data(), 0, d * sizeof(float));
+            if (b.post_norm_b)
+                ggml_backend_tensor_get(b.post_norm_b, nb.data(), 0, d * sizeof(float));
+            nle_cpu_layernorm(hidden.data(), hidden.data(), b.post_norm_w ? nw.data() : nullptr,
+                              b.post_norm_b ? nb.data() : nullptr, d, T, 1e-5f);
+        }
+
+        // Self-conditioning residual: HF runs `out(hidden) → softmax → out_mid()`
+        // on the layer with idx == self_conditioning_layer (1-indexed).
+        // Done BEFORE the snapshot append so the snapshot at this index
+        // includes the self-conditioning residual (matches HF's
+        // all_hidden_states ordering — append happens after the residual).
+        if (il + 1 == self_cond_layer_1based && ctx->model.encoder.ctc_out_w && ctx->model.encoder.ctc_mid_w) {
+            const int ctc_dim = (int)ctx->model.encoder.ctc_out_w->ne[1];
+            std::vector<float> mid_out((size_t)ctc_dim * T), mid_back((size_t)d * T);
+            nle_run_matmul(ctx, mid_out.data(), hidden.data(), d, T, ctx->model.encoder.ctc_out_w,
+                           ctx->model.encoder.ctc_out_b, ctc_dim);
+            for (int t = 0; t < T; t++) {
+                float* row = mid_out.data() + t * ctc_dim;
+                float mx = -1e30f;
+                for (int i = 0; i < ctc_dim; i++)
+                    if (row[i] > mx)
+                        mx = row[i];
+                float sum = 0;
+                for (int i = 0; i < ctc_dim; i++) {
+                    row[i] = std::exp(row[i] - mx);
+                    sum += row[i];
+                }
+                for (int i = 0; i < ctc_dim; i++)
+                    row[i] /= sum;
+            }
+            nle_run_matmul(ctx, mid_back.data(), mid_out.data(), ctc_dim, T, ctx->model.encoder.ctc_mid_w,
+                           ctx->model.encoder.ctc_mid_b, d);
+            for (size_t i = 0; i < (size_t)d * T; i++)
+                hidden[i] += mid_back[i];
+        }
+
+        // Snapshot at HF tuple index il+1.
+        for (size_t k = 0; k < want.size(); k++) {
+            if (want[k] == il + 1)
+                snapshots[k].assign(hidden.begin(), hidden.end());
+        }
+
+        if (ctx->params.verbosity >= 2 && (il == 0 || il == 3 || il == 7 || il == n_layers - 1)) {
+            float mn = 1e30, mx = -1e30, s = 0;
+            for (size_t i = 0; i < (size_t)d * T; i++) {
+                mn = std::min(mn, hidden[i]);
+                mx = std::max(mx, hidden[i]);
+                s += hidden[i];
+            }
+            fprintf(stderr, "  layer %d/%d: min=%.4f max=%.4f mean=%.6f\n", il + 1, n_layers, mn, mx, s / (d * T));
+        }
+    }
+
+    // Final CTC head — cache logits for the BPE editing path. We only run
+    // the char-vocab head here; the BPE auxiliary head (out_bpe) is needed
+    // only for run_llm_editing's text-init step and is added later.
+    if (ctx->model.encoder.ctc_out_w) {
+        const int ctc_dim = (int)hp.enc_ctc_vocab;
+        ctx->last_ctc_logits.assign((size_t)ctc_dim * T, 0.0f);
+        nle_run_matmul(ctx, ctx->last_ctc_logits.data(), hidden.data(), d, T, ctx->model.encoder.ctc_out_w,
+                       ctx->model.encoder.ctc_out_b, ctc_dim);
+        ctx->last_ctc_T = T;
+    }
+
+    // Build the final concatenated encoder output.
+    //   per-frame layout: [snapshot_0[d], snapshot_1[d], ..., snapshot_K-1[d]]
+    //   total feature dim = K * d, where K = encoder_layer_indices.size()
+    // If encoder_layer_indices is empty, fall back to last hidden state.
+    if (snapshots.empty()) {
+        size_t total = (size_t)T * d;
+        float* result = (float*)malloc(total * sizeof(float));
+        if (!result)
+            return nullptr;
+        std::memcpy(result, hidden.data(), total * sizeof(float));
+        if (out_T)
+            *out_T = T;
+        if (out_dim)
+            *out_dim = d;
+        return result;
+    }
+
+    const int K = (int)snapshots.size();
+    const int wide_d = K * d;
+    std::vector<float> wide((size_t)wide_d * T);
+    for (int t = 0; t < T; t++) {
+        float* dst = wide.data() + (size_t)t * wide_d;
+        for (int k = 0; k < K; k++) {
+            if (snapshots[k].empty()) {
+                std::memset(dst + (size_t)k * d, 0, (size_t)d * sizeof(float));
+            } else {
+                std::memcpy(dst + (size_t)k * d, snapshots[k].data() + (size_t)t * d, (size_t)d * sizeof(float));
+            }
+        }
+    }
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "  encoder: concat output (T=%d, %d × %d = %d)\n", T, K, d, wide_d);
+
+    size_t total = (size_t)wide_d * T;
+    float* result = (float*)malloc(total * sizeof(float));
+    if (!result)
+        return nullptr;
+    std::memcpy(result, wide.data(), total * sizeof(float));
     if (out_T)
-        *out_T = 0;
+        *out_T = T;
     if (out_dim)
-        *out_dim = 0;
-    return nullptr;
+        *out_dim = wide_d;
+    return result;
 }
 
 extern "C" const float* granite_nle_last_ctc_logits(struct granite_nle_context* ctx, int* out_T, int* out_vocab) {

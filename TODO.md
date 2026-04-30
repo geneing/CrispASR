@@ -509,34 +509,23 @@ each backend. High-value gaps to close:
   + `core_mel::compute` call. Same 80-bin HTK filterbank + log10 +
   GlobalClipMax + stacked_frames=2 pipeline as base. ~120 LOC.
   Commit `c7ea343`.
-- **[next] NAR variant — encoder forward.** ~700 LOC of helpers +
-  main loop. The encoder is the **same 16-layer Conformer as base
-  granite_speech**: FFN1 → attention with Shaw RPE → conv module →
-  FFN2 → post-norm. Self-conditioning at layer 8 (mid-CTC residual)
-  is **already handled by the base granite_speech encoder forward
-  unchanged** — it's not NAR-specific. The capture-and-concat
-  infrastructure for `cat_layers` (added for PLUS) already exists.
-  Two NAR-specific tweaks needed:
-    1. **encoder_layer_indices semantics differ from cat_hidden_layers.**
-       PLUS's `[3]` means `[hidden_states[3], final]` (2 layers,
-       2048-wide). NAR's `[4, 8, 12, -1]` means
-       `[hidden_states[4..12], hidden_states[-1]]` (4 layers,
-       4096-wide) — the final layer is *already in the list* via the
-       `-1` sentinel, so the runtime must skip the auto-append-final
-       step it does for PLUS. Rule: if `-1` (or `n_layers`) is in
-       the indices, don't append final.
-    2. **BPE auxiliary head** (`enc.bpe_out`, 100353 vocab) is
-       computed only on posterior-weighted-pooled hidden states
-       (window=4) at valid frames. Only needed for the LLM editing
-       pass's text-init step — can be skipped for the basic
-       encoder output. ~80 LOC when wired.
-
-  Easiest path: copy ~700 LOC of helpers (run_matmul,
-  run_norm_matmul_pair, run_ffn, run_conv_module, shaw_block_attention,
-  cpu_layernorm) + the main loop from `granite_speech.cpp` into
-  `granite_nle.cpp`, rename `granite_speech_*` → `granite_nle_*`,
-  and adjust the concat rule. Then validate with a new
-  `tools/reference_backends/granite_nle.py` dump against PyTorch BF16.
+- **[done]** ~~NAR variant — encoder forward.~~ Ported the helpers
+  (`nle_run_matmul`, `nle_run_norm_matmul_pair`, `nle_run_ffn`,
+  `nle_run_conv_module`, `nle_shaw_block_attention_cpu`,
+  `nle_cpu_layernorm`) and the main 16-layer Conformer loop from
+  `granite_speech.cpp` into `granite_nle.cpp`. BN folding + per-layer
+  Shaw RPE precompute + scheduler creation moved into
+  `granite_nle_init_from_file`. `encoder_layer_indices` is parsed
+  with HF tuple semantics (`-1` → `n_layers`, no auto-append-final);
+  the snapshot at index 8 is taken AFTER the self-conditioning
+  residual to match HF's `all_hidden_states` ordering. Validated
+  against the PyTorch reference on JFK with a new
+  `tools/reference_backends/granite_nle.py` (encoder-only loader to
+  avoid the upstream LLM-tokenizer fetch): mel `cos_min=0.999997`,
+  encoder_output (T=550, 4×1024=4096) `cos_min=0.999852`,
+  encoder_logits (T=550, 348) `cos_min=0.999675`. BPE auxiliary
+  head (`enc.bpe_out`) is intentionally not wired here — it's only
+  needed by the LLM editing pass's text-init step.
 - **[next] NAR variant — windowed Q-Former projector.** Different
   tensor naming and structure from base 4.1's BLIP-2 Q-Former: 4
   per-encoder-layer LayerNorms, a `layer_proj` (4096 → 2048), 32-head

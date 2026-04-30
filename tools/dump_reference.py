@@ -97,6 +97,9 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     "voxtral4b":  "reference_backends.voxtral4b",
     "granite":    "reference_backends.granite",
     "granite-4.1": "reference_backends.granite",
+    # granite-speech 4.1-2b NAR: non-autoregressive variant. Custom
+    # modeling code in the HF snapshot — needs trust_remote_code=True.
+    "granite-nle": "reference_backends.granite_nle",
     # Encoder-decoder (NeMo + Cohere) reference backends. These capture
     # encoder activations via forward hooks and run generate() for a
     # greedy transcript check — no per-token logits, because the decoder
