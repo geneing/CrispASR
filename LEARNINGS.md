@@ -427,16 +427,16 @@ Out of the box, every ASR runtime in this repo accepts WAV / FLAC / MP3
 The two embedded single-header decoders (`miniaudio`, `stb_vorbis`) are
 enough for 95% of real-world ASR pipelines.
 
-### `WHISPER_FFMPEG=ON` only helps bare Opus
+### `CRISPASR_FFMPEG=ON` only helps bare Opus
 
-Upstream whisper.cpp's `examples/ffmpeg-transcode.cpp` has known bugs
+Upstream crispasr's `examples/ffmpeg-transcode.cpp` has known bugs
 on mp4-family containers: `.m4a` crashes with `munmap_chunk(): invalid
 pointer` on the first audio chunk read, and `.webm` (Opus-in-WebM)
 hangs indefinitely after the libavformat headers are parsed. Both use
 the same `av_read_frame` + `avcodec_send_packet` loop.
 
 Bare-codec `.opus` files work cleanly in the FFmpeg build. So the
-practical advice is: enable `WHISPER_FFMPEG=ON` only if you need
+practical advice is: enable `CRISPASR_FFMPEG=ON` only if you need
 in-process `.opus` decoding. For everything else, pre-convert:
 
 ```bash
@@ -542,7 +542,7 @@ Two cases where bit-identity is not achievable:
    the float summation order, shifting one SRT boundary by 80 ms (one
    encoder frame). Transcript text is byte-identical. Accepted.
 2. **Whisper code path.** Untouched by `src/core/` refactors; bit-
-   identical against upstream `whisper-cli` is the gate.
+   identical against upstream `crispasr` is the gate.
 
 The few FFNs / attention blocks where ggml graph op ordering matters
 have all come back bit-identical so far. Flash attention results
@@ -1184,7 +1184,7 @@ producing sample indices 100× too large. Every segment fell past the
 end of the audio, causing "no speech detected" for every file.
 
 **Lesson:** Always check the units of external API return values. The
-whisper.cpp VAD API stores `start`/`end` via `samples_to_cs()` (line
+crispasr VAD API stores `start`/`end` via `samples_to_cs()` (line
 5676) and the internal code divides by 100.0 for display (line 6914).
 The getter functions return the raw centisecond values.
 
@@ -1199,9 +1199,9 @@ reliable output. On jfk.wav (11s), the VAD split into 5 segments of
 the accumulated segment is shorter than 3s. This produces 2 merged
 segments instead of 5 tiny ones, with correct transcription.
 
-### VAD stitching matches whisper.cpp quality
+### VAD stitching matches crispasr quality
 
-whisper.cpp stitches VAD segments into one contiguous buffer with 0.1s
+crispasr stitches VAD segments into one contiguous buffer with 0.1s
 silence gaps, builds a mapping table, processes as one audio stream,
 then remaps timestamps. This is fundamentally better than independent
 per-slice processing because the decoder sees continuous audio context.
@@ -1412,7 +1412,7 @@ release in this cycle; caught one typo that would've shipped.
 ### Rust FFI: C++ exceptions abort the process
 
 The old `CrispASR` Rust API (wrapping `whisper_full()` directly) crashes
-with "Rust cannot catch foreign exceptions" because whisper.cpp's C++
+with "Rust cannot catch foreign exceptions" because crispasr's C++
 code can throw exceptions (ggml assertion failures, `std::bad_alloc`).
 Rust's `extern "C"` FFI boundary treats C++ exceptions as undefined
 behavior — they unwind through Rust stack frames and trigger `abort()`.
@@ -4085,3 +4085,194 @@ The complete recipe — for any future audio codec port — is:
 **dump after every stride-changing layer, not just at module
 boundaries.** Module boundaries hide the conv-by-conv accumulation;
 intra-module dumps localise it.
+
+---
+
+## Granite Speech 4.1 (April 2026)
+
+### Q4K OOM in `granite_speech_init_from_file`: tiny `tctx` for `ggml_new_graph`
+
+`granite_speech_init_from_file` precomputes the Shaw RPE lookup at
+load time. For F32 RPE weights it just reads bytes directly; for any
+quantized type it took an else-branch that built a one-op cast graph:
+
+```cpp
+ggml_init_params tip = {2 * ggml_tensor_overhead(), nullptr, true};  // 736 B
+ggml_context* tctx = ggml_init(tip);
+ggml_tensor* f32 = ggml_cast(tctx, rpe_w, GGML_TYPE_F32);
+ggml_cgraph* tgf = ggml_new_graph(tctx);   // needs ~83 KB!
+ggml_backend_sched_reset(ctx->sched);      // and sched is still NULL here!
+```
+
+Two compounding bugs:
+
+1. The `tctx` was sized for **2 tensor overheads (736 bytes)** —
+   enough to host two `ggml_tensor` objects but not the `ggml_cgraph`
+   structure that `ggml_new_graph` allocates inside the same context.
+   `ggml_new_graph` (with default `GGML_DEFAULT_GRAPH_SIZE=2048`)
+   needs ~83 KB for its node/leaf arrays. Result:
+   `ggml_new_object: not enough space in the context's memory pool
+   (needed 82976, available 736)`.
+2. `ctx->sched` is created **after** the RPE precomputation, so even
+   if `tctx` had been sized correctly, the `ggml_backend_sched_reset`
+   call would have crashed on a NULL scheduler.
+
+The branch was never tested because for the F16 GGUF the converter
+keeps `attn_rel_pos_w` in F32 (so the if-branch fires); only Q4K
+hits the else.
+
+**Fix.** Skip the graph entirely. Read the raw bytes via
+`ggml_backend_tensor_get` (works for any backend, including Metal —
+the runtime copies device → host for you) and dequantize on the CPU
+using `ggml_get_type_traits(type)->to_float`. No `ggml_context`, no
+graph, no scheduler — and it works for any current or future quant
+type without code changes:
+
+```cpp
+std::vector<uint8_t> raw(ggml_nbytes(rpe_w));
+ggml_backend_tensor_get(rpe_w, raw.data(), 0, raw.size());
+const struct ggml_type_traits* tt = ggml_get_type_traits(rpe_w->type);
+tt->to_float(raw.data(), emb_table.data(), (int64_t)emb_table.size());
+```
+
+**Generalisable lesson.** When you need a one-shot dequantize at
+load time (small tensor, runs once), prefer the type-traits route
+over a tiny graph. Tiny graphs require correctly sizing both the
+tensor budget *and* the graph overhead, plus a live scheduler — and
+all three preconditions tend to fail in init paths. Reserve the
+graph route for runtime dequantizes that genuinely need GPU.
+
+The same pattern appeared a second time in the CPU encoder loop's
+per-layer RPE read (`ggml_backend_tensor_get(rpe_w, emb.data(), 0,
+emb.size() * sizeof(float))`) — that call requested
+`emb.size() * sizeof(float)` bytes from a tensor whose `ggml_nbytes`
+was much smaller in the quantized case, so we read random uninitialised
+bytes off the end of the device buffer and they tokenised to noise.
+The fix is the same dispatch on `rpe_w->type`.
+
+### Granite encoder graph path is ~4× faster than the CPU loop
+
+The CPU per-layer loop in `granite_speech_run_encoder` dispatches
+~96 small ggml graphs (one per matmul / per layer) to the scheduler.
+Each dispatch carries scheduler overhead — `ggml_backend_sched_reset`,
+`ggml_backend_sched_alloc_graph`, kernel pipeline lookup. With Metal
+that's a full command-buffer round-trip per matmul.
+
+The opt-in `GRANITE_ENCODER_GRAPH=1` path builds the **entire 16-layer
+encoder as a single ggml graph** and dispatches it once. Numbers on
+M1 / Q4_K (encoder kept F32) for an 11s JFK clip:
+
+| Path                       | run_encoder | total      | realtime |
+|----------------------------|------------:|-----------:|---------:|
+| CPU loops (default)        |  12,624 ms  |  19.6 s    | 0.6×     |
+| `GRANITE_ENCODER_GRAPH=1`  |   3,110 ms  |   7.55 s   | **1.5×** |
+
+The graph path currently omits Shaw relative position embeddings
+(`flash_attn_ext` can't ingest a Q-dependent additive bias), so
+output is approximate. Accuracy on JFK is still good but for harder
+material the missing RPE bias matters.
+
+**Path forward.** To make the graph path the default and drop the
+CPU loop, attention must be implemented manually as
+`Q @ K^T + Q @ R^T → softmax → @ V` instead of via `flash_attn_ext`.
+The RPE lookup tensor (`rpe_lookup`, declared as graph input but
+unused) is the seam.
+
+**Lesson.** A "single big graph" is almost always faster than many
+small graphs on GPU backends because the per-dispatch cost dwarfs
+the per-op cost for our typical layer sizes. When porting a new
+encoder, default to the graph path and only fall back to per-op
+loops if a specific op isn't fusable.
+
+### Quantizer encoder skip rule for Granite Speech
+
+The default quantizer skips `proj.` tensors for Granite Speech
+(precision-sensitive), but it was happily quantizing the 16-layer
+Conformer encoder (everything ending in `_w` / `weight`, 2D, no
+"norm" in the name). Result: JFK encoder cos_min dropped from
+**0.999908 (F16)** to **0.929 (Q4_K)**, projector from 0.999995
+to 0.922. The transcript was still readable on JFK by luck — the
+LLM is robust to small acoustic noise — but the README claim
+"encoder + projector kept F32" was false.
+
+**Fix.** Detect `general.architecture == granite_speech` in the
+quantizer and skip any tensor whose name starts with `enc.`. This
+restores Q4K parity to F16 levels:
+
+| File         | encoder cos_min | projector cos_min | size    |
+|--------------|----------------:|------------------:|--------:|
+| F16          |        0.999908 |          0.999995 | 5.2 GB  |
+| Q4K (enc F32)|        0.999908 |          0.999995 | 2.94 GB |
+| Q4K (all)    |        0.929    |          0.922    | 1.7 GB  |
+
+**Lesson.** When the README says "kept at F32," verify with a
+diff harness against the BF16 reference. The encoder is a 16-layer
+Conformer where Q4_K rounding error compounds across layers; even
+if individual matmuls land at cos 0.999, by layer 16 you can be at
+0.93. The size saving (2.94 GB → 1.7 GB) is real but the parity
+loss is not free — ship both, document both, let the user choose.
+
+### Don't hardcode block-attention `context_size` / `max_pos_emb`
+
+The runtime had `const int C = 200; const int max_pos = 512;` in
+five places (init, two encoder forward functions, two RPE precompute
+blocks). They happened to match the granite-4.0-1b config, and they
+also match 4.1-2b — but only because the upstream config files
+re-used the same numbers. They are **per-config values** that belong
+in the GGUF header (`granite_speech.enc.context_size` and
+`granite_speech.enc.max_pos_emb`), with the old values as defaults
+so legacy GGUFs without these keys still load.
+
+**Lesson.** Any constant that comes from the model's `config.json`
+gets a GGUF key — even if every release so far has used the same
+value. The cost is one converter line and one hparam-load line per
+key. The cost of *not* doing it is rediscovering the bug six months
+later when a new variant ships with a different value.
+
+### Granite Speech 4.1 variant family: base / plus / nar
+
+The 4.1 release ships **three** variants with significantly different
+architectures despite the shared "4.1-2b" name:
+
+| Variant | Decoder         | Encoder change          | Outputs                               | Speed | Status |
+|---------|-----------------|-------------------------|---------------------------------------|-------|--------|
+| base    | Granite-1B (AR) | —                       | text                                  |   1×  | shipped |
+| plus    | Granite-1B (AR) | `cat_hidden_layers:[3]` | text + speaker labels + word timing   |   1×  | not yet |
+| nar     | NLENARDecoder   | self-conditioning + CTC | text                                  | 5–20× | not yet |
+
+- **plus** is the smallest delta: encoder forward concatenates the
+  layer-3 output with the final layer output, so the projector input
+  is 2048-dim instead of 1024-dim (`encoder_hidden_size: 2048`).
+  The Q-Former cross-attention KV weights are correspondingly
+  `(1024, 2048)` instead of `(1024, 1024)`. Converter: emit a new
+  GGUF key `granite_speech.proj.cat_layers` (e.g. `[3]`). Runtime:
+  capture the layer-3 hidden state during encoder forward and
+  concatenate before passing into the projector.
+- **nar** is essentially a different model. `model_type: nle`,
+  `architectures: ["NLENARDecoder"]`, character-level CTC tokenizer
+  (348 tokens incl. ASCII + Kana), `bpe_output_dim: 100353` auxiliary
+  BPE head, `self_conditioning_layer: 8` (encoder layer 8 also
+  consumes the running CTC logits), `encoder_layer_indices: [4,8,12,-1]`
+  (projector reads from 4 different encoder layers), and the LLM is
+  Granite 4.0-1B used as a **non-autoregressive** refiner over
+  parallel-decoded tokens. New converter + new runtime, ~1000 LOC.
+
+**Lesson.** "Variant" in a model card can mean anything from a one-line
+config diff to a wholly different decoder. Read the
+`config.json["model_type"]` field before estimating effort:
+`granite_speech` and `granite_speech_plus` share 95% of their code;
+`nle` shares ~30%.
+
+### Per-stage bench timer (`GRANITE_BENCH=1`)
+
+The runtime now ships a tiny RAII timer wrapped in `granite_bench_stage`
+that prints elapsed wall-clock for `compute_mel`, `run_encoder`, and
+`run_projector` when `GRANITE_BENCH=1` is set. Cost when disabled is
+one cached `getenv` per stage. Useful for A/B-ing encoder paths
+(the 4× speedup above was measured with this), and for spotting
+which stage dominates after future changes.
+
+**Lesson.** Per-stage bench instrumentation at the public-API level
+is cheap to add and pays for itself the first time you need to compare
+two implementation paths. Add it to every new model runtime up front,
+not retroactively when you're trying to debug a regression.
