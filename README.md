@@ -511,6 +511,22 @@ Notes:
 - Quantizing the tokenizer / codec hurts `qwen3-tts` earlier than talker-only
   quantization. Prefer keeping `qwen3-tts-tokenizer-12hz.gguf` at `f16`.
 
+#### qwen3-tts environment switches
+
+These knobs gate experimental code paths added during the v0.5.x speed
+work. Defaults reproduce the original (pre-optimization) graph
+topology, so unset is the safe choice if you hit unexpected output.
+
+| Variable | Default | Effect when set |
+| --- | --- | --- |
+| `QWEN3_TTS_O15` | unset | Pin code-predictor `Lk = cp_kv_max_ctx` and reuse one cached T=1 graph across steps 2..14 (saves ~7 ms/frame on Mac/Metal). With it unset, the per-step graph uses the original dynamic `Lk = n_past + T`. Some non-Metal backends have produced garbled output with O15 on; leave unset until you confirm parity on your platform. |
+| `QWEN3_TTS_FUSED_QKV` | unset | Concatenate Q+K+V weights into one `attn_qkv_w` per talker layer at load time (F16/F32 talker only; auto-skipped for quantized talkers). Bit-identical output on M1 Metal but a contended-machine bench was inconclusive on speed; leave unset until you have a clean A/B. |
+| `QWEN3_TTS_MAX_FRAMES` | `1500` | Hard cap on AR decode steps. Useful for benchmarks where short prompts would otherwise run to the default 1500-frame ceiling without emitting `codec_eos`. |
+| `QWEN3_TTS_BENCH` | unset | Print per-call build/alloc/compute/read timings for `talker_kv` and `code_pred_kv`. |
+| `QWEN3_TTS_PROF` | unset | Per-op profiler (more granular than `BENCH`). |
+| `QWEN3_TTS_CP_BACKEND` | unset | Set to `cpu` to pin the code predictor to the CPU backend (debug aid). |
+| `QWEN3_TTS_DUMP_DIR` | unset | Write per-frame intermediate tensors into the named directory (large; for diff-harness work). |
+
 GGUF downloads: [`cstr/vibevoice-realtime-0.5b-GGUF`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF), [`cstr/vibevoice-1.5b-GGUF`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF), [`cstr/qwen3-tts-0.6b-base-GGUF`](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF), [`cstr/qwen3-tts-tokenizer-12hz-GGUF`](https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF)
 
 ### Server mode (persistent model, HTTP API)

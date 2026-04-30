@@ -953,11 +953,15 @@ ggml_cgraph* build_graph_code_pred_kv(qwen3_tts_context* c, int n_past, int n_to
     const float theta = hp.rope_theta;
     const float attn_scale = 1.0f / std::sqrt((float)hd);
     const int T = n_tokens;
-    // Use a fixed Lk = cp_kv_max_ctx for all code_pred graphs so that all
-    // T=1 steps share the same tensor topology.  The gallocr plan is computed
-    // once (at init reservation) and reused for every subsequent alloc,
-    // eliminating per-step re-planning overhead (~7 ms/frame for Q8_0).
-    const int Lk = c->cp_kv_max_ctx;
+    // O15 (default OFF; opt-in with QWEN3_TTS_O15=1): use a fixed
+    // Lk = cp_kv_max_ctx for all code_pred graphs so all T=1 steps share
+    // the same tensor topology and gallocr can reuse the plan. This is
+    // a perf win on Mac/Metal but in early field reports has produced
+    // garbled output on other backends (suspected NaN propagation from
+    // never-written KV slots). Until validated cross-platform, the
+    // default reproduces the original dynamic-Lk graph.
+    const bool o15 = env_bool("QWEN3_TTS_O15");
+    const int Lk = o15 ? c->cp_kv_max_ctx : (n_past + T);
 
     ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);
@@ -971,13 +975,15 @@ ggml_cgraph* build_graph_code_pred_kv(qwen3_tts_context* c, int n_past, int n_to
     ggml_set_name(positions, "positions");
     ggml_set_input(positions);
 
-    // Always provide a causal mask (even for T=1 decode steps) so that
-    // positions beyond the actual context window are masked to -inf.
-    // This keeps the (Lk, T) mask shape fixed across all calls with the
-    // same T, enabling gallocr plan reuse.
-    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T);
-    ggml_set_name(causal_mask, "causal_mask");
-    ggml_set_input(causal_mask);
+    // Causal mask: always present in the O15 graph (even at T=1, so the
+    // topology is invariant across n_past); only present at T>1 in the
+    // dynamic-Lk graph (yesterday's behaviour, where T=1 needs no mask).
+    ggml_tensor* causal_mask = nullptr;
+    if (o15 || T > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T);
+        ggml_set_name(causal_mask, "causal_mask");
+        ggml_set_input(causal_mask);
+    }
 
     const core_attn::KvSelfAttnParams kvp = {
         n_q, n_kv, hd, n_kv_grp, (int)hp.max_pos, theta, 32.0f, 1.0f, attn_scale, eps, core_attn::GQA_MANUAL_CONT,
@@ -991,11 +997,13 @@ ggml_cgraph* build_graph_code_pred_kv(qwen3_tts_context* c, int n_past, int n_to
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.attn_norm_w);
 
-        // For T=1 graphs, fix the KV-read length to cp_kv_max_ctx so that all
-        // T=1 steps share the same graph topology (enabling graph reuse in O15).
-        const int fixed_kv = (T == 1) ? c->cp_kv_max_ctx : 0;
+        // O15: pin Lk to cp_kv_max_ctx at T=1 so the topology is invariant
+        // across n_past; otherwise fall through to the helper's natural
+        // Lk = n_past + T.
+        const int fixed_kv = (o15 && T == 1) ? c->cp_kv_max_ctx : 0;
+        ggml_tensor* eff_mask = (T == 1 && !o15) ? nullptr : causal_mask;
         ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
-                                                    b.attn_q_norm_w, b.attn_k_norm_w, positions, causal_mask,
+                                                    b.attn_q_norm_w, b.attn_k_norm_w, positions, eff_mask,
                                                     c->cp_kv_k, c->cp_kv_v, (int)il, n_past, kvp,
                                                     /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv);
         cur = ggml_add(ctx0, residual, attn);
@@ -1013,9 +1021,11 @@ ggml_cgraph* build_graph_code_pred_kv(qwen3_tts_context* c, int n_past, int n_to
     if (T > 1) {
         cur = ggml_view_2d(ctx0, cur, d, 1, cur->nb[1], (size_t)(T - 1) * cur->nb[1]);
     }
-    // For T=1 graphs, use the writable slot so we can reuse the graph across
-    // steps by blitting different lm_head weights in before each compute.
-    ggml_tensor* eff_lm = (T == 1 && c->cp_lm_head_slot) ? c->cp_lm_head_slot : lm_head;
+    // O15: route T=1 logits through the writable lm_head slot so we can
+    // reuse the graph across steps by blitting different lm_head weights
+    // before each compute. The helper falls back to the per-call lm_head
+    // tensor when the slot isn't allocated or O15 is off.
+    ggml_tensor* eff_lm = (o15 && T == 1 && c->cp_lm_head_slot) ? c->cp_lm_head_slot : lm_head;
     ggml_tensor* logits = ggml_mul_mat(ctx0, eff_lm, cur);
     ggml_set_name(logits, "logits");
     ggml_build_forward_expand(gf, logits);
@@ -1405,29 +1415,39 @@ float* run_code_pred_kv(qwen3_tts_context* c, const float* embeds, int n_tokens,
     const auto& hp = c->hp;
     const int d = (int)hp.cp_d_model;
     const int vocab = (int)hp.cp_vocab_size;
+
+    const bool o15 = env_bool("QWEN3_TTS_O15");
     const int actual_Lk = n_past + n_tokens;
-    const int fixed_Lk = c->cp_kv_max_ctx; // matches build_graph_code_pred_kv
+    const int mask_Lk = o15 ? c->cp_kv_max_ctx : actual_Lk;
 
     std::vector<int32_t> positions(n_tokens);
     for (int i = 0; i < n_tokens; i++) {
         positions[i] = n_past + i;
     }
 
-    // Build causal mask for every call (T=1 or T=2).  Size is (fixed_Lk, T).
-    // Positions [0 .. n_past+q] are 0; positions [n_past+q+1 .. fixed_Lk-1] are -inf.
+    // Causal mask: shape (mask_Lk, T). Positions [0..n_past+q] are 0,
+    // [n_past+q+1..mask_Lk-1] are -inf. The graph builder only declares
+    // a mask input for the cases that need one (T>1 in dynamic-Lk mode,
+    // or any T in O15 mode); we mirror that here when populating it.
     const ggml_fp16_t zero_h = ggml_fp32_to_fp16(0.0f);
     const ggml_fp16_t neginf_h = ggml_fp32_to_fp16(-INFINITY);
-    std::vector<ggml_fp16_t> mask((size_t)fixed_Lk * n_tokens, neginf_h);
-    for (int q = 0; q < n_tokens; q++) {
-        for (int k = 0; k <= n_past + q; k++) {
-            mask[(size_t)q * fixed_Lk + k] = zero_h;
+    std::vector<ggml_fp16_t> mask;
+    const bool need_mask = o15 || n_tokens > 1;
+    if (need_mask) {
+        mask.assign((size_t)mask_Lk * n_tokens, neginf_h);
+        for (int q = 0; q < n_tokens; q++) {
+            for (int k = 0; k <= n_past + q; k++) {
+                mask[(size_t)q * mask_Lk + k] = zero_h;
+            }
         }
     }
     (void)actual_Lk;
 
-    // For T=1 steps: blit current lm_head[i] into the slot so the persistent
-    // graph always reads from cp_lm_head_slot regardless of which step i we're on.
-    const bool use_slot = (n_tokens == 1 && c->cp_lm_head_slot && !c->cp_cpu_pinned);
+    // O15: blit current lm_head[i] into the persistent slot so the cached
+    // graph always reads from cp_lm_head_slot. With O15 off, the graph
+    // references the per-call lm_head tensor directly and there is no slot
+    // to update.
+    const bool use_slot = (o15 && n_tokens == 1 && c->cp_lm_head_slot && !c->cp_cpu_pinned);
     if (use_slot) {
         ggml_backend_tensor_copy(lm_head, c->cp_lm_head_slot);
     }
@@ -1472,8 +1492,10 @@ float* run_code_pred_kv(qwen3_tts_context* c, const float* embeds, int n_tokens,
                             (size_t)d * n_tokens * sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
                             positions.size() * sizeof(int32_t));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
-                            mask.size() * sizeof(ggml_fp16_t));
+    if (need_mask) {
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
+                                mask.size() * sizeof(ggml_fp16_t));
+    }
     qwen3_prof_state prof_state;
     if (prof) {
         ggml_backend_sched_set_eval_callback(sched, qwen3_prof_eval_cb, &prof_state);
@@ -1680,6 +1702,13 @@ bool cp_kv_alloc(qwen3_tts_context* c) {
     char* base = (char*)ggml_backend_buffer_get_base(c->cp_kv_buf);
     ggml_backend_tensor_alloc(c->cp_kv_buf, c->cp_kv_k, base);
     ggml_backend_tensor_alloc(c->cp_kv_buf, c->cp_kv_v, base + kb);
+    // Zero the cache so the fixed-Lk code_pred path's never-written slots
+    // contain finite zeros rather than uninitialised bytes. Q·K against
+    // those slots is then 0; softmax(-inf+0)=exp(-inf)=0; the mask wins.
+    // Without this, CUDA / CPU buffers can hand back NaN-coded bytes which
+    // poison softmax and turn the whole output into noise (Metal usually
+    // zero-inits, hiding the bug there).
+    ggml_backend_buffer_clear(c->cp_kv_buf, 0);
     c->cp_kv_max_ctx = max_ctx;
     return true;
 }
