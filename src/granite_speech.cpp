@@ -6,6 +6,7 @@
 //   3. 40-layer Granite 1B LLM (GQA 16/4, μP multipliers, RoPE)
 
 #include "granite_speech.h"
+#include <chrono>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -38,6 +39,38 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation
+// ===========================================================================
+//
+// Enable per-stage timing with `GRANITE_BENCH=1`. The cost when disabled is
+// one cached env-var read per stage (≈1 ns) — safe to leave compiled in.
+// Useful for A/B-ing the CPU-loop encoder vs the GRANITE_ENCODER_GRAPH=1
+// path and for spotting which stage dominates after future changes.
+
+static bool granite_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("GRANITE_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct granite_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit granite_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~granite_bench_stage() {
+        if (!granite_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        fprintf(stderr, "  bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 // ===========================================================================
 // Hyperparameters
 // ===========================================================================
@@ -794,6 +827,7 @@ extern "C" float* granite_speech_compute_mel(struct granite_speech_context* ctx,
                                              int* out_n_mels, int* out_T_mel) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
+    granite_bench_stage _b("compute_mel");
     const int n_fft = 512, win_length = 400, hop = 160, n_mels = 80, n_freqs = n_fft / 2 + 1;
 
     // Load mel filters from GGUF (shape: [n_freqs, n_mels], HF layout).
@@ -1521,6 +1555,7 @@ extern "C" float* granite_speech_run_encoder(struct granite_speech_context* ctx,
                                              int T_mel, int* out_N, int* out_dim) {
     if (!ctx || !mel || n_mels != 160)
         return nullptr;
+    granite_bench_stage _b("run_encoder");
     const auto& hp = ctx->model.hparams;
     const int d = (int)hp.enc_d_model; // 1024
 
@@ -1911,6 +1946,7 @@ extern "C" float* granite_speech_run_projector(struct granite_speech_context* ct
                                                int enc_dim, int* out_N, int* out_dim) {
     if (!ctx || !enc_out || enc_dim != (int)ctx->model.hparams.proj_d_model)
         return nullptr;
+    granite_bench_stage _b("run_projector");
     const int d = enc_dim;                                          // 1024
     const int llm_d = (int)ctx->model.hparams.llm_d_model;          // 2048
     const int window_size = (int)ctx->model.hparams.window_size;    // 15
