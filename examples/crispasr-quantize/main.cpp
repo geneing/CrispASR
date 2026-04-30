@@ -90,6 +90,14 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     const bool is_firered = (arch.find("firered") != std::string::npos);
     const bool is_ecapa = (arch.find("ecapa") != std::string::npos);
     const bool is_granite_speech = (arch.find("granite_speech") != std::string::npos);
+    // Optional: downcast granite_speech encoder F32 weights to F16 instead of
+    // preserving F32. Halves the encoder footprint (~960 MB on 4.1-2b) at
+    // negligible quality cost — F16 is what every Whisper / Llama / parakeet
+    // GGUF in the wild uses for encoder weights. Off by default to keep the
+    // canonical Q4K bit-identical to F16 reference; opt in with the env var.
+    const char* env_enc_f16 = std::getenv("CRISPASR_GRANITE_ENC_F16");
+    const bool granite_enc_to_f16 =
+        is_granite_speech && env_enc_f16 && *env_enc_f16 && *env_enc_f16 != '0';
 
     const int n_tensors = gguf_get_n_tensors(ctx_in);
     for (int i = 0; i < n_tensors; i++) {
@@ -237,6 +245,31 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
             for (size_t j = 0; j < pad; j++)
                 fputc(0, fout);
 
+            printf("done\n");
+        } else if (granite_enc_to_f16 && type == GGML_TYPE_F32 && sname.find("enc.") == 0 &&
+                   sname.find("norm") == std::string::npos &&
+                   sname.find("running_mean") == std::string::npos &&
+                   sname.find("running_var") == std::string::npos &&
+                   sname.find("rel_pos") == std::string::npos) {
+            // Granite Speech encoder weight: keep out of Q4K (precision-
+            // sensitive across 16 layers) but downcast F32 → F16. Norms,
+            // BN stats and the RPE table stay F32.
+            printf("F32 -> F16... ");
+            const int64_t nelements = ggml_nelements(t);
+            std::vector<float> f32(nelements);
+            if (fread(f32.data(), sizeof(float), nelements, fin) != (size_t)nelements) {
+                fprintf(stderr, "failed to read f32 data\n");
+                return false;
+            }
+            std::vector<ggml_fp16_t> f16(nelements);
+            for (int64_t j = 0; j < nelements; j++)
+                f16[j] = ggml_fp32_to_fp16(f32[j]);
+            const size_t out_bytes = (size_t)nelements * sizeof(ggml_fp16_t);
+            fwrite(f16.data(), 1, out_bytes, fout);
+            gguf_set_tensor_type(ctx_out, name, GGML_TYPE_F16);
+            size_t pad = GGML_PAD(out_bytes, GGUF_DEFAULT_ALIGNMENT) - out_bytes;
+            for (size_t j = 0; j < pad; j++)
+                fputc(0, fout);
             printf("done\n");
         } else {
             printf("copying... ");
