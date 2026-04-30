@@ -46,60 +46,60 @@
 
 struct granite_nle_hparams {
     uint32_t sample_rate = 16000;
-    uint32_t n_mels      = 80;
+    uint32_t n_mels = 80;
 
     // Encoder (16-layer Macaron Conformer, same shape as granite_speech base
     // but with extra heads).
-    uint32_t enc_n_layers              = 16;
-    uint32_t enc_d_model               = 1024;
-    uint32_t enc_n_heads               = 8;
-    uint32_t enc_head_dim              = 128;
-    uint32_t enc_input_dim             = 160;
-    uint32_t enc_conv_kernel           = 15;
-    uint32_t enc_ff_dim                = 4096;
-    uint32_t enc_context_size          = 200;
-    uint32_t enc_max_pos_emb           = 512;
-    uint32_t enc_ctc_vocab             = 348;       // char-level CTC
-    uint32_t enc_bpe_vocab             = 100353;    // aux BPE CTC
-    uint32_t enc_bpe_pooling_window    = 4;
-    uint32_t enc_self_conditioning_layer = 8;       // 1-indexed in upstream
+    uint32_t enc_n_layers = 16;
+    uint32_t enc_d_model = 1024;
+    uint32_t enc_n_heads = 8;
+    uint32_t enc_head_dim = 128;
+    uint32_t enc_input_dim = 160;
+    uint32_t enc_conv_kernel = 15;
+    uint32_t enc_ff_dim = 4096;
+    uint32_t enc_context_size = 200;
+    uint32_t enc_max_pos_emb = 512;
+    uint32_t enc_ctc_vocab = 348;    // char-level CTC
+    uint32_t enc_bpe_vocab = 100353; // aux BPE CTC
+    uint32_t enc_bpe_pooling_window = 4;
+    uint32_t enc_self_conditioning_layer = 8; // 1-indexed in upstream
 
     // Projector (windowed Q-Former with 4-encoder-layer concat input).
-    uint32_t proj_num_encoder_layers   = 4;
-    uint32_t proj_encoder_dim          = 1024;
-    uint32_t proj_hidden_size          = 2048;
-    uint32_t proj_llm_dim              = 2048;
-    uint32_t proj_n_layers             = 2;
-    uint32_t proj_n_heads              = 32;
-    uint32_t proj_mlp_ratio            = 2;
-    uint32_t proj_block_size           = 15;
-    uint32_t proj_downsample_rate      = 5;
-    float    proj_layernorm_eps        = 1e-6f;
-    bool     proj_attn_bias            = true;
-    bool     proj_mlp_bias             = true;
+    uint32_t proj_num_encoder_layers = 4;
+    uint32_t proj_encoder_dim = 1024;
+    uint32_t proj_hidden_size = 2048;
+    uint32_t proj_llm_dim = 2048;
+    uint32_t proj_n_layers = 2;
+    uint32_t proj_n_heads = 32;
+    uint32_t proj_mlp_ratio = 2;
+    uint32_t proj_block_size = 15;
+    uint32_t proj_downsample_rate = 5;
+    float proj_layernorm_eps = 1e-6f;
+    bool proj_attn_bias = true;
+    bool proj_mlp_bias = true;
     // Comma-separated list of encoder layer indices to feed into projector;
     // negative values index from the end (e.g. -1 = last layer). Default
     // matches NAR upstream config.
     std::string proj_encoder_layer_indices = "4,8,12,-1";
 
     // LLM (Granite 4.0-1B used as NAR refiner).
-    uint32_t llm_n_layers       = 40;
-    uint32_t llm_d_model        = 2048;
-    uint32_t llm_n_heads        = 16;
-    uint32_t llm_n_kv_heads     = 4;
-    uint32_t llm_head_dim       = 128;
-    uint32_t llm_ff_dim         = 4096;
-    float    llm_rope_theta     = 10000.0f;
-    float    llm_rms_eps        = 1e-5f;
-    uint32_t llm_vocab_size     = 100352;     // 100353 in base; 100352 in NAR
-    float    embedding_multiplier = 12.0f;
-    float    attention_multiplier = 0.0078125f;
-    float    residual_multiplier  = 0.22f;
-    float    logits_scaling       = 8.0f;
-    uint32_t eos_token_id         = 100257;
-    uint32_t bos_token_id         = 100257;
-    uint32_t pad_token_id         = 100256;
-    bool     tie_word_embeddings  = true;     // NAR has no separate lm_head.weight
+    uint32_t llm_n_layers = 40;
+    uint32_t llm_d_model = 2048;
+    uint32_t llm_n_heads = 16;
+    uint32_t llm_n_kv_heads = 4;
+    uint32_t llm_head_dim = 128;
+    uint32_t llm_ff_dim = 4096;
+    float llm_rope_theta = 10000.0f;
+    float llm_rms_eps = 1e-5f;
+    uint32_t llm_vocab_size = 100352; // 100353 in base; 100352 in NAR
+    float embedding_multiplier = 12.0f;
+    float attention_multiplier = 0.0078125f;
+    float residual_multiplier = 0.22f;
+    float logits_scaling = 8.0f;
+    uint32_t eos_token_id = 100257;
+    uint32_t bos_token_id = 100257;
+    uint32_t pad_token_id = 100256;
+    bool tie_word_embeddings = true; // NAR has no separate lm_head.weight
 
     // Top-level NAR flag.
     bool scale_projected_embeddings = true;
@@ -113,38 +113,38 @@ struct granite_nle_enc_block {
     // FFN1 (Macaron half-step)
     ggml_tensor* ff1_norm_w = nullptr;
     ggml_tensor* ff1_norm_b = nullptr;
-    ggml_tensor* ff1_up_w   = nullptr;
-    ggml_tensor* ff1_up_b   = nullptr;
+    ggml_tensor* ff1_up_w = nullptr;
+    ggml_tensor* ff1_up_b = nullptr;
     ggml_tensor* ff1_down_w = nullptr;
     ggml_tensor* ff1_down_b = nullptr;
 
     // Attention (block-local, Shaw RPE)
-    ggml_tensor* attn_norm_w     = nullptr;
-    ggml_tensor* attn_norm_b     = nullptr;
-    ggml_tensor* attn_q_w        = nullptr;
-    ggml_tensor* attn_kv_w       = nullptr;
-    ggml_tensor* attn_out_w      = nullptr;
-    ggml_tensor* attn_out_b      = nullptr;
-    ggml_tensor* attn_rel_pos_w  = nullptr;
+    ggml_tensor* attn_norm_w = nullptr;
+    ggml_tensor* attn_norm_b = nullptr;
+    ggml_tensor* attn_q_w = nullptr;
+    ggml_tensor* attn_kv_w = nullptr;
+    ggml_tensor* attn_out_w = nullptr;
+    ggml_tensor* attn_out_b = nullptr;
+    ggml_tensor* attn_rel_pos_w = nullptr;
 
     // Conv module
-    ggml_tensor* conv_up_w     = nullptr;
-    ggml_tensor* conv_up_b     = nullptr;
-    ggml_tensor* conv_dw_w     = nullptr;
-    ggml_tensor* conv_bn_w     = nullptr;
-    ggml_tensor* conv_bn_b     = nullptr;
-    ggml_tensor* conv_bn_mean  = nullptr;
-    ggml_tensor* conv_bn_var   = nullptr;
-    ggml_tensor* conv_down_w   = nullptr;
-    ggml_tensor* conv_down_b   = nullptr;
-    ggml_tensor* conv_norm_w   = nullptr;
-    ggml_tensor* conv_norm_b   = nullptr;
+    ggml_tensor* conv_up_w = nullptr;
+    ggml_tensor* conv_up_b = nullptr;
+    ggml_tensor* conv_dw_w = nullptr;
+    ggml_tensor* conv_bn_w = nullptr;
+    ggml_tensor* conv_bn_b = nullptr;
+    ggml_tensor* conv_bn_mean = nullptr;
+    ggml_tensor* conv_bn_var = nullptr;
+    ggml_tensor* conv_down_w = nullptr;
+    ggml_tensor* conv_down_b = nullptr;
+    ggml_tensor* conv_norm_w = nullptr;
+    ggml_tensor* conv_norm_b = nullptr;
 
     // FFN2
     ggml_tensor* ff2_norm_w = nullptr;
     ggml_tensor* ff2_norm_b = nullptr;
-    ggml_tensor* ff2_up_w   = nullptr;
-    ggml_tensor* ff2_up_b   = nullptr;
+    ggml_tensor* ff2_up_w = nullptr;
+    ggml_tensor* ff2_up_b = nullptr;
     ggml_tensor* ff2_down_w = nullptr;
     ggml_tensor* ff2_down_b = nullptr;
 
@@ -157,32 +157,32 @@ struct granite_nle_proj_block {
     // 2-layer simplified Q-Former (cross-attention + MLP).
     ggml_tensor* attn_norm_w = nullptr;
     ggml_tensor* attn_norm_b = nullptr;
-    ggml_tensor* attn_q_w    = nullptr;
-    ggml_tensor* attn_q_b    = nullptr;
-    ggml_tensor* attn_k_w    = nullptr;
-    ggml_tensor* attn_k_b    = nullptr;
-    ggml_tensor* attn_v_w    = nullptr;
-    ggml_tensor* attn_v_b    = nullptr;
-    ggml_tensor* attn_o_w    = nullptr;
-    ggml_tensor* attn_o_b    = nullptr;
-    ggml_tensor* mlp_norm_w  = nullptr;
-    ggml_tensor* mlp_norm_b  = nullptr;
-    ggml_tensor* mlp_fc1_w   = nullptr;
-    ggml_tensor* mlp_fc1_b   = nullptr;
-    ggml_tensor* mlp_fc2_w   = nullptr;
-    ggml_tensor* mlp_fc2_b   = nullptr;
+    ggml_tensor* attn_q_w = nullptr;
+    ggml_tensor* attn_q_b = nullptr;
+    ggml_tensor* attn_k_w = nullptr;
+    ggml_tensor* attn_k_b = nullptr;
+    ggml_tensor* attn_v_w = nullptr;
+    ggml_tensor* attn_v_b = nullptr;
+    ggml_tensor* attn_o_w = nullptr;
+    ggml_tensor* attn_o_b = nullptr;
+    ggml_tensor* mlp_norm_w = nullptr;
+    ggml_tensor* mlp_norm_b = nullptr;
+    ggml_tensor* mlp_fc1_w = nullptr;
+    ggml_tensor* mlp_fc1_b = nullptr;
+    ggml_tensor* mlp_fc2_w = nullptr;
+    ggml_tensor* mlp_fc2_b = nullptr;
 };
 
 struct granite_nle_llm_block {
-    ggml_tensor* attn_norm_w  = nullptr;
-    ggml_tensor* attn_q_w     = nullptr;
-    ggml_tensor* attn_k_w     = nullptr;
-    ggml_tensor* attn_v_w     = nullptr;
-    ggml_tensor* attn_o_w     = nullptr;
-    ggml_tensor* ffn_norm_w   = nullptr;
-    ggml_tensor* ffn_gate_w   = nullptr;
-    ggml_tensor* ffn_up_w     = nullptr;
-    ggml_tensor* ffn_down_w   = nullptr;
+    ggml_tensor* attn_norm_w = nullptr;
+    ggml_tensor* attn_q_w = nullptr;
+    ggml_tensor* attn_k_w = nullptr;
+    ggml_tensor* attn_v_w = nullptr;
+    ggml_tensor* attn_o_w = nullptr;
+    ggml_tensor* ffn_norm_w = nullptr;
+    ggml_tensor* ffn_gate_w = nullptr;
+    ggml_tensor* ffn_up_w = nullptr;
+    ggml_tensor* ffn_down_w = nullptr;
 };
 
 struct granite_nle_model {
@@ -190,15 +190,15 @@ struct granite_nle_model {
 
     // Encoder
     struct {
-        ggml_tensor* input_w   = nullptr;
-        ggml_tensor* input_b   = nullptr;
-        ggml_tensor* mel_filters = nullptr;  // optional: written by converter
+        ggml_tensor* input_w = nullptr;
+        ggml_tensor* input_b = nullptr;
+        ggml_tensor* mel_filters = nullptr; // optional: written by converter
         std::vector<granite_nle_enc_block> blocks;
-        ggml_tensor* ctc_out_w = nullptr;    // 348-vocab CTC
+        ggml_tensor* ctc_out_w = nullptr; // 348-vocab CTC
         ggml_tensor* ctc_out_b = nullptr;
-        ggml_tensor* ctc_mid_w = nullptr;    // 348 → 1024 self-conditioning
+        ggml_tensor* ctc_mid_w = nullptr; // 348 → 1024 self-conditioning
         ggml_tensor* ctc_mid_b = nullptr;
-        ggml_tensor* bpe_out_w = nullptr;    // 100353-vocab aux head
+        ggml_tensor* bpe_out_w = nullptr; // 100353-vocab aux head
         ggml_tensor* bpe_out_b = nullptr;
     } encoder;
 
@@ -207,27 +207,27 @@ struct granite_nle_model {
         // Per-encoder-layer LayerNorms (one per encoder_layer_indices entry).
         std::vector<ggml_tensor*> layer_norm_w;
         std::vector<ggml_tensor*> layer_norm_b;
-        ggml_tensor* layer_proj_w   = nullptr;
-        ggml_tensor* layer_proj_b   = nullptr;
-        ggml_tensor* query          = nullptr;  // (1, block_size/downsample, hidden_size)
-        ggml_tensor* window_pos     = nullptr;  // (1, block_size, hidden_size)
+        ggml_tensor* layer_proj_w = nullptr;
+        ggml_tensor* layer_proj_b = nullptr;
+        ggml_tensor* query = nullptr;      // (1, block_size/downsample, hidden_size)
+        ggml_tensor* window_pos = nullptr; // (1, block_size, hidden_size)
         std::vector<granite_nle_proj_block> blocks;
-        ggml_tensor* out_norm_w     = nullptr;
-        ggml_tensor* out_norm_b     = nullptr;
-        ggml_tensor* out_linear_w   = nullptr;  // (hidden_size → llm_dim)
-        ggml_tensor* out_linear_b   = nullptr;
+        ggml_tensor* out_norm_w = nullptr;
+        ggml_tensor* out_norm_b = nullptr;
+        ggml_tensor* out_linear_w = nullptr; // (hidden_size → llm_dim)
+        ggml_tensor* out_linear_b = nullptr;
     } projector;
 
     // LLM (Granite 4.0-1B; tied embeddings — no separate lm_head)
     struct {
         ggml_tensor* token_embd_w = nullptr;
         std::vector<granite_nle_llm_block> blocks;
-        ggml_tensor* norm_w       = nullptr;
+        ggml_tensor* norm_w = nullptr;
         // lm_head reuses token_embd_w when tie_word_embeddings is true.
     } llm;
 
     // Storage
-    ggml_context*         ctx = nullptr;
+    ggml_context* ctx = nullptr;
     ggml_backend_buffer_t buf = nullptr;
 };
 
@@ -241,9 +241,9 @@ struct granite_nle_context {
 
     granite_nle_model model;
 
-    ggml_backend_t       backend     = nullptr;
-    ggml_backend_t       backend_cpu = nullptr;
-    ggml_backend_sched_t sched       = nullptr;
+    ggml_backend_t backend = nullptr;
+    ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
     std::vector<uint8_t> compute_meta;
 
     // CTC tokenizer (char-level, 348 vocab). Built from the
@@ -280,8 +280,7 @@ static bool granite_nle_bench_enabled() {
 struct granite_nle_bench_stage {
     const char* name;
     std::chrono::steady_clock::time_point t0;
-    explicit granite_nle_bench_stage(const char* n)
-        : name(n), t0(std::chrono::steady_clock::now()) {}
+    explicit granite_nle_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
     ~granite_nle_bench_stage() {
         if (!granite_nle_bench_enabled())
             return;
@@ -295,8 +294,7 @@ struct granite_nle_bench_stage {
 // GGUF loading
 // ===========================================================================
 
-static bool granite_nle_load_model(granite_nle_model& model, const char* path,
-                                   ggml_backend_t backend) {
+static bool granite_nle_load_model(granite_nle_model& model, const char* path, ggml_backend_t backend) {
     // Pass 1: metadata
     {
         gguf_context* g = core_gguf::open_metadata(path);
@@ -304,55 +302,57 @@ static bool granite_nle_load_model(granite_nle_model& model, const char* path,
             return false;
         auto& hp = model.hparams;
 
-        hp.enc_n_layers              = core_gguf::kv_u32(g, "granite_nle.enc.n_layers", hp.enc_n_layers);
-        hp.enc_d_model               = core_gguf::kv_u32(g, "granite_nle.enc.d_model", hp.enc_d_model);
-        hp.enc_n_heads               = core_gguf::kv_u32(g, "granite_nle.enc.n_heads", hp.enc_n_heads);
-        hp.enc_head_dim              = core_gguf::kv_u32(g, "granite_nle.enc.head_dim", hp.enc_head_dim);
-        hp.enc_input_dim             = core_gguf::kv_u32(g, "granite_nle.enc.input_dim", hp.enc_input_dim);
-        hp.enc_conv_kernel           = core_gguf::kv_u32(g, "granite_nle.enc.conv_kernel", hp.enc_conv_kernel);
-        hp.enc_ff_dim                = core_gguf::kv_u32(g, "granite_nle.enc.ff_dim", hp.enc_ff_dim);
-        hp.enc_context_size          = core_gguf::kv_u32(g, "granite_nle.enc.context_size", hp.enc_context_size);
-        hp.enc_max_pos_emb           = core_gguf::kv_u32(g, "granite_nle.enc.max_pos_emb", hp.enc_max_pos_emb);
-        hp.enc_ctc_vocab             = core_gguf::kv_u32(g, "granite_nle.enc.ctc_vocab", hp.enc_ctc_vocab);
-        hp.enc_bpe_vocab             = core_gguf::kv_u32(g, "granite_nle.enc.bpe_vocab", hp.enc_bpe_vocab);
-        hp.enc_bpe_pooling_window    = core_gguf::kv_u32(g, "granite_nle.enc.bpe_pooling_window", hp.enc_bpe_pooling_window);
-        hp.enc_self_conditioning_layer = core_gguf::kv_u32(
-            g, "granite_nle.enc.self_conditioning_layer", hp.enc_self_conditioning_layer);
+        hp.enc_n_layers = core_gguf::kv_u32(g, "granite_nle.enc.n_layers", hp.enc_n_layers);
+        hp.enc_d_model = core_gguf::kv_u32(g, "granite_nle.enc.d_model", hp.enc_d_model);
+        hp.enc_n_heads = core_gguf::kv_u32(g, "granite_nle.enc.n_heads", hp.enc_n_heads);
+        hp.enc_head_dim = core_gguf::kv_u32(g, "granite_nle.enc.head_dim", hp.enc_head_dim);
+        hp.enc_input_dim = core_gguf::kv_u32(g, "granite_nle.enc.input_dim", hp.enc_input_dim);
+        hp.enc_conv_kernel = core_gguf::kv_u32(g, "granite_nle.enc.conv_kernel", hp.enc_conv_kernel);
+        hp.enc_ff_dim = core_gguf::kv_u32(g, "granite_nle.enc.ff_dim", hp.enc_ff_dim);
+        hp.enc_context_size = core_gguf::kv_u32(g, "granite_nle.enc.context_size", hp.enc_context_size);
+        hp.enc_max_pos_emb = core_gguf::kv_u32(g, "granite_nle.enc.max_pos_emb", hp.enc_max_pos_emb);
+        hp.enc_ctc_vocab = core_gguf::kv_u32(g, "granite_nle.enc.ctc_vocab", hp.enc_ctc_vocab);
+        hp.enc_bpe_vocab = core_gguf::kv_u32(g, "granite_nle.enc.bpe_vocab", hp.enc_bpe_vocab);
+        hp.enc_bpe_pooling_window =
+            core_gguf::kv_u32(g, "granite_nle.enc.bpe_pooling_window", hp.enc_bpe_pooling_window);
+        hp.enc_self_conditioning_layer =
+            core_gguf::kv_u32(g, "granite_nle.enc.self_conditioning_layer", hp.enc_self_conditioning_layer);
 
-        hp.proj_num_encoder_layers = core_gguf::kv_u32(g, "granite_nle.proj.num_encoder_layers", hp.proj_num_encoder_layers);
-        hp.proj_encoder_dim        = core_gguf::kv_u32(g, "granite_nle.proj.encoder_dim", hp.proj_encoder_dim);
-        hp.proj_hidden_size        = core_gguf::kv_u32(g, "granite_nle.proj.hidden_size", hp.proj_hidden_size);
-        hp.proj_llm_dim            = core_gguf::kv_u32(g, "granite_nle.proj.llm_dim", hp.proj_llm_dim);
-        hp.proj_n_layers           = core_gguf::kv_u32(g, "granite_nle.proj.n_layers", hp.proj_n_layers);
-        hp.proj_n_heads            = core_gguf::kv_u32(g, "granite_nle.proj.n_heads", hp.proj_n_heads);
-        hp.proj_mlp_ratio          = core_gguf::kv_u32(g, "granite_nle.proj.mlp_ratio", hp.proj_mlp_ratio);
-        hp.proj_block_size         = core_gguf::kv_u32(g, "granite_nle.proj.block_size", hp.proj_block_size);
-        hp.proj_downsample_rate    = core_gguf::kv_u32(g, "granite_nle.proj.downsample_rate", hp.proj_downsample_rate);
-        hp.proj_layernorm_eps      = core_gguf::kv_f32(g, "granite_nle.proj.layernorm_eps", hp.proj_layernorm_eps);
-        hp.proj_attn_bias          = core_gguf::kv_bool(g, "granite_nle.proj.attn_bias", hp.proj_attn_bias);
-        hp.proj_mlp_bias           = core_gguf::kv_bool(g, "granite_nle.proj.mlp_bias", hp.proj_mlp_bias);
-        hp.proj_encoder_layer_indices = core_gguf::kv_str(
-            g, "granite_nle.proj.encoder_layer_indices", hp.proj_encoder_layer_indices.c_str());
+        hp.proj_num_encoder_layers =
+            core_gguf::kv_u32(g, "granite_nle.proj.num_encoder_layers", hp.proj_num_encoder_layers);
+        hp.proj_encoder_dim = core_gguf::kv_u32(g, "granite_nle.proj.encoder_dim", hp.proj_encoder_dim);
+        hp.proj_hidden_size = core_gguf::kv_u32(g, "granite_nle.proj.hidden_size", hp.proj_hidden_size);
+        hp.proj_llm_dim = core_gguf::kv_u32(g, "granite_nle.proj.llm_dim", hp.proj_llm_dim);
+        hp.proj_n_layers = core_gguf::kv_u32(g, "granite_nle.proj.n_layers", hp.proj_n_layers);
+        hp.proj_n_heads = core_gguf::kv_u32(g, "granite_nle.proj.n_heads", hp.proj_n_heads);
+        hp.proj_mlp_ratio = core_gguf::kv_u32(g, "granite_nle.proj.mlp_ratio", hp.proj_mlp_ratio);
+        hp.proj_block_size = core_gguf::kv_u32(g, "granite_nle.proj.block_size", hp.proj_block_size);
+        hp.proj_downsample_rate = core_gguf::kv_u32(g, "granite_nle.proj.downsample_rate", hp.proj_downsample_rate);
+        hp.proj_layernorm_eps = core_gguf::kv_f32(g, "granite_nle.proj.layernorm_eps", hp.proj_layernorm_eps);
+        hp.proj_attn_bias = core_gguf::kv_bool(g, "granite_nle.proj.attn_bias", hp.proj_attn_bias);
+        hp.proj_mlp_bias = core_gguf::kv_bool(g, "granite_nle.proj.mlp_bias", hp.proj_mlp_bias);
+        hp.proj_encoder_layer_indices =
+            core_gguf::kv_str(g, "granite_nle.proj.encoder_layer_indices", hp.proj_encoder_layer_indices.c_str());
 
-        hp.llm_n_layers   = core_gguf::kv_u32(g, "granite_nle.llm.n_layers", hp.llm_n_layers);
-        hp.llm_d_model    = core_gguf::kv_u32(g, "granite_nle.llm.d_model", hp.llm_d_model);
-        hp.llm_n_heads    = core_gguf::kv_u32(g, "granite_nle.llm.n_heads", hp.llm_n_heads);
+        hp.llm_n_layers = core_gguf::kv_u32(g, "granite_nle.llm.n_layers", hp.llm_n_layers);
+        hp.llm_d_model = core_gguf::kv_u32(g, "granite_nle.llm.d_model", hp.llm_d_model);
+        hp.llm_n_heads = core_gguf::kv_u32(g, "granite_nle.llm.n_heads", hp.llm_n_heads);
         hp.llm_n_kv_heads = core_gguf::kv_u32(g, "granite_nle.llm.n_kv_heads", hp.llm_n_kv_heads);
-        hp.llm_head_dim   = core_gguf::kv_u32(g, "granite_nle.llm.head_dim", hp.llm_head_dim);
-        hp.llm_ff_dim     = core_gguf::kv_u32(g, "granite_nle.llm.ff_dim", hp.llm_ff_dim);
+        hp.llm_head_dim = core_gguf::kv_u32(g, "granite_nle.llm.head_dim", hp.llm_head_dim);
+        hp.llm_ff_dim = core_gguf::kv_u32(g, "granite_nle.llm.ff_dim", hp.llm_ff_dim);
         hp.llm_rope_theta = core_gguf::kv_f32(g, "granite_nle.llm.rope_theta", hp.llm_rope_theta);
-        hp.llm_rms_eps    = core_gguf::kv_f32(g, "granite_nle.llm.rms_norm_eps", hp.llm_rms_eps);
+        hp.llm_rms_eps = core_gguf::kv_f32(g, "granite_nle.llm.rms_norm_eps", hp.llm_rms_eps);
         hp.llm_vocab_size = core_gguf::kv_u32(g, "granite_nle.llm.vocab_size", hp.llm_vocab_size);
         hp.embedding_multiplier = core_gguf::kv_f32(g, "granite_nle.llm.embedding_multiplier", hp.embedding_multiplier);
         hp.attention_multiplier = core_gguf::kv_f32(g, "granite_nle.llm.attention_multiplier", hp.attention_multiplier);
-        hp.residual_multiplier  = core_gguf::kv_f32(g, "granite_nle.llm.residual_multiplier", hp.residual_multiplier);
-        hp.logits_scaling       = core_gguf::kv_f32(g, "granite_nle.llm.logits_scaling", hp.logits_scaling);
-        hp.eos_token_id         = core_gguf::kv_u32(g, "granite_nle.llm.eos_token_id", hp.eos_token_id);
-        hp.bos_token_id         = core_gguf::kv_u32(g, "granite_nle.llm.bos_token_id", hp.bos_token_id);
-        hp.pad_token_id         = core_gguf::kv_u32(g, "granite_nle.llm.pad_token_id", hp.pad_token_id);
-        hp.tie_word_embeddings  = core_gguf::kv_bool(g, "granite_nle.llm.tie_word_embeddings", hp.tie_word_embeddings);
-        hp.scale_projected_embeddings = core_gguf::kv_bool(
-            g, "granite_nle.scale_projected_embeddings", hp.scale_projected_embeddings);
+        hp.residual_multiplier = core_gguf::kv_f32(g, "granite_nle.llm.residual_multiplier", hp.residual_multiplier);
+        hp.logits_scaling = core_gguf::kv_f32(g, "granite_nle.llm.logits_scaling", hp.logits_scaling);
+        hp.eos_token_id = core_gguf::kv_u32(g, "granite_nle.llm.eos_token_id", hp.eos_token_id);
+        hp.bos_token_id = core_gguf::kv_u32(g, "granite_nle.llm.bos_token_id", hp.bos_token_id);
+        hp.pad_token_id = core_gguf::kv_u32(g, "granite_nle.llm.pad_token_id", hp.pad_token_id);
+        hp.tie_word_embeddings = core_gguf::kv_bool(g, "granite_nle.llm.tie_word_embeddings", hp.tie_word_embeddings);
+        hp.scale_projected_embeddings =
+            core_gguf::kv_bool(g, "granite_nle.scale_projected_embeddings", hp.scale_projected_embeddings);
 
         core_gguf::free_metadata(g);
     }
@@ -392,35 +392,35 @@ static bool granite_nle_load_model(granite_nle_model& model, const char* path,
 
         b.ff1_norm_w = get(s + "ff1_norm.weight");
         b.ff1_norm_b = get(s + "ff1_norm.bias");
-        b.ff1_up_w   = get(s + "ff1_up.weight");
-        b.ff1_up_b   = get(s + "ff1_up.bias");
+        b.ff1_up_w = get(s + "ff1_up.weight");
+        b.ff1_up_b = get(s + "ff1_up.bias");
         b.ff1_down_w = get(s + "ff1_down.weight");
         b.ff1_down_b = get(s + "ff1_down.bias");
 
-        b.attn_norm_w    = get(s + "attn_norm.weight");
-        b.attn_norm_b    = get(s + "attn_norm.bias");
-        b.attn_q_w       = get(s + "attn_q.weight");
-        b.attn_kv_w      = get(s + "attn_kv.weight");
-        b.attn_out_w     = get(s + "attn_out.weight");
-        b.attn_out_b     = get(s + "attn_out.bias");
+        b.attn_norm_w = get(s + "attn_norm.weight");
+        b.attn_norm_b = get(s + "attn_norm.bias");
+        b.attn_q_w = get(s + "attn_q.weight");
+        b.attn_kv_w = get(s + "attn_kv.weight");
+        b.attn_out_w = get(s + "attn_out.weight");
+        b.attn_out_b = get(s + "attn_out.bias");
         b.attn_rel_pos_w = get(s + "attn_rel_pos.weight");
 
-        b.conv_up_w    = get(s + "conv_up.weight");
-        b.conv_up_b    = get(s + "conv_up.bias");
-        b.conv_dw_w    = get(s + "conv_dw.weight");
-        b.conv_bn_w    = get(s + "conv_bn.weight");
-        b.conv_bn_b    = get(s + "conv_bn.bias");
+        b.conv_up_w = get(s + "conv_up.weight");
+        b.conv_up_b = get(s + "conv_up.bias");
+        b.conv_dw_w = get(s + "conv_dw.weight");
+        b.conv_bn_w = get(s + "conv_bn.weight");
+        b.conv_bn_b = get(s + "conv_bn.bias");
         b.conv_bn_mean = get(s + "conv_bn.running_mean");
-        b.conv_bn_var  = get(s + "conv_bn.running_var");
-        b.conv_down_w  = get(s + "conv_down.weight");
-        b.conv_down_b  = get(s + "conv_down.bias");
-        b.conv_norm_w  = get(s + "conv_norm.weight");
-        b.conv_norm_b  = get(s + "conv_norm.bias");
+        b.conv_bn_var = get(s + "conv_bn.running_var");
+        b.conv_down_w = get(s + "conv_down.weight");
+        b.conv_down_b = get(s + "conv_down.bias");
+        b.conv_norm_w = get(s + "conv_norm.weight");
+        b.conv_norm_b = get(s + "conv_norm.bias");
 
         b.ff2_norm_w = get(s + "ff2_norm.weight");
         b.ff2_norm_b = get(s + "ff2_norm.bias");
-        b.ff2_up_w   = get(s + "ff2_up.weight");
-        b.ff2_up_b   = get(s + "ff2_up.bias");
+        b.ff2_up_w = get(s + "ff2_up.weight");
+        b.ff2_up_b = get(s + "ff2_up.bias");
         b.ff2_down_w = get(s + "ff2_down.weight");
         b.ff2_down_b = get(s + "ff2_down.bias");
 
@@ -440,10 +440,10 @@ static bool granite_nle_load_model(granite_nle_model& model, const char* path,
     }
     model.projector.layer_proj_w = get("proj.layer_proj.weight");
     model.projector.layer_proj_b = get("proj.layer_proj.bias");
-    model.projector.query        = get("proj.query");
-    model.projector.window_pos   = get("proj.window_positions");
-    model.projector.out_norm_w   = get("proj.out_norm.weight");
-    model.projector.out_norm_b   = get("proj.out_norm.bias");
+    model.projector.query = get("proj.query");
+    model.projector.window_pos = get("proj.window_positions");
+    model.projector.out_norm_w = get("proj.out_norm.weight");
+    model.projector.out_norm_b = get("proj.out_norm.bias");
     model.projector.out_linear_w = get("proj.out_linear.weight");
     model.projector.out_linear_b = get("proj.out_linear.bias");
 
@@ -473,7 +473,7 @@ static bool granite_nle_load_model(granite_nle_model& model, const char* path,
 
     // LLM
     model.llm.token_embd_w = get("llm.token_embd.weight");
-    model.llm.norm_w       = get("llm.norm.weight");
+    model.llm.norm_w = get("llm.norm.weight");
     model.llm.blocks.resize(model.hparams.llm_n_layers);
     for (uint32_t il = 0; il < model.hparams.llm_n_layers; il++) {
         auto& b = model.llm.blocks[il];
@@ -481,14 +481,14 @@ static bool granite_nle_load_model(granite_nle_model& model, const char* path,
         snprintf(p, sizeof(p), "llm.blk.%u.", il);
         std::string s = p;
         b.attn_norm_w = get(s + "attn_norm.weight");
-        b.attn_q_w    = get(s + "attn_q.weight");
-        b.attn_k_w    = get(s + "attn_k.weight");
-        b.attn_v_w    = get(s + "attn_v.weight");
-        b.attn_o_w    = get(s + "attn_o.weight");
-        b.ffn_norm_w  = get(s + "ffn_norm.weight");
-        b.ffn_gate_w  = get(s + "ffn_gate.weight");
-        b.ffn_up_w    = get(s + "ffn_up.weight");
-        b.ffn_down_w  = get(s + "ffn_down.weight");
+        b.attn_q_w = get(s + "attn_q.weight");
+        b.attn_k_w = get(s + "attn_k.weight");
+        b.attn_v_w = get(s + "attn_v.weight");
+        b.attn_o_w = get(s + "attn_o.weight");
+        b.ffn_norm_w = get(s + "ffn_norm.weight");
+        b.ffn_gate_w = get(s + "ffn_gate.weight");
+        b.ffn_up_w = get(s + "ffn_up.weight");
+        b.ffn_down_w = get(s + "ffn_down.weight");
     }
 
     return true;
@@ -502,10 +502,10 @@ extern "C" struct granite_nle_context_params granite_nle_context_default_params(
     return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true};
 }
 
-extern "C" struct granite_nle_context* granite_nle_init_from_file(
-    const char* path, struct granite_nle_context_params params) {
+extern "C" struct granite_nle_context* granite_nle_init_from_file(const char* path,
+                                                                  struct granite_nle_context_params params) {
     auto* ctx = new granite_nle_context();
-    ctx->params    = params;
+    ctx->params = params;
     ctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
 
     ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
@@ -543,8 +543,7 @@ extern "C" struct granite_nle_context* granite_nle_init_from_file(
                     i = j + 1;
                 }
                 if (params.verbosity >= 1)
-                    fprintf(stderr, "granite_nle: loaded %zu CTC vocab entries\n",
-                            ctx->ctc_id_to_str.size());
+                    fprintf(stderr, "granite_nle: loaded %zu CTC vocab entries\n", ctx->ctc_id_to_str.size());
             }
 
             // LLM tokenizer — same names as base granite_speech for consistency.
@@ -572,9 +571,8 @@ extern "C" struct granite_nle_context* granite_nle_init_from_file(
 
     if (params.verbosity >= 1) {
         const auto& hp = ctx->model.hparams;
-        fprintf(stderr,
-                "granite_nle: loaded %s (enc %u layers, proj %u layers, llm %u layers, vocab %u)\n",
-                path, hp.enc_n_layers, hp.proj_n_layers, hp.llm_n_layers, hp.llm_vocab_size);
+        fprintf(stderr, "granite_nle: loaded %s (enc %u layers, proj %u layers, llm %u layers, vocab %u)\n", path,
+                hp.enc_n_layers, hp.proj_n_layers, hp.llm_n_layers, hp.llm_vocab_size);
     }
 
     return ctx;
@@ -604,91 +602,96 @@ extern "C" void granite_nle_free(struct granite_nle_context* ctx) {
 // They print a one-line warning and return nullptr / 0 so callers can
 // build and link against the API while the math is filled in.
 
-extern "C" float* granite_nle_compute_mel(struct granite_nle_context* ctx,
-                                          const float* /*samples*/, int /*n_samples*/,
+extern "C" float* granite_nle_compute_mel(struct granite_nle_context* ctx, const float* /*samples*/, int /*n_samples*/,
                                           int* out_n_mels, int* out_T_mel) {
     if (!ctx)
         return nullptr;
     fprintf(stderr, "granite_nle: compute_mel not yet implemented\n");
-    if (out_n_mels) *out_n_mels = 0;
-    if (out_T_mel)  *out_T_mel  = 0;
+    if (out_n_mels)
+        *out_n_mels = 0;
+    if (out_T_mel)
+        *out_T_mel = 0;
     return nullptr;
 }
 
-extern "C" float* granite_nle_run_encoder(struct granite_nle_context* ctx,
-                                          const float* /*mel*/, int /*n_mels*/, int /*T_mel*/,
-                                          int* out_T, int* out_dim) {
+extern "C" float* granite_nle_run_encoder(struct granite_nle_context* ctx, const float* /*mel*/, int /*n_mels*/,
+                                          int /*T_mel*/, int* out_T, int* out_dim) {
     if (!ctx)
         return nullptr;
     fprintf(stderr, "granite_nle: run_encoder not yet implemented\n");
-    if (out_T)   *out_T   = 0;
-    if (out_dim) *out_dim = 0;
+    if (out_T)
+        *out_T = 0;
+    if (out_dim)
+        *out_dim = 0;
     return nullptr;
 }
 
-extern "C" const float* granite_nle_last_ctc_logits(struct granite_nle_context* ctx,
-                                                    int* out_T, int* out_vocab) {
+extern "C" const float* granite_nle_last_ctc_logits(struct granite_nle_context* ctx, int* out_T, int* out_vocab) {
     if (!ctx || ctx->last_ctc_logits.empty())
         return nullptr;
-    if (out_T)     *out_T     = ctx->last_ctc_T;
-    if (out_vocab) *out_vocab = (int)ctx->model.hparams.enc_ctc_vocab;
+    if (out_T)
+        *out_T = ctx->last_ctc_T;
+    if (out_vocab)
+        *out_vocab = (int)ctx->model.hparams.enc_ctc_vocab;
     return ctx->last_ctc_logits.data();
 }
 
-extern "C" const float* granite_nle_last_bpe_logits(struct granite_nle_context* ctx,
-                                                    int* out_T, int* out_vocab) {
+extern "C" const float* granite_nle_last_bpe_logits(struct granite_nle_context* ctx, int* out_T, int* out_vocab) {
     if (!ctx || ctx->last_bpe_logits.empty())
         return nullptr;
-    if (out_T)     *out_T     = ctx->last_bpe_T;
-    if (out_vocab) *out_vocab = (int)ctx->model.hparams.enc_bpe_vocab;
+    if (out_T)
+        *out_T = ctx->last_bpe_T;
+    if (out_vocab)
+        *out_vocab = (int)ctx->model.hparams.enc_bpe_vocab;
     return ctx->last_bpe_logits.data();
 }
 
-extern "C" float* granite_nle_run_projector(struct granite_nle_context* ctx,
-                                            const float* /*enc_concat*/, int /*T*/, int /*dim*/,
-                                            int* out_T, int* out_dim) {
+extern "C" float* granite_nle_run_projector(struct granite_nle_context* ctx, const float* /*enc_concat*/, int /*T*/,
+                                            int /*dim*/, int* out_T, int* out_dim) {
     if (!ctx)
         return nullptr;
     fprintf(stderr, "granite_nle: run_projector not yet implemented\n");
-    if (out_T)   *out_T   = 0;
-    if (out_dim) *out_dim = 0;
+    if (out_T)
+        *out_T = 0;
+    if (out_dim)
+        *out_dim = 0;
     return nullptr;
 }
 
-extern "C" float* granite_nle_run_llm_editing(struct granite_nle_context* ctx,
-                                              const float* /*audio_embs*/, int /*n_audio*/,
-                                              const int32_t* /*text_ids*/, int /*n_text*/,
-                                              int* out_n, int* out_vocab) {
+extern "C" float* granite_nle_run_llm_editing(struct granite_nle_context* ctx, const float* /*audio_embs*/,
+                                              int /*n_audio*/, const int32_t* /*text_ids*/, int /*n_text*/, int* out_n,
+                                              int* out_vocab) {
     if (!ctx)
         return nullptr;
     fprintf(stderr, "granite_nle: run_llm_editing not yet implemented\n");
-    if (out_n)     *out_n     = 0;
-    if (out_vocab) *out_vocab = 0;
+    if (out_n)
+        *out_n = 0;
+    if (out_vocab)
+        *out_vocab = 0;
     return nullptr;
 }
 
-extern "C" char* granite_nle_transcribe(struct granite_nle_context* ctx,
-                                        const float* /*samples*/, int /*n_samples*/) {
+extern "C" char* granite_nle_transcribe(struct granite_nle_context* ctx, const float* /*samples*/, int /*n_samples*/) {
     if (!ctx)
         return nullptr;
     fprintf(stderr, "granite_nle: transcribe not yet implemented\n");
     return nullptr;
 }
 
-extern "C" int32_t* granite_nle_tokenize(struct granite_nle_context* ctx,
-                                         const char* text, int* out_n) {
+extern "C" int32_t* granite_nle_tokenize(struct granite_nle_context* ctx, const char* text, int* out_n) {
     if (!ctx || !text) {
-        if (out_n) *out_n = 0;
+        if (out_n)
+            *out_n = 0;
         return nullptr;
     }
     // Stub: defer to core_bpe once wired up. For now return empty so the
     // CLI can detect "unsupported" and skip.
-    if (out_n) *out_n = 0;
+    if (out_n)
+        *out_n = 0;
     return nullptr;
 }
 
-extern "C" char* granite_nle_detokenize(struct granite_nle_context* ctx,
-                                        const int32_t* ids, int n) {
+extern "C" char* granite_nle_detokenize(struct granite_nle_context* ctx, const int32_t* ids, int n) {
     if (!ctx || !ids || n <= 0)
         return nullptr;
     std::string out;
@@ -706,8 +709,7 @@ extern "C" char* granite_nle_detokenize(struct granite_nle_context* ctx,
     return r;
 }
 
-extern "C" char* granite_nle_ctc_decode(struct granite_nle_context* ctx,
-                                        const int32_t* ids, int n) {
+extern "C" char* granite_nle_ctc_decode(struct granite_nle_context* ctx, const int32_t* ids, int n) {
     if (!ctx || !ids || n <= 0)
         return nullptr;
     std::string out;
