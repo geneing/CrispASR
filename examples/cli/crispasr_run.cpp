@@ -150,6 +150,8 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, wh
         setenv_safe("COHERE_DEBUG", "1");
         setenv_safe("COHERE_BENCH", "1");
         setenv_safe("OMNIASR_BENCH", "1");
+        setenv_safe("QWEN3_TTS_BENCH", "1");
+        setenv_safe("QWEN3_TTS_DEBUG", "1");
         setenv_safe("FIREREDPUNC_DEBUG", "1");
     }
 

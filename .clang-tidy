@@ -97,7 +97,7 @@ Checks: >
 
 WarningsAsErrors: ""    # don't fail the build on tidy warnings; use as advisory
 
-HeaderFilterRegex: "examples/cli/.*\\.h$|src/.*\\.h$"
+HeaderFilterRegex: '^(src|examples/cli)/(?!.*(miniaudio\.h|httplib\.h|json\.hpp|stb_vorbis\.c)).*\.h$'
 
 # Options for specific checks
 CheckOptions:

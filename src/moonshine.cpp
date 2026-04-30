@@ -445,7 +445,7 @@ static struct ggml_tensor* moonshine_build_encoder(struct ggml_context* ctx0, co
         struct ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, nullptr, scale, 0.0f, 0.0f);
 
         // Result is [head_dim, n_heads, seq_len] — reshape to [hidden, seq_len]
-        attn = ggml_reshape_2d(ctx0, attn, head_dim * n_heads, seq_len);
+        attn = ggml_reshape_2d(ctx0, attn, (int64_t)head_dim * n_heads, seq_len);
 
         // Output projection
         cur = ggml_mul_mat(ctx0, layer.attn_o, attn);
@@ -486,7 +486,7 @@ static bool moonshine_kv_cache_init(moonshine_kv_cache& cache, int n_layers, int
     cache.k.resize(n_layers);
     cache.v.resize(n_layers);
 
-    const size_t n_tensors = 2 * n_layers;
+    const size_t n_tensors = 2 * (size_t)n_layers;
     const size_t mem_size = ggml_tensor_overhead() * n_tensors + 256;
     struct ggml_init_params params = {
         /*.mem_size   =*/mem_size,
@@ -494,8 +494,9 @@ static bool moonshine_kv_cache_init(moonshine_kv_cache& cache, int n_layers, int
         /*.no_alloc   =*/true,
     };
     cache.ctx = ggml_init(params);
-    if (!cache.ctx)
+    if (!cache.ctx) {
         return false;
+    }
 
     for (int i = 0; i < n_layers; i++) {
         // Moonshine decoder writes F32 directly to cache via ggml_set_*d;
@@ -505,8 +506,9 @@ static bool moonshine_kv_cache_init(moonshine_kv_cache& cache, int n_layers, int
     }
 
     cache.buf = ggml_backend_alloc_ctx_tensors_from_buft(cache.ctx, ggml_backend_cpu_buffer_type());
-    if (!cache.buf)
+    if (!cache.buf) {
         return false;
+    }
 
     ggml_backend_buffer_clear(cache.buf, 0);
     return true;
@@ -595,8 +597,9 @@ int moonshine_encode(struct moonshine_context* ctx, const float* audio, int n_sa
     }
 
     int ret = moonshine_run_encoder(ctx, audio, n_samples);
-    if (ret != 0)
+    if (ret != 0) {
         return ret;
+    }
 
     const int hidden_dim = (int)ctx->model.hparams.enc_hidden_size;
     const int seq_len = ctx->enc_len;
@@ -635,8 +638,9 @@ static int moonshine_precompute_cross_kv(struct moonshine_context* ctx) {
         /*.no_alloc   =*/true,
     };
     struct ggml_context* ctx0 = ggml_init(params);
-    if (!ctx0)
+    if (!ctx0) {
         return -1;
+    }
 
     // Input: encoder output [hidden, enc_len]
     struct ggml_tensor* enc_out = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, enc_len);
@@ -684,7 +688,7 @@ static int moonshine_precompute_cross_kv(struct moonshine_context* ctx) {
         return -1;
     }
 
-    ggml_backend_tensor_set(enc_out, ctx->encoder_out.data(), 0, hidden * enc_len * sizeof(float));
+    ggml_backend_tensor_set(enc_out, ctx->encoder_out.data(), 0, (size_t)hidden * enc_len * sizeof(float));
 
     if (ggml_backend_graph_compute(ctx->backend, graph) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "%s: graph compute failed\n", __func__);
@@ -694,7 +698,7 @@ static int moonshine_precompute_cross_kv(struct moonshine_context* ctx) {
     }
 
     // Copy results into cross KV cache
-    const size_t kv_bytes = head_dim * enc_len * n_kv_heads * sizeof(float);
+    const size_t kv_bytes = (size_t)head_dim * enc_len * n_kv_heads * sizeof(float);
     for (int i = 0; i < n_layers; i++) {
         ggml_backend_tensor_get(k_outputs[i], ctx->kv_cross.k[i]->data, 0, kv_bytes);
         ggml_backend_tensor_get(v_outputs[i], ctx->kv_cross.v[i]->data, 0, kv_bytes);
@@ -728,8 +732,9 @@ static struct ggml_tensor* moonshine_build_decoder_step(struct ggml_context* ctx
     // ggml_get_rows inherits the embed type; cast to F32 so mul_mat src1 is always F32
     // (multilingual GGUFs may store dec_embed as F16)
     struct ggml_tensor* cur = ggml_get_rows(ctx0, model.dec_embed, token_id);
-    if (cur->type != GGML_TYPE_F32)
+    if (cur->type != GGML_TYPE_F32) {
         cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
+    }
 
     for (uint32_t il = 0; il < hp.dec_n_layers; il++) {
         const auto& layer = model.dec_layers[il];
@@ -781,7 +786,7 @@ static struct ggml_tensor* moonshine_build_decoder_step(struct ggml_context* ctx
 
         struct ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K_cached, V_cached, nullptr, scale, 0.0f, 0.0f);
         // Output: [head_dim, n_heads, 1] -> [hidden, 1]
-        attn = ggml_reshape_2d(ctx0, attn, n_heads * head_dim, 1);
+        attn = ggml_reshape_2d(ctx0, attn, (int64_t)n_heads * head_dim, 1);
         cur = ggml_add(ctx0, ggml_mul_mat(ctx0, layer.attn_o, attn), residual);
 
         // === Cross-attention ===
@@ -803,7 +808,7 @@ static struct ggml_tensor* moonshine_build_decoder_step(struct ggml_context* ctx
 
         struct ggml_tensor* cross_attn =
             ggml_flash_attn_ext(ctx0, Q_cross, K_cross, V_cross, nullptr, scale, 0.0f, 0.0f);
-        cross_attn = ggml_reshape_2d(ctx0, cross_attn, n_heads * head_dim, 1);
+        cross_attn = ggml_reshape_2d(ctx0, cross_attn, (int64_t)n_heads * head_dim, 1);
         cur = ggml_add(ctx0, ggml_mul_mat(ctx0, layer.cross_attn_o, cross_attn), residual);
 
         // === Gated SiLU FFN ===
@@ -921,8 +926,9 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
 
     // 2. Init KV caches
     int max_gen = (int)(ceil((double)n_samples / 16000.0 * 6.5));
-    if (max_gen > 194)
+    if (max_gen > 194) {
         max_gen = 194;
+    }
     int max_len = max_gen + 1; // +1 for BOS
 
     if (!moonshine_kv_cache_init(ctx->kv_self, hp.dec_n_layers, max_len, hp.n_kv_heads, hp.head_dim)) {
@@ -991,8 +997,9 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
             }
         }
 
-        if (best == (int32_t)hp.eos_token_id)
+        if (best == (int32_t)hp.eos_token_id) {
             break;
+        }
 
         tokens.push_back(best);
         token = best;
@@ -1014,15 +1021,17 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
 }
 
 void moonshine_free(struct moonshine_context* ctx) {
-    if (!ctx)
+    if (!ctx) {
         return;
+    }
     // moonshine_model's destructor frees buf_w + ctx_w. It must run BEFORE
     // we free the backend, otherwise ggml_metal sees a buffer outliving its
     // device and ggml_metal_rsets_free's assert fires at process exit.
     auto* backend = ctx->backend;
     delete ctx;
-    if (backend)
+    if (backend) {
         ggml_backend_free(backend);
+    }
 }
 
 void moonshine_print_model_info(struct moonshine_context* ctx) {
@@ -1102,8 +1111,9 @@ void moonshine_print_model_info(struct moonshine_context* ctx) {
 }
 
 void moonshine_set_n_threads(struct moonshine_context* ctx, int n_threads) {
-    if (!ctx || n_threads < 1)
+    if (!ctx || n_threads < 1) {
         return;
+    }
     ctx->n_threads = n_threads;
     if (ctx->backend) {
         ggml_backend_cpu_set_n_threads(ctx->backend, n_threads);
@@ -1111,14 +1121,16 @@ void moonshine_set_n_threads(struct moonshine_context* ctx, int n_threads) {
 }
 
 int moonshine_get_n_threads(struct moonshine_context* ctx) {
-    if (!ctx)
+    if (!ctx) {
         return 0;
+    }
     return ctx->n_threads;
 }
 
 int moonshine_get_timing(struct moonshine_context* ctx, struct moonshine_timing* timing) {
-    if (!ctx || !timing)
+    if (!ctx || !timing) {
         return -1;
+    }
     *timing = ctx->timing;
     return 0;
 }

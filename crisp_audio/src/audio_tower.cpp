@@ -109,13 +109,13 @@ struct tower {
 
     // Optional — present in GGUFs that bake the WhisperFeatureExtractor
     // mel filterbank + Hann window into the model.
-    ggml_tensor *mel_filters = nullptr;
-    ggml_tensor *mel_window = nullptr;
+    ggml_tensor* mel_filters = nullptr;
+    ggml_tensor* mel_window = nullptr;
 };
 
 constexpr float kLayerNormEps = 1e-5f;
 
-}  // namespace
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Public context — opaque to the C ABI
@@ -126,7 +126,7 @@ struct crisp_audio_context {
 
     hparams hp;
     tower w;
-    std::vector<float> sin_pe;  // (max_source_pos, d_model) row-major
+    std::vector<float> sin_pe; // (max_source_pos, d_model) row-major
 
     ggml_context* model_ctx = nullptr;
     ggml_backend_buffer_t model_buf = nullptr;
@@ -174,11 +174,13 @@ void crisp_audio_fft_recursive(float* in, int N, float* out) {
         return;
     }
     float* even = in + N;
-    for (int i = 0; i < half_N; i++) even[i] = in[2 * i];
+    for (int i = 0; i < half_N; i++)
+        even[i] = in[2 * i];
     float* even_fft = out + 2 * N;
     crisp_audio_fft_recursive(even, half_N, even_fft);
     float* odd = even;
-    for (int i = 0; i < half_N; i++) odd[i] = in[2 * i + 1];
+    for (int i = 0; i < half_N; i++)
+        odd[i] = in[2 * i + 1];
     float* odd_fft = even_fft + N;
     crisp_audio_fft_recursive(odd, half_N, odd_fft);
     for (int k = 0; k < half_N; k++) {
@@ -197,21 +199,24 @@ void crisp_audio_fft_recursive(float* in, int N, float* out) {
 void crisp_audio_fft_wrapper(const float* in, int N, float* out) {
     static thread_local std::vector<float> scratch_in;
     static thread_local std::vector<float> scratch_out;
-    if ((int)scratch_in.size() < 4 * N) scratch_in.assign((size_t)4 * N, 0.0f);
-    if ((int)scratch_out.size() < 8 * N) scratch_out.assign((size_t)8 * N, 0.0f);
+    if ((int)scratch_in.size() < 4 * N)
+        scratch_in.assign((size_t)4 * N, 0.0f);
+    if ((int)scratch_out.size() < 8 * N)
+        scratch_out.assign((size_t)8 * N, 0.0f);
     std::memcpy(scratch_in.data(), in, (size_t)N * sizeof(float));
     crisp_audio_fft_recursive(scratch_in.data(), N, scratch_out.data());
     std::memcpy(out, scratch_out.data(), (size_t)(2 * N) * sizeof(float));
 }
 
-const char* default_or(const char* p, const char* d) { return (p && *p) ? p : d; }
+const char* default_or(const char* p, const char* d) {
+    return (p && *p) ? p : d;
+}
 
 // ---------------------------------------------------------------------------
 // Model loading — pull weights + hparams from the GGUF.
 // ---------------------------------------------------------------------------
 
-bool load_model(crisp_audio_context& ctx, const char* path,
-                const crisp_audio_params& params) {
+bool load_model(crisp_audio_context& ctx, const char* path, const crisp_audio_params& params) {
     const std::string tprefix = default_or(params.tensor_prefix, "audio.");
     const std::string mprefix = default_or(params.meta_prefix, "crisp_audio.");
 
@@ -227,8 +232,8 @@ bool load_model(crisp_audio_context& ctx, const char* path,
         // requested prefix first; if its canonical "d_model" key isn't
         // present we fall back to the qwen3-asr key layout so existing
         // qwen3-asr GGUFs work without re-conversion.
-        std::string ap = mprefix;          // audio-fields prefix
-        std::string tp;                    // top-level (sr/n_fft/etc.) prefix
+        std::string ap = mprefix; // audio-fields prefix
+        std::string tp;           // top-level (sr/n_fft/etc.) prefix
         const std::string canonical_probe = mprefix + "d_model";
         if (gguf_find_key(gctx, canonical_probe.c_str()) < 0) {
             const std::string qwen_probe = "qwen3asr.audio.d_model";
@@ -236,39 +241,34 @@ bool load_model(crisp_audio_context& ctx, const char* path,
                 ap = "qwen3asr.audio.";
                 tp = "qwen3asr.";
             } else {
-                tp = mprefix;  // both stay at requested prefix; defaults will apply
+                tp = mprefix; // both stay at requested prefix; defaults will apply
             }
         } else {
             tp = mprefix;
         }
-        auto ua = [&](const char* k, uint32_t d) {
-            return core_gguf::kv_u32(gctx, (ap + k).c_str(), d);
-        };
-        auto ut = [&](const char* k, uint32_t d) {
-            return core_gguf::kv_u32(gctx, (tp + k).c_str(), d);
-        };
+        auto ua = [&](const char* k, uint32_t d) { return core_gguf::kv_u32(gctx, (ap + k).c_str(), d); };
+        auto ut = [&](const char* k, uint32_t d) { return core_gguf::kv_u32(gctx, (tp + k).c_str(), d); };
         // Top-level audio config (sample rate / FFT / window).
-        hp.sample_rate    = ut("sample_rate", hp.sample_rate);
-        hp.n_mels         = ut("n_mels", hp.n_mels);
-        hp.n_fft          = ut("n_fft", hp.n_fft);
-        hp.win_length     = ut("win_length", hp.win_length);
-        hp.hop_length     = ut("hop_length", hp.hop_length);
-        hp.n_window       = ut("n_window", hp.n_window);
+        hp.sample_rate = ut("sample_rate", hp.sample_rate);
+        hp.n_mels = ut("n_mels", hp.n_mels);
+        hp.n_fft = ut("n_fft", hp.n_fft);
+        hp.win_length = ut("win_length", hp.win_length);
+        hp.hop_length = ut("hop_length", hp.hop_length);
+        hp.n_window = ut("n_window", hp.n_window);
         hp.n_window_infer = ut("n_window_infer", hp.n_window_infer);
         hp.attn_window_mode = ua("attn_window_mode", hp.attn_window_mode);
         // Encoder hparams.
-        hp.n_layers       = ua("n_layers", hp.n_layers);
-        hp.d_model        = ua("d_model", hp.d_model);
-        hp.n_heads        = ua("n_heads", hp.n_heads);
-        hp.head_dim       = ua("head_dim", hp.head_dim);
-        hp.ff_dim         = ua("ff_dim", hp.ff_dim);
-        hp.conv_ch        = ua("conv_channels", hp.conv_ch);
+        hp.n_layers = ua("n_layers", hp.n_layers);
+        hp.d_model = ua("d_model", hp.d_model);
+        hp.n_heads = ua("n_heads", hp.n_heads);
+        hp.head_dim = ua("head_dim", hp.head_dim);
+        hp.ff_dim = ua("ff_dim", hp.ff_dim);
+        hp.conv_ch = ua("conv_channels", hp.conv_ch);
         hp.max_source_pos = ua("max_source_pos", hp.max_source_pos);
         // qwen3-asr converter wrote `proj_dim`; BidirLM/crisp_audio writes
         // `output_dim`. Try both so the same loader works on both GGUF
         // dialects without forcing the user to re-run the converter.
-        hp.output_dim = ua("output_dim",
-                           ua("proj_dim", hp.output_dim));
+        hp.output_dim = ua("output_dim", ua("proj_dim", hp.output_dim));
         core_gguf::free_metadata(gctx);
     }
 
@@ -311,8 +311,7 @@ bool load_model(crisp_audio_context& ctx, const char* path,
     w.mel_filters = get(tprefix + "mel_filters");
     w.mel_window = get(tprefix + "mel_window");
 
-    if (!w.conv1_w || !w.conv2_w || !w.conv3_w || !w.conv_out_w ||
-        !w.ln_post_w || !w.proj1_w || !w.proj2_w) {
+    if (!w.conv1_w || !w.conv2_w || !w.conv3_w || !w.conv_out_w || !w.ln_post_w || !w.proj1_w || !w.proj2_w) {
         return false;
     }
 
@@ -340,7 +339,8 @@ bool load_model(crisp_audio_context& ctx, const char* path,
         b.ffn_up_b = rq("ffn_up.bias");
         b.ffn_down_w = rq("ffn_down.weight");
         b.ffn_down_b = rq("ffn_down.bias");
-        if (!b.attn_q_w) return false;
+        if (!b.attn_q_w)
+            return false;
     }
 
     // Precompute sinusoidal positional embedding (Whisper-style).
@@ -378,9 +378,7 @@ bool load_model(crisp_audio_context& ctx, const char* path,
 //     → (output_dim, N_padded)
 // ---------------------------------------------------------------------------
 
-ggml_cgraph* build_graph_qwen_omni(crisp_audio_context& ctx,
-                                   int T_chunk, int num_chunks,
-                                   int T_chunk_out_expected) {
+ggml_cgraph* build_graph_qwen_omni(crisp_audio_context& ctx, int T_chunk, int num_chunks, int T_chunk_out_expected) {
     const auto& hp = ctx.hp;
     const auto& w = ctx.w;
     const int n_mels = (int)hp.n_mels;
@@ -432,7 +430,8 @@ ggml_cgraph* build_graph_qwen_omni(crisp_audio_context& ctx,
     cur = ggml_cont(g, ggml_permute(g, cur, 2, 0, 1, 3));
     cur = ggml_reshape_3d(g, cur, F_out * C_out, T_out, num_chunks);
     cur = ggml_mul_mat(g, w.conv_out_w, cur);
-    if (w.conv_out_b) cur = ggml_add(g, cur, w.conv_out_b);
+    if (w.conv_out_b)
+        cur = ggml_add(g, cur, w.conv_out_b);
 
     cur = ggml_add(g, cur, pe_in);
 
@@ -496,7 +495,7 @@ ggml_cgraph* build_graph_qwen_omni(crisp_audio_context& ctx,
     return gf;
 }
 
-}  // namespace
+} // namespace
 
 // ===========================================================================
 // Public C API
@@ -515,24 +514,22 @@ struct crisp_audio_params crisp_audio_params_default(void) {
     return p;
 }
 
-struct crisp_audio_context* crisp_audio_init_from_file(
-    const char* gguf_path,
-    const struct crisp_audio_params* params) {
-    if (!gguf_path) return nullptr;
+struct crisp_audio_context* crisp_audio_init_from_file(const char* gguf_path, const struct crisp_audio_params* params) {
+    if (!gguf_path)
+        return nullptr;
     crisp_audio_params eff = params ? *params : crisp_audio_params_default();
 
     auto* ctx = new crisp_audio_context();
     ctx->n_threads = eff.n_threads;
     ctx->verbosity = eff.verbosity;
-    ctx->dialect = (eff.dialect == CRISP_AUDIO_DIALECT_AUTO)
-                   ? CRISP_AUDIO_DIALECT_QWEN_OMNI
-                   : eff.dialect;
+    ctx->dialect = (eff.dialect == CRISP_AUDIO_DIALECT_AUTO) ? CRISP_AUDIO_DIALECT_QWEN_OMNI : eff.dialect;
 
     // Backend selection — GPU if requested + available, fall back to CPU.
     ctx->backend = nullptr;
     if (eff.use_gpu) {
         ggml_backend_dev_t gdev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
-        if (gdev) ctx->backend = ggml_backend_dev_init(gdev, nullptr);
+        if (gdev)
+            ctx->backend = ggml_backend_dev_init(gdev, nullptr);
     }
     if (!ctx->backend) {
         ctx->backend = ggml_backend_cpu_init();
@@ -553,44 +550,47 @@ struct crisp_audio_context* crisp_audio_init_from_file(
     // graph holds ~290 ops for an 18-layer encoder, ~390 for 24 layers, so
     // 16384 is comfortable headroom).
     constexpr int kGraphCapacity = 16384;
-    ctx->compute_meta.resize(
-        ggml_tensor_overhead() * kGraphCapacity +
-        ggml_graph_overhead_custom(kGraphCapacity, false));
+    ctx->compute_meta.resize(ggml_tensor_overhead() * kGraphCapacity +
+                             ggml_graph_overhead_custom(kGraphCapacity, false));
 
     std::vector<ggml_backend_t> backends;
     backends.push_back(ctx->backend);
-    if (ctx->backend_cpu) backends.push_back(ctx->backend_cpu);
+    if (ctx->backend_cpu)
+        backends.push_back(ctx->backend_cpu);
     // op_offload=false to match qwen3_asr's behavior — keeps each tensor
     // on its assigned backend rather than letting the scheduler migrate.
-    ctx->sched = ggml_backend_sched_new(backends.data(), nullptr,
-                                        (int)backends.size(),
-                                        kGraphCapacity, false, false);
+    ctx->sched = ggml_backend_sched_new(backends.data(), nullptr, (int)backends.size(), kGraphCapacity, false, false);
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr,
                 "crisp_audio: loaded dialect=qwen_omni d_model=%u layers=%u "
                 "heads=%u head_dim=%u output_dim=%u n_mels=%u n_window=%u\n",
-                ctx->hp.d_model, ctx->hp.n_layers, ctx->hp.n_heads,
-                ctx->hp.head_dim, ctx->hp.output_dim, ctx->hp.n_mels,
-                ctx->hp.n_window);
+                ctx->hp.d_model, ctx->hp.n_layers, ctx->hp.n_heads, ctx->hp.head_dim, ctx->hp.output_dim,
+                ctx->hp.n_mels, ctx->hp.n_window);
     }
     return ctx;
 }
 
 void crisp_audio_free(struct crisp_audio_context* ctx) {
-    if (!ctx) return;
-    if (ctx->sched) ggml_backend_sched_free(ctx->sched);
-    if (ctx->model_buf) ggml_backend_buffer_free(ctx->model_buf);
-    if (ctx->model_ctx) ggml_free(ctx->model_ctx);
-    if (ctx->backend_cpu) ggml_backend_free(ctx->backend_cpu);
-    if (ctx->backend) ggml_backend_free(ctx->backend);
+    if (!ctx)
+        return;
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
+    if (ctx->model_buf)
+        ggml_backend_buffer_free(ctx->model_buf);
+    if (ctx->model_ctx)
+        ggml_free(ctx->model_ctx);
+    if (ctx->backend_cpu)
+        ggml_backend_free(ctx->backend_cpu);
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
     delete ctx;
 }
 
-float* crisp_audio_compute_mel(struct crisp_audio_context* ctx,
-                               const float* samples, int n_samples,
-                               int* out_n_mels, int* out_T_mel) {
-    if (!ctx || !samples || n_samples <= 0) return nullptr;
+float* crisp_audio_compute_mel(struct crisp_audio_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                               int* out_T_mel) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
     const auto& hp = ctx->hp;
     if (!ctx->w.mel_filters || !ctx->w.mel_window) {
         fprintf(stderr, "crisp_audio: GGUF missing mel_filters / mel_window — "
@@ -604,11 +604,9 @@ float* crisp_audio_compute_mel(struct crisp_audio_context* ctx,
     const int n_freqs = n_fft / 2 + 1;
 
     std::vector<float> hann(n_fft);
-    ggml_backend_tensor_get(ctx->w.mel_window, hann.data(), 0,
-                            (size_t)n_fft * sizeof(float));
+    ggml_backend_tensor_get(ctx->w.mel_window, hann.data(), 0, (size_t)n_fft * sizeof(float));
     std::vector<float> filt((size_t)n_freqs * n_mels);
-    ggml_backend_tensor_get(ctx->w.mel_filters, filt.data(), 0,
-                            filt.size() * sizeof(float));
+    ggml_backend_tensor_get(ctx->w.mel_filters, filt.data(), 0, filt.size() * sizeof(float));
 
     core_mel::Params p;
     p.n_fft = n_fft;
@@ -626,22 +624,24 @@ float* crisp_audio_compute_mel(struct crisp_audio_context* ctx,
     p.drop_last_frame = true;
 
     int T_ret = 0;
-    auto mel = core_mel::compute(samples, n_samples, hann.data(), n_fft,
-                                 filt.data(), n_freqs,
-                                 crisp_audio_fft_wrapper, p, T_ret);
-    if (mel.empty()) return nullptr;
+    auto mel = core_mel::compute(samples, n_samples, hann.data(), n_fft, filt.data(), n_freqs, crisp_audio_fft_wrapper,
+                                 p, T_ret);
+    if (mel.empty())
+        return nullptr;
 
-    if (out_n_mels) *out_n_mels = n_mels;
-    if (out_T_mel) *out_T_mel = T_ret;
+    if (out_n_mels)
+        *out_n_mels = n_mels;
+    if (out_T_mel)
+        *out_T_mel = T_ret;
     float* result = (float*)std::malloc(mel.size() * sizeof(float));
     std::memcpy(result, mel.data(), mel.size() * sizeof(float));
     return result;
 }
 
-float* crisp_audio_encode(struct crisp_audio_context* ctx,
-                          const float* mel_features, int n_mels, int T_mel,
+float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel_features, int n_mels, int T_mel,
                           int* out_n_frames, int* out_dim) {
-    if (!ctx || !mel_features) return nullptr;
+    if (!ctx || !mel_features)
+        return nullptr;
     const auto& hp = ctx->hp;
     if (n_mels != (int)hp.n_mels) {
         fprintf(stderr, "crisp_audio: mel mismatch (%d vs %d)\n", n_mels, (int)hp.n_mels);
@@ -650,9 +650,7 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx,
 
     const int chunk_T = (int)hp.n_window * 2;
     const int num_chunks = (T_mel + chunk_T - 1) / chunk_T;
-    auto conv_out_len = [](int in_len) {
-        return (in_len + 2 - 3) / 2 + 1;
-    };
+    auto conv_out_len = [](int in_len) { return (in_len + 2 - 3) / 2 + 1; };
     const int T_chunk_out = conv_out_len(conv_out_len(conv_out_len(chunk_T)));
     const int N_padded = T_chunk_out * num_chunks;
 
@@ -678,15 +676,14 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx,
         // would produce NaN, so we leave padding rows unmasked. Their outputs
         // are discarded by the BidirLM wrapper's pooling step anyway.
         const float kNegInf = -std::numeric_limits<float>::infinity();
-        const int chunks_per_window = (hp.n_window > 0)
-            ? std::max(1, (int)(hp.n_window_infer / (hp.n_window * 2)))
-            : 1;
+        const int chunks_per_window = (hp.n_window > 0) ? std::max(1, (int)(hp.n_window_infer / (hp.n_window * 2))) : 1;
         const int window_aftercnn = chunks_per_window * T_chunk_out;
         std::vector<int> valid_per_chunk(num_chunks);
         for (int c = 0; c < num_chunks; c++) {
             const int t_len = std::min(chunk_T, T_mel - c * chunk_T);
             int v = t_len;
-            for (int s = 0; s < 3; s++) v = (v - 1) / 2 + 1;
+            for (int s = 0; s < 3; s++)
+                v = (v - 1) / 2 + 1;
             valid_per_chunk[c] = v;
         }
         // Determine which global frame indices are valid (and therefore have
@@ -708,7 +705,8 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx,
         // to keys in the same window. For padding query rows (window_id == -1)
         // leave full zero attention — their outputs are pooled out.
         for (int i = 0; i < N_padded; i++) {
-            if (window_id[i] < 0) continue;  // padding query: keep zero row
+            if (window_id[i] < 0)
+                continue; // padding query: keep zero row
             for (int j = 0; j < N_padded; j++) {
                 if (window_id[j] != window_id[i]) {
                     mask[(size_t)i * N_padded + j] = kNegInf;
@@ -724,22 +722,17 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx,
         return nullptr;
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mel_batched"),
-                            mel_padded.data(), 0,
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mel_batched"), mel_padded.data(), 0,
                             mel_padded.size() * sizeof(float));
 
     {
         const int d = (int)hp.d_model;
         std::vector<float> pe_buf((size_t)d * T_chunk_out);
-        std::memcpy(pe_buf.data(), ctx->sin_pe.data(),
-                    pe_buf.size() * sizeof(float));
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pe_input"),
-                                pe_buf.data(), 0,
-                                pe_buf.size() * sizeof(float));
+        std::memcpy(pe_buf.data(), ctx->sin_pe.data(), pe_buf.size() * sizeof(float));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pe_input"), pe_buf.data(), 0, pe_buf.size() * sizeof(float));
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "attn_mask"),
-                            mask.data(), 0, mask.size() * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "attn_mask"), mask.data(), 0, mask.size() * sizeof(float));
 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "crisp_audio: graph compute failed\n");
@@ -747,11 +740,14 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx,
     }
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "encoder_out");
-    if (!out) return nullptr;
+    if (!out)
+        return nullptr;
     const int pdim = (int)out->ne[0];
     const int N = (int)out->ne[1];
-    if (out_n_frames) *out_n_frames = N;
-    if (out_dim) *out_dim = pdim;
+    if (out_n_frames)
+        *out_n_frames = N;
+    if (out_dim)
+        *out_dim = pdim;
 
     const size_t total = (size_t)pdim * N;
     float* result = (float*)std::malloc(total * sizeof(float));
@@ -775,4 +771,4 @@ enum crisp_audio_dialect crisp_audio_dialect_of(struct crisp_audio_context* ctx)
     return ctx ? ctx->dialect : CRISP_AUDIO_DIALECT_AUTO;
 }
 
-}  // extern "C"
+} // extern "C"

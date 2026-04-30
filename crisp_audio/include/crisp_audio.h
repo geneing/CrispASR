@@ -39,8 +39,8 @@ struct crisp_audio_context;
 // Adding a new dialect = (a) add an enum value, (b) implement the matching
 // graph builder in src/. Callers don't need to change.
 enum crisp_audio_dialect {
-    CRISP_AUDIO_DIALECT_AUTO            = 0,  // resolve from GGUF
-    CRISP_AUDIO_DIALECT_QWEN_OMNI       = 1,  // Conv2D-3x s=2 + sinusoidal + pre-LN + proj1/GELU/proj2
+    CRISP_AUDIO_DIALECT_AUTO = 0,      // resolve from GGUF
+    CRISP_AUDIO_DIALECT_QWEN_OMNI = 1, // Conv2D-3x s=2 + sinusoidal + pre-LN + proj1/GELU/proj2
     // Future: WHISPER_CLASSIC, MOONSHINE, MODERNBERT_AUDIO, ...
 };
 
@@ -49,7 +49,7 @@ enum crisp_audio_dialect {
 // them here.
 struct crisp_audio_params {
     int n_threads;
-    int verbosity;        // 0=silent 1=normal 2=verbose
+    int verbosity; // 0=silent 1=normal 2=verbose
     bool use_gpu;
 
     // Tensor-name prefix in the GGUF (e.g. "audio." for qwen3-asr,
@@ -70,9 +70,7 @@ struct crisp_audio_params crisp_audio_params_default(void);
 
 // Load the audio encoder from a GGUF.
 // Returns NULL on failure. Caller must free with crisp_audio_free().
-struct crisp_audio_context* crisp_audio_init_from_file(
-    const char* gguf_path,
-    const struct crisp_audio_params* params);
+struct crisp_audio_context* crisp_audio_init_from_file(const char* gguf_path, const struct crisp_audio_params* params);
 
 void crisp_audio_free(struct crisp_audio_context* ctx);
 
@@ -83,16 +81,14 @@ void crisp_audio_free(struct crisp_audio_context* ctx);
 //
 // Returns malloc'd (n_mels, T_mel) row-major, or NULL on failure.
 // *out_n_mels and *out_T_mel are set on return. Caller frees with free().
-float* crisp_audio_compute_mel(struct crisp_audio_context* ctx,
-                               const float* samples, int n_samples,
-                               int* out_n_mels, int* out_T_mel);
+float* crisp_audio_compute_mel(struct crisp_audio_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                               int* out_T_mel);
 
 // Run the full audio encoder forward pass on a precomputed log-mel.
 // Output: malloc'd (n_frames, output_dim) row-major, or NULL on failure.
 // *out_n_frames and *out_dim are set on return. Caller frees with free().
-float* crisp_audio_encode(struct crisp_audio_context* ctx,
-                          const float* mel, int n_mels, int T_mel,
-                          int* out_n_frames, int* out_dim);
+float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel, int n_mels, int T_mel, int* out_n_frames,
+                          int* out_dim);
 
 // Read scalar hparams of the loaded model. Useful for caller sanity
 // checks. Returns 0 if the field is not meaningful for the dialect.
