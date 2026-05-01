@@ -83,9 +83,50 @@ public:
     }
 
     std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
-        if (!voice_loaded_ && !params.tts_voice.empty()) {
-            if (vibevoice_load_voice(ctx_, params.tts_voice.c_str()) == 0)
+        // Voice resolution order:
+        //   1. Explicit --voice <path>
+        //   2. Per-language sibling pick (vibevoice-voice-<lang>-Spk1_woman.gguf
+        //      → vibevoice-voice-<lang>-Spk0_man.gguf), if -l <lang> is set
+        //   3. Sibling kokoro-voice-emma.gguf as English default (matches the
+        //      auto-download companion)
+        std::string voice_path = params.tts_voice;
+        if (voice_path.empty()) {
+            auto slash = params.model.find_last_of("/\\");
+            std::string dir = (slash == std::string::npos) ? "." : params.model.substr(0, slash);
+            auto try_sibling = [&](const std::string& fname) -> std::string {
+                std::string p = dir + "/" + fname;
+                FILE* f = fopen(p.c_str(), "rb");
+                if (f) { fclose(f); return p; }
+                return {};
+            };
+            const std::string& lang = params.language;
+            if (!lang.empty() && lang != "auto" && lang.size() >= 2) {
+                std::string l2 = lang.substr(0, 2);
+                voice_path = try_sibling("vibevoice-voice-" + l2 + "-Spk1_woman.gguf");
+                if (voice_path.empty())
+                    voice_path = try_sibling("vibevoice-voice-" + l2 + "-Spk0_man.gguf");
+            }
+            if (voice_path.empty())
+                voice_path = try_sibling("vibevoice-voice-emma.gguf");
+        }
+        if (!voice_loaded_ && !voice_path.empty()) {
+            if (vibevoice_load_voice(ctx_, voice_path.c_str()) == 0) {
                 voice_loaded_ = true;
+                if (params.tts_voice.empty())
+                    fprintf(stderr, "crispasr[vibevoice-tts]: auto-picked voice '%s'\n", voice_path.c_str());
+            } else {
+                fprintf(stderr,
+                        "crispasr[vibevoice-tts]: voice '%s' could not be loaded; "
+                        "refusing to synthesise without a voice prompt.\n",
+                        voice_path.c_str());
+                return {};
+            }
+        }
+        if (!voice_loaded_) {
+            fprintf(stderr,
+                    "crispasr[vibevoice-tts]: no voice prompt resolved (pass --voice <path> "
+                    "or place a vibevoice-voice-*.gguf next to the model).\n");
+            return {};
         }
         if (!ctx_ || text.empty())
             return {};

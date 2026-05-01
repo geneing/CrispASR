@@ -145,8 +145,24 @@ constexpr ExtraCompanion k_kokoro_extras[] = {
     {nullptr, nullptr},
 };
 
+// VibeVoice-Realtime ships 26 voicepacks (~3 MB each) on
+// cstr/vibevoice-realtime-0.5b-GGUF. The inline companion is `emma`
+// (English default, ~3 MB). Extras here pull a representative German
+// voice + a French voice so `-m auto --backend vibevoice-tts -l de`
+// (or `-l fr`) produces native-language output without an explicit
+// `--voice`. Other languages (ja/it/kr/...) ship as separate downloads
+// — keeping the auto-download set lean.
+constexpr ExtraCompanion k_vibevoice_tts_extras[] = {
+    {"vibevoice-voice-de-Spk1_woman.gguf",
+     "https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF/resolve/main/vibevoice-voice-de-Spk1_woman.gguf"},
+    {"vibevoice-voice-fr-Spk1_woman.gguf",
+     "https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF/resolve/main/vibevoice-voice-fr-Spk1_woman.gguf"},
+    {nullptr, nullptr},
+};
+
 constexpr ExtraList k_extras[] = {
     {"kokoro", k_kokoro_extras},
+    {"vibevoice-tts", k_vibevoice_tts_extras},
     {nullptr, nullptr},
 };
 // clang-format on
