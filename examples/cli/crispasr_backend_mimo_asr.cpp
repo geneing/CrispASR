@@ -23,7 +23,7 @@ namespace {
 
 bool file_exists(const std::string& p) {
     struct stat st;
-    return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+    return ::stat(p.c_str(), &st) == 0;
 }
 
 std::string discover_audio_tokenizer(const std::string& model_path) {
@@ -70,9 +70,8 @@ public:
         if (tok_path.empty())
             tok_path = discover_audio_tokenizer(params.model);
         if (tok_path.empty()) {
-            fprintf(stderr,
-                    "crispasr[mimo-asr]: no audio tokenizer GGUF found. Pass --codec-model PATH "
-                    "or place mimo-tokenizer-q4_k.gguf next to the LM.\n");
+            fprintf(stderr, "crispasr[mimo-asr]: no audio tokenizer GGUF found. Pass --codec-model PATH "
+                            "or place mimo-tokenizer-q4_k.gguf next to the LM.\n");
             return false;
         }
         if (mimo_asr_set_tokenizer_path(ctx_, tok_path.c_str()) != 0) {

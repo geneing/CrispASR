@@ -105,8 +105,8 @@ struct mimo_asr_qwen2_block {
     ggml_tensor* attn_k_b = nullptr;
     ggml_tensor* attn_v_w = nullptr;
     ggml_tensor* attn_v_b = nullptr;
-    ggml_tensor* attn_o_w = nullptr;    // no bias
-    ggml_tensor* ffn_norm_w = nullptr;  // RMSNorm γ, no bias
+    ggml_tensor* attn_o_w = nullptr;   // no bias
+    ggml_tensor* ffn_norm_w = nullptr; // RMSNorm γ, no bias
     ggml_tensor* ffn_gate_w = nullptr;
     ggml_tensor* ffn_up_w = nullptr;
     ggml_tensor* ffn_down_w = nullptr;
@@ -116,18 +116,18 @@ struct mimo_asr_qwen2_block {
 // group-fusion projection. `hidden_proj_w` (TTS-direction) is loaded
 // lazily and stays nullptr for ASR.
 struct mimo_asr_audio_tower {
-    std::vector<mimo_asr_qwen2_block> blocks;     // 6
-    ggml_tensor* norm_w = nullptr;                // audio.norm.weight (RMSNorm γ)
-    std::array<ggml_tensor*, 8> speech_emb{};     // audio.emb.{0..7}.weight
-    ggml_tensor* group_proj_w = nullptr;          // audio.group_proj.weight, [out_hidden, group_size*input_dim]
+    std::vector<mimo_asr_qwen2_block> blocks; // 6
+    ggml_tensor* norm_w = nullptr;            // audio.norm.weight (RMSNorm γ)
+    std::array<ggml_tensor*, 8> speech_emb{}; // audio.emb.{0..7}.weight
+    ggml_tensor* group_proj_w = nullptr;      // audio.group_proj.weight, [out_hidden, group_size*input_dim]
 };
 
 // 36-layer Qwen2 LM. lm_head is NOT tied to embeddings.
 struct mimo_asr_llm {
-    ggml_tensor* embed_w = nullptr;               // llm.embed.weight, [hidden, vocab]
-    std::vector<mimo_asr_qwen2_block> blocks;     // 36
-    ggml_tensor* final_norm_w = nullptr;          // llm.final_norm.weight
-    ggml_tensor* lm_head_w = nullptr;             // llm.lm_head.weight, [hidden, vocab]
+    ggml_tensor* embed_w = nullptr;           // llm.embed.weight, [hidden, vocab]
+    std::vector<mimo_asr_qwen2_block> blocks; // 36
+    ggml_tensor* final_norm_w = nullptr;      // llm.final_norm.weight
+    ggml_tensor* lm_head_w = nullptr;         // llm.lm_head.weight, [hidden, vocab]
 };
 
 struct mimo_asr_model {
@@ -174,14 +174,14 @@ struct mimo_asr_context {
 
     // Special-token ids resolved at init from the vocab (or fallbacks for
     // the stale Q4_K with a truncated vocab — step 9 fixes this).
-    int32_t id_empty = 151667;     // <|empty|>
-    int32_t id_im_start = 151644;  // <|im_start|>
-    int32_t id_im_end = 151645;    // <|im_end|>
-    int32_t id_eos = 151643;       // <|endoftext|>
-    int32_t id_sosp = 151651;      // <|sosp|>
-    int32_t id_eosp = 151652;      // <|eosp|>
-    int32_t id_eot = 151653;       // <|eot|>
-    int32_t id_eostm = 151654;     // <|eostm|>
+    int32_t id_empty = 151667;    // <|empty|>
+    int32_t id_im_start = 151644; // <|im_start|>
+    int32_t id_im_end = 151645;   // <|im_end|>
+    int32_t id_eos = 151643;      // <|endoftext|>
+    int32_t id_sosp = 151651;     // <|sosp|>
+    int32_t id_eosp = 151652;     // <|eosp|>
+    int32_t id_eot = 151653;      // <|eot|>
+    int32_t id_eostm = 151654;    // <|eostm|>
 };
 
 static uint32_t mimo_kv_u32(gguf_context* ctx, const char* key, uint32_t def) {
@@ -287,8 +287,8 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
         fprintf(stderr,
                 "mimo_asr: vocab=%zu merges=%zu specials: empty=%d im_start=%d im_end=%d "
                 "eos=%d sosp=%d eosp=%d\n",
-                ctx->vocab.size(), ctx->merge_rank.size(), ctx->id_empty, ctx->id_im_start,
-                ctx->id_im_end, ctx->id_eos, ctx->id_sosp, ctx->id_eosp);
+                ctx->vocab.size(), ctx->merge_rank.size(), ctx->id_empty, ctx->id_im_start, ctx->id_im_end, ctx->id_eos,
+                ctx->id_sosp, ctx->id_eosp);
     }
 
     // Backends
@@ -342,8 +342,8 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
         b.ffn_gate_w = require_t(prefix + ".ffn.gate.weight");
         b.ffn_up_w = require_t(prefix + ".ffn.up.weight");
         b.ffn_down_w = require_t(prefix + ".ffn.down.weight");
-        return b.attn_norm_w && b.attn_q_w && b.attn_q_b && b.attn_k_w && b.attn_k_b && b.attn_v_w && b.attn_v_b
-               && b.attn_o_w && b.ffn_norm_w && b.ffn_gate_w && b.ffn_up_w && b.ffn_down_w;
+        return b.attn_norm_w && b.attn_q_w && b.attn_q_b && b.attn_k_w && b.attn_k_b && b.attn_v_w && b.attn_v_b &&
+               b.attn_o_w && b.ffn_norm_w && b.ffn_gate_w && b.ffn_up_w && b.ffn_down_w;
     };
 
     auto& a = ctx->model.audio;
@@ -484,8 +484,8 @@ namespace {
 //
 // We pass per-channel masks separately and AND in graph form.
 struct AudioGraphIO {
-    ggml_tensor* speech_codes_c[8] = {};      // [T_groups*4] I32
-    ggml_tensor* combined_mask_c[8] = {};     // [audio_dim, T_groups*4] F32
+    ggml_tensor* speech_codes_c[8] = {};       // [T_groups*4] I32
+    ggml_tensor* combined_mask_c[8] = {};      // [audio_dim, T_groups*4] F32
     ggml_tensor* speech_active_mask = nullptr; // [llm_hidden, T_groups] F32 (broadcast for group_proj output gating)
     ggml_tensor* text_input_ids = nullptr;     // [T_groups] I32 (only meaningful text, not -100s)
     ggml_tensor* text_zero_mask = nullptr;     // [llm_hidden, T_groups] F32 (1 where text_input != empty else 0)
@@ -494,8 +494,8 @@ struct AudioGraphIO {
 };
 
 static ggml_tensor* build_input_local_block(ggml_context* ctx0, ggml_cgraph* gf, ggml_tensor* x,
-                                            const mimo_asr_qwen2_block& b, const mimo_asr_hp& hp,
-                                            int n_groups, int group_size, ggml_tensor* positions) {
+                                            const mimo_asr_qwen2_block& b, const mimo_asr_hp& hp, int n_groups,
+                                            int group_size, ggml_tensor* positions) {
     (void)gf; // accepted for symmetry with helpers that need it for set_rows
     // x : [audio_dim, group_size, n_groups]
     // `positions` is a shared 1D I32 tensor of length group_size, set by
@@ -784,11 +784,11 @@ struct PrefillInputs {
     int T_total = 0;
     int T_groups = 0;
     int group_size = 0;
-    std::vector<int32_t> text_input_ids;             // [T_groups]
-    std::vector<float> text_zero_mask;               // [d, T_groups], 1 where text != empty
-    std::vector<float> speech_active_mask;           // [d, T_groups], 1 where text == empty
-    std::array<std::vector<int32_t>, 8> speech_codes;          // [T_total] per channel
-    std::array<std::vector<float>, 8> combined_masks;          // [audio_dim, T_total] per channel
+    std::vector<int32_t> text_input_ids;              // [T_groups]
+    std::vector<float> text_zero_mask;                // [d, T_groups], 1 where text != empty
+    std::vector<float> speech_active_mask;            // [d, T_groups], 1 where text == empty
+    std::array<std::vector<int32_t>, 8> speech_codes; // [T_total] per channel
+    std::array<std::vector<float>, 8> combined_masks; // [audio_dim, T_total] per channel
 };
 
 static PrefillInputs make_prefill_inputs(const mimo_asr_hp& hp, const int32_t* input_ids_9xT, int T_total,
@@ -1078,7 +1078,8 @@ static std::vector<int32_t> mimo_asr_insert_between(const std::vector<int32_t>& 
 // Row 0 = tokens at stride gs, -100 fillers elsewhere; rows 1..8 = the
 // per-channel speech_zeroemb_idx for every position. Matches the
 // no-audio branch of InputSegment.to_input_id.
-static std::vector<int32_t> mimo_asr_build_text_segment(const mimo_asr_context* ctx, const std::vector<int32_t>& tokens) {
+static std::vector<int32_t> mimo_asr_build_text_segment(const mimo_asr_context* ctx,
+                                                        const std::vector<int32_t>& tokens) {
     const auto& hp = ctx->hp;
     const int gs = (int)hp.audio_group_size;
     const int channels = (int)hp.audio_channels;
@@ -1101,7 +1102,8 @@ static std::vector<int32_t> mimo_asr_build_text_segment(const mimo_asr_context* 
 //   - rows 1..8: [speech_zeroemb_pad(gs) | audio_codes(n_frames) | speech_zeroemb_pad(gs)]
 // `codes` is laid out [n_frames * channels] row-major (time-first), as
 // returned by mimo_tokenizer_encode_pcm16k.
-static std::vector<int32_t> mimo_asr_build_audio_segment(const mimo_asr_context* ctx, const int32_t* codes, int n_frames) {
+static std::vector<int32_t> mimo_asr_build_audio_segment(const mimo_asr_context* ctx, const int32_t* codes,
+                                                         int n_frames) {
     const auto& hp = ctx->hp;
     const int gs = (int)hp.audio_group_size;
     const int channels = (int)hp.audio_channels;
@@ -1150,8 +1152,7 @@ static std::vector<int32_t> mimo_asr_concat_segments(int channels_plus_text,
     for (const auto& s : segments) {
         int t = (int)(s.size() / channels_plus_text);
         for (int r = 0; r < channels_plus_text; r++) {
-            std::memcpy(out.data() + (size_t)r * T_total + off, s.data() + (size_t)r * t,
-                        (size_t)t * sizeof(int32_t));
+            std::memcpy(out.data() + (size_t)r * T_total + off, s.data() + (size_t)r * t, (size_t)t * sizeof(int32_t));
         }
         off += t;
     }
@@ -1314,7 +1315,10 @@ extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* 
         int best = 0;
         float bv = L[0];
         for (int i = 1; i < vocab; i++)
-            if (L[i] > bv) { bv = L[i]; best = i; }
+            if (L[i] > bv) {
+                bv = L[i];
+                best = i;
+            }
         return best;
     };
 
@@ -1351,8 +1355,7 @@ extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* 
     // 7. Detokenize. The upstream drops the last token (typically
     //    <|im_end|>) and string-replaces <|empty|>/<|eot|>/<|eostm|>
     //    out of the visible transcript.
-    if (!generated.empty() &&
-        (generated.back() == ctx->id_im_end || generated.back() == ctx->id_eos))
+    if (!generated.empty() && (generated.back() == ctx->id_im_end || generated.back() == ctx->id_eos))
         generated.pop_back();
 
     std::string detok = core_bpe::detokenize(ctx->vocab, generated.data(), generated.size());
