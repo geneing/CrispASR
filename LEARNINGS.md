@@ -5137,3 +5137,107 @@ get identical behaviour — Python's `crispasr.kokoro_resolve_for_lang()`
 verified against the CLI by running both on the same model + language
 pair and comparing.
 
+# Kokoro quant ceiling — session 2026-05-01
+
+PLAN #56 follow-up: when publishing kokoro GGUFs to HF
+(`cstr/kokoro-82m-GGUF`, `cstr/kokoro-de-hui-base-GGUF`), we
+quantised both backbones to Q4_K and Q8_0 and ran both
+`crispasr-diff kokoro` AND `parakeet-v3` ASR roundtrip on each.
+
+## Lesson 1 — Q4_K is below the quality bar for Kokoro
+
+| Quant | EN ASR roundtrip | DE ASR roundtrip |
+|---|---|---|
+| F16 | "Hello this is a test of the English Phone Miza." | "Guten Tag, dies ist ein Test des deutschen Phonemizers." (perfect) |
+| Q8_0 | identical to F16 | identical to F16 |
+| Q4_K | "phone miser" (1 word diff, intelligible) | "Guten A, dies ist ein S des Worten von links." (broken) |
+
+`crispasr-diff` cosine numbers tell the same story: F16 hits 16/16
+PASS at cos≥0.999 (with the audio_out RNG-divergent stage at 0.99);
+Q8_0 has 7 stages drift below 0.999 but stays ≥0.85 on every stage
+and produces ASR-identical output; Q4_K's audio_out cos drops to
+~0.03 on the German backbone. Q4_K English just-about works because
+parakeet's English G2P is forgiving enough to recover a comprehensible
+word from drifted prosody, but German has no such tolerance.
+
+Why: `crispasr-quantize` only quantises the matmul tensors; LSTM
+biases, norms, and the 178-symbol embedding table stay F32. Kokoro's
+matmul population is small enough (459 tensors total, ~110 quantised)
+that a Q4_K hit disproportionately damages the prosody predictor +
+decoder. Kokoro is not vibevoice.
+
+Decision: only F16 + Q8_0 are published on HF. Q8_0 is the
+recommended default — the disk savings vs F16 are only ~13 % but
+the ASR roundtrip stays byte-perfect.
+
+Lesson: peak/RMS gates are cheap and necessary, cosine diff is
+necessary, but ASR roundtrip is the *only* signal that distinguishes
+"loud noise" from "intelligible speech". For TTS quants, the diff
+table without an ASR check would have made Q4_K look "merely degraded"
+when in practice it produces unusable output for the target language.
+
+## Lesson 2 — community re-trains use modern parametrize WeightNorm
+
+The Python `kokoro` package's `KModel.__init__` only handles legacy
+`weight_g`/`weight_v` keys for its weight-norm-registered modules
+(decoder iSTFTNet, text encoder convs, predictor LSTM). Modern
+PyTorch ≥2.1 community re-trains (e.g. `dida-80b/kokoro-german-hui-
+multispeaker-base`) write keys as
+`parametrizations.weight.original{0,1}` instead. Loading that
+checkpoint via the upstream `KModel(model=...)` constructor falls
+into the bare-prefix-strip fallback (lines 70-75 of
+`kokoro/model.py`), which yields silent partial-init: predictor +
+decoder + text_encoder weights are essentially unloaded.
+
+Manifestation: `crispasr-diff kokoro` against the F16 German GGUF
+shows `text_enc_out` cos = -0.17 (anti-correlated) and everything
+downstream cascades. The C++ GGUF is fine — the *Python reference*
+is wrong because the upstream loader silently dropped weights.
+
+Workaround: pre-process the dida-80b checkpoint before passing it
+to KModel — split `state['net']` into top-level component dicts
+(KModel's expected layout) and rename
+`parametrizations.weight.original0` → `weight_g`,
+`parametrizations.weight.original1` → `weight_v`. After this, the
+German backbone's reference passes 14/16 stages at cos≥0.999.
+Our converter `models/convert-kokoro-to-gguf.py` already handles
+both naming conventions natively, so the C++ GGUF was always fine —
+only the Python diff harness needed the workaround.
+
+Lesson: when a downstream community re-train ships in a newer
+PyTorch's parametrize form, the upstream package's "convenience"
+loader can silently underspecify the forward pass without erroring.
+Always cross-check loaded weights against the checkpoint's actual
+key set when porting reference dumpers across re-trains, especially
+when the cosine diff against your C++ port goes anti-correlated on
+the *F16* baseline (= the quant isn't the problem).
+
+## Lesson 3 — multi-companion auto-download via ExtraCompanion
+
+Original `Entry` struct in `src/crispasr_model_registry.cpp` had
+exactly one `companion_file/url` slot — fine for moonshine
+(tokenizer.bin), vibevoice-tts (one voice), qwen3-tts (codec). Kokoro
+needs 3 extras alongside the model: English default voice (inline
+companion), German backbone (extra), German default voice (extra).
+Adding more `companion_file_2/3/...` slots to `Entry` would force
+every existing row to add trailing `nullptr,nullptr` pairs and bloat
+the table.
+
+Cleaner: keep `Entry` exactly as-is, add a sibling table
+`k_extras: [{backend, ExtraCompanion[]}]` indexed by backend name.
+Nullable. The resolver runs the inline companion first, then walks
+extras for the backend if any. Existing rows are unchanged; new
+multi-companion backends just add one entry to `k_extras`.
+
+This pattern generalises beyond kokoro: any TTS backend that wants
+to bundle a default voice + a related model (e.g. a speaker-encoder
+companion + a watermark detector + …) plugs into `k_extras` without
+touching the Entry struct.
+
+Lesson: when extending a packed config table, prefer a sibling table
+keyed by the existing identifier (`backend` name) over widening the
+struct. Keeps existing rows touch-free, makes the extension visually
+obvious to readers, and the indirection cost is one branch per
+auto-download — negligible compared to the HTTP round-trips.
+
+

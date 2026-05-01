@@ -113,28 +113,56 @@ Kokoro-82M doesn't ship voices for (de, ru, ko, ar, …).
   - `official + df_eva` (pre-2b baseline) → "...Phonemizer." (lost s)
   All four voices clear the gate (peak ≥ 8000, RMS ≥ 1000).
 
-**Open:**
-1. **Auto-download manifest for kokoro.** Add `kokoro-82m-f16`,
-   `kokoro-de-hui-base-f16`, and the four voicepack rows to
-   `src/crispasr_model_registry.cpp`. Blocks on publishing GGUF
-   mirrors to HF (e.g. `cstr/kokoro-82m-GGUF`,
-   `cstr/kokoro-de-hui-base-GGUF`, `cstr/kokoro-voices-GGUF`) since
-   no public mirrors exist yet — `hexgrad/Kokoro-82M` ships only
-   `.pth`. Today users drop the GGUFs into the model dir manually
-   or run `models/convert-kokoro*.py`.
-2. **Mandarin tones / Japanese kanji.** espeak-ng tone numbers and
+**Shipped on top of the above (this commit cluster, 2026-05-01):**
+
+- *HF GGUF mirrors published.*
+  [`cstr/kokoro-82m-GGUF`](https://huggingface.co/cstr/kokoro-82m-GGUF),
+  [`cstr/kokoro-de-hui-base-GGUF`](https://huggingface.co/cstr/kokoro-de-hui-base-GGUF),
+  [`cstr/kokoro-voices-GGUF`](https://huggingface.co/cstr/kokoro-voices-GGUF)
+  — F16 + Q8_0 for both backbones, 7 voicepacks. Q4_K is **not**
+  published: `crispasr-diff kokoro` shows audio_out cosine collapsing
+  to 0.03 on Q4_K and the dida-80b backbone produces unintelligible
+  output ("Guten A, dies ist ein S des Worten von links."). See
+  LEARNINGS.md "Kokoro quant ceiling" for the per-stage diff numbers
+  + ASR roundtrip table.
+- *Auto-download wired via the registry* (`src/crispasr_model_registry.cpp`).
+  New `ExtraCompanion` mechanism — backends with >1 auxiliary file
+  list extras in `k_extras` alongside the inline `companion_file`.
+  Kokoro's row pulls 4 files via `-m auto`: kokoro-82m-q8_0
+  (backbone) + kokoro-voice-af_heart (English default, inline
+  companion) + kokoro-de-hui-base-q8_0 (German backbone, extra) +
+  kokoro-voice-df_victoria (German default, extra). CLI then
+  auto-picks `af_heart` as the default English voice when `--voice`
+  is empty.
+- *Wrapper TTS surface across all bindings* (Rust sys + crate, Go,
+  Java, JavaScript-emscripten, Ruby). Each exposes
+  `Session.{open,close,setCodecPath,setVoice,synthesize}` plus
+  `kokoroResolveForLang(model, lang) -> KokoroResolved`. Mirrors the
+  verified Python wrapper. Go/Java/JS/Ruby were upstream-whisper-only
+  before — this is their first TTS surface.
+- *Reference dumper compat with dida-80b's modern parametrize
+  WeightNorm.* The German backbone ships keys as
+  `parametrizations.weight.original{0,1}`; upstream `KModel.__init__`
+  only handles legacy `weight_g`/`weight_v`. Manual workaround: split
+  the StyleTTS2-style `state['net']` dict and rename
+  `parametrizations.weight.original0/1` → `weight_g/weight_v`. The
+  reference dumper now produces a German diff that matches the C++
+  GGUF at cos≥0.999 on 14/16 stages. Could be folded into
+  `tools/reference_backends/kokoro.py` as a mode flag if we add more
+  community Kokoro re-trains (low priority).
+
+**Still open:**
+1. **Mandarin tones / Japanese kanji.** espeak-ng tone numbers and
    CJK fallback both lose information at the kokoro vocab level.
    For tones: try `--ipa=2` or pypinyin. For Japanese: pyopenjtalk
    pre-process. See PLAN §56 open #2 / #3.
-3. **`crispasr-diff kokoro` reference backend** covering the
-   phonemizer step too. PLAN §56 open #4.
-4. **Wrapper TTS surface beyond Python.** Rust/Go/Java/JS/Ruby
-   bindings don't yet expose the TTS API. Once they do they can
-   adopt `crispasr_kokoro_resolve_*_abi` (already in the dylib;
-   verified via Python). Trivial — same ctypes-style pattern.
-5. **Stage-2 fine-tune on one HUI speaker** (~half-day A40) for
+2. **`crispasr-diff kokoro` reference backend** covering the
+   phonemizer step too (the model side is already covered, including
+   dida-80b after this session's parametrize-rename trick). PLAN
+   §56 open #4.
+3. **Stage-2 fine-tune on one HUI speaker** (~half-day A40) for
    deployable single-voice production quality. Out of scope here.
-6. Optional `kokoro_phoneme_cache_clear()` C ABI. PLAN §56 open #5.
+4. Optional `kokoro_phoneme_cache_clear()` C ABI. PLAN §56 open #5.
 
 ---
 

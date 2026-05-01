@@ -20,7 +20,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 | **HIGH** | [#54 granite-speech-4.1 plus / nar](#54-granite-speech-41-plus--nar-variants) | Small | base + plus + nar runtimes all DONE; only NAR quant + HF upload remain |
 | **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Medium | parakeet/cohere DONE; canary remaining |
 | **MEDIUM** | [#53 core/audio_decoder.h](#53-coreaudio_decoderh--dry-across-tts--codec-backends) | Medium | DRY across qwen3-tts/mimo/vibevoice |
-| **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng linkage + LRU + `-l/--language` wired; pending: kokoro-82m.gguf for end-to-end synth + diff-harness reference backend |
+| **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
@@ -722,17 +722,25 @@ so existing builds don't regress.
       `kokoro-de-hui-base-f16.gguf` sit in the same directory.
    4. Option 3 not needed.
 
-   **Follow-ups (optional, separate track):**
-   - Auto-download manifest entries for `kokoro-82m-f16`,
-     `kokoro-de-hui-base-f16`, and the four German voicepacks blocks
-     on publishing GGUF mirrors to HF (cstr/* equivalents). Today users
-     either drop the files into `<model_dir>` manually or run the
-     converters in `models/`.
+   **Follow-ups:**
+   - ✅ HF GGUF mirrors published (2026-05-01):
+     [`cstr/kokoro-82m-GGUF`](https://huggingface.co/cstr/kokoro-82m-GGUF),
+     [`cstr/kokoro-de-hui-base-GGUF`](https://huggingface.co/cstr/kokoro-de-hui-base-GGUF),
+     [`cstr/kokoro-voices-GGUF`](https://huggingface.co/cstr/kokoro-voices-GGUF)
+     — F16 + Q8_0 backbones (Q4_K dropped — see LEARNINGS), 7 voicepacks.
+   - ✅ Auto-download via `src/crispasr_model_registry.cpp` (PLAN #56).
+     New `ExtraCompanion` mechanism in the registry — backends with >1
+     auxiliary file (kokoro: English voice + German backbone + German
+     voice) can list extras alongside the inline `companion_file`.
+     `crispasr --backend kokoro -m auto -l de` now pulls all 4 files
+     and auto-routes to the German backbone.
+   - ✅ Wrapper TTS surface across Rust/Go/Java/JS/Ruby
+     (commit `4f476c3`, 2026-05-01). Each binding gets
+     `Session.{open,setVoice,setCodecPath,synthesize,close}` plus
+     `kokoroResolveForLang(model, lang)` returning the same
+     `KokoroResolved` shape as the Python wrapper.
    - Stage-2 fine-tune on one HUI speaker (~half-day A40) for
      deployable single-voice production quality. Out of scope here.
-   - Wrappers besides Python (Rust/Go/Java/JS/Ruby) can adopt the
-     `crispasr_kokoro_resolve_*_abi` symbols when they grow a TTS
-     surface; the C ABI is published in `src/kokoro.h`.
 2. **Mandarin tone numbers.** espeak-ng outputs digit-suffixed
    tone markers (`ni2χˈɑu2`) that aren't in the kokoro-82m IPA vocab
    (178 symbols) and likely get dropped at tokenization, losing tone
