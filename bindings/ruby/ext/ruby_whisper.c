@@ -210,6 +210,9 @@ void Init_whisper() {
     init_ruby_whisper_vad_segments(&mVAD);
     init_ruby_whisper_vad_context(&mVAD);
 
+    extern void init_ruby_crispasr_session(VALUE* mWhisper);
+    init_ruby_crispasr_session(&mWhisper);
+
     rb_require("whisper/context");
     rb_require("whisper/segment");
     rb_require("whisper/model/uri");

@@ -15,6 +15,29 @@
 #include <thread>
 #include <vector>
 
+// Forward-declare the unified Session + kokoro routing C ABI exported
+// by libcrispasr. The full prototypes live in src/crispasr_c_api.cpp
+// and src/kokoro.h. Including those headers from emscripten would pull
+// in C++/STL declarations we don't need here.
+extern "C" {
+struct CrispasrSession;
+struct CrispasrSession* crispasr_session_open(const char* model_path, int n_threads);
+void                    crispasr_session_close(struct CrispasrSession* s);
+int                     crispasr_session_set_codec_path(struct CrispasrSession* s, const char* path);
+int                     crispasr_session_set_voice(struct CrispasrSession* s, const char* path,
+                                                   const char* ref_text_or_null);
+float*                  crispasr_session_synthesize(struct CrispasrSession* s, const char* text,
+                                                    int* out_n_samples);
+void                    crispasr_pcm_free(float* pcm);
+int                     crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const char* lang,
+                                                                   char* out_path, int out_path_len);
+int                     crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path, const char* lang,
+                                                                   char* out_path, int out_path_len,
+                                                                   char* out_picked, int out_picked_len);
+}
+
+static struct CrispasrSession* g_tts_session = nullptr;
+
 struct whisper_context* g_context;
 
 EMSCRIPTEN_BINDINGS(whisper) {
@@ -93,4 +116,89 @@ EMSCRIPTEN_BINDINGS(whisper) {
 
             return 0;
         }));
+
+    // -------------------------------------------------------------------
+    // TTS surface (kokoro / vibevoice / qwen3-tts) + kokoro per-language
+    // routing (PLAN #56 opt 2b).
+    // -------------------------------------------------------------------
+
+    emscripten::function("ttsOpen", emscripten::optional_override([](const std::string& model_path,
+                                                                     int n_threads) {
+                             if (g_tts_session != nullptr) {
+                                 crispasr_session_close(g_tts_session);
+                                 g_tts_session = nullptr;
+                             }
+                             g_tts_session = crispasr_session_open(model_path.c_str(),
+                                                                   n_threads <= 0 ? 1 : n_threads);
+                             return g_tts_session != nullptr;
+                         }));
+
+    emscripten::function("ttsClose", emscripten::optional_override([]() {
+                             if (g_tts_session) {
+                                 crispasr_session_close(g_tts_session);
+                                 g_tts_session = nullptr;
+                             }
+                         }));
+
+    emscripten::function("ttsSetCodecPath", emscripten::optional_override([](const std::string& path) {
+                             return g_tts_session ? crispasr_session_set_codec_path(g_tts_session,
+                                                                                    path.c_str())
+                                                  : -1;
+                         }));
+
+    emscripten::function("ttsSetVoice", emscripten::optional_override([](const std::string& path,
+                                                                         const std::string& ref_text) {
+                             if (!g_tts_session) return -1;
+                             const char* rt = ref_text.empty() ? nullptr : ref_text.c_str();
+                             return crispasr_session_set_voice(g_tts_session, path.c_str(), rt);
+                         }));
+
+    // Returns a Float32Array of 24 kHz mono PCM. Empty array on failure.
+    emscripten::function("ttsSynthesize",
+                         emscripten::optional_override([](const std::string& text) -> emscripten::val {
+                             if (!g_tts_session) return emscripten::val::array();
+                             int n = 0;
+                             float* pcm = crispasr_session_synthesize(g_tts_session, text.c_str(), &n);
+                             if (!pcm || n <= 0) {
+                                 if (pcm) crispasr_pcm_free(pcm);
+                                 return emscripten::val::array();
+                             }
+                             emscripten::val out = emscripten::val::global("Float32Array").new_(n);
+                             emscripten::val memoryView = emscripten::val(emscripten::typed_memory_view(n, pcm));
+                             out.call<void>("set", memoryView);
+                             crispasr_pcm_free(pcm);
+                             return out;
+                         }));
+
+    // Mirrors python crispasr.kokoro_resolve_for_lang() — returns
+    // {modelPath, voicePath, voiceName, backboneSwapped}.
+    emscripten::function("kokoroResolveForLang",
+                         emscripten::optional_override([](const std::string& model_path,
+                                                          const std::string& lang) -> emscripten::val {
+                             char out_model[1024]  = {0};
+                             char out_voice[1024]  = {0};
+                             char out_picked[64]   = {0};
+
+                             int rc = crispasr_kokoro_resolve_model_for_lang_abi(
+                                 model_path.c_str(), lang.c_str(), out_model, sizeof(out_model));
+                             bool swapped = (rc == 0);
+                             std::string resolved = (out_model[0] != 0) ? std::string(out_model) : model_path;
+
+                             std::string vp, vn;
+                             rc = crispasr_kokoro_resolve_fallback_voice_abi(
+                                 model_path.c_str(), lang.c_str(),
+                                 out_voice, sizeof(out_voice),
+                                 out_picked, sizeof(out_picked));
+                             if (rc == 0) {
+                                 vp = out_voice;
+                                 vn = out_picked;
+                             }
+
+                             emscripten::val r = emscripten::val::object();
+                             r.set("modelPath",       resolved);
+                             r.set("voicePath",       vp);
+                             r.set("voiceName",       vn);
+                             r.set("backboneSwapped", swapped);
+                             return r;
+                         }));
 }

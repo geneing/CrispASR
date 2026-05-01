@@ -581,6 +581,81 @@ impl Session {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Kokoro per-language routing (PLAN #56 opt 2b).
+// ---------------------------------------------------------------------------
+
+/// Result of [`kokoro_resolve_for_lang`]. Mirrors the Python wrapper's
+/// `KokoroResolved` dataclass.
+#[derive(Clone, Debug)]
+pub struct KokoroResolved {
+    /// Path to load — may differ from the input when a German backbone
+    /// sibling (`kokoro-de-hui-base-*.gguf`) sits next to the official
+    /// Kokoro-82M baseline.
+    pub model_path: String,
+    /// Per-language fallback voice path. `None` if `lang` already has a
+    /// native Kokoro-82M voice or no candidate exists in the model dir.
+    pub voice_path: Option<String>,
+    /// Basename of the picked voice (e.g. "df_victoria"). Same nullity
+    /// as `voice_path`.
+    pub voice_name: Option<String>,
+    /// True iff the model path was rewritten to the German backbone.
+    pub backbone_swapped: bool,
+}
+
+/// Resolve the kokoro model + fallback voice for `lang`. Mirrors what
+/// the CLI does for `--backend kokoro -l <lang>` (PLAN #56 opt 2b).
+///
+/// Wrappers should call this *before* opening the [`Session`] so the
+/// routing kicks in even outside the CLI entry point. Identical to the
+/// Python wrapper's `crispasr.kokoro_resolve_for_lang`.
+pub fn kokoro_resolve_for_lang(model_path: &str, lang: &str) -> Result<KokoroResolved, String> {
+    let cmodel = CString::new(model_path).map_err(|e| e.to_string())?;
+    let clang = CString::new(lang).map_err(|e| e.to_string())?;
+    let mut out_model = vec![0i8; 1024];
+    let mut out_voice = vec![0i8; 1024];
+    let mut out_picked = vec![0i8; 64];
+
+    let mut backbone_swapped = false;
+    unsafe {
+        let rc = crispasr_sys::crispasr_kokoro_resolve_model_for_lang_abi(
+            cmodel.as_ptr(), clang.as_ptr(),
+            out_model.as_mut_ptr() as *mut c_char, out_model.len() as c_int,
+        );
+        if rc < 0 { return Err("kokoro_resolve_model_for_lang: buffer too small".into()); }
+        if rc == 0 { backbone_swapped = true; }
+    }
+    let model_resolved = unsafe { std::ffi::CStr::from_ptr(out_model.as_ptr() as *const c_char) }
+        .to_string_lossy()
+        .into_owned();
+    let model_resolved = if model_resolved.is_empty() { model_path.to_string() } else { model_resolved };
+
+    let (voice_path, voice_name) = unsafe {
+        let rc = crispasr_sys::crispasr_kokoro_resolve_fallback_voice_abi(
+            cmodel.as_ptr(), clang.as_ptr(),
+            out_voice.as_mut_ptr() as *mut c_char, out_voice.len() as c_int,
+            out_picked.as_mut_ptr() as *mut c_char, out_picked.len() as c_int,
+        );
+        if rc < 0 { return Err("kokoro_resolve_fallback_voice: buffer too small".into()); }
+        if rc == 0 {
+            let p = std::ffi::CStr::from_ptr(out_voice.as_ptr() as *const c_char)
+                .to_string_lossy().into_owned();
+            let n = std::ffi::CStr::from_ptr(out_picked.as_ptr() as *const c_char)
+                .to_string_lossy().into_owned();
+            (Some(p), Some(n))
+        } else {
+            (None, None)
+        }
+    };
+
+    Ok(KokoroResolved {
+        model_path: model_resolved,
+        voice_path,
+        voice_name,
+        backbone_swapped,
+    })
+}
+
 /// Tunables for [`Session::transcribe_vad`]. Defaults mirror crispasr's
 /// `whisper_vad_default_params` plus the max-chunk fallback the shared
 /// library uses to bound encoder cost on long audio.

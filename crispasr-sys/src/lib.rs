@@ -391,4 +391,23 @@ extern "C" {
     pub fn crispasr_punc_free(ctx: *mut c_void);
 
     pub fn crispasr_c_api_version() -> *const c_char;
+
+    // --- Kokoro per-language model + voice routing (PLAN #56 opt 2b) ---
+    // See `src/kokoro.h` for full semantics.
+    pub fn crispasr_kokoro_lang_is_german_abi(lang: *const c_char) -> bool;
+    pub fn crispasr_kokoro_lang_has_native_voice_abi(lang: *const c_char) -> bool;
+    pub fn crispasr_kokoro_resolve_model_for_lang_abi(
+        model_path: *const c_char,
+        lang: *const c_char,
+        out_path: *mut c_char,
+        out_path_len: c_int,
+    ) -> c_int;
+    pub fn crispasr_kokoro_resolve_fallback_voice_abi(
+        model_path: *const c_char,
+        lang: *const c_char,
+        out_path: *mut c_char,
+        out_path_len: c_int,
+        out_picked: *mut c_char,
+        out_picked_len: c_int,
+    ) -> c_int;
 }
