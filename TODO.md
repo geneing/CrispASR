@@ -166,6 +166,52 @@ Kokoro-82M doesn't ship voices for (de, ru, ko, ar, …).
 
 ---
 
+## TTS voicepack expansion **[in progress]**
+
+### VibeVoice-Realtime (shipped 2026-05-01)
+
+`cstr/vibevoice-realtime-0.5b-GGUF` now bundles all 25 demo voices
+from [`microsoft/VibeVoice@main`](https://github.com/microsoft/VibeVoice/tree/main/demo/voices/streaming_model)
+(MIT). Languages: en (6 voices), de/fr/it/jp/kr/nl/pl/pt/sp (2 each),
+in/Indian-English (1, Samuel). Each voicepack is 2-6 MB. Smoke-tested:
+en-Grace_woman ASR-roundtrips byte-perfect; fr-Spk0_man near-perfect
+("voice" misread for "voix" — ASR quirk on the unfamiliar word, not
+a TTS issue); JP synth produces expected duration audio (parakeet-v3
+doesn't cover JA so couldn't roundtrip; would need parakeet-ja).
+
+Local files staged at `/Volumes/backups/ai/crispasr-models/
+vibevoice-voice-{en-Grace_woman,en-Mike_man,fr-Spk*,it-Spk*,
+jp-Spk*,kr-Spk*,nl-Spk*,pl-Spk*,pt-Spk*,sp-Spk*,in-Samuel_man}.gguf`.
+
+### Qwen3-TTS — no clean voicepacks available
+
+Qwen3-TTS is voice-cloning-from-WAV (not pre-baked voicepacks like
+vibevoice). Surveyed HF for clean third-party voicepacks:
+
+- **`kautism/qwen3_tts_voices`** — 500+ voicepacks but they're all
+  HoYoverse 星穹铁道 (Honkai: Star Rail) characters, license
+  undeclared, almost certainly extracted from commercial game audio.
+  **Skip** — not redistributable.
+- **`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`**,
+  **`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`** — official Apache-2.0
+  Qwen models for *runtime* voice cloning (CustomVoice = WAV-driven,
+  VoiceDesign = text-prompt-driven). No pre-baked voicepacks ship.
+
+To add Apache-2.0 / CC-BY qwen3-tts voicepacks we'd need to bake them
+ourselves from a public-domain corpus via
+`models/bake-qwen3-tts-voice-pack.py`. Candidate sources:
+
+| Source | License | Notes |
+|---|---|---|
+| LibriTTS-R (`mythicinfinity/libritts_r`) | CC-BY-4.0 | 24 kHz, English, 2,400 speakers — could pick 5-10 representative voices |
+| VCTK (`CSTR-Edinburgh/vctk`) | CC-BY-4.0 | 110 English speakers, multiple accents |
+| Common Voice 17 | CC0 | Multilingual but per-speaker quality varies wildly |
+| MLCommons People's Speech | CC-BY-2.0/3.0/4.0 | Multilingual, mixed licenses per clip |
+
+This is a separate work item — out of scope for this session.
+
+---
+
 ## Qwen3-TTS CLI/wrapper integration **[next]**
 
 Bring qwen3-tts up to feature parity with vibevoice's `--tts` mode and
