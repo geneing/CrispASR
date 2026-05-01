@@ -537,35 +537,48 @@ so existing builds don't regress.
    Wired as the German auto-fallback (Option 1 table above).
 
    **Option 2b — Use `dida-80b/kokoro-german-hui-multispeaker-base`
-   as the German backbone (best path to real native quality).**
-   <https://huggingface.co/dida-80b/kokoro-german-hui-multispeaker-base>
-   — a true Stage-1 multispeaker base fine-tune of Kokoro-82M on
-   the HUI-Audio-Corpus-German (51 speakers, 51 h, 10 epochs A40).
-   Apache-2.0 weights + CC0 training data. **This is a separate
-   model from Kokoro-82M, not a voice pack:** ships only
-   `first_stage.pth` + `config.json`. Why it helps:
-   - StyleEncoder, predictor, and decoder are all trained on
-     German — solves the root cause of the silence collapse.
-   - Style embeddings extracted from German speakers will be
-     in-distribution.
-   - HUI corpus is open, so we can pick any speaker as reference.
+   as a second German-aware backbone (open; tracked alongside 2a so
+   we eventually ship both quality tiers).**
+
+   Sources (Apache-2.0 weights + recipe; CC0 dataset):
+   - Recipe: <https://github.com/semidark/kokoro-deutsch> — clone
+     locally (recurse-submodules: `StyleTTS2/` + `kokoro/`).
+     Includes `scripts/extract_voicepack.py` (the tool we need),
+     `scripts/prepare_dataset.py`, and `scripts/prepare_training.py`.
+   - Model: <https://huggingface.co/dida-80b/kokoro-german-hui-multispeaker-base>
+     — `first_stage.pth` + `config.json`. Stage-1 multispeaker base
+     fine-tune of Kokoro-82M on HUI-Audio-Corpus-German (51 speakers,
+     51 h, 10 epochs A40, mel loss 0.583 → 0.326).
+
+   Why it improves on 2a:
+   - **Predictor + decoder are German-trained.** Solves the root
+     cause behind the af_heart silence collapse on long German
+     phrases — voices alone (Option 2a) only cover the speaker
+     timbre, not the prosody/duration distribution.
+   - StyleEncoder is German-trained → extracted style embeddings
+     are in-distribution.
+   - Voicepack-extraction tool already exists in semidark's
+     `scripts/extract_voicepack.py`; no Stage-2 fine-tune required
+     for a deployable voice.
 
    Steps:
-   1. Convert `first_stage.pth` to GGUF. Verify the converter at
-      `models/convert-kokoro-to-gguf.py` handles dida-80b's tensor
-      names — it's a fine-tune of Kokoro-82M so layout *should*
-      match, but spot-check first. Output:
+   1. Spot-check the existing `models/convert-kokoro-to-gguf.py`
+      against `first_stage.pth`'s tensor names. Tundragoon's
+      [512,1,256] voicepack hint suggests dida-80b may use the same
+      bumped `max_phon=512` and the converter may need a small
+      adjustment (or just work — verify). Output:
       `kokoro-de-hui-base-f16.gguf` (~163 MB at F16).
-   2. Extract a German voice pack: pick one speaker from HUI
-      (file IDs are public), run a 10 s reference mel through the
-      *German-fine-tuned* StyleEncoder, save as a `.pt` shaped
-      `[510, 1, 256]`, convert via existing
-      `convert-kokoro-voice-to-gguf.py`.
-   3. Dispatcher logic: when `-l de` is set, load
-      `kokoro-de-hui-base-f16.gguf` instead of `kokoro-82m-f16.gguf`
-      (and the matching German voice). Implement as a per-language
-      model-routing table in `crispasr_backend_kokoro.cpp` or the
-      auto-download manifest.
+   2. Use semidark's `scripts/extract_voicepack.py` to extract a
+      voice pack from one (or several) HUI speakers via the
+      *German-fine-tuned* StyleEncoder. Convert resulting `.pt` via
+      our existing `convert-kokoro-voice-to-gguf.py`. Suggested
+      candidates: 1F + 1M speaker for parity with df_eva/dm_bernd.
+   3. Per-language model routing in
+      `crispasr_backend_kokoro.cpp` (or the auto-download manifest):
+      when `-l de` is set, prefer
+      `kokoro-de-hui-base-f16.gguf` over `kokoro-82m-f16.gguf`.
+      Layer over the Option 1/2a fallback table — Option 2b becomes
+      the new German default once the GGUF is on disk.
 
    For deployable single-voice production quality, run Stage-2
    fine-tuning on one HUI speaker (~half-day on an A40) — out of

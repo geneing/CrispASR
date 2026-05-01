@@ -73,34 +73,46 @@ voice-pack split, conv_post exp/sin, etc.).
 Full plan: `PLAN.md` → §56. Lessons: `LEARNINGS.md` "Kokoro phonemizer:
 libespeak-ng vs popen divergence".
 
-Replaces the popen("espeak-ng …") shell-out with an in-process
-`libespeak-ng` call (behind CMake AUTO probe) while keeping popen as a
-runtime fallback. Adds a 1024-entry LRU phoneme cache and routes the
-CLI's `-l/--language` flag to `cp.espeak_lang`.
+Two layers: (a) in-process libespeak-ng phonemizer + LRU cache for all
+languages, and (b) per-language voice fallback table for languages
+Kokoro-82M doesn't ship voices for (de, ru, ko, ar, …).
 
-**Done this session** (uncommitted):
-- `src/CMakeLists.txt` — `CRISPASR_WITH_ESPEAK_NG` cache string
-  (AUTO/ON/OFF, default AUTO; pkg-config first, Homebrew/Linux
-  fallback).
-- `src/kokoro.cpp` — `kokoro_phoneme_cache` (bounded LRU, mutex),
-  `phonemize_espeak_lib()` (gated on `CRISPASR_HAVE_ESPEAK_NG`,
-  process-global mutex, sticky init/voice, `CRISPASR_ESPEAK_DATA_PATH`
-  override), `phonemize_popen()` (kept as fallback),
-  `phonemize_cached()` (cache → lib → popen).
-- `src/kokoro.h` — docstring updates.
-- `examples/cli/crispasr_backend_kokoro.cpp` — `-l/--language` →
-  `cp.espeak_lang`.
-- Build: `otool -L libcrispasr.dylib` shows `libespeak-ng.1.dylib`;
-  `nm libkokoro.a` has `espeak_{Initialize,SetVoiceByName,
-  TextToPhonemes}` references.
+**Shipped (commits `6d6e978`, `ad7dac5`, `7615005`, `65be09d`,
+`<this commit>`):**
+
+- *Phonemizer layer.* `CRISPASR_WITH_ESPEAK_NG` AUTO probe (pkg-config
+  + Homebrew/Linux fallback). In-process `espeak_TextToPhonemes()`
+  behind a process-global mutex; sticky init + voice; LRU cache
+  (1024 entries, mutex-protected) keyed on `lang \0 text`. Popen
+  retained as runtime fallback. CLI `-l/--language` → `cp.espeak_lang`.
+- *End-to-end synth verified.* Six languages (en, de, fr, ru, cmn, ja)
+  exercised. en/fr/ru clean; cmn loses tone numbers; ja kanji falls
+  back to English. de needed a voice fix — see below.
+- *Voice fallback table.* Per-language preferred voice in
+  `examples/cli/crispasr_backend_kokoro.cpp`:
+  - `de` → `df_eva` (Tundragoon German, Apache-2.0 — recovered from
+    `r1di/kokoro-fastapi-german`'s Git LFS after the original HF repo
+    was deleted; `dm_bernd` also available).
+  - everything else without a native pack → `ff_siwis` (French,
+    non-silence baseline).
+  - Resolution order: explicit `--voice` → preferred → ff_siwis →
+    helpful error. RMS-verified on the long German phrase: df_eva
+    peak=14716, dm_bernd peak=19185 (vs af_heart's 541 silence
+    collapse).
 
 **Open:**
-1. End-to-end synth check — blocked on a `kokoro-82m.gguf` under
-   `/Volumes/backups/ai/crispasr-models/` or `~/.cache/crispasr/`
-   (neither has one today).
-2. `crispasr-diff kokoro` reference backend covering the
-   phonemizer step too.
-3. Optional `kokoro_phoneme_cache_clear()` C ABI.
+1. **Native German backbone.** `dida-80b/kokoro-german-hui-multispeaker-base`
+   (Stage-1 German fine-tune of Kokoro-82M, Apache-2.0) +
+   `semidark/kokoro-deutsch` (recipe with `extract_voicepack.py`).
+   Convert + extract one HUI speaker → ship as the *real* German
+   default once it's on disk. ~half-day. See PLAN §56 Option 2b.
+2. **Mandarin tones / Japanese kanji.** espeak-ng tone numbers and
+   CJK fallback both lose information at the kokoro vocab level.
+   For tones: try `--ipa=2` or pypinyin. For Japanese: pyopenjtalk
+   pre-process. See PLAN §56 open #2 / #3.
+3. **`crispasr-diff kokoro` reference backend** covering the
+   phonemizer step too. PLAN §56 open #4.
+4. Optional `kokoro_phoneme_cache_clear()` C ABI. PLAN §56 open #5.
 
 ---
 

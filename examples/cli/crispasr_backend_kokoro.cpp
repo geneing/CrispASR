@@ -37,17 +37,37 @@ bool kokoro_lang_has_native_voice(const std::string& lang) {
     return false;
 }
 
+// Pick the preferred fallback voice for a non-native language. df_eva
+// (Tundragoon German, Apache-2.0) for German; ff_siwis (French) as the
+// generic fallback for everything else (Russian, Korean, Arabic, etc.).
+const char* kokoro_preferred_fallback_voice(const std::string& lang) {
+    if (lang.size() >= 2 && lang.compare(0, 2, "de") == 0
+        && (lang.size() == 2 || lang[2] == '-' || lang[2] == '_'))
+        return "df_eva";
+    return "ff_siwis";
+}
+
 // Derive the fallback voice path from the model path: same directory,
-// filename `kokoro-voice-ff_siwis.gguf`. Returns empty if the file
-// doesn't exist on disk.
-std::string kokoro_resolve_fallback_voice(const std::string& model_path) {
+// filename `kokoro-voice-<preferred>.gguf`. Falls back to ff_siwis if
+// the language-preferred voice isn't on disk. Returns empty if neither
+// file exists.
+std::string kokoro_resolve_fallback_voice(const std::string& lang, const std::string& model_path) {
     auto slash = model_path.find_last_of("/\\");
     std::string dir = (slash == std::string::npos) ? "." : model_path.substr(0, slash);
-    std::string candidate = dir + "/kokoro-voice-ff_siwis.gguf";
-    if (FILE* f = std::fopen(candidate.c_str(), "rb")) {
-        std::fclose(f);
-        return candidate;
-    }
+    auto try_voice = [&](const char* name) -> std::string {
+        std::string candidate = dir + "/kokoro-voice-" + name + ".gguf";
+        if (FILE* f = std::fopen(candidate.c_str(), "rb")) {
+            std::fclose(f);
+            return candidate;
+        }
+        return {};
+    };
+    const char* preferred = kokoro_preferred_fallback_voice(lang);
+    std::string p = try_voice(preferred);
+    if (!p.empty())
+        return p;
+    if (std::strcmp(preferred, "ff_siwis") != 0)
+        return try_voice("ff_siwis");
     return {};
 }
 
@@ -96,17 +116,28 @@ public:
         std::string voice_path = params.tts_voice;
         if (voice_path.empty() && !params.language.empty() && params.language != "auto"
             && !kokoro_lang_has_native_voice(params.language)) {
-            voice_path = kokoro_resolve_fallback_voice(params.model);
+            voice_path = kokoro_resolve_fallback_voice(params.language, params.model);
             if (!voice_path.empty()) {
-                fprintf(stderr,
-                        "crispasr[kokoro]: no native Kokoro-82M voice for language '%s'; "
-                        "using ff_siwis fallback (French speaker — prosody will sound "
-                        "French-accented). See PLAN #56.\n",
-                        params.language.c_str());
+                const char* picked = kokoro_preferred_fallback_voice(params.language);
+                bool is_de = std::strcmp(picked, "df_eva") == 0
+                             && voice_path.find("df_eva") != std::string::npos;
+                if (is_de) {
+                    fprintf(stderr,
+                            "crispasr[kokoro]: language 'de' — using df_eva (Tundragoon "
+                            "German speaker, Apache-2.0). Predictor weights are still the "
+                            "official Kokoro-82M's, so prosody may not be fully native. "
+                            "See PLAN #56.\n");
+                } else {
+                    fprintf(stderr,
+                            "crispasr[kokoro]: no native Kokoro-82M voice for language '%s'; "
+                            "using ff_siwis fallback (French speaker — prosody will sound "
+                            "French-accented). See PLAN #56.\n",
+                            params.language.c_str());
+                }
             } else {
                 fprintf(stderr,
                         "crispasr[kokoro]: no native Kokoro-82M voice for language '%s' "
-                        "and no fallback at '<model_dir>/kokoro-voice-ff_siwis.gguf'. "
+                        "and no fallback at '<model_dir>/kokoro-voice-{df_eva,ff_siwis}.gguf'. "
                         "Pass --voice <path> or convert one via "
                         "models/convert-kokoro-voice-to-gguf.py. See PLAN #56.\n",
                         params.language.c_str());
