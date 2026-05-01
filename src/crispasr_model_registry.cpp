@@ -133,6 +133,16 @@ constexpr Entry k_registry[] = {
      "~968 MB",
      "qwen3-tts-tokenizer-12hz.gguf",
      "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf"},
+    // Qwen3-TTS-Base 1.7B: same ICL voice-clone path as 0.6B-Base
+    // (`--voice <wav> --ref-text "..."`), with talker hidden=2048,
+    // ECAPA enc_dim=2048, and a small_to_mtp_projection bridge to the
+    // 1024-d code predictor. ~1.9 GB Q8_0 talker; reuses the 12 Hz
+    // tokenizer.
+    {"qwen3-tts-1.7b-base", "qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+     "https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF/resolve/main/qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+     "~1.9 GB (publish pending)",
+     "qwen3-tts-tokenizer-12hz.gguf",
+     "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf"},
     // Orpheus-3B (canopylabs/orpheus-3b-0.1-ft, llama3.2 — "Built with
     // Llama"). Talker = Llama-3.2-3B-Instruct + 7×4096 custom audio
     // tokens. Codec = hubertsiuzdak/snac_24khz (3 codebooks × 4096,

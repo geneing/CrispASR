@@ -69,7 +69,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
     if (name == "vibevoice" || name == "vibevoice-tts")
         return crispasr_make_vibevoice_backend();
     if (name == "qwen3-tts" || name == "qwen3_tts" || name == "qwen3tts" || name == "qwen3-tts-customvoice" ||
-        name == "qwen3tts-customvoice" || name == "qwen3-tts-cv")
+        name == "qwen3tts-customvoice" || name == "qwen3-tts-cv" || name == "qwen3-tts-1.7b-base" ||
+        name == "qwen3-tts-1.7b")
         return crispasr_make_qwen3_tts_backend();
     if (name == "orpheus" || name == "orpheus-tts" || name == "orpheus3b" || name == "kartoffel-orpheus" ||
         name == "kartoffel_orpheus")
@@ -117,6 +118,7 @@ std::vector<std::string> crispasr_list_backends() {
         "vibevoice",
         "qwen3-tts",
         "qwen3-tts-customvoice",
+        "qwen3-tts-1.7b-base",
         "orpheus",
         "kokoro",
         "glm-asr",
