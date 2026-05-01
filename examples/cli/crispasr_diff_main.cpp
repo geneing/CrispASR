@@ -1238,11 +1238,8 @@ int main(int argc, char** argv) {
         // (skipping the ones that require running the wrapper.asr_sft like
         // generated_text — those are handled separately).
         static const char* stages[] = {
-            "prefill_audio_features",
-            "prefill_text_embeds",
-            "prefill_inputs_embeds",
-            "prefill_last_hidden",
-            "prefill_text_logits_step0",
+            "prefill_audio_features", "prefill_text_embeds",       "prefill_inputs_embeds",
+            "prefill_last_hidden",    "prefill_text_logits_step0",
         };
         std::vector<float> saved_text_embeds, saved_audio_features;
         for (const char* stage : stages) {
@@ -1727,36 +1724,27 @@ int main(int argc, char** argv) {
         //   slot 0     → codes_0    (1 entry / super-frame)
         //   slot 1, 4  → codes_1    (2 / super-frame)
         //   slot 2,3,5,6 → codes_2  (4 / super-frame)
-        const int T_super = std::getenv("ORPHEUS_SNAC_T_SUPER")
-                                ? std::atoi(std::getenv("ORPHEUS_SNAC_T_SUPER"))
-                                : 4;
-        const int fill_code = std::getenv("ORPHEUS_SNAC_CODE")
-                                  ? std::atoi(std::getenv("ORPHEUS_SNAC_CODE"))
-                                  : 0;
+        const int T_super = std::getenv("ORPHEUS_SNAC_T_SUPER") ? std::atoi(std::getenv("ORPHEUS_SNAC_T_SUPER")) : 4;
+        const int fill_code = std::getenv("ORPHEUS_SNAC_CODE") ? std::atoi(std::getenv("ORPHEUS_SNAC_CODE")) : 0;
         const int code = ((fill_code % 4096) + 4096) % 4096;
         std::vector<int32_t> c0((size_t)T_super, code);
         std::vector<int32_t> c1((size_t)T_super * 2, code);
         std::vector<int32_t> c2((size_t)T_super * 4, code);
 
-        printf("crispasr-diff: orpheus SNAC: T_super=%d  code=%d  → %zu+%zu+%zu codebook entries\n",
-               T_super, code, c0.size(), c1.size(), c2.size());
+        printf("crispasr-diff: orpheus SNAC: T_super=%d  code=%d  → %zu+%zu+%zu codebook entries\n", T_super, code,
+               c0.size(), c1.size(), c2.size());
 
         // Stage list matches DEFAULT_STAGES in orpheus_snac.py minus
         // the trivially-equal codes_{0,1,2}. snac_pcm_emit is derived
         // from snac_pcm by slicing [:, :, 2048:4096] when T_super == 4.
         static const char* stages[] = {
-            "snac_quant_out",
-            "snac_dec_pre",
-            "snac_dec_blk0",
-            "snac_dec_blk1",
-            "snac_dec_blk2",
-            "snac_dec_blk3",
-            "snac_pcm",
+            "snac_quant_out", "snac_dec_pre",  "snac_dec_blk0", "snac_dec_blk1",
+            "snac_dec_blk2",  "snac_dec_blk3", "snac_pcm",
         };
         for (const char* stage : stages) {
             int n_stage = 0;
             float* our_data = snac_decoder_extract_stage(ctx, c0.data(), (int)c0.size(), c1.data(), (int)c1.size(),
-                                                        c2.data(), (int)c2.size(), stage, &n_stage);
+                                                         c2.data(), (int)c2.size(), stage, &n_stage);
             if (!our_data) {
                 printf("[ERR ] %-22s  extract returned null\n", stage);
                 n_fail++;

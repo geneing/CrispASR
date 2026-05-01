@@ -96,7 +96,10 @@ public:
             auto try_sibling = [&](const std::string& fname) -> std::string {
                 std::string p = dir + "/" + fname;
                 FILE* f = fopen(p.c_str(), "rb");
-                if (f) { fclose(f); return p; }
+                if (f) {
+                    fclose(f);
+                    return p;
+                }
                 return {};
             };
             const std::string& lang = params.language;
@@ -123,9 +126,8 @@ public:
             }
         }
         if (!voice_loaded_) {
-            fprintf(stderr,
-                    "crispasr[vibevoice-tts]: no voice prompt resolved (pass --voice <path> "
-                    "or place a vibevoice-voice-*.gguf next to the model).\n");
+            fprintf(stderr, "crispasr[vibevoice-tts]: no voice prompt resolved (pass --voice <path> "
+                            "or place a vibevoice-voice-*.gguf next to the model).\n");
             return {};
         }
         if (!ctx_ || text.empty())

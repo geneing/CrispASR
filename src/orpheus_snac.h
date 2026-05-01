@@ -43,9 +43,9 @@ struct snac_decoder_ctx* snac_decoder_init_from_file(const char* path, struct sn
 
 void snac_decoder_free(struct snac_decoder_ctx* ctx);
 
-uint32_t snac_decoder_sample_rate(const struct snac_decoder_ctx* ctx);    // 24000
-uint32_t snac_decoder_n_codebooks(const struct snac_decoder_ctx* ctx);    // 3
-uint32_t snac_decoder_hop_length(const struct snac_decoder_ctx* ctx);     // 512
+uint32_t snac_decoder_sample_rate(const struct snac_decoder_ctx* ctx); // 24000
+uint32_t snac_decoder_n_codebooks(const struct snac_decoder_ctx* ctx); // 3
+uint32_t snac_decoder_hop_length(const struct snac_decoder_ctx* ctx);  // 512
 // Fills out[0..n_codebooks-1] with the per-codebook strides ([4, 2, 1]).
 void snac_decoder_vq_strides(const struct snac_decoder_ctx* ctx, uint32_t out[3]);
 

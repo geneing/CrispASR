@@ -2236,20 +2236,26 @@ CA_EXPORT bool crispasr_kokoro_lang_has_native_voice_abi(const char* lang) {
     return crispasr_kokoro_lang_has_native_voice(lang);
 }
 
-CA_EXPORT int crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const char* lang,
-                                                         char* out_path, int out_path_len) {
+CA_EXPORT int crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const char* lang, char* out_path,
+                                                         int out_path_len) {
     return crispasr_kokoro_resolve_model_for_lang(model_path, lang, out_path, out_path_len);
 }
 
-CA_EXPORT int crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path, const char* lang,
-                                                         char* out_path, int out_path_len,
-                                                         char* out_picked, int out_picked_len) {
-    return crispasr_kokoro_resolve_fallback_voice(model_path, lang, out_path, out_path_len,
-                                                  out_picked, out_picked_len);
+CA_EXPORT int crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path, const char* lang, char* out_path,
+                                                         int out_path_len, char* out_picked, int out_picked_len) {
+    return crispasr_kokoro_resolve_fallback_voice(model_path, lang, out_path, out_path_len, out_picked, out_picked_len);
 }
 #else
-CA_EXPORT bool crispasr_kokoro_lang_is_german_abi(const char*) { return false; }
-CA_EXPORT bool crispasr_kokoro_lang_has_native_voice_abi(const char*) { return false; }
-CA_EXPORT int crispasr_kokoro_resolve_model_for_lang_abi(const char*, const char*, char*, int) { return 1; }
-CA_EXPORT int crispasr_kokoro_resolve_fallback_voice_abi(const char*, const char*, char*, int, char*, int) { return 2; }
+CA_EXPORT bool crispasr_kokoro_lang_is_german_abi(const char*) {
+    return false;
+}
+CA_EXPORT bool crispasr_kokoro_lang_has_native_voice_abi(const char*) {
+    return false;
+}
+CA_EXPORT int crispasr_kokoro_resolve_model_for_lang_abi(const char*, const char*, char*, int) {
+    return 1;
+}
+CA_EXPORT int crispasr_kokoro_resolve_fallback_voice_abi(const char*, const char*, char*, int, char*, int) {
+    return 2;
+}
 #endif

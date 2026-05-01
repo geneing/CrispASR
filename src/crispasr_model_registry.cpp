@@ -231,17 +231,21 @@ void fill(CrispasrRegistryEntry& out, const Entry& e) {
 }
 
 const ExtraCompanion* find_extras(const char* backend) {
-    if (!backend) return nullptr;
+    if (!backend)
+        return nullptr;
     for (const auto& x : k_extras) {
-        if (!x.backend) break;
-        if (std::string(backend) == x.backend) return x.items;
+        if (!x.backend)
+            break;
+        if (std::string(backend) == x.backend)
+            return x.items;
     }
     return nullptr;
 }
 
 void download_extras(const Entry& e, bool quiet, const std::string& cache_dir_override) {
     const ExtraCompanion* extras = find_extras(e.backend);
-    if (!extras) return;
+    if (!extras)
+        return;
     for (const ExtraCompanion* it = extras; it->file && it->url; ++it) {
         crispasr_cache::ensure_cached_file(it->file, it->url, quiet, "crispasr", cache_dir_override);
     }
@@ -304,7 +308,8 @@ std::string crispasr_resolve_model(const std::string& model_arg, const std::stri
             if (!dl.empty() && match->companion_file && match->companion_url)
                 crispasr_cache::ensure_cached_file(match->companion_file, match->companion_url, quiet, "crispasr",
                                                    cache_dir_override);
-            if (!dl.empty()) download_extras(*match, quiet, cache_dir_override);
+            if (!dl.empty())
+                download_extras(*match, quiet, cache_dir_override);
             return dl;
         }
         // Either no registry match or caller didn't authorise download —
@@ -330,7 +335,8 @@ std::string crispasr_resolve_model(const std::string& model_arg, const std::stri
     }
     // Backend-specific extras (e.g. kokoro German backbone + voice) — opt-in
     // per backend via k_extras.
-    if (!result.empty()) download_extras(*e, quiet, cache_dir_override);
+    if (!result.empty())
+        download_extras(*e, quiet, cache_dir_override);
 
     return result;
 }

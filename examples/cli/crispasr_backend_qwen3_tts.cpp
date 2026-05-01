@@ -121,8 +121,9 @@ public:
                 std::string spk_name = params.tts_voice;
                 if (spk_name.empty() || ends_with_ci(spk_name, ".wav") || ends_with_ci(spk_name, ".gguf")) {
                     if (!spk_name.empty() && !params.no_prints) {
-                        fprintf(stderr, "crispasr[qwen3-tts]: CustomVoice expects a speaker NAME for --voice, "
-                                        "got '%s' — falling back to first speaker.\n",
+                        fprintf(stderr,
+                                "crispasr[qwen3-tts]: CustomVoice expects a speaker NAME for --voice, "
+                                "got '%s' — falling back to first speaker.\n",
                                 spk_name.c_str());
                     }
                     const char* first = qwen3_tts_get_speaker_name(ctx_, 0);

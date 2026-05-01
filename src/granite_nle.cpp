@@ -679,8 +679,7 @@ extern "C" struct granite_nle_context* granite_nle_init_from_file(const char* pa
             ggml_tensor* rpe_w = ctx->model.encoder.blocks[il].attn_rel_pos_w;
             if (!rpe_w)
                 continue;
-            if (!core_conformer_ibm::build_shaw_rpe_lookup(rpe_w, C, hd, max_pos,
-                                                           ctx->rpe_per_layer[il])) {
+            if (!core_conformer_ibm::build_shaw_rpe_lookup(rpe_w, C, hd, max_pos, ctx->rpe_per_layer[il])) {
                 fprintf(stderr, "granite_nle: unsupported RPE type %s at layer %d — skipping\n",
                         ggml_type_name(rpe_w->type), il);
                 ctx->rpe_per_layer[il].clear();
@@ -884,19 +883,15 @@ extern "C" float* granite_nle_run_encoder(struct granite_nle_context* ctx, const
         const auto& b = ctx->model.encoder.blocks[il];
 
         // FFN1 (Macaron half-step)
-        core_conformer_ibm::run_ffn(ctx->compute_meta, ctx->sched,
-                                    ffn_out.data(), hidden.data(), d, T,
-                                    b.ff1_norm_w, b.ff1_norm_b, b.ff1_up_w, b.ff1_up_b,
-                                    b.ff1_down_w, b.ff1_down_b);
+        core_conformer_ibm::run_ffn(ctx->compute_meta, ctx->sched, ffn_out.data(), hidden.data(), d, T, b.ff1_norm_w,
+                                    b.ff1_norm_b, b.ff1_up_w, b.ff1_up_b, b.ff1_down_w, b.ff1_down_b);
         for (size_t i = 0; i < (size_t)d * T; i++)
             hidden[i] += 0.5f * ffn_out[i];
 
         // Attention: norm + Q/KV (fused graph) → Shaw block attention on CPU
-        core_conformer_ibm::run_norm_matmul_pair(ctx->compute_meta, ctx->sched,
-                                                 Q.data(), b.attn_q_w, d,
-                                                 KV.data(), b.attn_kv_w, d * 2,
-                                                 hidden.data(), d, T,
-                                                 b.attn_norm_w, b.attn_norm_b, 1e-5f);
+        core_conformer_ibm::run_norm_matmul_pair(ctx->compute_meta, ctx->sched, Q.data(), b.attn_q_w, d, KV.data(),
+                                                 b.attn_kv_w, d * 2, hidden.data(), d, T, b.attn_norm_w, b.attn_norm_b,
+                                                 1e-5f);
 
         std::vector<float> K((size_t)d * T), V((size_t)d * T);
         for (int t = 0; t < T; t++) {
@@ -904,31 +899,25 @@ extern "C" float* granite_nle_run_encoder(struct granite_nle_context* ctx, const
             std::memcpy(V.data() + (size_t)t * d, KV.data() + (size_t)t * 2 * d + d, d * sizeof(float));
         }
 
-        core_conformer_ibm::shaw_block_attention_cpu(
-            attn_out.data(), Q.data(), K.data(), V.data(),
-            ctx->rpe_per_layer[il].empty() ? nullptr : ctx->rpe_per_layer[il].data(),
-            T, n_heads, hd, ctx_size, attn_scale, remainder);
+        core_conformer_ibm::shaw_block_attention_cpu(attn_out.data(), Q.data(), K.data(), V.data(),
+                                                     ctx->rpe_per_layer[il].empty() ? nullptr
+                                                                                    : ctx->rpe_per_layer[il].data(),
+                                                     T, n_heads, hd, ctx_size, attn_scale, remainder);
 
         nle_run_matmul(ctx, proj_out.data(), attn_out.data(), d, T, b.attn_out_w, b.attn_out_b, d);
         for (size_t i = 0; i < (size_t)d * T; i++)
             hidden[i] += proj_out[i];
 
         // Conv module
-        core_conformer_ibm::run_conv_module(ctx->compute_meta, ctx->sched,
-                                            conv_out.data(), hidden.data(), d, T,
-                                            b.conv_norm_w, b.conv_norm_b,
-                                            b.conv_up_w, b.conv_up_b,
-                                            b.conv_dw_w,
-                                            b.conv_bn_w, b.conv_bn_b,
-                                            b.conv_down_w, b.conv_down_b);
+        core_conformer_ibm::run_conv_module(ctx->compute_meta, ctx->sched, conv_out.data(), hidden.data(), d, T,
+                                            b.conv_norm_w, b.conv_norm_b, b.conv_up_w, b.conv_up_b, b.conv_dw_w,
+                                            b.conv_bn_w, b.conv_bn_b, b.conv_down_w, b.conv_down_b);
         for (size_t i = 0; i < (size_t)d * T; i++)
             hidden[i] += conv_out[i];
 
         // FFN2 (Macaron half-step)
-        core_conformer_ibm::run_ffn(ctx->compute_meta, ctx->sched,
-                                    ffn_out.data(), hidden.data(), d, T,
-                                    b.ff2_norm_w, b.ff2_norm_b, b.ff2_up_w, b.ff2_up_b,
-                                    b.ff2_down_w, b.ff2_down_b);
+        core_conformer_ibm::run_ffn(ctx->compute_meta, ctx->sched, ffn_out.data(), hidden.data(), d, T, b.ff2_norm_w,
+                                    b.ff2_norm_b, b.ff2_up_w, b.ff2_up_b, b.ff2_down_w, b.ff2_down_b);
         for (size_t i = 0; i < (size_t)d * T; i++)
             hidden[i] += 0.5f * ffn_out[i];
 
@@ -1022,8 +1011,7 @@ extern "C" float* granite_nle_run_encoder(struct granite_nle_context* ctx, const
             importance[t] = 1.0f - blank_prob_mid[t];
 
         std::vector<float> pooled((size_t)num_windows * d);
-        core_ctc::posterior_weighted_pool(hidden.data(), importance.data(),
-                                          T, d, pool_window, pooled.data());
+        core_ctc::posterior_weighted_pool(hidden.data(), importance.data(), T, d, pool_window, pooled.data());
 
         ctx->last_bpe_logits.assign((size_t)bpe_dim * num_windows, 0.0f);
         nle_run_matmul(ctx, ctx->last_bpe_logits.data(), pooled.data(), d, num_windows, ctx->model.encoder.bpe_out_w,
@@ -1154,13 +1142,13 @@ static ggml_cgraph* nle_proj_build_block(granite_nle_context* ctx) {
     std::vector<core_qformer::BlockWeights> blocks(n_layers);
     for (int il = 0; il < n_layers; il++) {
         const auto& b = m.projector.blocks[il];
-        blocks[il] = {b.attn_norm_w, b.attn_norm_b, b.attn_q_w,   b.attn_q_b,   b.attn_k_w,   b.attn_k_b,
-                      b.attn_v_w,    b.attn_v_b,    b.attn_o_w,   b.attn_o_b,   b.mlp_norm_w, b.mlp_norm_b,
-                      b.mlp_fc1_w,   b.mlp_fc1_b,   b.mlp_fc2_w,  b.mlp_fc2_b};
+        blocks[il] = {b.attn_norm_w, b.attn_norm_b, b.attn_q_w,  b.attn_q_b, b.attn_k_w,   b.attn_k_b,
+                      b.attn_v_w,    b.attn_v_b,    b.attn_o_w,  b.attn_o_b, b.mlp_norm_w, b.mlp_norm_b,
+                      b.mlp_fc1_w,   b.mlp_fc1_b,   b.mlp_fc2_w, b.mlp_fc2_b};
     }
 
-    core_qformer::OuterWeights outer = {m.projector.query,       m.projector.window_pos,  m.projector.out_norm_w,
-                                        m.projector.out_norm_b,  m.projector.out_linear_w, m.projector.out_linear_b};
+    core_qformer::OuterWeights outer = {m.projector.query,      m.projector.window_pos,   m.projector.out_norm_w,
+                                        m.projector.out_norm_b, m.projector.out_linear_w, m.projector.out_linear_b};
 
     return core_qformer::build_block(ctx->compute_meta, blocks, outer, qhp);
 }
@@ -1217,8 +1205,7 @@ extern "C" float* granite_nle_run_projector(struct granite_nle_context* ctx, con
         if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
             return nullptr;
         ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "qformer_blk_out"),
-                                all_out.data() + (size_t)blk * q_len * llm_d, 0,
-                                (size_t)q_len * llm_d * sizeof(float));
+                                all_out.data() + (size_t)blk * q_len * llm_d, 0, (size_t)q_len * llm_d * sizeof(float));
     }
 
     if (ctx->params.verbosity >= 2) {
@@ -1322,15 +1309,15 @@ static ggml_cgraph* nle_build_llm(granite_nle_context* ctx, int n_audio, int n_t
     std::vector<core_granite_llm::LayerWeights> blocks(n_layers);
     for (int il = 0; il < n_layers; il++) {
         const auto& b = m.llm.blocks[il];
-        blocks[il] = {b.attn_norm_w, b.attn_q_w,    b.attn_k_w, b.attn_v_w,    b.attn_o_w,
+        blocks[il] = {b.attn_norm_w, b.attn_q_w,   b.attn_k_w, b.attn_v_w,  b.attn_o_w,
                       b.ffn_norm_w,  b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w};
     }
 
-    ggml_tensor* cur = core_granite_llm::build_decoder(ctx0, gf, inputs_embeds, positions,
-                                                       /*causal_mask*/ nullptr,
-                                                       /*kv_k*/ nullptr, /*kv_v*/ nullptr, /*n_past*/ 0,
-                                                       blocks, m.llm.norm_w, llm_hp,
-                                                       /*is_causal*/ false);
+    ggml_tensor* cur =
+        core_granite_llm::build_decoder(ctx0, gf, inputs_embeds, positions,
+                                        /*causal_mask*/ nullptr,
+                                        /*kv_k*/ nullptr, /*kv_v*/ nullptr, /*n_past*/ 0, blocks, m.llm.norm_w, llm_hp,
+                                        /*is_causal*/ false);
 
     // Slice the text portion: positions [n_audio, N) → (d, n_text).
     ggml_tensor* text_h = ggml_view_2d(ctx0, cur, d, n_text, cur->nb[1], (size_t)n_audio * cur->nb[1]);
@@ -1457,9 +1444,9 @@ extern "C" char* granite_nle_transcribe(struct granite_nle_context* ctx, const f
     // core_ctc::greedy_decode_with_blank.
     std::string ctc_text;
     {
-        const std::vector<int32_t> ids = core_ctc::greedy_decode_with_blank(
-            ctx->last_bpe_logits.data(), ctx->last_bpe_T, (int)hp.enc_bpe_vocab,
-            /*blank_id=*/0, /*shift=*/-1);
+        const std::vector<int32_t> ids =
+            core_ctc::greedy_decode_with_blank(ctx->last_bpe_logits.data(), ctx->last_bpe_T, (int)hp.enc_bpe_vocab,
+                                               /*blank_id=*/0, /*shift=*/-1);
         if (!ids.empty())
             ctc_text = core_bpe::detokenize(ctx->id_to_token, ids.data(), ids.size());
         else

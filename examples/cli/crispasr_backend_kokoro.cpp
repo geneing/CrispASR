@@ -29,8 +29,7 @@ namespace {
 
 std::string kokoro_resolve_model(const std::string& lang, const std::string& model_path) {
     char out[1024] = {0};
-    int rc = crispasr_kokoro_resolve_model_for_lang(model_path.c_str(), lang.c_str(),
-                                                    out, (int)sizeof(out));
+    int rc = crispasr_kokoro_resolve_model_for_lang(model_path.c_str(), lang.c_str(), out, (int)sizeof(out));
     if (rc == 0) {
         fprintf(stderr,
                 "crispasr[kokoro]: language 'de' — preferring German-trained "
@@ -43,16 +42,16 @@ std::string kokoro_resolve_model(const std::string& lang, const std::string& mod
     return model_path;
 }
 
-std::string kokoro_resolve_fallback_voice(const std::string& lang,
-                                          const std::string& model_path,
+std::string kokoro_resolve_fallback_voice(const std::string& lang, const std::string& model_path,
                                           std::string* out_picked_name = nullptr) {
     char path[1024] = {0};
     char picked[64] = {0};
-    int rc = crispasr_kokoro_resolve_fallback_voice(model_path.c_str(), lang.c_str(),
-                                                    path, (int)sizeof(path),
-                                                    picked, (int)sizeof(picked));
-    if (rc != 0) return {};
-    if (out_picked_name) *out_picked_name = picked;
+    int rc = crispasr_kokoro_resolve_fallback_voice(model_path.c_str(), lang.c_str(), path, (int)sizeof(path), picked,
+                                                    (int)sizeof(picked));
+    if (rc != 0)
+        return {};
+    if (out_picked_name)
+        *out_picked_name = picked;
     return path;
 }
 
@@ -102,8 +101,8 @@ public:
         // languages → sibling kokoro-voice-af_heart.gguf (auto-download default
         // companion) → empty (synthesis will fail with a clear error).
         std::string voice_path = params.tts_voice;
-        if (voice_path.empty() && !params.language.empty() && params.language != "auto"
-            && !crispasr_kokoro_lang_has_native_voice(params.language.c_str())) {
+        if (voice_path.empty() && !params.language.empty() && params.language != "auto" &&
+            !crispasr_kokoro_lang_has_native_voice(params.language.c_str())) {
             std::string picked;
             voice_path = kokoro_resolve_fallback_voice(params.language, params.model, &picked);
             if (!voice_path.empty() && crispasr_kokoro_lang_is_german(params.language.c_str())) {
@@ -150,7 +149,10 @@ public:
             std::string dir = (slash == std::string::npos) ? "." : mp.substr(0, slash);
             std::string candidate = dir + "/kokoro-voice-af_heart.gguf";
             FILE* tf = fopen(candidate.c_str(), "rb");
-            if (tf) { fclose(tf); voice_path = std::move(candidate); }
+            if (tf) {
+                fclose(tf);
+                voice_path = std::move(candidate);
+            }
         }
         if (!voice_loaded_ && !voice_path.empty()) {
             if (kokoro_load_voice_pack(ctx_, voice_path.c_str()) != 0) {

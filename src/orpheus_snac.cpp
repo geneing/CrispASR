@@ -74,25 +74,25 @@
 namespace {
 
 struct snac_quant {
-    ggml_tensor* codebook = nullptr;     // (codebook_dim=8, codebook_size=4096) F16
-    ggml_tensor* out_proj_w = nullptr;   // (1, codebook_dim=8, latent_dim=768)  F16
-    ggml_tensor* out_proj_b = nullptr;   // (latent_dim=768,) F32
+    ggml_tensor* codebook = nullptr;   // (codebook_dim=8, codebook_size=4096) F16
+    ggml_tensor* out_proj_w = nullptr; // (1, codebook_dim=8, latent_dim=768)  F16
+    ggml_tensor* out_proj_b = nullptr; // (latent_dim=768,) F32
 };
 
 struct snac_res_unit {
-    ggml_tensor* alpha0 = nullptr;       // (dim,) F32
-    ggml_tensor* conv0_w = nullptr;      // (7, 1, dim) F16  — depthwise k=7 dilation=d
-    ggml_tensor* conv0_b = nullptr;      // (dim,) F32
-    ggml_tensor* alpha1 = nullptr;       // (dim,) F32
-    ggml_tensor* conv1_w = nullptr;      // (1, dim, dim) F16 — pointwise k=1
-    ggml_tensor* conv1_b = nullptr;      // (dim,) F32
+    ggml_tensor* alpha0 = nullptr;  // (dim,) F32
+    ggml_tensor* conv0_w = nullptr; // (7, 1, dim) F16  — depthwise k=7 dilation=d
+    ggml_tensor* conv0_b = nullptr; // (dim,) F32
+    ggml_tensor* alpha1 = nullptr;  // (dim,) F32
+    ggml_tensor* conv1_w = nullptr; // (1, dim, dim) F16 — pointwise k=1
+    ggml_tensor* conv1_b = nullptr; // (dim,) F32
 };
 
 struct snac_block {
-    ggml_tensor* alpha = nullptr;        // (input_dim,) F32
-    ggml_tensor* up_w = nullptr;         // (K=2s, output_dim, input_dim) F16
-    ggml_tensor* up_b = nullptr;         // (output_dim,) F32
-    ggml_tensor* noise_w = nullptr;      // (1, output_dim, output_dim) F16 — bound but unused
+    ggml_tensor* alpha = nullptr;   // (input_dim,) F32
+    ggml_tensor* up_w = nullptr;    // (K=2s, output_dim, input_dim) F16
+    ggml_tensor* up_b = nullptr;    // (output_dim,) F32
+    ggml_tensor* noise_w = nullptr; // (1, output_dim, output_dim) F16 — bound but unused
     std::array<snac_res_unit, 3> res;
 };
 
@@ -104,8 +104,8 @@ struct snac_hparams {
     uint32_t latent_dim = 768;   // not stored in GGUF — derived from snac.dec.in0.weight
     uint32_t decoder_dim = 1024; // derived from snac.dec.in1.weight
     uint32_t hop_length = 512;
-    std::vector<uint32_t> vq_strides;        // [4, 2, 1]
-    std::vector<uint32_t> decoder_strides;   // [8, 8, 4, 2]
+    std::vector<uint32_t> vq_strides;         // [4, 2, 1]
+    std::vector<uint32_t> decoder_strides;    // [8, 8, 4, 2]
     std::vector<uint32_t> residual_dilations; // [1, 3, 9]
 };
 
@@ -311,8 +311,8 @@ static ggml_tensor* dw_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w,
     y = ggml_conv_1d_dw(ctx, w, y, /*s*/ 1, p, dil);         // (T_out, 1, C)
     // ggml_conv_1d_dw returns ne=[T_out, ne[2]_of_input=1 wait..., C, 1] —
     // squeeze the 1 dim and reshape to (T, C).
-    y = ggml_reshape_2d(ctx, y, T, C);                       // (T, C)
-    y = ggml_cont(ctx, ggml_transpose(ctx, y));              // (C, T)
+    y = ggml_reshape_2d(ctx, y, T, C);          // (T, C)
+    y = ggml_cont(ctx, ggml_transpose(ctx, y)); // (C, T)
     if (b) {
         y = ggml_add(ctx, y, b);
     }
@@ -347,7 +347,7 @@ static ggml_tensor* conv1d_k(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, 
 static ggml_tensor* convt1d_pad(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int stride,
                                 int pad) {
     const int Cout = (int)w->ne[1];
-    ggml_tensor* xT = ggml_cont(ctx, ggml_transpose(ctx, x));         // (T, Cin)
+    ggml_tensor* xT = ggml_cont(ctx, ggml_transpose(ctx, x));          // (T, Cin)
     ggml_tensor* y = ggml_conv_transpose_1d(ctx, w, xT, stride, 0, 1); // (T_unpad, Cout, 1, 1)
     const int T_unpad = (int)y->ne[0];
     const int T_out = T_unpad - 2 * pad;
@@ -356,7 +356,7 @@ static ggml_tensor* convt1d_pad(ggml_context* ctx, ggml_tensor* x, ggml_tensor* 
         y = ggml_view_2d(ctx, y, T_out, Cout, (size_t)T_unpad * sizeof(float), (size_t)pad * sizeof(float));
         y = ggml_cont(ctx, y); // (T_out, Cout)
     }
-    y = ggml_cont(ctx, ggml_transpose(ctx, y));                       // (Cout, T_out)
+    y = ggml_cont(ctx, ggml_transpose(ctx, y)); // (Cout, T_out)
     if (b) {
         y = ggml_add(ctx, y, b);
     }
@@ -701,8 +701,7 @@ extern "C" float* snac_decoder_decode(struct snac_decoder_ctx* ctx, const int32_
     return run_graph_and_extract(ctx, c0, n0, c1, n1, c2, n2, "snac_pcm", out_n_samples);
 }
 
-extern "C" float* snac_decoder_extract_stage(struct snac_decoder_ctx* ctx, const int32_t* c0, int n0,
-                                             const int32_t* c1, int n1, const int32_t* c2, int n2,
-                                             const char* stage_name, int* out_n) {
+extern "C" float* snac_decoder_extract_stage(struct snac_decoder_ctx* ctx, const int32_t* c0, int n0, const int32_t* c1,
+                                             int n1, const int32_t* c2, int n2, const char* stage_name, int* out_n) {
     return run_graph_and_extract(ctx, c0, n0, c1, n1, c2, n2, stage_name, out_n);
 }

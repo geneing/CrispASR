@@ -54,7 +54,7 @@ float* mimo_asr_extract_stage(struct mimo_asr_context* ctx, const int32_t* input
 // Read out a few hyperparameters needed by the diff harness for layout
 // validation (each pointer may be NULL to skip).
 int mimo_asr_get_hparams(struct mimo_asr_context* ctx, uint32_t* llm_hidden, uint32_t* llm_vocab, uint32_t* audio_dim,
-                        uint32_t* audio_channels, uint32_t* audio_group_size);
+                         uint32_t* audio_channels, uint32_t* audio_group_size);
 
 // Free context and all associated memory.
 void mimo_asr_free(struct mimo_asr_context* ctx);

@@ -165,9 +165,10 @@ static bool bind_talker(orpheus_context* c) {
     for (uint32_t i = 0; i < c->hp.n_layers; i++) {
         auto& b = t.blocks[i];
         char key[64];
-#define FMT(fld, sub) do { \
-        std::snprintf(key, sizeof(key), "talker.blk.%u." sub ".weight", i); \
-        b.fld = core_gguf::require(tensors, key, "orpheus"); \
+#define FMT(fld, sub)                                                                                                  \
+    do {                                                                                                               \
+        std::snprintf(key, sizeof(key), "talker.blk.%u." sub ".weight", i);                                            \
+        b.fld = core_gguf::require(tensors, key, "orpheus");                                                           \
     } while (0)
         FMT(attn_norm_w, "attn_norm");
         FMT(attn_q_w, "attn_q");
