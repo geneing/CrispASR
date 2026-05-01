@@ -1,6 +1,6 @@
 # CrispASR
 
-**One C++ binary, twenty-one ASR backends, zero Python dependencies.**
+**One C++ binary, twenty-four ASR backends, zero Python dependencies.**
 
 CrispASR started as a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and extends that base into a **unified speech recognition tool** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR architectures. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file.
 
@@ -18,7 +18,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 
 | Project | What it does |
 |---|---|
-| **[CrispASR](https://github.com/CrispStrobe/CrispASR)** | This repo — C++ speech recognition engine. 11 backends, CLI + HTTP server + C-ABI + Python/Rust/Dart bindings. |
+| **[CrispASR](https://github.com/CrispStrobe/CrispASR)** | This repo — C++ speech recognition engine. 24 ASR backends + 3 TTS backends, CLI + HTTP server + C-ABI + Python/Rust/Dart bindings. |
 | **[CrisperWeaver](https://github.com/CrispStrobe/CrisperWeaver)** | Cross-platform Flutter transcription app built on CrispASR. Desktop + mobile, all 10 backends, model browser with download queue, mic capture, SRT/VTT/JSON export, diarization, batch processing. Fully offline. |
 | **[CrispEmbed](https://github.com/CrispStrobe/CrispEmbed)** | Text embedding engine via ggml — same philosophy as CrispASR but for retrieval. 10 architectures (XLM-R, Qwen3-Embed, Gemma3, ModernBERT, ...), dense + sparse + ColBERT + reranking. 9.5x faster than ONNX on CPU, GPU via CUDA/Metal/Vulkan. Python/Rust/Dart bindings. |
 | **[Susurrus](https://github.com/CrispStrobe/Susurrus)** | Python ASR GUI with 9 backends (faster-whisper, mlx-whisper, voxtral, insanely-fast-whisper, ...). The Python counterpart to CrispASR's C++ approach. |
@@ -968,7 +968,7 @@ from crispasr import (
     align_words, cache_ensure_file, registry_lookup,
 )
 
-# Transcribe (all 10 backends via one session object)
+# Transcribe (any of the 24 ASR backends via one session object)
 sess = Session("parakeet-tdt-0.6b-v3-q4_k.gguf")
 segs = sess.transcribe_vad(pcm, "silero-v5.1.2.bin")  # stitched VAD pass
 
@@ -1477,7 +1477,7 @@ It is a model-agnostic tool that iterates through the GGUF tensor list and re-qu
 
 ## Branch state & roadmap
 
-**21 ASR backends** + 2 punctuation models + VAD/LID/diarization/alignment — all through a unified C-ABI with Python/Rust/Dart wrappers. See [PLAN.md](PLAN.md) for the roadmap, [HISTORY.md](HISTORY.md) for completed milestones, and [PERFORMANCE.md](PERFORMANCE.md) for benchmarks on Kaggle T4 GPU (21/21 pass, fastest 9.0x RT).
+**24 ASR backends** + 3 TTS backends + 2 punctuation models + VAD/LID/diarization/alignment — all through a unified C-ABI with Python/Rust/Dart wrappers. See [PLAN.md](PLAN.md) for the roadmap, [HISTORY.md](HISTORY.md) for completed milestones, and [PERFORMANCE.md](PERFORMANCE.md) for benchmarks on Kaggle T4 GPU (21/21 of the benchmarked backends pass, fastest 9.0x RT — newer backends not yet in the benchmark suite).
 
 ---
 
