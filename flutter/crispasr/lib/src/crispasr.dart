@@ -1704,6 +1704,7 @@ class CrispasrSession {
   ///
   /// For qwen3-tts a WAV reference requires [refText] (the transcription of
   /// the reference audio). For vibevoice only GGUF voice packs are supported.
+  /// For orpheus voice selection is BY NAME — use [setSpeakerName] instead.
   void setVoice(String path, {String? refText}) {
     if (_closed) throw StateError('CrispasrSession is closed');
     if (!_lib.providesSymbol('crispasr_session_set_voice')) {
@@ -1723,10 +1724,59 @@ class CrispasrSession {
     }
   }
 
+  /// Select a fixed/preset speaker by NAME (orpheus).
+  ///
+  /// Names are e.g. `"tara"`, `"leo"`, `"leah"` for the canopylabs English
+  /// finetune; `"Anton"`, `"Sophie"`, etc. for the Kartoffel_Orpheus DE
+  /// finetunes. Use [speakers] to enumerate names baked into the GGUF.
+  void setSpeakerName(String name) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_speaker_name')) {
+      throw UnsupportedError('setSpeakerName API not available in this libcrispasr build');
+    }
+    final fn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<Utf8>),
+        int Function(Pointer<Void>, Pointer<Utf8>)>('crispasr_session_set_speaker_name');
+    final namePtr = name.toNativeUtf8();
+    try {
+      final rc = fn(_handle, namePtr);
+      if (rc == -2) {
+        throw ArgumentError('unknown speaker: $name (call speakers() to enumerate)');
+      }
+      if (rc == -3) {
+        throw StateError('backend $_backend has no preset speakers; use setVoice() instead');
+      }
+      if (rc != 0) throw Exception('setSpeakerName failed (rc=$rc) for backend $_backend');
+    } finally {
+      calloc.free(namePtr);
+    }
+  }
+
+  /// Return the list of preset speaker names for the active backend.
+  /// Empty if the backend has no preset-speaker contract.
+  List<String> speakers() {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_n_speakers')) return const [];
+    final nFn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>),
+        int Function(Pointer<Void>)>('crispasr_session_n_speakers');
+    final getFn = _lib.lookupFunction<
+        Pointer<Utf8> Function(Pointer<Void>, Int32),
+        Pointer<Utf8> Function(Pointer<Void>, int)>('crispasr_session_get_speaker_name');
+    final n = nFn(_handle);
+    final out = <String>[];
+    for (var i = 0; i < n; i++) {
+      final ptr = getFn(_handle, i);
+      if (ptr != nullptr) out.add(ptr.toDartString());
+    }
+    return out;
+  }
+
   /// Synthesise [text] to 24 kHz mono float32 PCM.
   ///
-  /// Requires a TTS-capable backend (vibevoice, qwen3-tts).
-  /// For vibevoice call [setVoice] before the first synthesis.
+  /// Requires a TTS-capable backend (vibevoice, qwen3-tts, kokoro, orpheus).
+  /// For vibevoice call [setVoice] before the first synthesis. For orpheus
+  /// call [setCodecPath] (SNAC GGUF) and [setSpeakerName].
   Float32List synthesize(String text) {
     if (_closed) throw StateError('CrispasrSession is closed');
     if (!_lib.providesSymbol('crispasr_session_synthesize')) {

@@ -16,10 +16,11 @@
 // samples at 24 kHz); the streaming protocol emits the middle 2048
 // samples of each 4-super-frame sliding window.
 //
-// Status: talker-side wired up; SNAC decoder C++ side is the next
-// slice. orpheus_synthesize_codes works once SNAC weights are loaded
-// via orpheus_set_codec_path; orpheus_synthesize is gated on the
-// codec landing.
+// Status: end-to-end shipped (PLAN #57 Phase 2 slice (c), commit
+// a0982d3). orpheus_synthesize drives the talker AR loop and decodes
+// SNAC codes to 24 kHz PCM in C++. orpheus_synthesize_codes still
+// returns the raw <custom_token_N> LM token IDs for callers that want
+// to render with the python reference SNAC decoder.
 
 #include <stdint.h>
 
@@ -71,12 +72,11 @@ int orpheus_set_speaker_by_name(struct orpheus_context* ctx, const char* name);
 int orpheus_is_fixed_speaker(struct orpheus_context* ctx);
 
 // Synthesise text → 24 kHz mono float32 PCM. Caller frees with
-// `orpheus_pcm_free`. *out_n_samples is set on success.
-//
-// Returns nullptr until the SNAC C++ decoder lands. The current
-// implementation can drive the talker AR loop end-to-end and emit
-// custom_token_N LM token IDs via orpheus_synthesize_codes; the
-// C++ SNAC half is in flight (slice b).
+// `orpheus_pcm_free`. *out_n_samples is set on success. Requires
+// orpheus_set_codec_path to have been called first; returns nullptr
+// otherwise. With the default temperature=0.6 (set in
+// orpheus_context_default_params), `"Hello, my name is Tara."`
+// roundtrips word-exact through parakeet ASR.
 float* orpheus_synthesize(struct orpheus_context* ctx, const char* text, int* out_n_samples);
 
 // Run the talker on `text`, AR-decode until the audio_end token (or

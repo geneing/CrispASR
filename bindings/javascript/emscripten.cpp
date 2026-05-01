@@ -26,6 +26,9 @@ void                    crispasr_session_close(struct CrispasrSession* s);
 int                     crispasr_session_set_codec_path(struct CrispasrSession* s, const char* path);
 int                     crispasr_session_set_voice(struct CrispasrSession* s, const char* path,
                                                    const char* ref_text_or_null);
+int                     crispasr_session_set_speaker_name(struct CrispasrSession* s, const char* name);
+int                     crispasr_session_n_speakers(struct CrispasrSession* s);
+const char*             crispasr_session_get_speaker_name(struct CrispasrSession* s, int i);
 float*                  crispasr_session_synthesize(struct CrispasrSession* s, const char* text,
                                                     int* out_n_samples);
 void                    crispasr_pcm_free(float* pcm);
@@ -151,6 +154,27 @@ EMSCRIPTEN_BINDINGS(whisper) {
                              if (!g_tts_session) return -1;
                              const char* rt = ref_text.empty() ? nullptr : ref_text.c_str();
                              return crispasr_session_set_voice(g_tts_session, path.c_str(), rt);
+                         }));
+
+    // Orpheus preset speakers — set by NAME, not by file path.
+    emscripten::function("ttsSetSpeakerName",
+                         emscripten::optional_override([](const std::string& name) {
+                             if (!g_tts_session) return -1;
+                             return crispasr_session_set_speaker_name(g_tts_session, name.c_str());
+                         }));
+
+    // Returns the list of preset speaker names for the active backend
+    // (orpheus today). Empty array if the backend has no preset speakers.
+    emscripten::function("ttsSpeakers",
+                         emscripten::optional_override([]() -> emscripten::val {
+                             emscripten::val out = emscripten::val::array();
+                             if (!g_tts_session) return out;
+                             int n = crispasr_session_n_speakers(g_tts_session);
+                             for (int i = 0; i < n; i++) {
+                                 const char* name = crispasr_session_get_speaker_name(g_tts_session, i);
+                                 if (name) out.call<void>("push", std::string(name));
+                             }
+                             return out;
                          }));
 
     // Returns a Float32Array of 24 kHz mono PCM. Empty array on failure.

@@ -8,8 +8,8 @@ import com.sun.jna.ptr.IntByReference;
 /**
  * Minimal TTS surface for the Java binding. Exposes the unified
  * CrispASR Session API for TTS-capable backends (kokoro, vibevoice,
- * qwen3-tts) plus the kokoro per-language model + voice resolver
- * (PLAN #56 opt 2b).
+ * qwen3-tts, orpheus) plus the kokoro per-language model + voice
+ * resolver (PLAN #56 opt 2b).
  *
  * <p>Usage:
  * <pre>{@code
@@ -31,6 +31,9 @@ public final class CrispasrSession implements AutoCloseable {
         void    crispasr_session_close(Pointer session);
         int     crispasr_session_set_codec_path(Pointer session, String path);
         int     crispasr_session_set_voice(Pointer session, String path, String refTextOrNull);
+        int     crispasr_session_set_speaker_name(Pointer session, String name);
+        int     crispasr_session_n_speakers(Pointer session);
+        String  crispasr_session_get_speaker_name(Pointer session, int i);
         Pointer crispasr_session_synthesize(Pointer session, String text, IntByReference outNSamples);
         void    crispasr_pcm_free(Pointer pcm);
 
@@ -62,7 +65,10 @@ public final class CrispasrSession implements AutoCloseable {
         return new CrispasrSession(p);
     }
 
-    /** Load a separate codec GGUF (qwen3-tts only; no-op for others). */
+    /**
+     * Load a separate codec GGUF. Required for qwen3-tts (12 Hz tokenizer)
+     * and orpheus (SNAC codec); no-op for other backends.
+     */
     public void setCodecPath(String path) {
         int rc = Lib.INSTANCE.crispasr_session_set_codec_path(handle, path);
         if (rc != 0) throw new IllegalStateException("set_codec_path failed (rc=" + rc + ")");
@@ -72,6 +78,9 @@ public final class CrispasrSession implements AutoCloseable {
      * Load a voice prompt: a baked GGUF voice pack OR a *.wav reference.
      * {@code refText} is required for qwen3-tts when {@code path} is a WAV;
      * pass {@code null} otherwise.
+     *
+     * <p>For orpheus voice selection is BY NAME — use
+     * {@link #setSpeakerName(String)} instead.
      */
     public void setVoice(String path, String refText) {
         int rc = Lib.INSTANCE.crispasr_session_set_voice(handle, path, refText);
@@ -79,8 +88,38 @@ public final class CrispasrSession implements AutoCloseable {
     }
 
     /**
+     * Select a fixed/preset speaker by name (orpheus). Names are e.g.
+     * {@code "tara"}, {@code "leo"}, {@code "leah"} for canopylabs;
+     * {@code "Anton"}, {@code "Sophie"} for the Kartoffel_Orpheus DE
+     * finetunes. Use {@link #speakers()} to enumerate.
+     *
+     * @throws IllegalArgumentException if {@code name} is not in the GGUF metadata
+     * @throws IllegalStateException if the active backend has no preset-speaker contract
+     */
+    public void setSpeakerName(String name) {
+        int rc = Lib.INSTANCE.crispasr_session_set_speaker_name(handle, name);
+        if (rc == -2) throw new IllegalArgumentException("unknown speaker: " + name + "; call speakers() to enumerate");
+        if (rc == -3) throw new IllegalStateException("backend has no preset speakers; use setVoice() instead");
+        if (rc != 0) throw new IllegalStateException("set_speaker_name failed (rc=" + rc + ")");
+    }
+
+    /**
+     * Return the list of preset speaker names for the active backend.
+     * Empty if the backend has no preset-speaker contract.
+     */
+    public String[] speakers() {
+        int n = Lib.INSTANCE.crispasr_session_n_speakers(handle);
+        String[] out = new String[n];
+        for (int i = 0; i < n; i++) {
+            String s = Lib.INSTANCE.crispasr_session_get_speaker_name(handle, i);
+            out[i] = (s == null) ? "" : s;
+        }
+        return out;
+    }
+
+    /**
      * Synthesise {@code text} to 24 kHz mono PCM. Requires a TTS-capable
-     * backend (kokoro / vibevoice / qwen3-tts).
+     * backend (kokoro / vibevoice / qwen3-tts / orpheus).
      */
     public float[] synthesize(String text) {
         IntByReference n = new IntByReference(0);

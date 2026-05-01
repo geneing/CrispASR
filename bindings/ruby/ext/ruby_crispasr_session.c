@@ -1,13 +1,15 @@
 // Minimal TTS surface for the Ruby binding. Exposes the unified
 // CrispASR Session API for TTS-capable backends (kokoro, vibevoice,
-// qwen3-tts) plus the kokoro per-language model + voice resolver
-// (PLAN #56 opt 2b).
+// qwen3-tts, orpheus) plus the kokoro per-language model + voice
+// resolver (PLAN #56 opt 2b).
 //
 // Surface (under module `CrispASR::Session`):
 //   open(model_path, n_threads) -> handle
 //   close(handle)
 //   set_codec_path(handle, path)
 //   set_voice(handle, path, ref_text=nil)
+//   set_speaker_name(handle, name)             # orpheus preset speakers
+//   speakers(handle) -> Array<String>
 //   synthesize(handle, text) -> Array<Float>   # 24 kHz mono PCM
 //
 // And a singleton method:
@@ -27,6 +29,9 @@ extern void                    crispasr_session_close(struct CrispasrSession* s)
 extern int                     crispasr_session_set_codec_path(struct CrispasrSession* s, const char* path);
 extern int                     crispasr_session_set_voice(struct CrispasrSession* s, const char* path,
                                                           const char* ref_text_or_null);
+extern int                     crispasr_session_set_speaker_name(struct CrispasrSession* s, const char* name);
+extern int                     crispasr_session_n_speakers(struct CrispasrSession* s);
+extern const char*             crispasr_session_get_speaker_name(struct CrispasrSession* s, int i);
 extern float*                  crispasr_session_synthesize(struct CrispasrSession* s, const char* text,
                                                            int* out_n_samples);
 extern void                    crispasr_pcm_free(float* pcm);
@@ -68,6 +73,26 @@ static VALUE rb_session_set_voice(int argc, VALUE* argv, VALUE self) {
     int rc = crispasr_session_set_voice(s, StringValueCStr(path), rt);
     if (rc != 0) rb_raise(rb_eRuntimeError, "set_voice failed (rc=%d)", rc);
     return Qnil;
+}
+
+static VALUE rb_session_set_speaker_name(VALUE self, VALUE handle, VALUE name) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_speaker_name(s, StringValueCStr(name));
+    if (rc == -2) rb_raise(rb_eArgError, "unknown speaker: %s", StringValueCStr(name));
+    if (rc == -3) rb_raise(rb_eRuntimeError, "backend has no preset speakers; use set_voice instead");
+    if (rc != 0) rb_raise(rb_eRuntimeError, "set_speaker_name failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_speakers(VALUE self, VALUE handle) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int n = crispasr_session_n_speakers(s);
+    VALUE arr = rb_ary_new_capa(n);
+    for (int i = 0; i < n; i++) {
+        const char* name = crispasr_session_get_speaker_name(s, i);
+        rb_ary_push(arr, name ? rb_str_new_cstr(name) : rb_str_new_cstr(""));
+    }
+    return arr;
 }
 
 static VALUE rb_session_synthesize(VALUE self, VALUE handle, VALUE text) {
@@ -121,6 +146,8 @@ void init_ruby_crispasr_session(VALUE* mWhisper) {
     rb_define_singleton_method(mSession, "close",                rb_session_close,            1);
     rb_define_singleton_method(mSession, "set_codec_path",       rb_session_set_codec_path,   2);
     rb_define_singleton_method(mSession, "set_voice",            rb_session_set_voice,       -1);
+    rb_define_singleton_method(mSession, "set_speaker_name",     rb_session_set_speaker_name, 2);
+    rb_define_singleton_method(mSession, "speakers",             rb_session_speakers,         1);
     rb_define_singleton_method(mSession, "synthesize",           rb_session_synthesize,       2);
     rb_define_singleton_method(mSession, "kokoro_resolve_for_lang", rb_kokoro_resolve_for_lang, 2);
 }

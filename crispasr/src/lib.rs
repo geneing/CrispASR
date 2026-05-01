@@ -547,6 +547,9 @@ impl Session {
 
     /// Load a voice prompt: a baked GGUF voice pack OR a *.wav reference
     /// (qwen3-tts requires `ref_text` for *.wav inputs).
+    ///
+    /// For orpheus voice selection is BY NAME — use [`set_speaker_name`]
+    /// instead.
     pub fn set_voice(&self, path: &str, ref_text: Option<&str>) -> Result<(), String> {
         let cpath = CString::new(path).map_err(|e| e.to_string())?;
         let crt = match ref_text {
@@ -561,8 +564,40 @@ impl Session {
         Ok(())
     }
 
+    /// Select a fixed/preset speaker by NAME for backends that bake names
+    /// into the GGUF (orpheus). Names are e.g. `"tara"`/`"leo"` for
+    /// canopylabs English; `"Anton"`/`"Sophie"` for Kartoffel_Orpheus DE.
+    /// Use [`speakers`] to enumerate.
+    pub fn set_speaker_name(&self, name: &str) -> Result<(), String> {
+        let cname = CString::new(name).map_err(|e| e.to_string())?;
+        let rc = unsafe { crispasr_sys::crispasr_session_set_speaker_name(self.handle, cname.as_ptr()) };
+        match rc {
+            0 => Ok(()),
+            -2 => Err(format!("unknown speaker {:?}; call .speakers() to enumerate", name)),
+            -3 => Err("backend has no preset speakers; use set_voice() instead".to_string()),
+            _ => Err(format!("set_speaker_name failed (rc={})", rc)),
+        }
+    }
+
+    /// Return the list of preset speaker names for the active backend.
+    /// Empty if the backend has no preset-speaker contract.
+    pub fn speakers(&self) -> Vec<String> {
+        let n = unsafe { crispasr_sys::crispasr_session_n_speakers(self.handle) };
+        let mut out = Vec::with_capacity(n.max(0) as usize);
+        for i in 0..n {
+            let ptr = unsafe { crispasr_sys::crispasr_session_get_speaker_name(self.handle, i) };
+            if !ptr.is_null() {
+                let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned();
+                out.push(s);
+            }
+        }
+        out
+    }
+
     /// Synthesise `text` to 24 kHz mono PCM. Requires a TTS-capable backend
-    /// (`vibevoice`, `qwen3-tts`).
+    /// (`vibevoice`, `qwen3-tts`, `kokoro`, `orpheus`).
     pub fn synthesize(&self, text: &str) -> Result<Vec<f32>, String> {
         let ctext = CString::new(text).map_err(|e| e.to_string())?;
         let mut n: c_int = 0;

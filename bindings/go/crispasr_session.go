@@ -2,8 +2,8 @@ package whisper
 
 // Minimal TTS surface for the Go binding. Exposes the unified
 // CrispASR Session API for TTS-capable backends (kokoro, vibevoice,
-// qwen3-tts) plus the kokoro per-language model + voice resolver
-// (PLAN #56 opt 2b).
+// qwen3-tts, orpheus) plus the kokoro per-language model + voice
+// resolver (PLAN #56 opt 2b).
 
 /*
 #cgo LDFLAGS: -lcrispasr
@@ -21,6 +21,9 @@ CrispasrSession* crispasr_session_open(const char* model_path, int n_threads);
 void             crispasr_session_close(CrispasrSession* s);
 int              crispasr_session_set_codec_path(CrispasrSession* s, const char* path);
 int              crispasr_session_set_voice(CrispasrSession* s, const char* path, const char* ref_text_or_null);
+int              crispasr_session_set_speaker_name(CrispasrSession* s, const char* name);
+int              crispasr_session_n_speakers(CrispasrSession* s);
+const char*      crispasr_session_get_speaker_name(CrispasrSession* s, int i);
 float*           crispasr_session_synthesize(CrispasrSession* s, const char* text, int* out_n_samples);
 void             crispasr_pcm_free(float* pcm);
 
@@ -34,10 +37,11 @@ import "C"
 
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 )
 
-// CrispasrSession is a TTS-capable session (kokoro, vibevoice, qwen3-tts).
+// CrispasrSession is a TTS-capable session (kokoro, vibevoice, qwen3-tts, orpheus).
 type CrispasrSession struct {
 	handle *C.CrispasrSession
 }
@@ -63,7 +67,9 @@ func (s *CrispasrSession) Close() {
 	}
 }
 
-// SetCodecPath loads a separate codec GGUF (qwen3-tts only; no-op for others).
+// SetCodecPath loads a separate codec GGUF.
+// Required for qwen3-tts (12 Hz tokenizer) and orpheus (SNAC codec);
+// no-op for other backends.
 func (s *CrispasrSession) SetCodecPath(path string) error {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
@@ -77,6 +83,8 @@ func (s *CrispasrSession) SetCodecPath(path string) error {
 // SetVoice loads a voice prompt: a baked GGUF voice pack OR a *.wav reference.
 // `refText` is required for qwen3-tts when `path` is a WAV; pass an empty
 // string otherwise.
+//
+// For orpheus voice selection is BY NAME — use SetSpeakerName instead.
 func (s *CrispasrSession) SetVoice(path, refText string) error {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
@@ -93,8 +101,42 @@ func (s *CrispasrSession) SetVoice(path, refText string) error {
 	return nil
 }
 
+// SetSpeakerName selects a fixed/preset speaker by NAME for backends
+// that bake speaker names into the GGUF (orpheus today). Names are
+// e.g. "tara"/"leo" for the canopylabs English finetune; "Anton"/"Sophie"
+// for the Kartoffel_Orpheus DE finetunes. Use Speakers() to enumerate.
+func (s *CrispasrSession) SetSpeakerName(name string) error {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	rc := C.crispasr_session_set_speaker_name(s.handle, cname)
+	switch rc {
+	case 0:
+		return nil
+	case -2:
+		return fmt.Errorf("unknown speaker %q; call Speakers() to enumerate", name)
+	case -3:
+		return errors.New("backend has no preset speakers; use SetVoice instead")
+	default:
+		return fmt.Errorf("crispasr_session_set_speaker_name failed (rc=%d)", int(rc))
+	}
+}
+
+// Speakers returns the list of preset speaker names for the active
+// backend. Empty if the backend has no preset-speaker contract.
+func (s *CrispasrSession) Speakers() []string {
+	n := int(C.crispasr_session_n_speakers(s.handle))
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ptr := C.crispasr_session_get_speaker_name(s.handle, C.int(i))
+		if ptr != nil {
+			out = append(out, C.GoString(ptr))
+		}
+	}
+	return out
+}
+
 // Synthesize converts `text` to 24 kHz mono PCM. Requires a TTS-capable
-// backend (kokoro / vibevoice / qwen3-tts).
+// backend (kokoro / vibevoice / qwen3-tts / orpheus).
 func (s *CrispasrSession) Synthesize(text string) ([]float32, error) {
 	ctext := C.CString(text)
 	defer C.free(unsafe.Pointer(ctext))

@@ -2067,6 +2067,50 @@ CA_EXPORT int crispasr_session_set_voice(crispasr_session* s, const char* path, 
     return -3;
 }
 
+// Set the natural-language voice description for instruct-tuned TTS
+// backends (qwen3-tts VoiceDesign today). Required before
+// crispasr_session_synthesize when the loaded backend is VoiceDesign.
+//
+// Returns 0 on success, -1 on invalid args, -3 if the active backend
+// has no instruct contract (or isn't a VoiceDesign variant).
+CA_EXPORT int crispasr_session_set_instruct(crispasr_session* s, const char* instruct) {
+    if (!s || !instruct)
+        return -1;
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx && qwen3_tts_is_voice_design(s->qwen3_tts_ctx)) {
+        int rc = qwen3_tts_set_instruct(s->qwen3_tts_ctx, instruct);
+        if (rc == 0)
+            s->qwen3_tts_voice_loaded = true;
+        return rc;
+    }
+#endif
+    return -3;
+}
+
+// Variant detection for the qwen3-tts backend. Returns 0/1; 0 also
+// covers "active backend isn't qwen3-tts". Lets wrappers branch on
+// which voice-prompt API to call (`set_voice` vs `set_speaker_name`
+// vs `set_instruct`) without parsing GGUF metadata themselves.
+CA_EXPORT int crispasr_session_is_custom_voice(crispasr_session* s) {
+    if (!s)
+        return 0;
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx)
+        return qwen3_tts_is_custom_voice(s->qwen3_tts_ctx);
+#endif
+    return 0;
+}
+
+CA_EXPORT int crispasr_session_is_voice_design(crispasr_session* s) {
+    if (!s)
+        return 0;
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx)
+        return qwen3_tts_is_voice_design(s->qwen3_tts_ctx);
+#endif
+    return 0;
+}
+
 CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* text, int* out_n_samples) {
     if (out_n_samples)
         *out_n_samples = 0;

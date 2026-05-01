@@ -1147,11 +1147,15 @@ class Session:
             self._lib.crispasr_session_result_free(res)
 
     # ---------------------------------------------------------------------
-    # TTS synthesis (vibevoice, qwen3-tts)
+    # TTS synthesis (vibevoice, qwen3-tts, kokoro, orpheus)
     # ---------------------------------------------------------------------
 
     def set_codec_path(self, path: str) -> None:
-        """Load a separate codec GGUF (qwen3-tts only; no-op for others)."""
+        """Load a separate codec GGUF.
+
+        Required for qwen3-tts (12 Hz tokenizer) and orpheus (SNAC
+        codec); no-op for other backends.
+        """
         if not hasattr(self._lib, "crispasr_session_set_codec_path"):
             raise RuntimeError("TTS API not present in this libcrispasr build")
         self._lib.crispasr_session_set_codec_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
@@ -1165,6 +1169,9 @@ class Session:
 
         For qwen3-tts a *.wav reference requires ``ref_text`` (the
         transcription of the reference audio).
+
+        For orpheus voice selection is BY NAME — use
+        :meth:`set_speaker_name` instead of this method.
         """
         if not hasattr(self._lib, "crispasr_session_set_voice"):
             raise RuntimeError("TTS API not present in this libcrispasr build")
@@ -1175,12 +1182,117 @@ class Session:
         if rc != 0:
             raise RuntimeError(f"set_voice failed (rc={rc}) for backend {self.backend!r}")
 
+    def set_speaker_name(self, name: str) -> None:
+        """Select a fixed/preset speaker by NAME (orpheus).
+
+        Orpheus bakes speaker names into the LM training data as the
+        literal ``f"{name}: {text}"`` prompt prefix — there is no
+        embedding-table dispatch. Names are e.g. ``"tara"``, ``"leo"``,
+        ``"leah"`` for the canopylabs English finetune; the
+        Kartoffel_Orpheus DE finetunes use ``"Anton"``, ``"Sophie"``,
+        etc. Enumerate available names with :meth:`speakers`.
+
+        Raises if the active backend has no preset-speaker contract or
+        the name is not in the GGUF metadata.
+        """
+        if not hasattr(self._lib, "crispasr_session_set_speaker_name"):
+            raise RuntimeError("set_speaker_name API not present in this libcrispasr build")
+        self._lib.crispasr_session_set_speaker_name.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self._lib.crispasr_session_set_speaker_name.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_speaker_name(self._handle, name.encode("utf-8"))
+        if rc == -2:
+            raise ValueError(f"unknown speaker {name!r} for backend {self.backend!r}; "
+                             f"call .speakers() to enumerate")
+        if rc == -3:
+            raise RuntimeError(f"backend {self.backend!r} has no preset speakers; "
+                               f"use set_voice() instead")
+        if rc != 0:
+            raise RuntimeError(f"set_speaker_name failed (rc={rc}) for backend {self.backend!r}")
+
+    def set_instruct(self, instruct: str) -> None:
+        """Set the natural-language voice description (qwen3-tts VoiceDesign).
+
+        VoiceDesign generates speech in a voice **described by a
+        natural-language instruction** — no reference WAV, no preset
+        speaker. The instruct text is wrapped as
+        ``"<|im_start|>user\\n{instruct}<|im_end|>\\n"`` and prepended
+        to the talker prefill; the codec bridge omits the speaker
+        frame entirely.
+
+        Required for qwen3-tts VoiceDesign before
+        :meth:`synthesize`. Re-callable; latest call wins. Raises if
+        the active backend isn't VoiceDesign.
+
+        Detect VoiceDesign via :meth:`is_voice_design`.
+        """
+        if not hasattr(self._lib, "crispasr_session_set_instruct"):
+            raise RuntimeError("set_instruct API not present in this libcrispasr build")
+        self._lib.crispasr_session_set_instruct.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self._lib.crispasr_session_set_instruct.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_instruct(self._handle, instruct.encode("utf-8"))
+        if rc == -3:
+            raise RuntimeError(f"backend {self.backend!r} is not a VoiceDesign variant; "
+                               f"set_instruct only applies to qwen3-tts VoiceDesign models")
+        if rc != 0:
+            raise RuntimeError(f"set_instruct failed (rc={rc}) for backend {self.backend!r}")
+
+    def is_voice_design(self) -> bool:
+        """Return True iff the loaded model is a qwen3-tts VoiceDesign variant.
+
+        Lets callers branch on the voice-prompt API: VoiceDesign needs
+        :meth:`set_instruct`, CustomVoice needs :meth:`set_speaker_name`,
+        Base needs :meth:`set_voice`.
+        """
+        if not hasattr(self._lib, "crispasr_session_is_voice_design"):
+            return False
+        self._lib.crispasr_session_is_voice_design.argtypes = [ctypes.c_void_p]
+        self._lib.crispasr_session_is_voice_design.restype = ctypes.c_int
+        return bool(self._lib.crispasr_session_is_voice_design(self._handle))
+
+    def is_custom_voice(self) -> bool:
+        """Return True iff the loaded model is a qwen3-tts CustomVoice variant."""
+        if not hasattr(self._lib, "crispasr_session_is_custom_voice"):
+            return False
+        self._lib.crispasr_session_is_custom_voice.argtypes = [ctypes.c_void_p]
+        self._lib.crispasr_session_is_custom_voice.restype = ctypes.c_int
+        return bool(self._lib.crispasr_session_is_custom_voice(self._handle))
+
+    def speakers(self) -> list:
+        """Return the list of preset speaker names for the active backend.
+
+        Empty list if the backend has no preset-speaker contract
+        (e.g. vibevoice, kokoro, qwen3-tts ICL/Base, qwen3-tts
+        VoiceDesign). Orpheus returns the speakers baked into the GGUF
+        metadata.
+        """
+        if not hasattr(self._lib, "crispasr_session_n_speakers"):
+            return []
+        self._lib.crispasr_session_n_speakers.argtypes = [ctypes.c_void_p]
+        self._lib.crispasr_session_n_speakers.restype = ctypes.c_int
+        self._lib.crispasr_session_get_speaker_name.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.crispasr_session_get_speaker_name.restype = ctypes.c_char_p
+        n = self._lib.crispasr_session_n_speakers(self._handle)
+        out = []
+        for i in range(n):
+            ptr = self._lib.crispasr_session_get_speaker_name(self._handle, i)
+            if ptr:
+                out.append(ptr.decode("utf-8", errors="replace"))
+        return out
+
     def synthesize(self, text: str) -> np.ndarray:
         """Synthesise ``text`` to 24 kHz mono float32 PCM as a numpy array.
 
-        Requires a TTS-capable backend (``vibevoice``, ``qwen3-tts``).
-        For qwen3-tts call :meth:`set_codec_path` and :meth:`set_voice`
-        before the first synthesis.
+        Requires a TTS-capable backend (``vibevoice``, ``qwen3-tts``,
+        ``kokoro``, ``orpheus``). For qwen3-tts call
+        :meth:`set_codec_path` and one of:
+
+        * :meth:`set_voice` — Base variants (WAV + ref_text, or voice-pack GGUF)
+        * :meth:`set_speaker_name` — CustomVoice variants (fixed speaker name)
+        * :meth:`set_instruct` — VoiceDesign variants (natural-language description)
+
+        Branch via :meth:`is_voice_design` / :meth:`is_custom_voice` —
+        Base if neither returns True. For orpheus call
+        :meth:`set_codec_path` (SNAC GGUF) and :meth:`set_speaker_name`.
         """
         if not hasattr(self._lib, "crispasr_session_synthesize"):
             raise RuntimeError("TTS API not present in this libcrispasr build")

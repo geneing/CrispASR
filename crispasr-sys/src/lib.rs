@@ -361,7 +361,7 @@ extern "C" {
     pub fn crispasr_session_result_free(r: *mut CrispasrSessionResult);
     pub fn crispasr_session_close(s: *mut CrispasrSession);
 
-    // --- TTS synthesis (vibevoice, qwen3-tts) ---
+    // --- TTS synthesis (vibevoice, qwen3-tts, kokoro, orpheus) ---
     pub fn crispasr_session_set_codec_path(
         s: *mut CrispasrSession,
         path: *const c_char,
@@ -371,6 +371,12 @@ extern "C" {
         path: *const c_char,
         ref_text_or_null: *const c_char,
     ) -> c_int;
+    pub fn crispasr_session_set_speaker_name(
+        s: *mut CrispasrSession,
+        name: *const c_char,
+    ) -> c_int;
+    pub fn crispasr_session_n_speakers(s: *mut CrispasrSession) -> c_int;
+    pub fn crispasr_session_get_speaker_name(s: *mut CrispasrSession, i: c_int) -> *const c_char;
     pub fn crispasr_session_synthesize(
         s: *mut CrispasrSession,
         text: *const c_char,

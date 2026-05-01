@@ -285,7 +285,11 @@ extern "C" struct orpheus_context_params orpheus_context_default_params(void) {
     p.n_threads = 4;
     p.verbosity = 1;
     p.use_gpu = false;
-    p.temperature = 0.0f;
+    // Match canopyai/Orpheus-TTS:engine_class.py default. Greedy
+    // (temperature=0) enters a 7-slot loop after a few super-frames
+    // and produces unusable audio; 0.6 is the engine default and what
+    // the slice (c) ASR roundtrip was validated against.
+    p.temperature = 0.6f;
     p.max_audio_tokens = 0;
     return p;
 }

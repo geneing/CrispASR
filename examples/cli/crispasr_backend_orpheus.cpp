@@ -70,16 +70,23 @@ public:
         cp.n_threads = p.n_threads;
         cp.verbosity = p.no_prints ? 0 : 1;
         cp.use_gpu = crispasr_backend_should_use_gpu(p);
-        cp.temperature = p.temperature;
+        // The CLI's global `--temperature` defaults to 0.0 (whisper-style
+        // greedy ASR). For orpheus, greedy loops in a 7-slot pattern;
+        // only override the orpheus default (0.6, engine_class.py) when
+        // the user explicitly passes a non-zero value.
+        if (p.temperature > 0.0f) {
+            cp.temperature = p.temperature;
+        }
         ctx_ = orpheus_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
             fprintf(stderr, "crispasr[orpheus]: failed to load talker '%s'\n", p.model.c_str());
             return false;
         }
 
-        // SNAC codec (best-effort — the C++ decoder lands in slice b
-        // of PLAN #57 Phase 2; without it, synthesis returns nullptr,
-        // but loading the codec path now keeps the wiring in place).
+        // SNAC codec is required for synthesis. Without it, synthesize
+        // returns nullptr; we still init the talker so callers using
+        // orpheus_synthesize_codes (raw codec token IDs) can render via
+        // the python reference SNAC decoder.
         std::string codec_path = p.tts_codec_model;
         if (codec_path.empty()) {
             codec_path = discover_codec(p.model);
