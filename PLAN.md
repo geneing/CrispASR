@@ -18,7 +18,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 | **HIGH** | [#52 Qwen3-TTS](#52-qwen3-tts) — speaker_encoder forward | Medium | talker + code_predictor + codec done; ECAPA next |
 | **DONE** | [#51 MiMo-V2.5-ASR runtime](#51-mimo-v25-asr-runtime--done-may-2026) | Large | end-to-end JFK matches reference; F16+Q4_K on HF; perf follow-ups (51a mmap loader, 51b step-only graph) at LOW |
 | **HIGH** | [#54 granite-speech-4.1 plus / nar](#54-granite-speech-41-plus--nar-variants) | Small | base + plus + nar runtimes all DONE; only NAR quant + HF upload remain |
-| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phase 1 (Qwen3-TTS-CustomVoice) in progress; phases 2-5 queued |
+| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phase 1 (Qwen3-TTS-{CustomVoice 0.6B/1.7B, Base 1.7B, VoiceDesign 1.7B}) DONE; Phase 2 Orpheus-3B base DONE (slice c, commit `a0982d3`); Kartoffel_Orpheus + lex-au unblocked as checkpoint swaps; phases 3-5 queued |
 | **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Medium | parakeet/cohere DONE; canary remaining |
 | **MEDIUM** | [#53 core/audio_decoder.h](#53-coreaudio_decoderh--dry-across-tts--codec-backends) | Medium | DRY across qwen3-tts/mimo/vibevoice |
 | **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
@@ -842,7 +842,8 @@ v1/v2 were Apache 2.0 but v3 not yet confirmed).
 - **havok2/Kartoffelbox-v0.1_0.65h2** — checkpoint variant of the
   blocked Kartoffelbox-v0.1; inherits the same NC license. **Skip.**
 - **SebastianBodza/Kartoffel_Orpheus_*** family + **lex-au/Orpheus-3b-German-FT-Q8_0.gguf**
-  → land once Phase 2 Orpheus base is in.
+  → unblocked now that Phase 2 Orpheus base shipped (commit `a0982d3`); queue as
+  checkpoint-swap registry adds.
 
 ### Phase 2 — talker pattern (qwen3_tts.cpp reuse)
 
@@ -850,12 +851,20 @@ Models with a Llama/Qwen-style AR talker + a small audio-token codec.
 The talker forward fits directly into the `core_attn::kv_self_attn` +
 `core_ffn::swiglu` pattern that #52 already uses.
 
-- **Orpheus-3B backbone** (`canopylabs/orpheus-3b-0.1-ft`,
+- **Orpheus-3B backbone** (`canopylabs/orpheus-3b-0.1-ft` —
+  use `unsloth/orpheus-3b-0.1-ft` non-gated mirror in practice;
   llama3.2 license) — Llama-3.2-3B + SNAC codec. New backend
-  `orpheus`. Effort: talker is ~80% reuse of qwen3_tts; SNAC is a
-  small published RVQ codec (4 codebooks × 4096 @ 24 kHz). Once
-  this lands, Kartoffel_Orpheus + lex-au + the various Orpheus
-  finetunes are checkpoint swaps.
+  `orpheus`. **DONE (May 2026, commit `a0982d3`)** — talker AR
+  forward + SNAC C++ decode shipped end-to-end; ASR-roundtrip on
+  `"Hello, my name is Tara."` returns the input verbatim through
+  parakeet-v3. With Orpheus base in, Kartoffel_Orpheus + lex-au +
+  the various Orpheus finetunes are checkpoint swaps. Phase 3+
+  follow-ups (out of scope for slice (c)): greedy decoding loops
+  (ship-default must pass `--temperature 0.6`); Llama-3 RoPE
+  freq scaling unimplemented; no `repetition_penalty`; Metal
+  first-load is slow (~10-15 min for 6.6 GB f16 due to kernel
+  compilation, fast thereafter); non-streaming AR (sliding-window
+  protocol from `orpheus_snac.py` is a follow-up).
 - **g-group-ai-lab/gwen-tts-0.6B** (MIT) — likely a Qwen3-TTS-style
   talker variant; need a weight inspection before sizing. If the
   shape matches, it's a #52 registry add.
@@ -934,9 +943,9 @@ adding a codec head + sampling path. Cheaper than a full new backend.
 | 1 | Qwen3-TTS-CustomVoice 0.6B | Apache 2.0 | **DONE — runtime spk_id path landed; 4 ASR roundtrips passed (vivian / aiden / serena / dylan-dialect). Registry line added; HF upload pending.** | S |
 | 1 | Qwen3-TTS-CustomVoice 1.7B | Apache 2.0 | **DONE — `small_to_mtp_projection` now applied to code_pred per-step embeddings (steps 1..14), not just step 0. ASR roundtrips passed on Q8_0/ryan + F16/vivian (exact-match transcripts on long prompt). HF upload pending.** | S |
 | 1 | Qwen3-TTS-Base 1.7B | Apache 2.0 | **DONE — runtime parameterised `spk_enc_dim` (was hardcoded 1024) so the 1.7B's 2048-d ECAPA output stops getting truncated; registry alias `qwen3-tts-1.7b-base` + HF model card landed. ASR-roundtrip word-exact on F16/Q8_0 (clone.wav English ICL). Published as [`cstr/qwen3-tts-1.7b-base-GGUF`](https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF) (F16 3.86 GB + Q8_0 2.07 GB).** | S |
-| 2 | Orpheus-3B base | llama3.2 | queued | M |
-| 2 | Kartoffel_Orpheus DE (natural+synthetic) | llama3.2 | blocked on Orpheus base | XS |
-| 2 | lex-au Orpheus-3B-DE-Q8 | llama3.2 | blocked on Orpheus base (already GGUF) | XS |
+| 2 | Orpheus-3B base | llama3.2 | **DONE (commit `a0982d3`) — talker AR forward + SNAC C++ decoder shipped; ASR-roundtrip word-exact on `"Hello, my name is Tara."` (parakeet-v3 verbatim). Talker GGUF converted from `unsloth/orpheus-3b-0.1-ft` non-gated mirror; SNAC from `hubertsiuzdak/snac_24khz`. Local F16 + SNAC in `/Volumes/backups/ai/crispasr-models/`; HF upload pending. Phase 3+ gaps tracked in slice prose above.** | M |
+| 2 | Kartoffel_Orpheus DE (natural+synthetic) | llama3.2 | unblocked — checkpoint swap on Orpheus base | XS |
+| 2 | lex-au Orpheus-3B-DE-Q8 | llama3.2 | unblocked — already GGUF; needs registry alias | XS |
 | 2 | gwen-tts-0.6B | MIT | queued — needs weight inspection first | S–M |
 | 2 | tada-3b-ml | llama3.2 | queued | M |
 | 3 | Chatterbox base | MIT | queued — CFM solver gating | L |

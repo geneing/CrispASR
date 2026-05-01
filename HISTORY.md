@@ -1005,3 +1005,89 @@ existing graph builders end-to-end.
 
 **HF release.** [`cstr/qwen3-tts-1.7b-voicedesign-GGUF`](https://huggingface.co/cstr/qwen3-tts-1.7b-voicedesign-GGUF) ships F16 + Q8_0.
 Pair with [`cstr/qwen3-tts-tokenizer-12hz-GGUF`](https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF) — same 12 Hz tokenizer.
+
+### 59. Orpheus 3B-FT — PLAN #57 Phase 2 slice (c) (May 2026)
+
+The first commercial-friendly TTS in the Phase 2 talker family
+shipped end-to-end behind the `orpheus` backend
+(commit `a0982d3`). The runtime drives a Llama-3.2-3B-Instruct
+talker (custom-token vocab `<custom_token_0..28671>`) over a
+persistent KV cache, samples on top of the 7-slot SNAC super-frame
+layout, de-interleaves per the canonical Orpheus protocol, and
+pipes the codes through a SNAC C++ decoder to 24 kHz PCM. With
+Orpheus base in, Kartoffel_Orpheus DE + lex-au Orpheus-3B-DE-Q8 +
+the various Orpheus finetunes are now checkpoint swaps.
+
+**Sourcing the talker.** `canopylabs/orpheus-3b-0.1-ft` is gated;
+having an HF login token isn't enough — you have to click through
+the gate. `unsloth/orpheus-3b-0.1-ft` is a **non-gated mirror** of
+the same weights and converts cleanly with the new
+`models/convert-orpheus-to-gguf.py`. SNAC codec from
+`hubertsiuzdak/snac_24khz` (MIT, 3 codebooks × 4096 @ 24 kHz).
+
+**The BOS=128000 trap.** Verbatim from
+`canopyai/Orpheus-TTS:engine_class.py:_format_prompt`, the prompt
+is built by tokenising `"{name}: {text}"` with `add_special_tokens=True`
+(HF tokenizer default) — which inserts the Llama-3
+`<|begin_of_text|>=128000` BOS at the start. The engine then
+prepends `audio_start=128259` and appends
+`eot_id=128009, audio_eot=128260, audio_eom=128261, audio_end=128257`.
+**Without the BOS the model produces well-structured but
+semantically garbage codec output** — parakeet ASR returned
+`"Ineonice perfect of the Pan 8."` for `"Hello, my name is Tara."`;
+with it, the roundtrip lands exact. Easy to miss because the model
+emits properly slot-patterned super-frames either way.
+
+**Stop policy.** Stop on `audio_end=128257` *or* on >4 consecutive
+non-codec tokens. **Don't** stop on `audio_pre_end=128009` or
+`audio_end_b=128261`: in the unsloth/canopylabs ID layout those
+are either the Llama-3 `<|eot_id|>` (which appears in the prompt)
+or `text_N<10` reserved markers in the custom_token block. The
+reference `tokens_decoder` filters them silently rather than
+terminating on them.
+
+**Sampling.** Greedy decoding (`temperature=0`) gets stuck in a
+7-slot loop after a few super-frames and the AR halts after ~24
+tokens. `engine_class.py` defaults to `temperature=0.6` — that's
+what produced the validated 2.73 s clip below.
+
+**Validation.**
+
+```
+$ crispasr --backend orpheus \
+    -m /Volumes/backups/ai/crispasr-models/orpheus-3b-ft-f16.gguf \
+    --codec-model /Volumes/backups/ai/crispasr-models/snac-24khz.gguf \
+    --voice tara --temperature 0.6 \
+    --tts "Hello, my name is Tara." \
+    --tts-output /Volumes/backups/ai/crispasr-models/orpheus_test.wav
+orpheus: AR emitted 224 codec tokens (32 super-frames)
+crispasr: TTS output written (65536 samples, 2.73 sec)
+
+$ crispasr --backend parakeet \
+    -m /Volumes/backups/ai/crispasr-models/parakeet-tdt-0.6b-v3-q4_k.gguf \
+    -f /Volumes/backups/ai/crispasr-models/orpheus_test.wav --no-prints
+Hello, my name is Tara.
+```
+
+**Converter note.** `models/convert-orpheus-to-gguf.py` had to flip
+`GGUFWriter(use_temp_file=True)` → `False`. With temp-file enabled
+the writer first buffers tensor data to a system tempfile (honors
+`TMPDIR`) then copies it to the output, which on
+`/Volumes/backups` at 100% disk usage causes silent corruption /
+slow throughput; direct write side-steps the issue.
+
+**HF release pending.** Local F16 (~6.6 GB) talker GGUF +
+SNAC codec at `/Volumes/backups/ai/crispasr-models/`. Registry
+alias `orpheus` already wired in `src/crispasr_model_registry.cpp`
+pointing at `cstr/orpheus-3b-base-GGUF` (publish pending) +
+companion `cstr/snac-24khz-GGUF`. Q8_0 / Q4_K quants + HF upload
+follow once disk pressure clears.
+
+**Phase 3+ known gaps (out of scope for slice c):** plain NEOX
+RoPE with `theta=500000` (no Llama-3 `freq_factors` scaling — fine
+for short prompts, may matter for long synthesis); no
+`repetition_penalty` in the sampler (engine_class.py default 1.3);
+Metal first-load is slow (~10-15 min for 6.6 GB f16 GGUF due to
+kernel compilation, fast thereafter); non-streaming AR (the
+reference's "emit middle of 4-super-frame sliding window" protocol
+in `orpheus_snac.py` is a follow-up).

@@ -154,15 +154,16 @@ constexpr Entry k_registry[] = {
      "~1.9 GB",
      "qwen3-tts-tokenizer-12hz.gguf",
      "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf"},
-    // Orpheus-3B (canopylabs/orpheus-3b-0.1-ft, llama3.2 — "Built with
-    // Llama"). Talker = Llama-3.2-3B-Instruct + 7×4096 custom audio
-    // tokens. Codec = hubertsiuzdak/snac_24khz (3 codebooks × 4096,
-    // MIT). Both upstream HF repos are gated=auto — users must run
-    // `huggingface-cli login` and accept the model card terms before
-    // first download. PLAN #57 Phase 2 slice (a) lands the foundation;
-    // talker AR forward + SNAC C++ decoder land in slices (b)/(c). The
-    // companion URL points at the cstr/snac-24khz-GGUF mirror that gets
-    // published alongside the talker GGUF.
+    // Orpheus-3B (canopylabs/orpheus-3b-0.1-ft is gated; we convert
+    // from the non-gated mirror unsloth/orpheus-3b-0.1-ft, llama3.2 —
+    // "Built with Llama"). Talker = Llama-3.2-3B-Instruct + 7×4096
+    // custom audio tokens. Codec = hubertsiuzdak/snac_24khz
+    // (3 codebooks × 4096, MIT). PLAN #57 Phase 2 slices (a)/(b)/(c)
+    // all DONE (commit a0982d3): registry foundation + talker AR
+    // forward + SNAC C++ decode end-to-end; `--temperature 0.6` is the
+    // ship-default (greedy loops in a 7-slot pattern). The companion
+    // URL points at the cstr/snac-24khz-GGUF mirror that gets published
+    // alongside the talker GGUF.
     {"orpheus", "orpheus-3b-base-q8_0.gguf",
      "https://huggingface.co/cstr/orpheus-3b-base-GGUF/resolve/main/orpheus-3b-base-q8_0.gguf",
      "~3.4 GB (publish pending)",

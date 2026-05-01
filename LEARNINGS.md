@@ -5609,3 +5609,88 @@ once the URL serves a 200 (or 302 to Xet CDN). It's also a useful
 trip-wire: a "publish pending" string that lingers in main is a
 signal that someone forgot to do the upload, which is recoverable;
 a dead URL in main is a worse failure mode.
+
+# Orpheus 3B-FT — PLAN #57 Phase 2 slice (c) (session 2026-05-01)
+
+The first Orpheus end-to-end ship surfaced three lessons that
+generalise beyond Orpheus and are worth pinning before the
+Kartoffel_Orpheus / lex-au checkpoint swaps land.
+
+## Lesson 1 — `add_special_tokens=True` is a silent prompt-format dependency
+
+`canopyai/Orpheus-TTS:engine_class.py:_format_prompt` builds the
+talker prompt as
+
+```python
+ids = [audio_start] + tokenizer(f"{name}: {text}").input_ids + end_tokens
+```
+
+The `tokenizer(...)` call defaults to `add_special_tokens=True`,
+which inserts the Llama-3 `<|begin_of_text|>=128000` BOS at the
+start of `input_ids`. The printed prompt template doesn't show
+that BOS — you have to dump `input_ids` to see it. **Without that
+BOS the C++ port produced well-structured but semantically garbage
+codec output**: parakeet ASR returned `"Ineonice perfect of the
+Pan 8."` for `"Hello, my name is Tara."`. With it, roundtrip lands
+exactly.
+
+The trap: well-formed super-frames are a strong signal that the
+talker is "working", which masks the actual issue. Generalisation:
+when porting a prompt builder from a Python reference, **always
+dump the live `input_ids` from the ref and grep for the model's
+BOS before trusting the printed template** — `add_special_tokens`
+is the most common source of silent BOS injection but tokenizer
+configs (`tokenizer_config.json:add_bos_token`,
+`PreTrainedTokenizer.__call__` overrides) can also do it.
+
+## Lesson 2 — greedy sampling can be a debugger trap
+
+`temperature=0` on the Orpheus talker enters a 7-slot loop after a
+few super-frames and the AR halts after ~24 tokens. This looks
+exactly like "model is broken / sampling path is wrong". The
+actual root cause is that the upstream `engine.generate()` defaults
+to `temperature=0.6` and relies on the noise to escape modal traps
+in the codec super-frame distribution — codec tokens are highly
+peaked, so greedy sampling routes back through a small attractor.
+
+When validating a new TTS port, mirror the upstream `engine`
+defaults exactly **before** declaring anything broken. Greedy
+decoding is the right default for ASR; for TTS where the codebook
+is a learned distribution, the upstream default is virtually
+always >0 and divergence from that is itself a bug.
+
+## Lesson 3 — stop policy by token-class, not just terminal IDs
+
+Orpheus's prompt template includes `eot_id=128009`,
+`audio_eot=128260`, and `audio_eom=128261`. All three look like
+they could be sentinel "stop here" tokens, but stopping on them
+breaks AR for two reasons:
+
+1. `eot_id=128009` is the Llama-3 `<|eot_id|>` and **already
+   appears in the prompt** (between the `name: text` block and the
+   audio sentinels). Stopping on it halts decoding after 0 codec
+   tokens.
+2. `audio_eom=128261` and `audio_pre_end=128009` map to `text_N<10`
+   reserved markers in the custom_token block. The reference
+   `tokens_decoder` filters them silently rather than terminating.
+
+The correct stop policy is **`audio_end=128257` OR >4 consecutive
+non-codec tokens**. The >4 heuristic catches the model jumping out
+of the custom_token block when it has nothing left to say. Same
+shape will likely apply to Kartoffel_Orpheus / lex-au and to the
+other Phase 2 talkers (gwen-tts-0.6B, tada-3b-ml) where the
+"terminal" token IDs in the prompt template overlap with text-side
+specials.
+
+## Lesson 4 — disable `GGUFWriter(use_temp_file=True)` on full disks
+
+`models/convert-orpheus-to-gguf.py` initially used the writer's
+default `use_temp_file=True`, which buffers tensor data to a
+`tempfile.SpooledTemporaryFile` (honors `TMPDIR`) and copies to
+the output afterward. With `/Volumes/backups` at 100% during this
+session, the temp-file write hit silent corruption / multi-MB/s
+throughput collapse (cf. the gigabyte-scale slowdown documented in
+`.claude/CLAUDE.md` "TMPDIR matters for converter temp files"). 
+Setting `use_temp_file=False` writes tensors directly and side-steps the
+issue at the cost of holding the full tensor list in RAM during
+write — fine for 6.6 GB f16, will need re-evaluation for VoxCPM2.
