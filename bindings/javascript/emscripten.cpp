@@ -29,6 +29,9 @@ int                     crispasr_session_set_voice(struct CrispasrSession* s, co
 int                     crispasr_session_set_speaker_name(struct CrispasrSession* s, const char* name);
 int                     crispasr_session_n_speakers(struct CrispasrSession* s);
 const char*             crispasr_session_get_speaker_name(struct CrispasrSession* s, int i);
+int                     crispasr_session_set_instruct(struct CrispasrSession* s, const char* instruct);
+int                     crispasr_session_is_custom_voice(struct CrispasrSession* s);
+int                     crispasr_session_is_voice_design(struct CrispasrSession* s);
 float*                  crispasr_session_synthesize(struct CrispasrSession* s, const char* text,
                                                     int* out_n_samples);
 void                    crispasr_pcm_free(float* pcm);
@@ -175,6 +178,25 @@ EMSCRIPTEN_BINDINGS(whisper) {
                                  if (name) out.call<void>("push", std::string(name));
                              }
                              return out;
+                         }));
+
+    // qwen3-tts VoiceDesign — natural-language voice description.
+    emscripten::function("ttsSetInstruct",
+                         emscripten::optional_override([](const std::string& instruct) {
+                             if (!g_tts_session) return -1;
+                             return crispasr_session_set_instruct(g_tts_session, instruct.c_str());
+                         }));
+
+    // qwen3-tts variant detection (returns false also when the active
+    // backend isn't qwen3-tts).
+    emscripten::function("ttsIsCustomVoice",
+                         emscripten::optional_override([]() -> bool {
+                             return g_tts_session && crispasr_session_is_custom_voice(g_tts_session) != 0;
+                         }));
+
+    emscripten::function("ttsIsVoiceDesign",
+                         emscripten::optional_override([]() -> bool {
+                             return g_tts_session && crispasr_session_is_voice_design(g_tts_session) != 0;
                          }));
 
     // Returns a Float32Array of 24 kHz mono PCM. Empty array on failure.

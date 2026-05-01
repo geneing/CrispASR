@@ -34,6 +34,9 @@ public final class CrispasrSession implements AutoCloseable {
         int     crispasr_session_set_speaker_name(Pointer session, String name);
         int     crispasr_session_n_speakers(Pointer session);
         String  crispasr_session_get_speaker_name(Pointer session, int i);
+        int     crispasr_session_set_instruct(Pointer session, String instruct);
+        int     crispasr_session_is_custom_voice(Pointer session);
+        int     crispasr_session_is_voice_design(Pointer session);
         Pointer crispasr_session_synthesize(Pointer session, String text, IntByReference outNSamples);
         void    crispasr_pcm_free(Pointer pcm);
 
@@ -115,6 +118,37 @@ public final class CrispasrSession implements AutoCloseable {
             out[i] = (s == null) ? "" : s;
         }
         return out;
+    }
+
+    /**
+     * Set the natural-language voice description for instruct-tuned TTS
+     * backends (qwen3-tts VoiceDesign today). Required before
+     * {@link #synthesize(String)} when the loaded backend is VoiceDesign.
+     * Detect via {@link #isVoiceDesign()}.
+     *
+     * @throws IllegalStateException if the active backend isn't a VoiceDesign variant
+     */
+    public void setInstruct(String instruct) {
+        int rc = Lib.INSTANCE.crispasr_session_set_instruct(handle, instruct);
+        if (rc == -3) throw new IllegalStateException(
+                "backend is not a VoiceDesign variant; setInstruct only applies to qwen3-tts VoiceDesign models");
+        if (rc != 0) throw new IllegalStateException("set_instruct failed (rc=" + rc + ")");
+    }
+
+    /**
+     * Whether the loaded model is a qwen3-tts CustomVoice variant
+     * (use {@link #setSpeakerName(String)} for it).
+     */
+    public boolean isCustomVoice() {
+        return Lib.INSTANCE.crispasr_session_is_custom_voice(handle) != 0;
+    }
+
+    /**
+     * Whether the loaded model is a qwen3-tts VoiceDesign variant
+     * (use {@link #setInstruct(String)} for it).
+     */
+    public boolean isVoiceDesign() {
+        return Lib.INSTANCE.crispasr_session_is_voice_design(handle) != 0;
     }
 
     /**

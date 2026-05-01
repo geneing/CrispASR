@@ -377,6 +377,14 @@ extern "C" {
     ) -> c_int;
     pub fn crispasr_session_n_speakers(s: *mut CrispasrSession) -> c_int;
     pub fn crispasr_session_get_speaker_name(s: *mut CrispasrSession, i: c_int) -> *const c_char;
+    // qwen3-tts VoiceDesign: natural-language voice description.
+    pub fn crispasr_session_set_instruct(
+        s: *mut CrispasrSession,
+        instruct: *const c_char,
+    ) -> c_int;
+    // qwen3-tts variant detection (returns 0/1; 0 also covers "not qwen3-tts").
+    pub fn crispasr_session_is_custom_voice(s: *mut CrispasrSession) -> c_int;
+    pub fn crispasr_session_is_voice_design(s: *mut CrispasrSession) -> c_int;
     pub fn crispasr_session_synthesize(
         s: *mut CrispasrSession,
         text: *const c_char,

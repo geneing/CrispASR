@@ -8,8 +8,11 @@
 //   close(handle)
 //   set_codec_path(handle, path)
 //   set_voice(handle, path, ref_text=nil)
-//   set_speaker_name(handle, name)             # orpheus preset speakers
+//   set_speaker_name(handle, name)             # orpheus + qwen3-tts CV
 //   speakers(handle) -> Array<String>
+//   set_instruct(handle, instruct)             # qwen3-tts VoiceDesign
+//   is_custom_voice(handle) -> Boolean         # qwen3-tts variant detect
+//   is_voice_design(handle) -> Boolean         # qwen3-tts variant detect
 //   synthesize(handle, text) -> Array<Float>   # 24 kHz mono PCM
 //
 // And a singleton method:
@@ -32,6 +35,9 @@ extern int                     crispasr_session_set_voice(struct CrispasrSession
 extern int                     crispasr_session_set_speaker_name(struct CrispasrSession* s, const char* name);
 extern int                     crispasr_session_n_speakers(struct CrispasrSession* s);
 extern const char*             crispasr_session_get_speaker_name(struct CrispasrSession* s, int i);
+extern int                     crispasr_session_set_instruct(struct CrispasrSession* s, const char* instruct);
+extern int                     crispasr_session_is_custom_voice(struct CrispasrSession* s);
+extern int                     crispasr_session_is_voice_design(struct CrispasrSession* s);
 extern float*                  crispasr_session_synthesize(struct CrispasrSession* s, const char* text,
                                                            int* out_n_samples);
 extern void                    crispasr_pcm_free(float* pcm);
@@ -95,6 +101,25 @@ static VALUE rb_session_speakers(VALUE self, VALUE handle) {
     return arr;
 }
 
+static VALUE rb_session_set_instruct(VALUE self, VALUE handle, VALUE instruct) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_instruct(s, StringValueCStr(instruct));
+    if (rc == -3) rb_raise(rb_eRuntimeError,
+            "backend is not a VoiceDesign variant; set_instruct only applies to qwen3-tts VoiceDesign models");
+    if (rc != 0) rb_raise(rb_eRuntimeError, "set_instruct failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_is_custom_voice(VALUE self, VALUE handle) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    return crispasr_session_is_custom_voice(s) ? Qtrue : Qfalse;
+}
+
+static VALUE rb_session_is_voice_design(VALUE self, VALUE handle) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    return crispasr_session_is_voice_design(s) ? Qtrue : Qfalse;
+}
+
 static VALUE rb_session_synthesize(VALUE self, VALUE handle, VALUE text) {
     struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
     int n = 0;
@@ -148,6 +173,9 @@ void init_ruby_crispasr_session(VALUE* mWhisper) {
     rb_define_singleton_method(mSession, "set_voice",            rb_session_set_voice,       -1);
     rb_define_singleton_method(mSession, "set_speaker_name",     rb_session_set_speaker_name, 2);
     rb_define_singleton_method(mSession, "speakers",             rb_session_speakers,         1);
+    rb_define_singleton_method(mSession, "set_instruct",         rb_session_set_instruct,     2);
+    rb_define_singleton_method(mSession, "is_custom_voice",      rb_session_is_custom_voice,  1);
+    rb_define_singleton_method(mSession, "is_voice_design",      rb_session_is_voice_design,  1);
     rb_define_singleton_method(mSession, "synthesize",           rb_session_synthesize,       2);
     rb_define_singleton_method(mSession, "kokoro_resolve_for_lang", rb_kokoro_resolve_for_lang, 2);
 }

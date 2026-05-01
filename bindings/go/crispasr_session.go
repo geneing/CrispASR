@@ -24,6 +24,9 @@ int              crispasr_session_set_voice(CrispasrSession* s, const char* path
 int              crispasr_session_set_speaker_name(CrispasrSession* s, const char* name);
 int              crispasr_session_n_speakers(CrispasrSession* s);
 const char*      crispasr_session_get_speaker_name(CrispasrSession* s, int i);
+int              crispasr_session_set_instruct(CrispasrSession* s, const char* instruct);
+int              crispasr_session_is_custom_voice(CrispasrSession* s);
+int              crispasr_session_is_voice_design(CrispasrSession* s);
 float*           crispasr_session_synthesize(CrispasrSession* s, const char* text, int* out_n_samples);
 void             crispasr_pcm_free(float* pcm);
 
@@ -119,6 +122,36 @@ func (s *CrispasrSession) SetSpeakerName(name string) error {
 	default:
 		return fmt.Errorf("crispasr_session_set_speaker_name failed (rc=%d)", int(rc))
 	}
+}
+
+// SetInstruct sets the natural-language voice description for
+// instruct-tuned TTS backends (qwen3-tts VoiceDesign today).
+// Required before Synthesize when the loaded backend is VoiceDesign.
+// Detect via IsVoiceDesign().
+func (s *CrispasrSession) SetInstruct(instruct string) error {
+	cins := C.CString(instruct)
+	defer C.free(unsafe.Pointer(cins))
+	rc := C.crispasr_session_set_instruct(s.handle, cins)
+	switch rc {
+	case 0:
+		return nil
+	case -3:
+		return errors.New("backend is not a VoiceDesign variant; SetInstruct only applies to qwen3-tts VoiceDesign")
+	default:
+		return fmt.Errorf("crispasr_session_set_instruct failed (rc=%d)", int(rc))
+	}
+}
+
+// IsCustomVoice reports whether the loaded model is a qwen3-tts
+// CustomVoice variant (use SetSpeakerName for it).
+func (s *CrispasrSession) IsCustomVoice() bool {
+	return C.crispasr_session_is_custom_voice(s.handle) != 0
+}
+
+// IsVoiceDesign reports whether the loaded model is a qwen3-tts
+// VoiceDesign variant (use SetInstruct for it).
+func (s *CrispasrSession) IsVoiceDesign() bool {
+	return C.crispasr_session_is_voice_design(s.handle) != 0
 }
 
 // Speakers returns the list of preset speaker names for the active
