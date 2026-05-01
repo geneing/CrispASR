@@ -11,6 +11,49 @@ are in `LEARNINGS.md`. Full roadmap in `PLAN.md`.
 
 ---
 
+## Kokoro / StyleTTS2 (iSTFTNet) backend **[next]**
+
+Plan file: `/Users/christianstrobele/.claude/plans/sprightly-enchanting-dahl.md`.
+Detailed handoff: `HANDOFF_NEXT_SESSION.md`. Lessons: `LEARNINGS.md`
+"Kokoro / StyleTTS2 lessons".
+
+Status as of 2026-05-01: **M1, M2, M3, M4, M5a, M5b, M6, M7a/b shipped
+and stage-validated**. Working tree has uncommitted work (see
+`HANDOFF_NEXT_SESSION.md` "Files in flight"). 11 stages exposed via
+`kokoro_extract_stage()`: token_ids, bert_pooler_out, bert_proj_out,
+text_enc_out, dur_enc_out, durations, pred_lstm_out, align_out,
+f0_curve, n_curve, dec_encode_out, dec_decode_3_out — all finite,
+shapes validated, magnitudes plausible.
+
+**Remaining:**
+
+1. **Commit** the working state as a clean checkpoint. Use explicit
+   paths in `git add` — do NOT `-A` (working tree has unrelated
+   pre-existing changes).
+2. **M7c — Generator** (~600 LOC). Snake-α activation + AdaINResBlock1
+   (different class from `kokoro_adain_resblk`, uses Snake-α not
+   LeakyReLU) + CPU-side SineGen+STFT for `har` + 2× ConvTranspose1d
+   upsample loop with noise injection + 3-kernel-averaged resblocks.
+   Conv_post split: `spec=exp(x[:11])`, `phase=sin(x[11:])`.
+   Keep on `gen_sched` (CPU-pinned) until validated; `ups[0]` is the
+   same Metal-hang shape (k=20, s=10) as the qwen3-tts codec.
+3. **M8 — iSTFT** (~150 LOC C). Direct DFT, n_fft=20 → 11 bins, hop=5,
+   hann periodic window. Pure CPU.
+4. **M9 — Wire `kokoro_synthesize`** to call BERT → text_enc →
+   predictor → align → F0Ntrain → decoder → generator → iSTFT and
+   return malloc'd `float*` PCM. The CLI adapter
+   (`crispasr_backend_kokoro.cpp`) is already plumbed.
+5. **M11 — Reference dumper** at `tools/reference_backends/kokoro.py`.
+   Hooks at every stage. Must replicate the 9 corrected behaviours
+   from the source-comparison work — pad-wrap, drop-unknown-phoneme,
+   banker's rounding, exp/sin on conv_post split, etc. — or the diff
+   will spuriously fail.
+6. **M12 — Validation** via `crispasr-diff kokoro …`. Need to register
+   `kokoro` in `examples/cli/crispasr_diff_main.cpp`. Target
+   `cos_min ≥ 0.999` per stage; end-to-end audio xcorr peak ≥ 0.999.
+
+---
+
 ## Qwen3-TTS CLI/wrapper integration **[next]**
 
 Bring qwen3-tts up to feature parity with vibevoice's `--tts` mode and

@@ -94,6 +94,8 @@ Cargo.lock
 # Claude session notes (private, do not publish)
 CLAUDE.md
 CLAUDE.*.md
+HANDOFF_NEXT_SESSION.md
+HANDOFF_*.md
 ref/
 
 # Qwen3-TTS reference samples (large WAV files, not source-controlled)

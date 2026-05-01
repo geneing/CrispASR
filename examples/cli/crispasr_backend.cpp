@@ -18,6 +18,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_fastconformer_ctc_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_wav2vec2_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_vibevoice_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_tts_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_kokoro_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_glm_asr_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_kyutai_stt_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_firered_asr_backend();
@@ -64,6 +65,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_vibevoice_backend();
     if (name == "qwen3-tts" || name == "qwen3_tts" || name == "qwen3tts")
         return crispasr_make_qwen3_tts_backend();
+    if (name == "kokoro" || name == "styletts2" || name == "styletts2-ljspeech" || name == "kokoro-tts")
+        return crispasr_make_kokoro_backend();
     if (name == "glm-asr" || name == "glmasr" || name == "glm" || name == "glm_asr")
         return crispasr_make_glm_asr_backend();
     if (name == "kyutai-stt" || name == "kyutai" || name == "moshi-stt")
@@ -101,6 +104,7 @@ std::vector<std::string> crispasr_list_backends() {
         "data2vec",
         "vibevoice",
         "qwen3-tts",
+        "kokoro",
         "glm-asr",
         "kyutai-stt",
         "firered-asr",
@@ -250,6 +254,10 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "qwen3";
     if (contains_ci("qwen3") && contains_ci("tts"))
         return "qwen3-tts";
+    if (contains_ci("kokoro"))
+        return "kokoro";
+    if (contains_ci("styletts") && contains_ci("ljspeech"))
+        return "kokoro";
     if (contains_ci("granite") && contains_ci("speech"))
         return "granite";
     if (contains_ci("glm") && contains_ci("asr"))
@@ -302,6 +310,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "qwen3";
             else if (a == "qwen3-tts" || a == "qwen3_tts" || a == "qwen3tts")
                 result = "qwen3-tts";
+            else if (a == "kokoro" || a == "styletts2" || a == "styletts2-ljspeech")
+                result = "kokoro";
             else if (a == "voxtral")
                 result = "voxtral";
             else if (a == "voxtral4b" || a == "voxtral-4b" || a == "voxtral_4b")

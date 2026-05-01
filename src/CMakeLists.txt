@@ -578,6 +578,18 @@ target_compile_features   (vibevoice PUBLIC cxx_std_17)
 target_link_libraries     (vibevoice PUBLIC crispasr-core ggml ggml-base ggml-cpu)
 
 # ---------------------------------------------------------------------------
+# kokoro — hexgrad/Kokoro-82M + yl4579/StyleTTS2-LJSpeech (iSTFTNet TTS)
+# ---------------------------------------------------------------------------
+add_library(kokoro STATIC kokoro.h kokoro.cpp)
+set_target_properties(kokoro PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(kokoro PUBLIC .)
+target_compile_features   (kokoro PUBLIC cxx_std_17)
+target_link_libraries     (kokoro PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(kokoro PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # firered-vad — FireRedVAD (DFSMN voice activity detection)
 # ---------------------------------------------------------------------------
 add_library(firered-vad STATIC firered_vad.h firered_vad.cpp)
@@ -768,6 +780,9 @@ if (TARGET mimo_asr)
 endif()
 if (TARGET qwen3_tts)
     target_link_libraries(crispasr PUBLIC qwen3_tts)
+endif()
+if (TARGET kokoro)
+    target_link_libraries(crispasr PUBLIC kokoro)
 endif()
 if (TARGET fireredpunc)
     target_link_libraries(crispasr PUBLIC fireredpunc)

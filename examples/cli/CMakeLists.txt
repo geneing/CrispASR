@@ -26,6 +26,7 @@ add_executable(${TARGET}
     crispasr_backend_wav2vec2.cpp
     crispasr_backend_vibevoice.cpp
     crispasr_backend_qwen3_tts.cpp
+    crispasr_backend_kokoro.cpp
     crispasr_backend_glm_asr.cpp
     crispasr_backend_kyutai_stt.cpp
     crispasr_backend_firered_asr.cpp
@@ -138,6 +139,7 @@ target_link_libraries(crispasr-diff PRIVATE
     voxtral4b
     qwen3_asr
     qwen3_tts
+    kokoro
     gemma4_e2b
     crispasr-diff-lib
     ${FFMPEG_LIBRARIES}
@@ -163,6 +165,7 @@ target_link_libraries(${TARGET} PRIVATE
     voxtral4b
     qwen3_asr
     qwen3_tts
+    kokoro
     canary_ctc
     wav2vec2-ggml
     vibevoice

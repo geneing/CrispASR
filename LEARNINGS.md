@@ -4596,3 +4596,120 @@ HF ecosystem, and any new model release can choose any of them:
 A converter that silently skips a layout it doesn't recognise will
 ship a useless GGUF. Always make missing tokenizer data a *warning*
 in the converter output, not silence.
+
+
+---
+
+# Kokoro / StyleTTS2 (iSTFTNet) lessons — session 2026-05-01
+
+## Lesson 1 — read the source, not the plan
+
+For Kokoro M3-M7b we caught **9 factual errors** in the plan + briefing
+context by spending ~10 minutes downloading the reference Python
+package (`pip download kokoro --no-deps`) and reading the actual
+forward code at `/tmp/kokoro_pkg/unpacked/kokoro/{modules,istftnet,model}.py`.
+Errors that would have silently produced wrong outputs:
+
+- TextEncoder activation: plan said GELU, source has LeakyReLU(0.2).
+- Pad-wrap convention: input ids must be `[0, *raw, 0]` before BERT
+  (`KModel.forward()` line 131). The plan did not mention this; the
+  initial M3 run produced the wrong-length BERT output.
+- Voice-pack split: plan/briefing said `[pred 0:128 | dec 128:256]`;
+  source has it reversed (`model.py:104,118`).
+- `dur_enc_out` shape: plan said `(L, 512)`, actually `(L, 640)`
+  because the last block in `DurationEncoder` is AdaLN+cat-with-style.
+- Duration formula: plan said `softplus`, source uses
+  `sigmoid(x).sum(-1).round().clamp(min=1)` over 50 buckets.
+- `dec_encode_out` / `dec_decode_3_out` shapes per plan were both wrong.
+- Generator activations: two different `LeakyReLU` slopes (0.1 inside
+  the upsample loop, 0.01 default after).
+- conv_post output split: plan called them "mag" and "phase", but the
+  reference applies `exp` on the mag side and `sin` on the phase side
+  (`spec = exp(x[:, :n_fft//2+1, :])`, `phase = sin(x[:, n_fft//2+1:, :])`).
+- The "pooler" weight in the GGUF is loaded but unused — `CustomAlbert`
+  returns `last_hidden_state` directly, discarding the pooler output.
+
+**Rule:** any plan claim about a model's forward pass should be
+treated as a hypothesis until verified against the published reference
+code. The cost of the verification is small relative to the cost of a
+silent numerical divergence at M11/M12.
+
+## Lesson 2 — depthwise ConvTranspose1d without `groups` support
+
+ggml's `ggml_conv_transpose_1d(kernel, input, s, p, d)` has no
+`groups` argument. Kokoro's pool layer (in `AdainResBlk1d` upsample
+blocks) is depthwise: kernel ne=`(K=3, 1, C)` with `groups=in_C` and
+`out_C/groups=1`. We open-coded the math for the specific
+`(s=2, k=3, p=1, op=1)` parameters:
+
+```
+y[c, 2t]   = w[c, 1] * x[c, t]
+y[c, 2t+1] = w[c, 0] * x[c, t] + w[c, 2] * x[c, t+1]    (x[c, T]=0 boundary)
+```
+
+Implementation in `kokoro_pool_2x_depthwise` (src/kokoro.cpp): permute
+the kernel from `(K, 1, C)` to `(C, K)`, cast to F32 (the F16 view +
+F32 mul fails on Metal — see Lesson 3), slice into 3 column views,
+compute even/odd separately, then interleave via
+`(C, 1, T) ⊕ (C, 1, T) → (C, 2, T) → reshape (C, 2T)`. The interleave
+trick relies on ggml's contiguous memory layout: in a `(C, 2, T)`
+tensor, element `(c, k, l)` is at byte offset `c·sz + k·C·sz + l·2C·sz`,
+which lines up exactly with `(C, 2T)` element `(c, 2l + k)`. ~10
+ops, very fast on any backend.
+
+## Lesson 3 — F32 × F16 element-wise ops are not portable
+
+`ggml_mul_mat` always casts F16 weights to F32 internally, so mixed
+mul_mat works. But `ggml_mul` (Hadamard) requires same-type operands
+on Metal. A pattern like `ggml_mul(F32_tensor, F16_view_of_kernel)`
+will fail at the kernel-dispatch level.
+
+Fix: cast the F16 weight to F32 before the element-wise op. Either
+cast the whole tensor once (cheap, and ggml caches the result) via
+`ggml_cast(ctx, w, GGML_TYPE_F32)`, or precompute slice views of an
+already-cast F32 copy.
+
+## Lesson 4 — InstanceNorm1d via transpose+ggml_norm
+
+`ggml_norm(x, eps)` normalises along `ne[0]` per other dim — i.e.
+LayerNorm-style across the first dim of every column. Kokoro uses two
+*different* normalisations:
+
+- `AdaLayerNorm` (DurationEncoder): LN over channels. With layout
+  `(C, T)` ne[0]=C, `ggml_norm` gives the right semantics directly.
+- `AdaIN1d` (predictor F0/N + decoder body): InstanceNorm1d, i.e.
+  per-channel mean/var across time. With layout `(C, T)`, ggml_norm
+  would be wrong. Transpose to `(T, C)`, ggml_norm normalises
+  over `ne[0]=T` per channel = per-channel-along-T = instance norm 1D,
+  then transpose back. Two extra `ggml_cont(ggml_transpose(...))`
+  ops per call, acceptable overhead.
+
+The cost of getting this wrong: cosines look "fine-ish" (because both
+ops normalise to roughly unit-variance outputs) but the actual
+distributions are different and downstream activations diverge by ~10%.
+
+## Lesson 5 — LSTM output assembly via cpy-into-pre-allocated columns
+
+`core_lstm::lstm_unidir` (src/core/lstm.h) builds the per-timestep
+forward graph with a pre-allocated output tensor `(H, T)`, and writes
+each step's `h_t` into a column via:
+
+```c
+ggml_tensor* slot = ggml_view_2d(ctx, output, H, 1, output->nb[1], (size_t)t * output->nb[1]);
+ggml_build_forward_expand(gf, ggml_cpy(ctx, h, slot));
+```
+
+The scheduler sequences the cpys before any downstream read of
+`output` thanks to ggml's view-tracking via `view_src`
+(same mechanism used by `core_attn::kv_self_attn` for the persistent
+KV cache). Cost: `O(T × H)` instead of `O(T² × H)` for the naive
+concat-chain approach. For Kokoro at L_padded=14 this is irrelevant;
+at T_frames=1500 (predictor `pred.shared` LSTM) it would have been
+prohibitive.
+
+The lazy zero-init for `h` and `c` (skip the `W_hh @ h_{t-1}` matmul
+at t=0) avoids needing an externally-zeroed input buffer — when `h`
+or `c` is nullptr, the helper substitutes `b_hh` (correct because
+`W_hh @ 0 = 0`) and `i ⊙ g` (correct because `f ⊙ 0 = 0`). Saves an
+input tensor and an extra `ggml_set_input` call per call site.
+
