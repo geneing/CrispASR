@@ -2737,8 +2737,8 @@ bool build_customvoice_prefill_embeds(qwen3_tts_context* c, const std::string& s
 //   [text_block(N+1)]  text_proj(text_content)+tts_eos | codec_pad×(N+1)
 //   [final(1)]         tts_pad | codec_bos_emb
 bool build_voicedesign_prefill_embeds(qwen3_tts_context* c, const std::string& instruct_text,
-                                      const std::string& syn_text, std::vector<float>& prefill_embeds,
-                                      int& T_prefill, std::vector<float>& trailing_text_hidden, int& M_trailing) {
+                                      const std::string& syn_text, std::vector<float>& prefill_embeds, int& T_prefill,
+                                      std::vector<float>& trailing_text_hidden, int& M_trailing) {
     const auto& hp = c->hp;
     const int d = (int)hp.d_model;
 

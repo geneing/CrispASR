@@ -1040,13 +1040,11 @@ static ggml_cgraph* granite_build_encoder(granite_speech_context* ctx, int T, bo
     // direct memcpy at offset il * (ctx_size * hd * ctx_size).
     // Reshaping to ne=[hd, ctx_size, ctx_size, n_layers] gives axes
     // [d, r, c, layer]; per-layer slicing uses ggml_view_3d on the layer dim.
-    ggml_tensor* rpe_tensor =
-        ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, ctx_size * hd, ctx_size, with_rpe ? n_layers : 1);
+    ggml_tensor* rpe_tensor = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, ctx_size * hd, ctx_size, with_rpe ? n_layers : 1);
     ggml_set_name(rpe_tensor, "rpe_lookup");
     ggml_set_input(rpe_tensor);
 
-    ggml_tensor* rpe_4d =
-        with_rpe ? ggml_reshape_4d(ctx0, rpe_tensor, hd, ctx_size, ctx_size, n_layers) : nullptr;
+    ggml_tensor* rpe_4d = with_rpe ? ggml_reshape_4d(ctx0, rpe_tensor, hd, ctx_size, ctx_size, n_layers) : nullptr;
 
     // 16 × Conformer blocks
     for (int il = 0; il < n_layers; il++) {
@@ -1106,7 +1104,7 @@ static ggml_cgraph* granite_build_encoder(granite_speech_context* ctx, int T, bo
                 // This layer's RPE = a (hd, ctx_size, ctx_size) view into the
                 // stacked rpe_4d on the layer (4th) axis.
                 ggml_tensor* rpe_3d_il = ggml_view_3d(ctx0, rpe_4d, hd, ctx_size, ctx_size, rpe_4d->nb[1],
-                                                     rpe_4d->nb[2], (size_t)il * rpe_4d->nb[3]);
+                                                      rpe_4d->nb[2], (size_t)il * rpe_4d->nb[3]);
 
                 std::vector<ggml_tensor*> block_outs;
                 block_outs.reserve(n_blocks_attn);
@@ -1130,9 +1128,8 @@ static ggml_cgraph* granite_build_encoder(granite_speech_context* ctx, int T, bo
                     //   B = Q_blk_4d   : (hd, 1,         blk_len_c, n_heads)
                     //   out            : (blk_len_r, 1, blk_len_c, n_heads)
                     // Broadcasting in batch dim 0 (1 → n_heads).
-                    ggml_tensor* rpe_blk =
-                        ggml_cont(ctx0, ggml_view_3d(ctx0, rpe_3d_il, hd, blk_len, blk_len, rpe_3d_il->nb[1],
-                                                     rpe_3d_il->nb[2], 0));
+                    ggml_tensor* rpe_blk = ggml_cont(ctx0, ggml_view_3d(ctx0, rpe_3d_il, hd, blk_len, blk_len,
+                                                                        rpe_3d_il->nb[1], rpe_3d_il->nb[2], 0));
                     ggml_tensor* rpe_blk_4d = ggml_reshape_4d(ctx0, rpe_blk, hd, blk_len, blk_len, 1);
                     ggml_tensor* Q_blk_4d = ggml_reshape_4d(ctx0, Q_blk, hd, 1, blk_len, n_heads);
                     ggml_tensor* pos_bias_4d = ggml_mul_mat(ctx0, rpe_blk_4d, Q_blk_4d);

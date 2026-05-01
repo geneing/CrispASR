@@ -120,13 +120,11 @@ public:
             if (qwen3_tts_is_voice_design(ctx_)) {
                 // VoiceDesign: --instruct is required, --voice has no role.
                 if (!params.tts_voice.empty() && !params.no_prints) {
-                    fprintf(stderr,
-                            "crispasr[qwen3-tts]: VoiceDesign uses --instruct, not --voice — ignoring '%s'\n",
+                    fprintf(stderr, "crispasr[qwen3-tts]: VoiceDesign uses --instruct, not --voice — ignoring '%s'\n",
                             params.tts_voice.c_str());
                 }
                 if (params.tts_instruct.empty()) {
-                    fprintf(stderr,
-                            "crispasr[qwen3-tts]: VoiceDesign requires --instruct \"<voice description>\"\n");
+                    fprintf(stderr, "crispasr[qwen3-tts]: VoiceDesign requires --instruct \"<voice description>\"\n");
                     return {};
                 }
                 if (qwen3_tts_set_instruct(ctx_, params.tts_instruct.c_str()) != 0) {

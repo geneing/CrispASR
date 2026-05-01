@@ -536,10 +536,10 @@ static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.attn_norm_w);
 
-        ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
-                                                    /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
-                                                    (T == 1) ? nullptr : causal_mask, c->kv_k, c->kv_v, (int)il, n_past,
-                                                    kvp);
+        ggml_tensor* attn =
+            core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
+                                    /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
+                                    (T == 1) ? nullptr : causal_mask, c->kv_k, c->kv_v, (int)il, n_past, kvp);
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
@@ -655,8 +655,7 @@ static int sample_logits(const float* logits, int n, float temperature, int top_
     for (int i = 0; i < n; i++) {
         idx[i] = i;
     }
-    std::partial_sort(idx.begin(), idx.begin() + top_k, idx.end(),
-                      [&](int a, int b) { return logits[a] > logits[b]; });
+    std::partial_sort(idx.begin(), idx.begin() + top_k, idx.end(), [&](int a, int b) { return logits[a] > logits[b]; });
     float max_l = logits[idx[0]];
     std::vector<float> probs(top_k);
     double sum = 0.0;
@@ -901,13 +900,27 @@ extern "C" float* orpheus_synthesize(struct orpheus_context* ctx, const char* te
                 clamped = true;
             }
             switch (s) {
-                case 0: c0.push_back(cb); break;
-                case 1: c1.push_back(cb); break;
-                case 2: c2.push_back(cb); break;
-                case 3: c2.push_back(cb); break;
-                case 4: c1.push_back(cb); break;
-                case 5: c2.push_back(cb); break;
-                case 6: c2.push_back(cb); break;
+            case 0:
+                c0.push_back(cb);
+                break;
+            case 1:
+                c1.push_back(cb);
+                break;
+            case 2:
+                c2.push_back(cb);
+                break;
+            case 3:
+                c2.push_back(cb);
+                break;
+            case 4:
+                c1.push_back(cb);
+                break;
+            case 5:
+                c2.push_back(cb);
+                break;
+            case 6:
+                c2.push_back(cb);
+                break;
             }
         }
     }
