@@ -39,6 +39,11 @@ constexpr Entry k_registry[] = {
     {"granite-4.1-plus", "granite-speech-4.1-2b-plus-q4_k.gguf",
      "https://huggingface.co/cstr/granite-speech-4.1-2b-plus-GGUF/resolve/main/granite-speech-4.1-2b-plus-q4_k.gguf",
      "~2.96 GB", nullptr, nullptr},
+    // granite-4.1-nar (cstr/granite-speech-4.1-2b-nar-GGUF) is published but
+    // the main `crispasr` CLI doesn't dispatch granite_nle_* yet — only
+    // crispasr-diff does. Add this entry once a `crispasr_backend_granite_nle.cpp`
+    // adapter exists and crispasr_c_api.cpp routes "granite-4.1-nar" to
+    // granite_nle_init_from_file.
     {"qwen3", "qwen3-asr-0.6b-q4_k.gguf",
      "https://huggingface.co/cstr/qwen3-asr-0.6b-GGUF/resolve/main/qwen3-asr-0.6b-q4_k.gguf", "~500 MB", nullptr, nullptr},
     {"cohere", "cohere-transcribe-q4_k.gguf",

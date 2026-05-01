@@ -89,23 +89,28 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     }
     const bool is_firered = (arch.find("firered") != std::string::npos);
     const bool is_ecapa = (arch.find("ecapa") != std::string::npos);
-    const bool is_granite_speech = (arch.find("granite_speech") != std::string::npos);
-    // Optional: downcast granite_speech encoder F32 weights to F16 instead of
+    // The granite-speech 4.1 family ("granite_speech" base + plus, "granite_nle"
+    // for the non-autoregressive variant) all share the same 16-layer Conformer
+    // encoder + Q-Former projector + Granite-1B LLM, so the same quantization
+    // rules apply: skip enc.* / proj.* unless explicitly overridden.
+    const bool is_granite_family =
+        (arch.find("granite_speech") != std::string::npos) || (arch.find("granite_nle") != std::string::npos);
+    // Optional: downcast granite-family encoder F32 weights to F16 instead of
     // preserving F32. Halves the encoder footprint (~960 MB on 4.1-2b) at
     // negligible quality cost — F16 is what every Whisper / Llama / parakeet
     // GGUF in the wild uses for encoder weights. Off by default to keep the
     // canonical Q4K bit-identical to F16 reference; opt in with the env var.
     const char* env_enc_f16 = std::getenv("CRISPASR_GRANITE_ENC_F16");
     const bool granite_enc_to_f16 =
-        is_granite_speech && env_enc_f16 && *env_enc_f16 && *env_enc_f16 != '0';
-    // Optional: quantize EVERYTHING for granite_speech — including the
+        is_granite_family && env_enc_f16 && *env_enc_f16 && *env_enc_f16 != '0';
+    // Optional: quantize EVERYTHING for the granite family — including the
     // 16-layer Conformer encoder and the Q-Former projector that we
     // normally pin at F32/F16. Produces the published `-mini` variant
     // (~1.7 GB on 4.1-2b) at the cost of ~0.93 cosine parity instead
     // of ~0.999. Off by default; opt in with the env var.
     const char* env_quant_all = std::getenv("CRISPASR_GRANITE_QUANT_ALL");
     const bool granite_quant_all =
-        is_granite_speech && env_quant_all && *env_quant_all && *env_quant_all != '0';
+        is_granite_family && env_quant_all && *env_quant_all && *env_quant_all != '0';
 
     const int n_tensors = gguf_get_n_tensors(ctx_in);
     for (int i = 0; i < n_tensors; i++) {
@@ -161,13 +166,13 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
         const bool ok_dims = (ggml_n_dims(t) == 2) || ((is_firered || is_ecapa) && ggml_n_dims(t) >= 2);
         bool quantize = ggml_is_quantized(qtype) && (type == GGML_TYPE_F32 || type == GGML_TYPE_F16) && ok_dims &&
                         is_weight && (sname.find("norm") == std::string::npos) &&
-                        // Skip projector tensors (Granite Speech: precision-sensitive).
+                        // Skip projector tensors (Granite family: precision-sensitive).
                         // CRISPASR_GRANITE_QUANT_ALL=1 overrides for the `-mini` build.
                         (granite_quant_all || sname.find("proj.") != 0) &&
-                        // Skip encoder tensors for Granite Speech: 16-layer Conformer
+                        // Skip encoder tensors for the Granite family: 16-layer Conformer
                         // encoder is precision-sensitive (cos drops to ~0.93 at Q4_K
                         // when encoder is quantized; ~0.999 when kept F32).
-                        !(is_granite_speech && !granite_quant_all && sname.find("enc.") == 0) &&
+                        !(is_granite_family && !granite_quant_all && sname.find("enc.") == 0) &&
                         // Skip small classifier heads (ECAPA cosine: 45x192, precision-critical)
                         !(sname.find("cls.") == 0 && ggml_nelements(t) < 65536) &&
                         // Skip OmniASR-LLM bridging tensors (enc_proj, lm_head, tok_emb, lang_emb)

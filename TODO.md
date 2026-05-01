@@ -731,25 +731,43 @@ each backend. High-value gaps to close:
   closed most of that gap). Still missing: query-dependent Shaw RPE
   bias. flash_attn_ext can't handle it; needs manual `Q@K.T + Q@R.T`
   attention. Once added, drop the CPU loop entirely.
-- **[next] NAR HF upload.** PLUS is already shipped (F16 + 3× Q4_K
-  variants on `cstr/granite-speech-4.1-2b-plus-GGUF`). NAR runtime is
-  bit-exact end-to-end on JFK as of commit `d4b892f`, and we have the
-  F16 GGUF locally at
-  `/Volumes/backups/ai/crispasr-models/granite-speech-4.1-2b-nar-f16.gguf`.
-  Outstanding:
-  - Quantize: `crispasr-quantize` produces Q4_K (q4_k=12). Build the
-    same set the base/plus families ship — Q4_K (full), Q4_K-f16enc
-    (encoder kept F16), Q4_K-mini (everything quantized; expect cos
-    ≈ 0.6–0.9 on encoder per the PLUS lessons because of the 4-layer
-    hidden-state concat).
-  - Validate each quant via `crispasr-diff granite-nle` against
-    `/tmp/nle-ref.gguf` — the new `transcribe` stage gives a single
-    pass/fail signal end-to-end. Threshold: transcribe must match the
-    reference `final_text` for Q4_K and Q4_K-f16enc; Q4_K-mini may
-    drop a punctuation token.
-  - Upload to `cstr/granite-speech-4.1-2b-nar-GGUF` (mirror the PLUS
-    repo layout: F16 + 3× Q4_K + README) and add a registry entry +
-    auto-download default (Q4_K-f16enc, mirroring PLUS).
+- **[done] NAR HF upload — F16 + 3× Q4_K.** All four GGUFs published
+  to [`cstr/granite-speech-4.1-2b-nar-GGUF`](https://huggingface.co/cstr/granite-speech-4.1-2b-nar-GGUF):
+  F16 (5.4 GB), Q4_K (3.2 GB; encoder F32, recommended), Q4_K-f16enc
+  (2.4 GB; encoder F16), Q4_K-mini (1.5 GB; everything Q4_K).
+  Quantizer extended (`is_granite_family` includes `granite_nle` arch
+  now, so the encoder/projector skip rules + `CRISPASR_GRANITE_ENC_F16` +
+  `CRISPASR_GRANITE_QUANT_ALL` env knobs apply identically). Diff vs.
+  PyTorch ref on JFK: F16/Q4_K/Q4_K-f16enc all transcribe == ref
+  exactly with `editing_logits_top1` cos_min=1.000000; Q4_K-mini's
+  encoder cos_min drops to 0.10 at the worst frame (vs. ~0.62 for
+  PLUS-mini — the 4-layer hidden-state concat amplifies Q4_K rounding
+  error) but still transcribes correctly because the LLM's argmax
+  recovers the right token.
+- **[next] NAR — wire `granite-4.1-nar` into the main `crispasr`
+  CLI.** Today the runtime is only reachable via `crispasr-diff` and
+  the `granite_nle` library; `crispasr -m granite-4.1-nar audio.wav`
+  has no dispatch path. Required:
+  1. New `examples/cli/crispasr_backend_granite_nle.cpp` adapter
+     mirroring `crispasr_backend_granite.cpp` but calling the
+     `granite_nle_*` functions. The transcribe path is already
+     end-to-end via `granite_nle_transcribe`, so the adapter is mostly
+     plumbing: load → transcribe → free.
+  2. Backend dispatch in `src/crispasr_c_api.cpp` (3 places: init at
+     L877, list at L1104, mode-aware route at L1436) — add a
+     `s->backend == "granite-4.1-nar"` branch that routes to
+     `granite_nle_init_from_file` instead of `granite_speech_*`.
+  3. CLI registration in `examples/cli/crispasr_backend.cpp` (L52
+     and L97) — add `"granite-4.1-nar"` to the alias list.
+  4. Re-instate the registry entry in
+     `src/crispasr_model_registry.cpp` (placeholder comment marks
+     where) so `crispasr -m granite-4.1-nar` auto-downloads
+     `granite-speech-4.1-2b-nar-q4_k.gguf` on first run.
+  5. Smoke-test `./build/bin/crispasr -m granite-4.1-nar samples/jfk.wav`
+     end-to-end. The expected transcript is the same as
+     `crispasr-diff granite-nle ... transcribe`: "and so, my fellow
+     americans, ask not what your country can do for you. ask what
+     you can do for your country."
 
 ### gemma4-e2b
 - **[later]** Speed — now **1.4× realtime** after the `end_of_turn`
