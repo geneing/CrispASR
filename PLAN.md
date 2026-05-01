@@ -271,7 +271,7 @@ flight.
 |---|---|---|---|---|
 | `granite-speech-4.1-2b` (base) | Granite-1B AR | none | text | DONE — 4 GGUFs on HF, encoder cos 0.999908, transcribes JFK at 2.1× realtime on M1 Q4K |
 | `granite-speech-4.1-2b-plus` | Granite-1B AR | `cat_hidden_layers: [3]` | text + speaker labels + word-level timestamps | DONE — f16 GGUF on HF, transcribes JFK with punctuation/capitalisation by default; speaker labels + word timestamps in template work pending |
-| `granite-speech-4.1-2b-nar` | non-autoregressive (`NLENARDecoder`) | self-conditioning at L8 + BPE aux head + 4-layer hidden capture | text | encoder + projector forward DONE (mel `cos_min=0.999997`, encoder_output (T,4096) `cos_min=0.999852`, encoder_logits `cos_min=0.999675`, projector_output (111,2048) `cos_min=0.999999`); LLM editing forward pending |
+| `granite-speech-4.1-2b-nar` | non-autoregressive (`NLENARDecoder`) | self-conditioning at L8 + BPE aux head + 4-layer hidden capture | text | encoder + projector + LLM editing DONE (mel `cos_min=0.999997`, encoder_output `cos_min=0.999852`, encoder_logits `cos_min=0.999675`, projector_output `cos_min=0.999999`, editing_logits `cos_min=0.999999` 47/47 top-1); transcribe orchestration + BPE-CTC text init pending |
 
 ### Base 4.1-2b (DONE)
 
@@ -305,7 +305,7 @@ timestamps are not yet in the output; investigating the upstream
 Commits: `f298818` (cat_layer + tokenizer fix), `ed0e5ac` (backend
 alias + registry), `a3147b6` (HF README).
 
-### NAR variant — encoder + projector DONE; LLM editing pending
+### NAR variant — encoder + projector + LLM editing DONE; transcribe orchestration pending
 
 1. **Encoder forward** (`granite_nle_run_encoder`). DONE. Same
    Conformer block as base; self-conditioning at layer 8 (the running
@@ -329,14 +329,40 @@ alias + registry), `a3147b6` (HF README).
    tokens per 15 encoder frames. Validated against PyTorch on JFK at
    `projector_output cos_min=0.999999` (T_out=111 × llm_dim=2048).
 3. **Non-causal LLM editing pass** (`granite_nle_run_llm_editing`).
-   Single forward over flat `[audio_embs, text_with_eos_slots]`. Every
-   self-attention layer runs `is_causal=False`. Argmax +
-   `unique_consecutive` + drop-EOS on slot positions gives the
-   transcript. Reuses `core_attn::kv_self_attn`. ~150 LOC.
+   DONE. Single graph over the flat `[audio_embs, text_embs_with_slots]`
+   sequence with µP scaling (embedding_multiplier=12,
+   attention_multiplier=1/128, residual_multiplier=0.22). 40 layers of
+   RMSNorm + non-causal `flash_attn_ext` (mask=nullptr, GQA 16/4
+   native) + SwiGLU. Tied LM head (matmul against the same
+   `token_embd_w` used for embed lookup). The caller passes audio_embs
+   pre-divided by `embedding_multiplier` so the uniform downstream
+   scale-up recovers the original projector output for audio while
+   still scaling text by 12× — mirrors `_build_flat_llm_inputs`.
+   Validated bit-exact: `editing_logits cos_min=0.999999` and 47/47
+   top-1 match on JFK.
 
-**Effort remaining:** ~150 LOC for the LLM editing pass.
-Both converters and the runtime scaffolds + encoder + projector are
-now in tree.
+   Reference dump pitfall: `GraniteModel.forward` unconditionally
+   builds an upper-triangular causal mask and passes it to SDPA, which
+   then enforces causality regardless of `self_attn.is_causal=False`.
+   The upstream "flash_attention_2 required" assertion is real — only
+   FA2 reads `is_causal` directly without using the mask. The
+   `tools/reference_backends/granite_nle.py` dumper monkey-patches
+   `transformers.models.granite.modeling_granite.create_causal_mask`
+   to return None to get true non-causal attention via SDPA.
+
+4. **Transcribe orchestration** (`granite_nle_transcribe`). PENDING.
+   Wires together: encoder (with BPE auxiliary head — needs a
+   posterior-pool window=4 stage in `run_encoder` populating
+   `last_bpe_logits`) → BPE-CTC greedy decode (argmax →
+   `unique_consecutive` → drop blank → shift to LLM IDs) → BPE
+   detokenize (GPT-2 byte-level reverse) → re-tokenize via
+   `core_bpe::tokenize_simple` → `add_insertion_slots` →
+   `run_llm_editing` → argmax + unique_consecutive + drop EOS +
+   detokenize. ~200-300 LOC.
+
+**Effort remaining:** transcribe orchestration only (~200-300 LOC).
+The forward path (encoder + projector + LLM editing) is now bit-exact
+end-to-end.
 
 ---
 

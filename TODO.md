@@ -647,12 +647,24 @@ each backend. High-value gaps to close:
   + SiLU-MLP layers, and a final `out_norm`+`out_linear`. Output
   rate: 3 audio tokens per 15 encoder frames. Validated on JFK at
   `projector_output cos_min=0.999999` (T_out=111 × llm_dim=2048).
-- **[next] NAR variant — non-causal LLM editing pass.** The LLM
-  runs ONCE over the flat `[audio_embs, text_with_eos_slots]`
-  sequence (every self-attention layer patched to `is_causal=False`).
-  Then argmax + `unique_consecutive` + drop EOS on the slot positions
-  gives the transcript. Editing logits + insertion-slot builder are
-  ~150 LOC; reuses `core_attn::kv_self_attn` for the LLM forward.
+- **[done] NAR variant — non-causal LLM editing pass.** Single graph
+  forward over the flat `[audio_embs, text_embs_with_slots]` sequence
+  with µP scaling (embedding_multiplier=12, attention_multiplier=1/128,
+  residual_multiplier=0.22). 40 layers of RMSNorm + non-causal
+  `flash_attn_ext` (mask=nullptr, GQA 16/4 native) + SwiGLU. Tied LM
+  head. Validated bit-exact: editing_logits cos_min=0.999999, 47/47
+  top-1 match on JFK. Reference dumper monkey-patches
+  `transformers.models.granite.modeling_granite.create_causal_mask` to
+  return None — without this, `GraniteModel.forward` unconditionally
+  passes an upper-triangular mask to SDPA, defeating
+  `self_attn.is_causal=False`. The upstream `flash_attention_2`
+  assertion is real, not paranoia.
+- **[next] NAR variant — transcribe orchestration.** Wires encoder
+  (needs BPE auxiliary head w/ posterior-pool window=4 in run_encoder
+  populating last_bpe_logits) → BPE-CTC greedy decode → BPE detokenize
+  (GPT-2 byte-level reverse) → re-tokenize via core_bpe →
+  add_insertion_slots → run_llm_editing → argmax + uniq + drop EOS +
+  detokenize. ~200-300 LOC.
 - **[later] Shaw RPE in graph path — make graph path the default.**
   `GRANITE_ENCODER_GRAPH=1` runs the encoder as a single Metal-accel
   graph (used to be 4× faster than the CPU loop; norm+QKV fusion has
