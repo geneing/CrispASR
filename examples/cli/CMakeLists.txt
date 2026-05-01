@@ -19,6 +19,7 @@ add_executable(${TARGET}
     crispasr_backend_canary.cpp
     crispasr_backend_cohere.cpp
     crispasr_backend_granite.cpp
+    crispasr_backend_granite_nle.cpp
     crispasr_backend_voxtral.cpp
     crispasr_backend_voxtral4b.cpp
     crispasr_backend_qwen3.cpp
@@ -176,6 +177,7 @@ target_link_libraries(${TARGET} PRIVATE
     canary
     cohere
     granite_speech
+    granite_nle
     voxtral
     voxtral4b
     qwen3_asr

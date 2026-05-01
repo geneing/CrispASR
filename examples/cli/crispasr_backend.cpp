@@ -11,6 +11,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_parakeet_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_canary_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_cohere_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_granite_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_granite_nle_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_voxtral_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_voxtral4b_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_backend();
@@ -51,6 +52,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_cohere_backend();
     if (name == "granite" || name == "granite-4.1" || name == "granite-4.1-plus")
         return crispasr_make_granite_backend();
+    if (name == "granite-4.1-nar" || name == "granite-nar")
+        return crispasr_make_granite_nle_backend();
     if (name == "voxtral")
         return crispasr_make_voxtral_backend();
     if (name == "voxtral4b")
@@ -95,6 +98,7 @@ std::vector<std::string> crispasr_list_backends() {
         "granite",
         "granite-4.1",
         "granite-4.1-plus",
+        "granite-4.1-nar",
         "voxtral",
         "voxtral4b",
         "qwen3",
@@ -318,6 +322,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "voxtral4b";
             else if (a == "granite-speech" || a == "granite_speech" || a == "granitespeech")
                 result = "granite";
+            else if (a == "granite-nle" || a == "granite_nle" || a == "granitenle")
+                result = "granite-4.1-nar";
             else if (a == "wav2vec2" || a == "wav2vec2-ctc")
                 result = "wav2vec2";
             else if (a == "vibevoice" || a == "vibevoice-asr" || a == "vibevoice_asr")
