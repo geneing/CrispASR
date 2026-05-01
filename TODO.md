@@ -701,8 +701,8 @@ Still pending:
   "Discrete Multi-Codebook LM" architecture: Qwen3 backbone with a
   16-codebook output head, paired with `Qwen3-TTS-Tokenizer-12Hz`
   (16 codebooks × 2048, 12.5 FPS RVQ). Variants:
-  Base / CustomVoice / VoiceDesign in 0.6B and 1.7B. 10 languages,
-  ~97ms end-to-end latency.
+  Base / CustomVoice in 0.6B and 1.7B; VoiceDesign 1.7B-only.
+  10 languages, ~97ms end-to-end latency.
   - Add `models/convert-qwen3-tts-to-gguf.py` for the LM
   - Add `models/convert-qwen3-tts-tokenizer-to-gguf.py` for the codec
   - New backend `qwen3-tts` reusing `core_attn::kv_self_attn` for
