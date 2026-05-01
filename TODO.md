@@ -545,6 +545,18 @@ each backend. High-value gaps to close:
   upload.~~ Backend alias of `granite` registered, registry entry
   with `~5.6 GB` size, HF repo `cstr/granite-speech-4.1-2b-plus-GGUF`
   populated with f16 GGUF + README. Commit `ed0e5ac`.
+- **[done]** ~~PLUS variant — Q4_K / Q4_K-f16enc / Q4_K-mini GGUFs
+  published.~~ Three quantized variants uploaded to
+  `cstr/granite-speech-4.1-2b-plus-GGUF`; auto-download default switched
+  from F16 to Q4_K (~2.96 GB). Diff vs PyTorch BF16 ref on JFK: Q4_K
+  and Q4_K-f16enc 3/3 PASS (encoder cos_min ≥ 0.999); Q4_K-mini drops
+  to encoder cos_min ≈ 0.62 because the layer-3 + final concat doubles
+  the surface for Q4_K rounding error (base-4.1 mini sat at ~0.93).
+  All three transcribe JFK correctly. Reference dumper
+  (`tools/reference_backends/granite.py`) gained PLUS detection +
+  cat-layer concat with HF's `output_hidden_states` indexing
+  convention; quantizer gained `CRISPASR_GRANITE_QUANT_ALL=1` env knob
+  to override the encoder/projector skip rules for the `-mini` build.
 - **[next] PLUS variant — speaker labels + word timestamps.** PLUS's
   default output already includes punctuation; the upstream model
   card also advertises speaker labels and word-level timestamps. We

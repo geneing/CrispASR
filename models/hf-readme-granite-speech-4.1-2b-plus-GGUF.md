@@ -42,9 +42,29 @@ projection weights are correspondingly `(1024, 2048)`.
 
 | File | Quantisation | Size | Notes |
 |---|---|---|---|
-| `granite-speech-4.1-2b-plus-f16.gguf` | F16 | ~5.6 GB | Encoder + projector in F32, LLM weights in F16 |
+| `granite-speech-4.1-2b-plus-f16.gguf` | F16 | ~5.6 GB | Encoder + projector in F32, LLM weights in F16 — full parity reference |
+| `granite-speech-4.1-2b-plus-q4_k.gguf` | Q4_K | ~2.96 GB | **Recommended.** LLM layers Q4_K; encoder + projector kept F32 (precision-sensitive). Bit-identical-quality to F16 on encoder + projector |
+| `granite-speech-4.1-2b-plus-q4_k-f16enc.gguf` | Q4_K + F16 encoder | ~2.28 GB | LLM Q4_K, encoder + projector F16 (norms / biases / BN stats stay F32). ~700 MB smaller than the recommended Q4_K with no measurable parity loss on this clip |
+| `granite-speech-4.1-2b-plus-q4_k-mini.gguf` | Q4_K (aggressive) | ~1.66 GB | Encoder, projector and LLM all Q4_K. Smallest / fastest to download. **Cosine parity is noticeably worse on PLUS than on the base 4.1 mini** because the layer-3 + final hidden-state concat (the architectural delta in PLUS) doubles the surface for Q4_K rounding error. JFK still transcribes correctly with light punctuation drift, but harder material is more likely to regress than on base-4.1 mini. Use Q4_K or Q4_K-f16enc unless disk size is the binding constraint |
 
-Q4_K and Q4_K-f16enc variants will land once parity is validated.
+## Cosine parity (vs PyTorch BF16 reference, JFK 11 s clip)
+
+| Stage | F16 cos_min | Q4_K cos_min | Q4_K-f16enc cos_min | Q4_K-mini cos_min |
+|---|---|---|---|---|
+| mel_spectrogram | 0.999997 | 0.999997 | 0.999997 | 0.999997 |
+| encoder_out | 0.999938 | 0.999938 | 0.999938 | 0.622 |
+| projector_out | 0.999995 | 0.999995 | 0.999995 | 0.960 |
+
+`encoder_out` is the 2048-dim concatenation of the layer-3 hidden state
+and the final encoder layer (the PLUS architectural delta). On the
+recommended and `-f16enc` files the encoder weights stay in F32/F16, so
+parity is essentially indistinguishable from the F16 reference. On the
+`-mini` file the encoder weights are Q4_K — rounding error compounds
+across the 16-layer Conformer and shows up amplified after the concat,
+which is why `encoder_out` cos_min drops to ~0.62 on PLUS where base-4.1
+mini sits at ~0.93. End-to-end JFK transcription is still correct.
+
+_Tested with `crispasr-diff granite-4.1 <model.gguf> <ref.gguf> samples/jfk.wav`_
 
 ## Usage with CrispASR
 
@@ -85,9 +105,24 @@ concatenation.
 ## Conversion
 
 ```bash
+# Convert HF safetensors → GGUF F16
 python models/convert-granite-speech-to-gguf.py \
   --input /path/to/granite-speech-4.1-2b-plus \
   --output granite-speech-4.1-2b-plus-f16.gguf
+
+# Quantise F16 → Q4_K (encoder + projector preserved F32, LLM Q4_K)
+crispasr-quantize granite-speech-4.1-2b-plus-f16.gguf \
+                  granite-speech-4.1-2b-plus-q4_k.gguf q4_k
+
+# Q4_K with F16 encoder/projector (smaller, no measurable parity loss)
+CRISPASR_GRANITE_ENC_F16=1 \
+crispasr-quantize granite-speech-4.1-2b-plus-f16.gguf \
+                  granite-speech-4.1-2b-plus-q4_k-f16enc.gguf q4_k
+
+# Aggressive Q4_K everywhere (encoder + projector + LLM)
+CRISPASR_GRANITE_QUANT_ALL=1 \
+crispasr-quantize granite-speech-4.1-2b-plus-f16.gguf \
+                  granite-speech-4.1-2b-plus-q4_k-mini.gguf q4_k
 ```
 
 The same converter handles base / 4.1-2b / 4.1-2b-plus from a single

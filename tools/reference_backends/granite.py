@@ -64,9 +64,37 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
 
     print(f"  loading Granite Speech 1B from {model_dir}")
     processor = AutoProcessor.from_pretrained(str(model_dir))
-    model = GraniteSpeechForConditionalGeneration.from_pretrained(
-        str(model_dir), torch_dtype=torch.float32, device_map="cpu",
-    ).eval()
+    # PLUS detection: granite-speech-4.1-2b-plus's config.json declares
+    # `model_type: granite_speech_plus` (not in transformers <=5.7), so
+    # we ask the model class directly. Loading with the base class works
+    # because the safetensors layout is a superset; the only architectural
+    # delta is the encoder layer-3 concat, which we apply manually below
+    # before calling the projector.
+    import json
+    cfg_json = json.loads((model_dir / "config.json").read_text())
+    cat_layers = (cfg_json.get("encoder_config") or {}).get("cat_hidden_layers") or []
+    is_plus = bool(cat_layers)
+    if is_plus:
+        # Coerce model_type so transformers loads the base GraniteSpeech
+        # class instead of erroring on the unknown "granite_speech_plus".
+        cfg_patched = dict(cfg_json)
+        cfg_patched["model_type"] = "granite_speech"
+        cfg_patched["architectures"] = ["GraniteSpeechForConditionalGeneration"]
+        if "encoder_config" in cfg_patched:
+            ec = dict(cfg_patched["encoder_config"])
+            ec["model_type"] = "granite_speech_encoder"
+            cfg_patched["encoder_config"] = ec
+        # Load via from_dict to avoid touching the on-disk file.
+        from transformers import GraniteSpeechConfig
+        config = GraniteSpeechConfig.from_dict(cfg_patched)
+        model = GraniteSpeechForConditionalGeneration.from_pretrained(
+            str(model_dir), config=config,
+            torch_dtype=torch.float32, device_map="cpu",
+        ).eval()
+    else:
+        model = GraniteSpeechForConditionalGeneration.from_pretrained(
+            str(model_dir), torch_dtype=torch.float32, device_map="cpu",
+        ).eval()
 
     # Granite expects the audio as a torch tensor shape (1, N) via torchaudio,
     # but a float32 numpy array of shape (N,) works with .unsqueeze(0) too.
@@ -140,6 +168,29 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
                 out[name] = (
                     layer_outputs[idx][0].detach().cpu().float().numpy())
 
+        # PLUS: build the concatenated encoder output (cat_layers + final)
+        # along the feature dim. The runtime captures and stores this 2048-dim
+        # tensor as `encoder_out`, so parity requires the same shape here.
+        # cat_hidden_layers values use HF's `output_hidden_states` convention:
+        # index 0 = input embedding (= input_linear output), index k>0 = output
+        # of encoder block k-1. So we subtract 1 to map into our 0-indexed
+        # `layer_outputs` dict.
+        if is_plus:
+            pieces = []
+            for cat_n in cat_layers:
+                cat_n = int(cat_n)
+                if cat_n == 0:
+                    if "v" not in input_linear_out:
+                        raise RuntimeError("PLUS cat index 0 needs input_linear capture")
+                    pieces.append(input_linear_out["v"])
+                else:
+                    idx = cat_n - 1
+                    if idx not in layer_outputs:
+                        raise RuntimeError(
+                            f"PLUS cat index {cat_n} → layer_outputs[{idx}] missing")
+                    pieces.append(layer_outputs[idx])
+            enc_hidden = torch.cat(pieces + [enc_hidden], dim=-1)
+
         if "encoder_out" in stages:
             out["encoder_out"] = enc_hidden[0].detach().cpu().float().numpy()
 
@@ -163,8 +214,12 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
             out["projector_out"] = proj_t[0].detach().cpu().float().numpy()
 
     # ---- Generation ----
-    want_argmax = "llm_argmax" in stages
-    want_text   = "generated_text" in stages
+    # PLUS: model.generate() goes through the projector with the bare
+    # last-layer hidden state (no concat), which crashes on the K/V
+    # 2048→1024 mismatch. The base class doesn't know about cat_hidden_layers.
+    # Diff parity only needs mel/encoder_out/projector_out anyway, so skip.
+    want_argmax = "llm_argmax" in stages and not is_plus
+    want_text   = "generated_text" in stages and not is_plus
     if want_argmax or want_text:
         with torch.no_grad():
             gen = model.generate(
