@@ -99,7 +99,8 @@ public:
         // Voice pack: load once on first call. Required — without it, synthesis
         // returns nullptr (predictor needs a (style_pred, style_dec) reference).
         // Resolution order: --voice (explicit) → ff_siwis fallback for non-native
-        // languages → empty (synthesis will fail with a clear error).
+        // languages → sibling kokoro-voice-af_heart.gguf (auto-download default
+        // companion) → empty (synthesis will fail with a clear error).
         std::string voice_path = params.tts_voice;
         if (voice_path.empty() && !params.language.empty() && params.language != "auto"
             && !crispasr_kokoro_lang_has_native_voice(params.language.c_str())) {
@@ -137,6 +138,19 @@ public:
                         "models/convert-kokoro-voice-to-gguf.py. See PLAN #56.\n",
                         params.language.c_str());
             }
+        }
+        if (voice_path.empty()) {
+            // Last-resort UX fallback for `-m auto` / native-voice languages
+            // (en, ja, zh, ...) where the user passed no `--voice` but the
+            // registry's auto-download companion sat `kokoro-voice-af_heart.gguf`
+            // next to the model. Use that as the default English voice. This
+            // matches what users expect from the auto-download flow.
+            const std::string& mp = params.model;
+            auto slash = mp.find_last_of("/\\");
+            std::string dir = (slash == std::string::npos) ? "." : mp.substr(0, slash);
+            std::string candidate = dir + "/kokoro-voice-af_heart.gguf";
+            FILE* tf = fopen(candidate.c_str(), "rb");
+            if (tf) { fclose(tf); voice_path = std::move(candidate); }
         }
         if (!voice_loaded_ && !voice_path.empty()) {
             if (kokoro_load_voice_pack(ctx_, voice_path.c_str()) != 0) {

@@ -13,8 +13,23 @@ struct Entry {
     const char* filename;
     const char* url;
     const char* approx_size;
-    const char* companion_file; // optional extra file (e.g. tokenizer.bin), NULL if none
+    const char* companion_file; // optional extra file (e.g. tokenizer.bin, primary voice). NULL if none.
     const char* companion_url;
+};
+
+// Extra companion files beyond the single inline `companion_file/url` slot.
+// Used by TTS backends that need more than one auxiliary file — e.g. kokoro
+// auto-download bundles the English-default voice (slot 0, inline) plus
+// the German backbone + German-default voice (here). The resolver pulls
+// these in addition to the inline companion. Adding extras for a backend:
+// one row in `k_extras`, terminate the list with {nullptr, nullptr}.
+struct ExtraCompanion {
+    const char* file;
+    const char* url;
+};
+struct ExtraList {
+    const char* backend;
+    const ExtraCompanion* items; // NULL-terminated
 };
 
 // Keep entries aligned with what the CLI-only registry used to ship.
@@ -105,6 +120,34 @@ constexpr Entry k_registry[] = {
      "~986 MB",
      "qwen3-tts-tokenizer-12hz.gguf",
      "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf"},
+    // Kokoro-82M: official baseline + English default voice. The German
+    // backbone + German default voice ride along via k_extras (see below)
+    // so users running `-m auto --backend kokoro` get a working multilingual
+    // setup without separate `--companion` flags. Q8_0 is the recommended
+    // quant (Q4_K is below quality bar — see `cstr/kokoro-82m-GGUF` README).
+    {"kokoro", "kokoro-82m-q8_0.gguf",
+     "https://huggingface.co/cstr/kokoro-82m-GGUF/resolve/main/kokoro-82m-q8_0.gguf",
+     "~135 MB",
+     "kokoro-voice-af_heart.gguf",
+     "https://huggingface.co/cstr/kokoro-voices-GGUF/resolve/main/kokoro-voice-af_heart.gguf"},
+};
+
+// Multi-companion extras. When a backend needs >1 auxiliary file the
+// extras here ride along with the inline `companion_file`.
+constexpr ExtraCompanion k_kokoro_extras[] = {
+    // German backbone — auto-routing kicks in when this sits next to
+    // kokoro-82m-*.gguf and the user passes `-l de`. See PLAN #56 opt 2b.
+    {"kokoro-de-hui-base-q8_0.gguf",
+     "https://huggingface.co/cstr/kokoro-de-hui-base-GGUF/resolve/main/kokoro-de-hui-base-q8_0.gguf"},
+    // German default voice (in-distribution to the dida-80b backbone).
+    {"kokoro-voice-df_victoria.gguf",
+     "https://huggingface.co/cstr/kokoro-voices-GGUF/resolve/main/kokoro-voice-df_victoria.gguf"},
+    {nullptr, nullptr},
+};
+
+constexpr ExtraList k_extras[] = {
+    {"kokoro", k_kokoro_extras},
+    {nullptr, nullptr},
 };
 // clang-format on
 
@@ -142,6 +185,23 @@ void fill(CrispasrRegistryEntry& out, const Entry& e) {
     out.filename = e.filename;
     out.url = e.url;
     out.approx_size = e.approx_size;
+}
+
+const ExtraCompanion* find_extras(const char* backend) {
+    if (!backend) return nullptr;
+    for (const auto& x : k_extras) {
+        if (!x.backend) break;
+        if (std::string(backend) == x.backend) return x.items;
+    }
+    return nullptr;
+}
+
+void download_extras(const Entry& e, bool quiet, const std::string& cache_dir_override) {
+    const ExtraCompanion* extras = find_extras(e.backend);
+    if (!extras) return;
+    for (const ExtraCompanion* it = extras; it->file && it->url; ++it) {
+        crispasr_cache::ensure_cached_file(it->file, it->url, quiet, "crispasr", cache_dir_override);
+    }
 }
 
 } // namespace
@@ -201,6 +261,7 @@ std::string crispasr_resolve_model(const std::string& model_arg, const std::stri
             if (!dl.empty() && match->companion_file && match->companion_url)
                 crispasr_cache::ensure_cached_file(match->companion_file, match->companion_url, quiet, "crispasr",
                                                    cache_dir_override);
+            if (!dl.empty()) download_extras(*match, quiet, cache_dir_override);
             return dl;
         }
         // Either no registry match or caller didn't authorise download —
@@ -224,6 +285,9 @@ std::string crispasr_resolve_model(const std::string& model_arg, const std::stri
     if (!result.empty() && e->companion_file && e->companion_url) {
         crispasr_cache::ensure_cached_file(e->companion_file, e->companion_url, quiet, "crispasr", cache_dir_override);
     }
+    // Backend-specific extras (e.g. kokoro German backbone + voice) — opt-in
+    // per backend via k_extras.
+    if (!result.empty()) download_extras(*e, quiet, cache_dir_override);
 
     return result;
 }
