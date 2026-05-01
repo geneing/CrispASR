@@ -27,6 +27,7 @@ add_executable(${TARGET}
     crispasr_backend_wav2vec2.cpp
     crispasr_backend_vibevoice.cpp
     crispasr_backend_qwen3_tts.cpp
+    crispasr_backend_orpheus.cpp
     crispasr_backend_kokoro.cpp
     crispasr_backend_glm_asr.cpp
     crispasr_backend_kyutai_stt.cpp
@@ -141,6 +142,7 @@ target_link_libraries(crispasr-diff PRIVATE
     voxtral4b
     qwen3_asr
     qwen3_tts
+    orpheus
     kokoro
     gemma4_e2b
     mimo_tokenizer
@@ -184,6 +186,7 @@ target_link_libraries(${TARGET} PRIVATE
     voxtral4b
     qwen3_asr
     qwen3_tts
+    orpheus
     kokoro
     canary_ctc
     wav2vec2-ggml

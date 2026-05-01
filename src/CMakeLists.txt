@@ -556,6 +556,18 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# orpheus — canopylabs/orpheus-3b-0.1-ft (Llama-3.2-3B + SNAC 24 kHz codec)
+# ---------------------------------------------------------------------------
+add_library(orpheus STATIC orpheus.h orpheus.cpp)
+set_target_properties(orpheus PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(orpheus PUBLIC .)
+target_compile_features   (orpheus PUBLIC cxx_std_17)
+target_link_libraries     (orpheus PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(orpheus PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # omniasr — Facebook OmniASR-CTC (wav2vec2-style, 1600+ languages)
 # ---------------------------------------------------------------------------
 add_library(omniasr STATIC omniasr.h omniasr.cpp)
@@ -850,6 +862,9 @@ if (TARGET mimo_asr)
 endif()
 if (TARGET qwen3_tts)
     target_link_libraries(crispasr PUBLIC qwen3_tts)
+endif()
+if (TARGET orpheus)
+    target_link_libraries(crispasr PUBLIC orpheus)
 endif()
 if (TARGET kokoro)
     target_link_libraries(crispasr PUBLIC kokoro)
