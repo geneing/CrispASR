@@ -21,6 +21,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 | **MEDIUM** | [#5 Reference backends](#5-reference-backends-for-parakeetcanarycohere) | Medium | parakeet/cohere DONE; canary remaining |
 | **MEDIUM** | [#53 core/audio_decoder.h](#53-coreaudio_decoderh--dry-across-tts--codec-backends) | Medium | DRY across qwen3-tts/mimo/vibevoice |
 | **MEDIUM** | [#55 granite-family DRY refactor](#55-granite-family-dry-refactor) | Medium | ~1500 LOC duplicated between granite_speech and granite_nle; ~5 lifts gated by diff harness |
+| **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng linkage + LRU + `-l/--language` wired; pending: kokoro-82m.gguf for end-to-end synth + diff-harness reference backend |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
@@ -554,6 +555,81 @@ zero-risk to land independently — the project never goes through a
 
 ---
 
+
+## 56. Kokoro multilingual phonemizer (espeak-ng)
+
+Kokoro/StyleTTS2 is multilingual at the model level — the 178-symbol IPA
+vocab covers en, de, fr, ru, cmn, ja and more — but until this work the
+runtime always shelled out to `popen("espeak-ng -q --ipa=3 -v LANG …")`,
+which (a) cost ~30–50 ms per call on the shell-quoting + fork path,
+(b) needed `espeak-ng` on `$PATH`, and (c) emitted U+200D ZWJ tie
+characters and newline-separated sentence chunks that the GGUF
+tokenizer then has to silently absorb.
+
+This item replaces the popen path with in-process libespeak-ng calls
+behind a CMake AUTO probe, while keeping popen as a runtime fallback
+so existing builds don't regress.
+
+### Done (this session)
+
+- `src/CMakeLists.txt`: `CRISPASR_WITH_ESPEAK_NG` cache string
+  (`AUTO`/`ON`/`OFF`, default `AUTO`). AUTO probes `pkg-config
+  espeak-ng` first, then a Homebrew/Linux fallback
+  (`/opt/homebrew`, `/usr/local`, `/usr`). When found, defines
+  `CRISPASR_HAVE_ESPEAK_NG=1` and links `libespeak-ng` via PUBLIC so
+  it propagates into `crispasr` / `libcrispasr.dylib`. `ON` makes a
+  missing lib a hard error; `OFF` skips the probe entirely.
+- `src/kokoro.cpp`:
+  1. `kokoro_phoneme_cache` — bounded LRU (1024 entries,
+     mutex-protected) keyed on `lang \0 text`, lives in
+     `kokoro_context`.
+  2. `phonemize_espeak_lib()` — gated on `CRISPASR_HAVE_ESPEAK_NG`.
+     Lazy `espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, …,
+     espeakINITIALIZE_PHONEME_IPA | espeakINITIALIZE_DONT_EXIT)`
+     behind a process-global mutex; sticky-init-failure flag so we
+     don't keep retrying. `CRISPASR_ESPEAK_DATA_PATH` env var
+     overrides the data dir for sandboxed apps. Voice changes are
+     sticky. Loops `espeak_TextToPhonemes` until `textptr==NULL`,
+     joining chunks with spaces.
+  3. `phonemize_popen()` — the old shell-out, kept as a runtime
+     fallback. `kokoro_synthesize` now calls `phonemize_cached()`
+     which tries cache → lib → popen.
+- `examples/cli/crispasr_backend_kokoro.cpp`: maps `-l/--language`
+  to `cp.espeak_lang`. `auto` keeps the default (en-us) since
+  espeak has no auto-detect mode.
+- Smoke-tested standalone against libespeak-ng: en-us, de, fr,
+  cmn, ru, ja all produce IPA. Compared lib vs popen: see
+  LEARNINGS.md "Kokoro phonemizer: libespeak-ng vs popen
+  divergence" for the ZWJ + sentence-join behaviour.
+- Build verified: `otool -L libcrispasr.dylib` shows
+  `libespeak-ng.1.dylib`; `nm libkokoro.a` has the three espeak
+  symbols.
+
+### Open
+
+1. **End-to-end synth check.** No `kokoro-82m.gguf` is present
+   under `/Volumes/backups/ai/crispasr-models/` or
+   `~/.cache/crispasr/`, so the pipeline is library-linkage-tested
+   only. Convert (or download) a Kokoro-82M GGUF and run a
+   per-language synth pass on the same six languages exercised in
+   the standalone test. Verify the LRU cache hit rate via a small
+   bench (re-synthesize the same text twice).
+2. **Diff harness reference backend.** No `crispasr-diff kokoro`
+   today. The reference dumper at
+   `tools/reference_backends/kokoro.py` already exists for the
+   model side (16 stages); extend it (or add a sibling) so the
+   phonemizer step itself is also diffed — guard against future
+   drift between popen / lib / future Python G2P.
+3. **Optional polish.** A `kokoro_phoneme_cache_clear()` C ABI
+   for long-running daemons that resynthesize across many speakers.
+   Low priority.
+
+### Effort
+
+Small. Open items 1 + 2 are each an afternoon. Open item 3 is
+~20 LOC if asked.
+
+---
 
 ## Ecosystem expansion (lower priority)
 

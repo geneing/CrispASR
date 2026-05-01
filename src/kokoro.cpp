@@ -48,11 +48,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <list>
 #include <map>
+#include <mutex>
 #include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#ifdef CRISPASR_HAVE_ESPEAK_NG
+#include <espeak-ng/speak_lib.h>
+#endif
 
 namespace {
 
@@ -110,6 +116,44 @@ struct kokoro_voice_pack {
     std::map<std::string, ggml_tensor*> tensors;
 };
 
+// Bounded LRU for (lang \0 text) → IPA phonemes. The phonemizer (popen or
+// libespeak-ng) is the wall-clock floor for short inputs, so caching pays
+// for the diff harness, benchmarks, and any UI where the same text is
+// resynthesized after voice changes.
+struct kokoro_phoneme_cache {
+    static constexpr size_t kMax = 1024;
+    using value_t = std::pair<std::string, std::string>; // key, phonemes
+    std::list<value_t> lru;
+    std::unordered_map<std::string, std::list<value_t>::iterator> idx;
+    std::mutex mu;
+
+    bool lookup(const std::string& key, std::string& out) {
+        std::lock_guard<std::mutex> g(mu);
+        auto it = idx.find(key);
+        if (it == idx.end())
+            return false;
+        lru.splice(lru.begin(), lru, it->second);
+        out = it->second->second;
+        return true;
+    }
+
+    void insert(const std::string& key, const std::string& val) {
+        std::lock_guard<std::mutex> g(mu);
+        auto it = idx.find(key);
+        if (it != idx.end()) {
+            it->second->second = val;
+            lru.splice(lru.begin(), lru, it->second);
+            return;
+        }
+        lru.emplace_front(key, val);
+        idx[key] = lru.begin();
+        if (lru.size() > kMax) {
+            idx.erase(lru.back().first);
+            lru.pop_back();
+        }
+    }
+};
+
 } // namespace
 
 struct kokoro_context {
@@ -146,6 +190,9 @@ struct kokoro_context {
     // Voice pack (secondary GGUF).
     kokoro_voice_pack vp;
     bool vp_loaded = false;
+
+    // Phoneme cache (lang \0 text → IPA). Lives for the life of the context.
+    kokoro_phoneme_cache phon_cache;
 };
 
 namespace {
@@ -2647,28 +2694,86 @@ extern "C" float* kokoro_synthesize_phonemes(struct kokoro_context* ctx, const c
     return audio;
 }
 
-extern "C" float* kokoro_synthesize(struct kokoro_context* ctx, const char* text, int* out_n_samples) {
-    if (out_n_samples)
-        *out_n_samples = 0;
-    if (!ctx || !text || !*text)
-        return nullptr;
+namespace {
 
-    // Shell out to espeak-ng to get IPA phonemes, then call synthesize_phonemes.
-    // We use popen("espeak-ng -q --ipa=3 -v LANG TEXT") — requires espeak-ng in PATH.
+// Strip ASCII whitespace from both ends.
+void rstrip_inplace(std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace((unsigned char)s[b]))
+        b++;
+    while (e > b && std::isspace((unsigned char)s[e - 1]))
+        e--;
+    s = s.substr(b, e - b);
+}
+
+#ifdef CRISPASR_HAVE_ESPEAK_NG
+// libespeak-ng's state is process-global, so all access goes through one
+// mutex. Init is one-shot; voice switches are sticky.
+std::mutex g_espeak_mu;
+bool g_espeak_inited = false;
+bool g_espeak_init_failed = false; // sticky — don't keep retrying
+std::string g_espeak_voice;
+
+// Returns true on success and fills `out`. Returns false to signal "fall
+// back to popen" (init failed, voice switch failed, or no output).
+bool phonemize_espeak_lib(const std::string& lang, const std::string& text, std::string& out) {
+    std::lock_guard<std::mutex> g(g_espeak_mu);
+    if (g_espeak_init_failed)
+        return false;
+    if (!g_espeak_inited) {
+        // CRISPASR_ESPEAK_DATA_PATH overrides the default search (helps in
+        // sandboxed apps and on systems where espeak-ng-data isn't in the
+        // standard location).
+        const char* path = std::getenv("CRISPASR_ESPEAK_DATA_PATH");
+        int sr = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, path,
+                                   espeakINITIALIZE_PHONEME_IPA | espeakINITIALIZE_DONT_EXIT);
+        if (sr < 0) {
+            fprintf(stderr,
+                    "kokoro: espeak_Initialize failed (data path=%s) — falling back to popen\n",
+                    path ? path : "<default>");
+            g_espeak_init_failed = true;
+            return false;
+        }
+        g_espeak_inited = true;
+    }
+    if (g_espeak_voice != lang) {
+        if (espeak_SetVoiceByName(lang.c_str()) != EE_OK) {
+            fprintf(stderr, "kokoro: espeak_SetVoiceByName('%s') failed — falling back to popen\n",
+                    lang.c_str());
+            return false;
+        }
+        g_espeak_voice = lang;
+    }
+    // espeak_TextToPhonemes returns up to a sentence/punctuation boundary
+    // and advances textptr; loop until it returns NULL.
+    out.clear();
+    const void* tp = text.c_str();
+    while (tp) {
+        const char* chunk = espeak_TextToPhonemes(&tp, espeakCHARS_UTF8, espeakPHONEMES_IPA);
+        if (chunk && *chunk) {
+            if (!out.empty())
+                out += ' ';
+            out += chunk;
+        }
+    }
+    rstrip_inplace(out);
+    return !out.empty();
+}
+#endif
+
+// popen("espeak-ng …") fallback. Always available; used when libespeak-ng
+// is not compiled in or its in-process init failed.
+bool phonemize_popen(const std::string& lang, const std::string& text, std::string& out) {
     std::string cmd = "espeak-ng -q --ipa=3 -v ";
-    cmd += ctx->espeak_lang;
-    cmd += " ";
-    // Quote the text to handle spaces / special chars. Escape single quotes
-    // by closing/reopening the quoted region.
-    cmd += "'";
-    for (const char* p = text; *p; ++p) {
-        if (*p == '\'')
+    cmd += lang;
+    cmd += " '";
+    for (char c : text) {
+        if (c == '\'')
             cmd += "'\\''";
         else
-            cmd += *p;
+            cmd += c;
     }
     cmd += "'";
-
 #ifdef _WIN32
 #define CRISPASR_POPEN _popen
 #define CRISPASR_PCLOSE _pclose
@@ -2679,26 +2784,52 @@ extern "C" float* kokoro_synthesize(struct kokoro_context* ctx, const char* text
     FILE* f = CRISPASR_POPEN(cmd.c_str(), "r");
     if (!f) {
         fprintf(stderr, "kokoro: failed to popen espeak-ng — is it installed?\n");
-        return nullptr;
+        return false;
     }
-    std::string phonemes;
+    out.clear();
     char buf[1024];
     while (size_t n = std::fread(buf, 1, sizeof(buf), f))
-        phonemes.append(buf, n);
+        out.append(buf, n);
     CRISPASR_PCLOSE(f);
-    // Strip leading/trailing whitespace.
-    size_t b = 0, e = phonemes.size();
-    while (b < e && std::isspace((unsigned char)phonemes[b]))
-        b++;
-    while (e > b && std::isspace((unsigned char)phonemes[e - 1]))
-        e--;
-    phonemes = phonemes.substr(b, e - b);
-    if (phonemes.empty()) {
-        fprintf(stderr, "kokoro: espeak-ng produced no phonemes for '%s'\n", text);
+    rstrip_inplace(out);
+    return !out.empty();
+}
+
+bool phonemize_cached(kokoro_context* ctx, const std::string& lang, const std::string& text,
+                      std::string& out) {
+    std::string key = lang;
+    key.push_back('\0');
+    key += text;
+    if (ctx->phon_cache.lookup(key, out))
+        return true;
+#ifdef CRISPASR_HAVE_ESPEAK_NG
+    if (phonemize_espeak_lib(lang, text, out)) {
+        ctx->phon_cache.insert(key, out);
+        return true;
+    }
+#endif
+    if (phonemize_popen(lang, text, out)) {
+        ctx->phon_cache.insert(key, out);
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+extern "C" float* kokoro_synthesize(struct kokoro_context* ctx, const char* text, int* out_n_samples) {
+    if (out_n_samples)
+        *out_n_samples = 0;
+    if (!ctx || !text || !*text)
+        return nullptr;
+
+    std::string phonemes;
+    if (!phonemize_cached(ctx, ctx->espeak_lang, text, phonemes)) {
+        fprintf(stderr, "kokoro: phonemizer produced no output for '%s'\n", text);
         return nullptr;
     }
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "kokoro: espeak-ng phonemes: '%s'\n", phonemes.c_str());
+        fprintf(stderr, "kokoro: phonemes: '%s'\n", phonemes.c_str());
     return kokoro_synthesize_phonemes(ctx, phonemes.c_str(), out_n_samples);
 }
 

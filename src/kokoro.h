@@ -10,9 +10,14 @@
 // 256]`. Index by phoneme length L: ref_s = voice.pack[L-1, 0, :],
 // split as [predictor_style 0:128 | decoder_style 128:256].
 //
-// Phonemizer: espeak-ng via popen("espeak-ng -q --ipa=3 -v LANG TEXT").
-// Pass already-IPA strings via kokoro_synthesize_phonemes to skip the
-// shell-out. The vocab map (178 IPA symbols) lives in the GGUF as
+// Phonemizer: when the build links libespeak-ng (CMake option
+// CRISPASR_WITH_ESPEAK_NG, defaults to AUTO-detect via pkg-config or the
+// homebrew layout), we call espeak_TextToPhonemes() in-process. Otherwise
+// we shell out to popen("espeak-ng -q --ipa=3 -v LANG TEXT"). Results are
+// memoised in a per-context LRU cache keyed on (lang, text).
+// Set CRISPASR_ESPEAK_DATA_PATH to override the espeak-ng-data location.
+// Pass already-IPA strings via kokoro_synthesize_phonemes to skip both
+// paths. The vocab map (178 IPA symbols) lives in the GGUF as
 // `tokenizer.ggml.tokens`.
 
 #include <stdbool.h>

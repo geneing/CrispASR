@@ -4724,3 +4724,46 @@ or `c` is nullptr, the helper substitutes `b_hh` (correct because
 `W_hh @ 0 = 0`) and `i ⊙ g` (correct because `f ⊙ 0 = 0`). Saves an
 input tensor and an extra `ggml_set_input` call per call site.
 
+## Lesson 6 — Kokoro phonemizer: libespeak-ng vs popen divergence
+
+Replacing the `popen("espeak-ng -q --ipa=3 -v LANG …")` shell-out with
+in-process `espeak_TextToPhonemes()` is the obvious latency win
+(~30–50 ms per call saved on shell-quoting + fork) but the two paths
+do **not** produce byte-identical output even though both ask for IPA:
+
+- **U+200D ZWJ tie characters.** The popen path emits ZWJ between
+  IPA symbols that the espeak CLI considers a "tied" articulation
+  (e.g. affricates). The library path with `espeakPHONEMES_IPA` does
+  not. The Kokoro-82M tokenizer's 178-symbol vocab does **not**
+  include U+200D, so the popen output is silently passing through a
+  character the model never trained on. Greedy tokenization drops it,
+  but anything stricter (e.g. byte-level tokenizers in future
+  variants) would diverge.
+- **Sentence separator.** popen joins sentences with `\n`; the
+  library returns one chunk per call to `espeak_TextToPhonemes`,
+  advancing `textptr` until NULL — we join these with `' '`. So the
+  library path actually preserves an inter-sentence space that popen
+  drops.
+
+For Kokoro at 178 IPA symbols + greedy tokenization the two paths
+produce equivalent token sequences after normalization. They are
+**not** equivalent at the phoneme-string level. If you ever wire a
+diff harness against the phonemizer (PLAN #56 open item 2), reference
+and runtime must use the **same** path or normalize ZWJ + whitespace
+before comparing.
+
+**Process-global state.** `espeak_Initialize` and
+`espeak_SetVoiceByName` are not thread-safe — they mutate process
+globals. The runtime takes a `std::mutex` around any espeak call. Init
+is one-shot; voice changes are sticky (avoid the
+`SetVoiceByName('en-us')` → `SetVoiceByName('en-us')` no-op cost).
+Init failure is sticky too: if `espeak_Initialize` returns < 0
+(typically a bad data path), set a flag and stop retrying — the call
+costs ~5 ms and would otherwise repeat per `kokoro_synthesize`.
+
+**Sandbox-friendly data path.** `espeak_Initialize`'s third arg is the
+data path. macOS .app sandboxes and Linux container images often don't
+have espeak-ng-data at the default location; export
+`CRISPASR_ESPEAK_DATA_PATH=/path/to/espeak-ng-data` to override it
+without recompiling.
+

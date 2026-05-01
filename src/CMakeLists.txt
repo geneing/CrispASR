@@ -603,6 +603,59 @@ if(NOT MSVC)
     target_compile_options(kokoro PRIVATE -O3)
 endif()
 
+# Optional libespeak-ng linkage. When ON we replace the popen("espeak-ng …")
+# shell-out with a direct espeak_TextToPhonemes() call (saves ~30–50 ms per
+# call, removes the shell-quoting surface, works in sandboxed processes).
+# AUTO: link if pkg-config finds it OR if Homebrew layout is present;
+# otherwise silently fall back to the popen path.
+set(CRISPASR_WITH_ESPEAK_NG "AUTO" CACHE STRING
+    "Link kokoro against libespeak-ng for in-process phonemization (AUTO/ON/OFF)")
+set_property(CACHE CRISPASR_WITH_ESPEAK_NG PROPERTY STRINGS "AUTO" "ON" "OFF")
+
+if(NOT CRISPASR_WITH_ESPEAK_NG STREQUAL "OFF")
+    set(_espeak_found FALSE)
+    set(_espeak_include "")
+    set(_espeak_lib "")
+
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ESPEAK_NG QUIET espeak-ng)
+        if(ESPEAK_NG_FOUND)
+            set(_espeak_found TRUE)
+            set(_espeak_include ${ESPEAK_NG_INCLUDE_DIRS})
+            set(_espeak_lib     ${ESPEAK_NG_LIBRARIES})
+            set(_espeak_libdir  ${ESPEAK_NG_LIBRARY_DIRS})
+        endif()
+    endif()
+
+    # Homebrew/macOS fallback: pkg-config sometimes isn't on PATH but the lib is.
+    if(NOT _espeak_found)
+        find_path(ESPEAK_NG_INCLUDE_DIR espeak-ng/speak_lib.h
+                  HINTS /opt/homebrew/include /usr/local/include /usr/include)
+        find_library(ESPEAK_NG_LIBRARY NAMES espeak-ng
+                     HINTS /opt/homebrew/lib /usr/local/lib /usr/lib)
+        if(ESPEAK_NG_INCLUDE_DIR AND ESPEAK_NG_LIBRARY)
+            set(_espeak_found TRUE)
+            set(_espeak_include ${ESPEAK_NG_INCLUDE_DIR})
+            set(_espeak_lib     ${ESPEAK_NG_LIBRARY})
+        endif()
+    endif()
+
+    if(_espeak_found)
+        target_compile_definitions(kokoro PRIVATE CRISPASR_HAVE_ESPEAK_NG=1)
+        target_include_directories(kokoro PRIVATE ${_espeak_include})
+        if(_espeak_libdir)
+            target_link_directories(kokoro PUBLIC ${_espeak_libdir})
+        endif()
+        target_link_libraries(kokoro PUBLIC ${_espeak_lib})
+        message(STATUS "kokoro: libespeak-ng enabled (in-process phonemizer)")
+    elseif(CRISPASR_WITH_ESPEAK_NG STREQUAL "ON")
+        message(FATAL_ERROR "CRISPASR_WITH_ESPEAK_NG=ON but libespeak-ng not found. Install espeak-ng or set OFF.")
+    else()
+        message(STATUS "kokoro: libespeak-ng not found, falling back to popen(espeak-ng) at runtime")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # firered-vad — FireRedVAD (DFSMN voice activity detection)
 # ---------------------------------------------------------------------------

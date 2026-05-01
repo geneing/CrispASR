@@ -42,6 +42,12 @@ public:
         cp.n_threads = p.n_threads;
         cp.verbosity = p.no_prints ? 0 : 1;
         cp.use_gpu = crispasr_backend_should_use_gpu(p);
+        // Map -l/--language to the espeak-ng voice. "auto" keeps the default
+        // (en-us) since espeak has no auto-detect mode.
+        if (!p.language.empty() && p.language != "auto") {
+            std::strncpy(cp.espeak_lang, p.language.c_str(), sizeof(cp.espeak_lang) - 1);
+            cp.espeak_lang[sizeof(cp.espeak_lang) - 1] = '\0';
+        }
         ctx_ = kokoro_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
             fprintf(stderr, "crispasr[kokoro]: failed to load model '%s'\n", p.model.c_str());
