@@ -748,42 +748,41 @@ static bool run_encoder(mimo_tokenizer_context* ctx, const float* pcm16k, int n_
         return false;
     }
 
-    // 6. Extract requested stages.
-    auto pull = [&](const char* name, std::vector<float>& dst, int T_expected, bool channels_last_first) {
+    // 6. Extract requested stages, normalising to TimeMels (T, D) row-major
+    // to match the Python ref dumper's `permute(0, 2, 1)` / `.T` outputs.
+    //
+    //   ggml conv output: ne=(T, D, 1) → memory data[d*T + t] (MelsTime)
+    //                     → transpose to TimeMels (T, D) for the dump.
+    //   ggml ne=(D, T) post-transpose: memory data[t*D + d] = TimeMels already.
+    auto pull = [&](const char* name, std::vector<float>& dst, int T_dim, int D_dim, bool need_transpose) {
         ggml_tensor* t = ggml_graph_get_tensor(gf, name);
         if (!t) {
             fprintf(stderr, "mimo_tokenizer: missing graph output '%s'\n", name);
             return false;
         }
-        // Stage tensor sizes:
-        //   tok_conv1_out / tok_conv2_out: ne = (T, d, 1) (channels-last from conv)
-        //   tok_xfmr_out / tok_pool_out:   ne = (d, T)    (after transpose)
         const size_t total = ggml_nelements(t) * sizeof(float);
         std::vector<float> raw(ggml_nelements(t));
         ggml_backend_tensor_get(t, raw.data(), 0, total);
-        if (channels_last_first) {
-            // (T, d, 1) → (T, d) row-major: already contiguous, just resize.
-            dst = std::move(raw);
-            // The conv output keeps the trailing batch=1 dim implicit; the
-            // first ne[0]*ne[1] floats are exactly (T, d) row-major.
+        if (need_transpose) {
+            // raw is MelsTime [d * T + t]; dst should be TimeMels [t * D + d].
+            dst.assign((size_t)T_dim * D_dim, 0.0f);
+            for (int d = 0; d < D_dim; d++)
+                for (int tt = 0; tt < T_dim; tt++)
+                    dst[(size_t)tt * D_dim + d] = raw[(size_t)d * T_dim + tt];
         } else {
-            // (d, T) ggml ne=(d, T), so memory is row-major over T frames of
-            // d floats per frame? Actually ggml stores ne[0] varying fastest,
-            // so ne=(d, T) means T frames each of d contiguous floats — i.e.
-            // already row-major (T, d) when viewed as (T, d).
             dst = std::move(raw);
         }
-        (void)T_expected;
         return true;
     };
 
-    if (need_conv1 && !pull("tok_conv1_out", out.conv1_out, T_mel, true))
+    const int d = (int)hp.d_model;
+    if (need_conv1 && !pull("tok_conv1_out", out.conv1_out, T_mel, d, /*transpose*/ true))
         return false;
-    if (need_conv2 && !pull("tok_conv2_out", out.conv2_out, T_xfmr, true))
+    if (need_conv2 && !pull("tok_conv2_out", out.conv2_out, T_xfmr, d, /*transpose*/ true))
         return false;
-    if (need_xfmr && !pull("tok_xfmr_out", out.xfmr_out, T_xfmr, false))
+    if (need_xfmr && !pull("tok_xfmr_out", out.xfmr_out, T_xfmr, d, /*transpose*/ false))
         return false;
-    if (need_pool && !pull("tok_pool_out", out.pool_out, T_pool, false))
+    if (need_pool && !pull("tok_pool_out", out.pool_out, T_pool, d, /*transpose*/ false))
         return false;
 
     return true;

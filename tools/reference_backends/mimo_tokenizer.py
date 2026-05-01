@@ -64,11 +64,20 @@ def _stub_flash_attn():
     at module level, which hard-fails on macOS / CPU-only builds. We replace
     the real call site via _patch_attention_for_no_flash_attn() so the stub
     function never actually runs.
+
+    Transformers also probes `is_flash_attn_2_available()` via
+    `importlib.util.find_spec("flash_attn")`, which raises if the module's
+    `__spec__` attribute is `None`. We attach a synthetic ModuleSpec so the
+    probe returns truthy without trying to actually import flash_attn — the
+    monkey-patched Attention.forward never reaches the symbol anyway.
     """
     import sys, types
+    from importlib.machinery import ModuleSpec
     if "flash_attn" in sys.modules:
         return
     mod = types.ModuleType("flash_attn")
+    mod.__spec__ = ModuleSpec("flash_attn", loader=None)
+    mod.__version__ = "0.0.0-stub"
     def _stub(*_a, **_kw):
         raise RuntimeError("flash_attn stub called — Attention.forward should be patched")
     mod.flash_attn_varlen_func = _stub
@@ -225,13 +234,20 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
 
     enc.get_features = get_features_with_capture
     try:
-        # output_length = (T_mel + 3 - k) → ((T_mel + 3 - k) + 2 - k) // s + 1
+        # AudioEncoder.encode() expects PACKED input: shape (sum_T, n_mels)
+        # — `unpack_hidden_states(input_features, input_lens)` turns it back
+        # into (B, T, n_mels). For batch=1 the "sum_T" is just T_mel and the
+        # packed view is mel_packed.squeeze(0). The misleading variable name
+        # in the upstream signature is `input_features`; it must already be
+        # packed.
         T_mel = log_mel.shape[-1]
         input_lens = torch.tensor([T_mel])
-        # encode() expects (1, T_mel, n_mels) packed
-        mel_packed = log_mel.transpose(1, 2)  # (1, T_mel, 128)
+        mel_packed = log_mel.transpose(1, 2).squeeze(0)  # (T_mel, 128)
         with torch.no_grad():
-            _, _, output_length, codes = enc.encode(
+            # `return_codes_only=True` returns (codes, output_length); the
+            # full-output 4-tuple is (hidden_states, hidden_states_packed,
+            # output_length, codes).
+            codes, output_length = enc.encode(
                 mel_packed, input_lens=input_lens, return_codes_only=True)
     finally:
         enc.get_features = orig_get_features

@@ -1158,7 +1158,11 @@ int main(int argc, char** argv) {
         auto cp = mimo_tokenizer_context_default_params();
         cp.n_threads = 4;
         cp.verbosity = 0;
-        cp.use_gpu = true;
+        // CPU-pin until the Metal graph-build path on the forward conv stem is
+        // verified safe. The qwen3-tts kernel_conv_transpose_1d watchdog hang
+        // shape is comparable to MiMo's conv2 / down_sample. Opt in with
+        // MIMO_TOKENIZER_GPU=1.
+        cp.use_gpu = std::getenv("MIMO_TOKENIZER_GPU") != nullptr;
         mimo_tokenizer_context* ctx = mimo_tokenizer_init_from_file(model_path.c_str(), cp);
         if (!ctx) {
             fprintf(stderr, "failed to load mimo-tokenizer model '%s'\n", model_path.c_str());

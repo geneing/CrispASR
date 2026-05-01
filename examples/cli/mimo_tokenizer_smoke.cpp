@@ -93,6 +93,16 @@ int main(int argc, char** argv) {
         else
             n_pass++;
         printf("%s %-22s n=%-8d min=%-12.4f max=%-12.4f mean=%-12.4f\n", tag, stage, n, s.min_v, s.max_v, s.mean);
+        if (std::getenv("MIMO_SMOKE_DUMP")) {
+            char path[256];
+            std::snprintf(path, sizeof(path), "/tmp/mimo_cpp_%s.bin", stage);
+            FILE* f = std::fopen(path, "wb");
+            if (f) {
+                std::fwrite(data, sizeof(float), (size_t)n, f);
+                std::fclose(f);
+                fprintf(stderr, "  → dumped %s (%d floats)\n", path, n);
+            }
+        }
         std::free(data);
     }
     mimo_tokenizer_free(ctx);
