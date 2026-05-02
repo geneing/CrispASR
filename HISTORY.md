@@ -1309,12 +1309,24 @@ the fix for free.
 
 **Validated.** parakeet Q4_K — Metal default, CPU default, and CPU +
 `CRISPASR_GGUF_MMAP=1` all produce the gold JFK transcript.
-mimo-asr Q4_K baseline peaks at 5.5 GB RSS; with `CRISPASR_GGUF_MMAP=1`
-the working set drops to 761 MB while the model loads — the zero-copy
-mechanism is confirmed. End-to-end mimo-asr Q4_K + mmap timing and the
-F16 motivating case are deferred to a quieter machine (this run was
-heavily contended by parallel HF uploads + an unrelated mimo F16
-test on the same external disk).
+
+| Case | Working-set RSS | Notes |
+|---|---:|---|
+| mimo-asr Q4_K (4.5 GB GGUF), legacy | ~5.5 GB | full backend buffer + OS-resident mmap pages |
+| mimo-asr Q4_K, mmap | ~760 MB | OS keeps the mmap'd file in shared cache only |
+| mimo-asr F16 (14.9 GB GGUF), legacy (predicted) | ~13 GB peak | per HANDOFF; thrashes swap 25+ min on 16 GB Mac |
+| mimo-asr F16, mmap | **~910 MB** during model load | observed at 60 s elapsed before contention forced a kill |
+
+The F16 mmap loader churned through model load + LID + tokenizer +
+encoder in seconds — the same span where the parallel legacy F16 run
+on the same file was still 30+ min into its mmap-then-copy. End-to-end
+decode timing is still pending. The kill was forced by an unrelated
+problem the test surfaced: `/Volumes/backups/ai` had hit 100% capacity
+(12 GB free of 1.9 TB), so both my mmap test and the parallel legacy
+F16 from another Claude session ended up thrashing on page faults
+under heavy memory pressure (vm_stat showed 13M+ swapins). Once that
+disk has headroom again, re-time F16 end-to-end before flipping the
+default.
 
 **Default still legacy.** The env flag remains opt-in. Flip the
 default in a follow-up commit once the F16 RSS savings are measured
