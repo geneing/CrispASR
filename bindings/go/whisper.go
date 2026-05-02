@@ -9,8 +9,20 @@ import (
 // CGO
 
 /*
-#cgo LDFLAGS: -lcrispasr -lggml -lggml-base -lggml-cpu -lm -lstdc++
-#cgo linux LDFLAGS: -fopenmp
+// Static linking of libcrispasr.a requires every conditionally-built sub-lib
+// the C-ABI shim references. cgo can't read CMake's transitive
+// `target_link_libraries(crispasr PUBLIC <subname>)` graph, so list them
+// explicitly. Order matters on Linux (single-pass linker) — wrap in
+// --start-group / --end-group so the linker iterates until all symbols
+// resolve. macOS ld is order-independent, so a flat list is fine there.
+//
+// Keep this list in sync with the conditional `target_link_libraries(crispasr
+// PUBLIC <name>)` block in src/CMakeLists.txt — every backend lib that's
+// PUBLIC-linked into libcrispasr.{so,dylib} for shared builds is also a
+// build-time dep here for static.
+#cgo CFLAGS: -I${SRCDIR}/../../include
+#cgo linux LDFLAGS: -Wl,--start-group -lcrispasr -lparakeet -lcanary -lcanary_ctc -lqwen3_asr -lcrisp_audio -lcohere -lgranite_speech -lvoxtral -lvoxtral4b -lwav2vec2-ggml -lglm-asr -lkyutai-stt -lfirered-asr -lfirered-vad -lmarblenet-vad -lcrispasr-vad-encdec -lfirered-lid -lomniasr -lvibevoice -lecapa-lid -lmoonshine -lmoonshine_streaming -lgemma4_e2b -lmimo_tokenizer -lmimo_asr -lqwen3_tts -lorpheus -lkokoro -lfireredpunc -lpyannote-seg -lsilero-lid -lcrispasr-core -lggml -lggml-base -lggml-cpu -Wl,--end-group -lm -lstdc++ -fopenmp
+#cgo darwin LDFLAGS: -lcrispasr -lparakeet -lcanary -lcanary_ctc -lqwen3_asr -lcrisp_audio -lcohere -lgranite_speech -lvoxtral -lvoxtral4b -lwav2vec2-ggml -lglm-asr -lkyutai-stt -lfirered-asr -lfirered-vad -lmarblenet-vad -lcrispasr-vad-encdec -lfirered-lid -lomniasr -lvibevoice -lecapa-lid -lmoonshine -lmoonshine_streaming -lgemma4_e2b -lmimo_tokenizer -lmimo_asr -lqwen3_tts -lorpheus -lkokoro -lfireredpunc -lpyannote-seg -lsilero-lid -lcrispasr-core -lggml -lggml-base -lggml-cpu -lm -lstdc++
 #cgo darwin LDFLAGS: -lggml-metal -lggml-blas
 #cgo darwin LDFLAGS: -framework Accelerate -framework Metal -framework Foundation -framework CoreGraphics
 #include <crispasr.h>

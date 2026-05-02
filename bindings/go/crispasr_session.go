@@ -6,7 +6,9 @@ package whisper
 // resolver (PLAN #56 opt 2b).
 
 /*
-#cgo LDFLAGS: -lcrispasr
+// LDFLAGS for libcrispasr + all conditionally-built sub-libs are set in
+// whisper.go (the canonical cgo block). Don't re-list here to avoid
+// `ld: warning: ignoring duplicate libraries: '-lcrispasr'`.
 #include <stdlib.h>
 #include <string.h>
 

@@ -15,7 +15,7 @@ BUILD_DIR := build_go
 MODELS_DIR := models
 EXAMPLES_DIR := $(wildcard examples/*)
 INCLUDE_PATH := $(abspath ../../include):$(abspath ../../ggml/include)
-LIBRARY_PATH := $(abspath ../../${BUILD_DIR}/src):$(abspath ../../${BUILD_DIR}/ggml/src)
+LIBRARY_PATH := $(abspath ../../${BUILD_DIR}/src):$(abspath ../../${BUILD_DIR}/ggml/src):$(abspath ../../${BUILD_DIR}/crisp_audio)
 
 ifeq ($(GGML_CUDA),1)
 	LIBRARY_PATH := $(LIBRARY_PATH):$(CUDA_PATH)/targets/$(UNAME_M)-linux/lib/
@@ -32,7 +32,8 @@ all: clean whisper examples
 whisper: mkdir
 	cmake -S ../.. -B ../../${BUILD_DIR} \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DBUILD_SHARED_LIBS=OFF
+		-DBUILD_SHARED_LIBS=OFF \
+		-DCRISPASR_WITH_ESPEAK_NG=OFF
 	cmake --build ../../${BUILD_DIR} --target crispasr
 
 test: model-small whisper modtidy
