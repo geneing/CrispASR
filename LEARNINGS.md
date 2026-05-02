@@ -6837,3 +6837,146 @@ backend's runtime declares `n_eos > 1` (granite, glm-asr, kyutai-stt
 have multi-stop sets; check `hp.eos_token_ids` arrays), the beam-
 helper Config needs the *whole set*, not just `[0]`. Worth surfacing
 this in any future per-backend beam wiring as a check on the adapter.
+
+## Lesson — different audio-LLM checkpoints in the same family use different prompt templates; don't reuse one orchestrator across all of them
+
+Hit during PLAN #7 phase 1 (voxtral4b streaming). The unified
+`run_voxtral_family<Ctx>()` orchestrator in `crispasr_c_api.cpp:1483-1663`
+prefills `<s>[INST][BEGIN_AUDIO]` + audio embeds + `[/INST]lang:en[TRANSCRIBE]`
+and runs a plain greedy loop. This works for voxtral-3B / qwen3-asr /
+granite-speech. **It does not work for Voxtral-Mini-4B-Realtime-2602.**
+That model uses a completely different streaming-prompt convention:
+
+- Audio is padded with 32 left-pad tokens of silence + right-aligned +
+  10 right-pad tokens of silence (one token = `hop_length × conv_stride
+  × stack_4 = 1280` samples).
+- Prompt is BOS + 38 × STREAMING_PAD (id=32) = 39 tokens.
+- Audio embeddings are *element-wise added* to the first 39 prompt embeddings.
+- During decode, each next-token's embedding has the *next* audio
+  embedding added to it before the LLM forward — the "audio-injection
+  pre_hook" pattern.
+- Decode stops when audio is exhausted (not on EOS — the model rarely
+  emits EOS; it emits id<1000 streaming-control tokens that get filtered
+  from the visible transcript).
+- Without the audio-exhausted stop, the model emits trailing garbage
+  ("...for your country.**ch.**") because the streaming prompt doesn't
+  license post-audio decoding.
+
+The CLI adapter at `examples/cli/crispasr_backend_voxtral4b.cpp:67-220`
+implements this correctly because it was hand-written for the realtime
+model. The Python `session.transcribe()` path goes through
+`run_voxtral_family` and produces a runtime crash on arbitrary audio
+sizes — not a regression from any recent change, just a long-standing
+oversight that nobody hit because the python session.transcribe() for
+voxtral4b was never the supported path.
+
+**Generalisable rule.** When a new audio-LLM checkpoint shares an
+encoder family with an existing backend but has a different "Realtime"
+or "Streaming" suffix in its name, **read its tokenizer config and its
+model card's prompt example before assuming the family orchestrator
+applies**. The C-ABI dispatch can route to a per-checkpoint backend
+adapter (the CLI does this); the unified `crispasr_session_transcribe`
+path needs an explicit branch for any model that breaks the family
+template.
+
+## Lesson — when an encoder is causal + SWA *and* the LLM has a KV cache, "streaming" is synchronous, not threaded
+
+PLAN #7's original framing (May 2026 PLAN.md §7) called for "encoder
+thread + decoder thread + audio ring buffer with cross-thread sync,
+~200-300 LOC, high complexity." That estimate predates the PLAN #62b
+adapter layer that landed in §66.
+
+With `crispasr_session_stream_open` already giving us synchronous
+`feed`/`get_text` semantics at the C ABI, and with audio-thread →
+managed-language trampolines templated per the lesson at the top of
+this section, the C++ side does NOT need its own threads to deliver
+PTT/dictation streaming. `feed()` accumulates PCM (or runs an
+incremental encoder if one is wired); `flush()` runs the prefill +
+greedy decode loop synchronously; `get_text()` returns the result.
+The wrapper layer handles its own audio-thread → main-thread marshaling
+exactly as the PLAN #62a/d kyutai/moonshine path does.
+
+The threading framing only earns its keep when *concurrent
+encode-during-decode* is needed — i.e., when the goal is live captions
+during continuous speech (PLAN #7 phase 2), not PTT. Even there, a
+state-machine driven by `get_text()` polls is often enough to deliver
+the user-visible behaviour without a real thread.
+
+**Generalisable rule.** When a streaming feature request lands, before
+budgeting threads, audit:
+1. Is the encoder causal? (Look at the attention mask construction —
+   if `mask[k > q]` is the only condition, yes; if `mask` is nullptr
+   or bidirectional, no.)
+2. Is the encoder bounded-context? (Look for SWA / sliding-window
+   attention.)
+3. Does the decoder/LLM have a persistent KV cache exposed via
+   `n_past`? (Look for a `_kv_init` / `_run_llm_kv(inputs_embeds,
+   n_tokens, n_past)` pair.)
+
+If 1+2+3 are all yes, the architecture supports synchronous incremental
+streaming. Threads only help if the bench shows you can't keep up with
+audio rate at synchronous feed cadence. Don't pre-spend the LOC budget
+on threads the architecture didn't need.
+
+PLAN #7 phase 1 shipped the API + bit-exact-batch on JFK in ~600 LOC
+total (including the bench harness), no C++ threads. Phase 1.5
+(incremental encoder bug fix) is the only remaining work to hit the
+≤240 ms first-token target.
+
+## Lesson — `language="auto"` is a hand grenade for backends that embed language codes literally
+
+Discovered May 2026 via `tools/test-all-backends.py` smoke run: canary
+returned an EMPTY transcript on JFK. The diagnostic chain:
+
+1. `whisper_params.h:71` defaults `language="auto"` (since 63d0e5d
+   on 2026-04-20 — multilingual UX improvement).
+2. `crispasr_run.cpp` triggers LID via whisper-tiny when
+   `language=="auto"`.
+3. LID calls `crispasr_cache::ensure_cached_file("ggml-tiny.bin",
+   <hf-url>)` which **only checked `~/.cache/crispasr/`**.
+4. That cache was empty on the test box; the download failed (network
+   flaky, file already on disk elsewhere — doesn't matter why).
+5. `crispasr_run.cpp:215` then left `params.language="auto"` —
+   useless as a fallback because it's the very value that triggered
+   LID in the first place.
+6. canary's prompt builder (`canary_build_prompt`) embeds the language
+   token *literally* — `<|en|>`, `<|de|>`, etc. So `language="auto"`
+   becomes `<|auto|>`, which is not in the canary vocab.
+7. Prompt build returns `{}`, transcribe silently emits an empty
+   string. Caller has no idea why.
+
+**Generalisable rule.** For any backend whose prompt or conditioning
+embeds the language code **as a literal token** (canary, qwen3-tts,
+likely future vibe variants), `"auto"` is a footgun. The contract has
+to be: by the time we hit the backend, `params.language` is a real
+ISO code or the backend rejects it loudly. Three places need to
+enforce this together — one alone isn't enough:
+
+| Layer | What it does | Why each layer matters |
+|---|---|---|
+| **Cache resolver** (`ensure_cached_file`) | Probe `$CRISPASR_MODELS_DIR`, `/Volumes/backups/ai/crispasr-models`, `~/.cache/crispasr-models`, `~/.cache/huggingface/hub` before downloading. | Prevents the LID-download-failure from triggering at all when the model is already on disk. Most users have it. |
+| **LID-failed fallback** (`crispasr_run.cpp:215`) | When LID returns false AND `language=="auto"`, set to `"en"` with stderr note. | If the cache resolver still misses (genuinely no model anywhere), don't pass the literal `"auto"` downstream. |
+| **Backend defensive** (`crispasr_backend_canary.cpp:65`) | If `src=="auto"` or empty still reaches us, normalize to `"en"` with stderr note. | Belt-and-suspenders against future code paths that skip LID entirely (e.g. `--lid-backend=off`). |
+
+**Why we didn't catch it earlier.** Two reasons compound:
+- The default flipped from `"en"` to `"auto"` on Apr 20. On most dev
+  boxes `~/.cache/crispasr/ggml-tiny.bin` was already populated from
+  prior whisper runs, so LID succeeded silently and `params.language`
+  got reset to a real code before the backend saw it. The bug only
+  surfaces on cleanish caches.
+- The test framework prior to `tools/test-all-backends.py` was
+  benchmark-shaped (perf tables + gist upload) and didn't gate on
+  pass/fail per backend per capability — an EMPTY transcript was
+  visible but not actionable.
+
+**Diagnostic next time.** Empty transcript with no obvious crash →
+add a stderr line in the backend that names which token / lookup
+failed. The original error message was just `"canary: prompt contains
+an unknown token"` — useless. Now it prints the offending string,
+vocab size, and the resolved src/tgt — which immediately revealed
+`<|auto|>`. Costs ~10 LOC, saves an hour of forensics.
+
+Reference: `src/crispasr_cache.cpp::well_known_search_dirs`,
+`examples/cli/crispasr_run.cpp:215` (LID-failed branch),
+`examples/cli/crispasr_backend_canary.cpp:65` (defensive layer),
+`src/canary.cpp:944` (improved error message), commit `f2d5ecb`.
