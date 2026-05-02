@@ -1174,13 +1174,16 @@ extern "C" bool voxtral4b_kv_init(voxtral4b_context* ctx, int max_ctx) {
     const int n_kv = (int)hp.llm_n_kv_heads;
     const int nl = (int)hp.llm_n_layers;
 
-    size_t k_size = (size_t)ggml_type_size(GGML_TYPE_F16) * hd * max_ctx * n_kv * nl;
-    size_t v_size = k_size;
-
     ggml_init_params ip = {2 * ggml_tensor_overhead(), nullptr, true};
     ctx->kv_ctx = ggml_init(ip);
-    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
-    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+    // PLAN #60e: KV dtype from CRISPASR_KV_QUANT (default f16).
+    const ggml_type kv_dtype = core_attn::kv_dtype_from_env("voxtral4b");
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
+    // Size the backend buffer from the actual ggml_nbytes after creation
+    // (was hardcoded F16 byte count, which over-allocated for quant types).
+    const size_t k_size = ggml_nbytes(ctx->kv_k);
+    const size_t v_size = ggml_nbytes(ctx->kv_v);
 
     ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, k_size + v_size);
     char* base = (char*)ggml_backend_buffer_get_base(ctx->kv_buf);

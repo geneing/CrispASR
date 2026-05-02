@@ -442,8 +442,10 @@ static bool kv_alloc(orpheus_context* c, int max_ctx) {
     const int nl = (int)hp.n_layers;
     ggml_init_params kp = {ggml_tensor_overhead() * 4 + 1024, nullptr, true};
     c->kv_ctx = ggml_init(kp);
-    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
-    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+    // PLAN #60e: KV dtype from CRISPASR_KV_QUANT (default f16).
+    const ggml_type kv_dtype = core_attn::kv_dtype_from_env("orpheus");
+    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
+    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
     ggml_set_name(c->kv_k, "kv_k");
     ggml_set_name(c->kv_v, "kv_v");
     const size_t kb = ggml_nbytes(c->kv_k), vb = ggml_nbytes(c->kv_v);

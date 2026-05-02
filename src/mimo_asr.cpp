@@ -454,24 +454,6 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
 //   prefill_text_logits_step0   [vocab]                   F32
 // ===========================================================================
 
-// PLAN #60e: KV cache dtype is configurable via CRISPASR_KV_QUANT.
-// Default F16 keeps bit-identity with previous behaviour; q8_0/q4_0
-// halve / quarter the cache footprint at the cost of a dequant step
-// on read (handled centrally in core_attn::kv_self_attn).
-static ggml_type mimo_asr_kv_dtype_from_env() {
-    const char* s = std::getenv("CRISPASR_KV_QUANT");
-    if (!s || !*s)
-        return GGML_TYPE_F16;
-    if (std::strcmp(s, "f16") == 0)
-        return GGML_TYPE_F16;
-    if (std::strcmp(s, "q8_0") == 0)
-        return GGML_TYPE_Q8_0;
-    if (std::strcmp(s, "q4_0") == 0)
-        return GGML_TYPE_Q4_0;
-    fprintf(stderr, "mimo_asr: CRISPASR_KV_QUANT='%s' unrecognised, defaulting to f16\n", s);
-    return GGML_TYPE_F16;
-}
-
 static bool mimo_asr_kv_init(mimo_asr_context* ctx, int max_ctx) {
     if (ctx->kv_k && ctx->kv_max_ctx >= max_ctx)
         return true;
@@ -487,7 +469,10 @@ static bool mimo_asr_kv_init(mimo_asr_context* ctx, int max_ctx) {
     const int hd = (int)hp.llm_head_dim;
     const int n_kv = (int)hp.llm_kv_heads;
     const int n_lay = (int)hp.llm_layers;
-    const ggml_type kv_dtype = mimo_asr_kv_dtype_from_env();
+    // PLAN #60e: KV cache dtype configurable via CRISPASR_KV_QUANT
+    // (f16 default / q8_0 / q4_0). Shared lookup in core_attn pairs
+    // with kv_self_attn's quant-safe write/read paths.
+    const ggml_type kv_dtype = core_attn::kv_dtype_from_env("mimo_asr");
     ggml_init_params kp = {ggml_tensor_overhead() * 4 + 1024, nullptr, true};
     ctx->kv_ctx = ggml_init(kp);
     ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, n_lay);

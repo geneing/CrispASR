@@ -33,8 +33,41 @@
 #include "ggml.h"
 
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace core_attn {
+
+// PLAN #60e: KV cache dtype selection from `CRISPASR_KV_QUANT`.
+//
+// Default returns `GGML_TYPE_F16` so any backend that calls this in
+// its `*_kv_init` is bit-identical to legacy behaviour until the user
+// opts in. Recognised values: `f16` (default), `q8_0`, `q4_0`. Anything
+// else logs a warning to stderr and falls back to F16.
+//
+// Pairs with the `core_attn::kv_self_attn` write- and read-path
+// quant-safety: when the cache type is quantised, the helper switches
+// to `ggml_set_rows` for the write (vs `ggml_cpy` for F16, which
+// requires contig dst that quant slices never satisfy) and uses
+// `ggml_cast(...,F32)` to dequantise on read (CPU-backend safe; F16
+// would be metal-only).
+//
+// `backend_tag` is the prefix on the warning line so a misconfigured
+// env var points at a specific backend rather than a generic message.
+inline ggml_type kv_dtype_from_env(const char* backend_tag) {
+    const char* s = std::getenv("CRISPASR_KV_QUANT");
+    if (!s || !*s)
+        return GGML_TYPE_F16;
+    if (std::strcmp(s, "f16") == 0)
+        return GGML_TYPE_F16;
+    if (std::strcmp(s, "q8_0") == 0)
+        return GGML_TYPE_Q8_0;
+    if (std::strcmp(s, "q4_0") == 0)
+        return GGML_TYPE_Q4_0;
+    std::fprintf(stderr, "%s: CRISPASR_KV_QUANT='%s' unrecognised, defaulting to f16\n", backend_tag, s);
+    return GGML_TYPE_F16;
+}
 
 // Parameters that differ from call to call. Everything here is a plain
 // value type so the compiler can inline the caller's constants into the

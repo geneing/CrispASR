@@ -21,7 +21,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 | **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
 | **MEDIUM** | [#58 MOSS-Audio-4B-Instruct](#58-moss-audio-4b-instruct) | Large | first audio-understanding (not just ASR) backend; introduces DeepStack cross-layer feature injection |
 | **MEDIUM** | [#59 Cross-binding C-ABI parity](#59-cross-binding-c-abi-parity) | Medium | TTS surface (incl. qwen3-tts variants) at full parity across all 7 wrappers; align/diarize/VAD/streaming/punctuation/LID/registry still C-ABI-only on Go/Java/Ruby/JS/Dart |
-| **MEDIUM** | [#60 llama.cpp/llamafile perf trick ports](#60-cross-backend-perf-tricks-llamacpp--llamafile-ports) | 14 items | 60a/b/c/d/f/g DONE; 60e (KV quant) env-flag landed for mimo-asr, per-backend rollout pending; 60h-n parked/skip |
+| **MEDIUM** | [#60 llama.cpp/llamafile perf trick ports](#60-cross-backend-perf-tricks-llamacpp--llamafile-ports) | 14 items | 60a/b/c/d/f/g DONE; 60e env-flag wired across 9 backends (mimo-asr validated, others awaiting per-backend cosine pass); 60h-n parked/skip |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
@@ -1168,17 +1168,39 @@ ASR** where `max_ctx` balloons past 10k groups (~1.5 GB F16 KV).
   write path (and `ggml_set_rows` scatter for the cached step
   graph) is supported on Metal for Q8_0 / Q4_0.
 
-**Per-backend rollout (the OPEN bit):** mirror the 2-line
-`CRISPASR_KV_QUANT` lookup from `mimo_asr_kv_init` into
-`qwen3_asr_kv_init`, `voxtral4b_kv_init`, `voxtral_kv_init`,
-`granite_speech_kv_init`, `granite_nle_kv_init`, `gemma4_e2b_kv_init`,
-`qwen3_tts_kv_init` (talker only — code_pred has its own cache).
-For each, validate via `crispasr-diff` with `CRISPASR_KV_QUANT=q8_0`
-and confirm cosines on consumed-output tensors (logits, last_hidden)
-stay ≥0.98. Default stays F16 until each backend passes.
+**Per-backend env wiring (DONE):** `core_attn::kv_dtype_from_env()` is the
+shared lookup. The 9 backends that route their KV cache through
+`core_attn::kv_self_attn` all call it from their `*_kv_init` and
+allocate `kv_k` / `kv_v` with the chosen dtype:
 
-**Validation done so far:** mimo-asr Q4_K diff harness with
-`CRISPASR_KV_QUANT=q8_0` — see HISTORY 64.
+- `mimo_asr_kv_init` (validated — see HISTORY §64)
+- `qwen3_asr_kv_init`
+- `voxtral_kv_init`
+- `voxtral4b_kv_init`
+- `granite_speech_kv_init`
+- `gemma4_e2b` (`g4e_kv_init`, both sliding-window and full-attention caches)
+- `glm_asr_kv_init`
+- `omniasr_init_kv_cache`
+- `orpheus` (`kv_alloc`)
+- `qwen3_tts` talker (`kv_alloc`) — `cp_kv` (code-predictor cache)
+  intentionally stays F16 since its decode path doesn't go through
+  `core_attn::kv_self_attn`
+
+Default stays F16 across all of them. `CRISPASR_KV_QUANT=q8_0`
+or `=q4_0` opts in.
+
+**Per-backend cosine validation (OPEN — the actual rollout gate):**
+each backend needs a `CRISPASR_KV_QUANT=q8_0` `crispasr-diff` run
+against its bf16 reference; consumed-output tensors (logits,
+last_hidden) must stay ≥0.98. Done so far: mimo-asr Q4_K (HISTORY §64,
+last_hidden 0.963 unchanged, logits 0.981 unchanged).
+
+**Backends with custom KV paths (skipped — would need separate
+quant-write fixes):** canary (Conformer encoder + RNN-T), cohere
+(encoder-decoder), kyutai_stt (depthwise/streaming decoder),
+vibevoice. These don't route through `core_attn::kv_self_attn`,
+so they can't piggy-back on the shared write/read fixes; they'd
+each need backend-specific work to support quant KV.
 
 ---
 
