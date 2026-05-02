@@ -2003,10 +2003,33 @@ foresee.
   `(emb, n_tokens, n_past)` calls). `CAP_BEAM_SEARCH` added to
   capabilities. README "Beam search" row gains 1 ✔ for glm-asr.
 
-**Greedy regression check:** `crispasr --backend glm-asr -bs 1 -f
-samples/jfk.wav` produces "And so, my fellow Americans, ask not what
-your country can do for you. Ask what you can do for your country."
-(unchanged from before the refactor).
+**Smoke results on JFK (11 s, glm-asr-nano-q4_k):**
+
+| Setting | Wall time | Transcript |
+|---|---|---|
+| `-bs 1` (greedy, GPU) | ~1 s | "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country." |
+| `-bs 1` (greedy, CPU) | 71 s | identical |
+| `-bs 2` (beam, GPU) | 52.9 s | identical |
+| `-bs 4` (beam, GPU) | 35.1 s | identical |
+| `-bs 2` (beam, CPU) | 129 s | identical |
+
+The GPU beam timings are dominated by per-call Metal command-buffer
+sync (~150-300 batched calls per beam decode); CPU at `-bs 2` runs 1.8×
+greedy as theory predicts.
+
+**Bug found and fixed mid-session.** The first iteration of the helper
+took a single `cfg.eos_id` (mirroring `core_greedy_decode::Config`).
+glm-asr has *three* stop tokens (`{59246, 59253, 59255}` per its
+`hp.eos_token_ids[]`): the LLM's `<|user|>` end (59253) and a couple
+of tokeniser sentinels. Single-id matching only caught 1 of 3, so on
+~2/3 of inputs the beam would emit a non-cfg.eos_id stop token, NOT
+mark itself finished, and run to `max_new_tokens=512`. CPU smoke
+stalled past 6 minutes before being killed; that was the symptom.
+Fix: extended `Config` with `std::vector<int> eos_ids` (helper checks
+membership; legacy single `eos_id` still honoured when the vector is
+empty). Adapter passes the full `hp.eos_token_ids[0..n_eos)` set
+through. After the fix beam=2 CPU finishes in 129 s, beam=2/4 GPU in
+under 1 min — all transcripts match greedy.
 
 **Why the other three target backends got deferred.**
 `omniasr-llm`, `kyutai-stt`, and `moonshine` each have a per-step

@@ -597,6 +597,11 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
         core_beam_decode::Config cfg;
         cfg.max_new_tokens = max_tokens;
         cfg.eos_id = (hp.n_eos > 0) ? hp.eos_token_ids[0] : 2;
+        // glm-asr has up to 3 stop tokens (e.g. 59246, 59253, 59255). Pass
+        // them ALL to the beam helper — single-eos_id misses ~2/3 of the
+        // model's stop conditions and lets beams run to max_new_tokens.
+        for (int i = 0; i < hp.n_eos; i++)
+            cfg.eos_ids.push_back(hp.eos_token_ids[i]);
         cfg.vocab_size = vocab;
         cfg.beam_size = beam_size;
         cfg.prompt_len = (int)ids.size();

@@ -6709,3 +6709,47 @@ Reference: `src/kyutai_stt.cpp` `kyutai_stt_stream_*`
 struct's `kyutai_stream_state` field + the four
 `if (s->kyutai_stream_state)` branches in feed/get_text/flush/close,
 and PLAN #62c for the options-evaluated record.
+
+### Beam search needs an EOS *set*, not a single EOS id (PLAN #61h)
+
+The greedy decode helper in `src/core/greedy_decode.h` takes a single
+`int eos_id` in its `Config` because every backend that ports through
+it terminates on exactly one stop token. The first iteration of
+`core_beam_decode::Config` mirrored this — same `int eos_id` — and
+glm-asr's adapter passed `hp.eos_token_ids[0]` through.
+
+This was wrong, in a way that didn't fail loudly: glm-asr declares
+`n_eos = 3` with `eos_token_ids = {59246, 59253, 59255}` (an LLM-end
+token plus two tokeniser sentinels), and the model emits any of the
+three depending on prompt. The greedy path's existing `is_eos` lambda
+already iterates the whole array. The beam path was checking only
+the first id. So:
+
+- ~1/3 of greedy decodes terminate on `eos_token_ids[0]` → beam works
+  by accident.
+- ~2/3 emit `eos_token_ids[1]` or `[2]` → beam never recognises the
+  stop, runs to `max_new_tokens=512`, replay-from-prefix at 512 token
+  decode steps with batched calls of length 1..512 = a multi-minute
+  stall.
+
+Symptom: beam=2 CPU smoke ran 6+ minutes at 300%+ CPU and never
+emitted output. The greedy regression (`-bs 1`) ALWAYS works because
+the bypass path uses the existing `is_eos` lambda. So a "greedy still
+works, beam stalls" pattern is the smoke signal.
+
+Fix: `Config` gained `std::vector<int> eos_ids` plus an `is_eos(id)`
+lambda that returns true on any match (or falls back to the legacy
+`eos_id` when the vector is empty, preserving callers that ported
+straight from `core_greedy_decode`). Adapter passes
+`hp.eos_token_ids[0..n_eos)` through. After the fix, beam=2 CPU on
+JFK finishes in 129 s; beam=2/4 GPU in under 1 min; all transcripts
+match greedy.
+
+**General lesson.** Greedy-style helpers can model "stop on EOS" as a
+single id because they peek at the next token before pushing. Beam
+search has to push then check, and prunes globally — so a "missed"
+stop token doesn't revert; the beam just keeps going. Whenever a
+backend's runtime declares `n_eos > 1` (granite, glm-asr, kyutai-stt
+have multi-stop sets; check `hp.eos_token_ids` arrays), the beam-
+helper Config needs the *whole set*, not just `[0]`. Worth surfacing
+this in any future per-backend beam wiring as a check on the adapter.

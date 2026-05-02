@@ -78,7 +78,8 @@ namespace core_beam_decode {
 
 struct Config {
     int max_new_tokens = 512; // hard cap on generated tokens
-    int eos_id = 2;           // stop-on-this-token in beam[0]
+    int eos_id = 2;           // legacy single-EOS field; used iff eos_ids is empty
+    std::vector<int> eos_ids; // multi-EOS set (e.g. glm-asr's 3 stop tokens). Any match terminates the beam.
     int vocab_size = 0;       // required
     int beam_size = 1;        // 1 = degenerate to greedy-via-beam (still works, just expensive)
     int prompt_len = 0;       // n_past after prompt prefill (replay anchor)
@@ -163,6 +164,16 @@ inline Result run_with_probs(Ctx* ctx, const float* prefill_logits, ReplayFn rep
     const int B = (cfg.beam_size > 0) ? cfg.beam_size : 1;
     const int V = cfg.vocab_size;
 
+    auto is_eos = [&](int id) {
+        if (!cfg.eos_ids.empty()) {
+            for (int e : cfg.eos_ids)
+                if (id == e)
+                    return true;
+            return false;
+        }
+        return id == cfg.eos_id;
+    };
+
     // 1. Initial beams: top-B from prefill logits.
     std::vector<int> first_ids;
     std::vector<double> first_lps;
@@ -173,7 +184,7 @@ inline Result run_with_probs(Ctx* ctx, const float* prefill_logits, ReplayFn rep
         beams[i].tokens.push_back(first_ids[i]);
         beams[i].probs.push_back((float)std::exp(first_lps[i]));
         beams[i].cum_logprob = first_lps[i];
-        if (first_ids[i] == cfg.eos_id)
+        if (is_eos(first_ids[i]))
             beams[i].finished = true;
     }
     // top_k_log_softmax already returns descending; beams are sorted.
@@ -196,7 +207,10 @@ inline Result run_with_probs(Ctx* ctx, const float* prefill_logits, ReplayFn rep
         for (size_t bi = 0; bi < beams.size(); bi++) {
             auto& b = beams[bi];
             if (b.finished) {
-                cands.push_back({(int)bi, cfg.eos_id, b.cum_logprob, 1.0f, true});
+                // Carry forward; the token field is only used by the
+                // detokeniser, which skips finished beams.
+                const int sentinel = cfg.eos_ids.empty() ? cfg.eos_id : cfg.eos_ids[0];
+                cands.push_back({(int)bi, sentinel, b.cum_logprob, 1.0f, true});
                 continue;
             }
 
@@ -241,7 +255,7 @@ inline Result run_with_probs(Ctx* ctx, const float* prefill_logits, ReplayFn rep
             nb.tokens.push_back(c.token);
             nb.probs.push_back(c.token_prob);
             nb.cum_logprob = c.cum_logprob;
-            if (c.token == cfg.eos_id)
+            if (is_eos(c.token))
                 nb.finished = true;
             next_beams.push_back(std::move(nb));
         }
