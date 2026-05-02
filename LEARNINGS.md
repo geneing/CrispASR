@@ -6439,3 +6439,43 @@ a fast "secret/config presence check" at the top that prints a
 clear `::warning::` + `exit 78` (neutral) when prerequisites
 are missing — instead of letting `cargo` / `twine` emit
 cryptic auth errors deep in the log.
+
+### `HF_HOME` overrides token-file lookup — a "401 from a gated repo I just accepted" footgun
+
+Setting `HF_HOME=/some/dir` to redirect the cache (e.g. to keep
+weights off a small `~`) silently moves the **token-file lookup**
+too. `huggingface_hub.snapshot_download` /
+`hf_hub_download` then look for `$HF_HOME/token` instead of the
+default `~/.cache/huggingface/token` — and if it's not there, they
+fall back to **anonymous** access. On a gated repo that surfaces as
+`GatedRepoError(401)` whose message says "must be authenticated"
+even though `hf auth whoami` and `api.repo_info()` (which use a
+different code path) both work fine and confirm the gate is
+already accepted.
+
+Symptom we hit on Kartoffel-Orpheus DE downloads: gate had been
+accepted and `cstr` was the logged-in user; the click-through
+accept page wasn't actually the issue. Diagnostic that nailed it:
+a direct `requests.head` with an explicit `Authorization: Bearer
+<token>` from `huggingface_hub.get_token()` returned 200 — same
+URL the lib hit, different auth-loading path.
+
+**Three fixes, by escalation:**
+
+1. **Drop the `HF_HOME` override.** Use `cache_dir=` on the
+   download call instead — `cache_dir` is per-call scope and
+   doesn't affect token loading.
+2. **Symlink the default token into the override.** `mkdir -p
+   $HF_HOME && ln -sf ~/.cache/huggingface/token $HF_HOME/token`
+   — keeps the override semantics for cache while preserving
+   default token resolution.
+3. **Pass the token explicitly.** `snapshot_download(...,
+   token=get_token())` bypasses the env-var dance entirely. Most
+   robust; least convenient.
+
+Don't waste cycles re-clicking gate accept pages until you've
+verified `requests.head` with the explicit token works. If it
+does, the gate is fine and the bug is in the lib's env-var
+handling. `HUGGINGFACE_HUB_CACHE` (cache-dir-only) does NOT have
+the same effect — only `HF_HOME` reroutes the token. Easy to
+assume both env vars behave the same; they don't.
