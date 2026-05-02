@@ -1762,7 +1762,21 @@ extern "C" struct voxtral4b_stream* voxtral4b_stream_open(struct voxtral4b_conte
         return nullptr;
     auto* s = new voxtral4b_stream();
     s->ctx = ctx;
-    s->chunk_mel_frames = 8;
+    // Chunk size in mel frames. Must be even (conv1 stride 2) AND divisible
+    // by 8 (so the projector's stack-4 alignment lands at a chunk boundary
+    // and we never carry partial-projector state between chunks). At 100 fps
+    // mel = 10 ms/frame, so 8 = 80 ms audio, 24 = 240 ms, 40 = 400 ms.
+    // Larger chunks amortize Metal kernel-launch overhead: at 80 ms each
+    // chunk pays ~170 ms on M1 Q4_K (2.1× realtime); at 240 ms it drops
+    // to ~250 ms per 240 ms chunk (~1× realtime). Bit-exact-batch holds
+    // for any valid size.
+    if (const char* env = getenv("CRISPASR_VOXTRAL4B_STREAM_CHUNK_MS")) {
+        const int ms = atoi(env);
+        const int frames = (ms / 10 / 8) * 8;        // round to multiple of 8 mel frames
+        s->chunk_mel_frames = frames > 0 ? frames : 8;
+    } else {
+        s->chunk_mel_frames = 24; // 240 ms default — phase 2 perf pass
+    }
     s->max_audio_seconds = 15;
     s->pcm_next_frame_start = 0;
     s->mel_frames_emitted = 0;
