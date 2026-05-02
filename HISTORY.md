@@ -1558,12 +1558,46 @@ paths for quantised cache:
   text_embeds, inputs_embeds) don't go through the KV cache and
   reproduce the F16 cosines exactly.
 
-Per-backend rollout (mirroring the env lookup into `qwen3_asr`,
-`voxtral4b`, `granite_speech`, `granite_nle`, `gemma4_e2b`, etc.) is
-deferred to a follow-up — see PLAN #60e for the rollout list and
-diff-harness gate. The shared-code surgery is already done; each
-backend just needs the same 3-line `CRISPASR_KV_QUANT` lookup
-mirrored from `mimo_asr_kv_init`.
+**Per-backend env wiring (commit `8edfb74`, same session):** the
+mimo_asr-local helper was lifted into a shared
+`core_attn::kv_dtype_from_env(const char* tag)` and called from
+each `*_kv_init` whose KV path routes through
+`core_attn::kv_self_attn`. 9 backends wired in one commit:
+`mimo_asr_kv_init` (refactored to use the shared helper),
+`qwen3_asr_kv_init`, `voxtral_kv_init`, `voxtral4b_kv_init`,
+`granite_speech_kv_init`, `gemma4_e2b` (`g4e_kv_init`, both
+sliding-window and full-attention caches share the dtype),
+`glm_asr_kv_init`, `omniasr` (`omniasr_alloc_kv_cache`), `orpheus`
+(`kv_alloc`), `qwen3_tts` talker (`kv_alloc` — `cp_kv` stays F16
+since the code-predictor decode doesn't go through `core_attn`).
+Default remains `GGML_TYPE_F16` so the wiring is bit-identical to
+legacy behaviour until a user opts in via
+`CRISPASR_KV_QUANT={q8_0,q4_0}`.
+
+Smoke-tested: `crispasr-diff mimo-asr` with default-F16 KV reproduces
+the audio_features 0.998270 / text_embeds 0.996284 / inputs_embeds
+0.997573 / last_hidden 0.963177 / logits 0.981261 cosines bit-exact
+post-refactor.
+
+Side-quest fixed in passing: `voxtral4b_kv_init` and
+`granite_speech_kv_init` had a hardcoded
+`ggml_type_size(GGML_TYPE_F16) * hd * max_ctx * n_kv * nl` byte
+pre-compute used to size the backend buffer. This silently
+over-allocates for quant types (Q8_0's `ggml_type_size` is 34 bytes
+for a 32-element block, treating each *element* as 34 bytes →
+massive over-alloc). Switched both to compute `ggml_nbytes()` after
+`ggml_new_tensor_4d` instead, which is the right pattern regardless
+of dtype.
+
+Per-backend cosine validation (CRISPASR_KV_QUANT=q8_0
+`crispasr-diff` against each bf16 reference) is the actual rollout
+gate that remains open — see PLAN #60e for the list.
+
+Backends with custom KV paths (canary, cohere, kyutai_stt,
+vibevoice) don't route through `core_attn::kv_self_attn`, so the
+shared write/read fixes from 1594577 don't cover them; they'd each
+need backend-specific work to support quant KV. Left as PARKED in
+PLAN #60e.
 
 **Side-quest:** the converter run itself was killed mid-flight after
 22 min / 0.8 MB/min sustained on the contested disk — same

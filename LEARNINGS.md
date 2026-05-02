@@ -6132,3 +6132,40 @@ session, three kill+restart cycles all stalled in the pre-upload
 phase (no xet activity logged after the initial config dump);
 local A/B copy ended up being the practical fallback. Lesson learnt
 post-fact — apply for any future variant-rotation publish.
+
+### Don't pre-compute KV-buffer byte sizes from a hardcoded dtype — use `ggml_nbytes()` after creation (PLAN #60e wiring)
+
+Found in `voxtral4b_kv_init` and `granite_speech_kv_init` while
+threading `CRISPASR_KV_QUANT` through every backend's `*_kv_init`.
+Both had this pattern:
+
+```cpp
+size_t k_size = (size_t)ggml_type_size(GGML_TYPE_F16) * hd * max_ctx * n_kv * nl;
+ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, k_size + v_size);
+```
+
+The pre-compute is bug-prone for two reasons:
+
+1. **Hardcodes the dtype.** Switching to a quant type (e.g. Q8_0)
+   under the env flag silently over-allocates: `ggml_type_size(Q8_0)
+   = 34` bytes (one block holding 32 quants), so the formula treats
+   each *element* as 34 bytes → ~30× over-alloc for Q8_0 K/V. The
+   buffer still works (over-alloc is safe) but wastes RAM.
+2. **Skips ggml's row-padding logic.** Quant types pad rows to a
+   block-multiple of `ggml_blck_size`; `ggml_nbytes()` accounts for
+   this, the manual product doesn't.
+
+Right pattern (already used by mimo_asr / orpheus / qwen3_tts):
+
+```cpp
+ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
+ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
+const size_t kbytes = ggml_nbytes(ctx->kv_k);
+const size_t vbytes = ggml_nbytes(ctx->kv_v);
+ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kbytes + vbytes);
+```
+
+Always size buffers from `ggml_nbytes()` after the tensor exists —
+it's the only path that's correct across F16, F32, and every quant
+type without per-dtype branches.
