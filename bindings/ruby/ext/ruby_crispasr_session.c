@@ -41,6 +41,7 @@ extern int                     crispasr_session_is_voice_design(struct CrispasrS
 extern float*                  crispasr_session_synthesize(struct CrispasrSession* s, const char* text,
                                                            int* out_n_samples);
 extern void                    crispasr_pcm_free(float* pcm);
+extern int                     crispasr_session_kokoro_clear_phoneme_cache(struct CrispasrSession* s);
 extern int                     crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const char* lang,
                                                                           char* out_path, int out_path_len);
 extern int                     crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path, const char* lang,
@@ -68,6 +69,14 @@ static VALUE rb_session_set_codec_path(VALUE self, VALUE handle, VALUE path) {
     struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
     int rc = crispasr_session_set_codec_path(s, StringValueCStr(path));
     if (rc != 0) rb_raise(rb_eRuntimeError, "set_codec_path failed (rc=%d)", rc);
+    return Qnil;
+}
+
+// Drop the kokoro per-session phoneme cache. (PLAN #56 #5)
+static VALUE rb_session_clear_phoneme_cache(VALUE self, VALUE handle) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_kokoro_clear_phoneme_cache(s);
+    if (rc != 0) rb_raise(rb_eRuntimeError, "clear_phoneme_cache failed (rc=%d)", rc);
     return Qnil;
 }
 
@@ -177,5 +186,6 @@ void init_ruby_crispasr_session(VALUE* mWhisper) {
     rb_define_singleton_method(mSession, "is_custom_voice",      rb_session_is_custom_voice,  1);
     rb_define_singleton_method(mSession, "is_voice_design",      rb_session_is_voice_design,  1);
     rb_define_singleton_method(mSession, "synthesize",           rb_session_synthesize,       2);
+    rb_define_singleton_method(mSession, "clear_phoneme_cache",  rb_session_clear_phoneme_cache, 1);
     rb_define_singleton_method(mSession, "kokoro_resolve_for_lang", rb_kokoro_resolve_for_lang, 2);
 }

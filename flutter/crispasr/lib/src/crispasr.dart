@@ -1700,6 +1700,21 @@ class CrispasrSession {
     }
   }
 
+  /// Drop the kokoro per-session phoneme cache. No-op for non-kokoro backends.
+  /// Useful for long-running daemons that resynthesize across many speakers
+  /// and want bounded memory. (PLAN #56 #5)
+  void clearPhonemeCache() {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_kokoro_clear_phoneme_cache')) {
+      return; // older libcrispasr build — no-op
+    }
+    final fn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>),
+        int Function(Pointer<Void>)>('crispasr_session_kokoro_clear_phoneme_cache');
+    final rc = fn(_handle);
+    if (rc != 0) throw Exception('clearPhonemeCache failed (rc=$rc)');
+  }
+
   /// Load a voice prompt: a baked GGUF voice pack OR a *.wav reference audio.
   ///
   /// For qwen3-tts a WAV reference requires [refText] (the transcription of

@@ -29,6 +29,7 @@ int              crispasr_session_is_custom_voice(CrispasrSession* s);
 int              crispasr_session_is_voice_design(CrispasrSession* s);
 float*           crispasr_session_synthesize(CrispasrSession* s, const char* text, int* out_n_samples);
 void             crispasr_pcm_free(float* pcm);
+int              crispasr_session_kokoro_clear_phoneme_cache(CrispasrSession* s);
 
 int crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const char* lang,
                                                char* out_path, int out_path_len);
@@ -68,6 +69,17 @@ func (s *CrispasrSession) Close() {
 		C.crispasr_session_close(s.handle)
 		s.handle = nil
 	}
+}
+
+// ClearPhonemeCache drops the kokoro per-session phoneme cache.
+// No-op for non-kokoro backends. Useful for long-running daemons that
+// resynthesize across many speakers and want bounded memory. (PLAN #56 #5)
+func (s *CrispasrSession) ClearPhonemeCache() error {
+	rc := C.crispasr_session_kokoro_clear_phoneme_cache(s.handle)
+	if rc != 0 {
+		return errors.New("crispasr_session_kokoro_clear_phoneme_cache failed")
+	}
+	return nil
 }
 
 // SetCodecPath loads a separate codec GGUF.

@@ -35,6 +35,7 @@ int                     crispasr_session_is_voice_design(struct CrispasrSession*
 float*                  crispasr_session_synthesize(struct CrispasrSession* s, const char* text,
                                                     int* out_n_samples);
 void                    crispasr_pcm_free(float* pcm);
+int                     crispasr_session_kokoro_clear_phoneme_cache(struct CrispasrSession* s);
 int                     crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const char* lang,
                                                                    char* out_path, int out_path_len);
 int                     crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path, const char* lang,
@@ -149,6 +150,12 @@ EMSCRIPTEN_BINDINGS(whisper) {
     emscripten::function("ttsSetCodecPath", emscripten::optional_override([](const std::string& path) {
                              return g_tts_session ? crispasr_session_set_codec_path(g_tts_session,
                                                                                     path.c_str())
+                                                  : -1;
+                         }));
+
+    // Drop the kokoro per-session phoneme cache. (PLAN #56 #5)
+    emscripten::function("ttsClearPhonemeCache", emscripten::optional_override([]() {
+                             return g_tts_session ? crispasr_session_kokoro_clear_phoneme_cache(g_tts_session)
                                                   : -1;
                          }));
 

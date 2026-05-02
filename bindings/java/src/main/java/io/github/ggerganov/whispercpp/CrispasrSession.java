@@ -39,6 +39,7 @@ public final class CrispasrSession implements AutoCloseable {
         int     crispasr_session_is_voice_design(Pointer session);
         Pointer crispasr_session_synthesize(Pointer session, String text, IntByReference outNSamples);
         void    crispasr_pcm_free(Pointer pcm);
+        int     crispasr_session_kokoro_clear_phoneme_cache(Pointer session);
 
         int crispasr_kokoro_resolve_model_for_lang_abi(
                 String modelPath, String lang, byte[] outPath, int outPathLen);
@@ -66,6 +67,16 @@ public final class CrispasrSession implements AutoCloseable {
             throw new IllegalStateException("crispasr_session_open: failed to open " + modelPath);
         }
         return new CrispasrSession(p);
+    }
+
+    /**
+     * Drop the kokoro per-session phoneme cache. No-op for non-kokoro
+     * backends. Useful for long-running daemons that resynthesize across
+     * many speakers and want bounded memory. (PLAN #56 #5)
+     */
+    public void clearPhonemeCache() {
+        int rc = Lib.INSTANCE.crispasr_session_kokoro_clear_phoneme_cache(handle);
+        if (rc != 0) throw new IllegalStateException("clear_phoneme_cache failed (rc=" + rc + ")");
     }
 
     /**
