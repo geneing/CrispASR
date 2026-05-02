@@ -2327,3 +2327,100 @@ quartet (pure plumbing once the session API exposes `beam_size`),
 and per-decoder beam for the canary/cohere encoder-decoder pair.
 Both were never the heart of the §65 deferral — that was the
 `O(B × T²)` perf wall that the branched-KV variant tore down.
+
+### 71. PLAN #7 voxtral4b streaming — phase 1 + 1.5 (incremental encoder default-on) (May 2026)
+
+**Scope.** Voxtral-Mini-4B-Realtime is the only deferred backend with an
+architectural path to sub-second first-token streaming: causal+SWA
+encoder + sliding-window LLM with persistent KV cache. Phase 1 ships
+the streaming **API surface** for it. PTT/dictation semantics — `feed`
+continuously, `flush` returns the transcript.
+
+**Files.**
+- `src/voxtral4b.{h,cpp}`: 5 entrypoints (`voxtral4b_stream_open` /
+  `_feed` / `_get_text` / `_flush` / `_close`) + the `voxtral4b_stream`
+  struct + an incremental encoder graph (`voxtral4b_build_graph_encoder_stream`)
+  and projector graph that's wired but currently opt-in (see phase 1.5).
+- `src/crispasr_c_api.cpp`: `void* voxtral4b_stream_state` field on
+  `crispasr_stream` + 4 dispatch branches (close/feed/get_text/flush)
+  + open path in `crispasr_session_stream_open`. Mirrors the
+  kyutai/moonshine pattern from §69.
+- `tools/bench_streaming_latency.py`: greenfield bench harness driving
+  the stream API; `--check-batch-equality` runs the CLI batch baseline
+  and asserts the streaming transcript matches byte-for-byte.
+
+**Default path: incremental encoder during feed.** `feed()` runs the
+streaming encoder graph chunk-by-chunk (~80 ms audio per chunk), with
+persistent encoder K/V cache (`core_attn::kv_self_attn` with F32 cache
+sized to `audio_swa = 750` frames) and per-conv left-context state
+(2 mel frames for conv0, 1 d_model frame for conv1). `flush()` does
+just the streaming-prompt prefill + per-step audio-injection greedy
+decode, exactly mirroring the CLI adapter in
+`examples/cli/crispasr_backend_voxtral4b.cpp`. Audio is auto-padded
+with 32 left-pad tokens of zero audio at stream open + right-aligned
++ 10 right-pad tokens at flush time. Set
+`CRISPASR_VOXTRAL4B_STREAM_BATCH_ENCODER=1` to fall back to running the
+whole encoder at flush time (regression-debug switch).
+
+**Validation.** Bit-exact-batch on JFK 11 s (M1, Q4_K):
+- Batch CLI: `"And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."`
+- Streaming via `crispasr_session_stream_open` → `feed` × N → `flush` → `get_text`: byte-for-byte identical, `[bench] BIT-EXACT-BATCH: PASS`.
+- Per-embed cosine vs batch encoder: cos≥0.9999 across all non-tail-pad
+  chunks; the final chunk diverges by construction (batch's last mel
+  frame uses right-side `center_pad` data that streaming doesn't have,
+  but the model already has the full content via the preceding 179
+  embeds, so the transcript is unaffected).
+- Wall-clock: feed ≈ 24 s (~170 ms per 80 ms chunk = 2.1× realtime),
+  flush ≈ 10 s. Combined ≈ 34 s for 11 s audio = 0.32× realtime —
+  same total cost as batch, distributed across feed + flush.
+
+**The streaming-prompt convention is qualitatively different from
+voxtral-3B's `[INST]…[TRANSCRIBE]` template** (which is what
+`run_voxtral_family` in `crispasr_c_api.cpp:1483` uses for voxtral 3B
++ qwen3 + granite). The 4B-realtime model's prompt is BOS + 38
+STREAMING_PAD = 39 tokens; audio embeds are *element-wise added* to the
+first 39 prompt embeds; subsequent audio embeds are *added per-step* to
+the next-token's embedding before the LLM forward (the "audio-injection
+pre_hook"). Decode stops when audio is exhausted (matches the CLI's
+`pre_hook → false` behaviour at `core/greedy_decode.h:306`); without
+this stop, the model emits trailing garbage tokens that the prompt
+template doesn't license. Streaming control tokens (id < 1000) are
+filtered from the user-visible transcript.
+
+**Phase 1.5 root cause and fix.** The incremental encoder went
+default-on after a single 2-axis layout transpose was removed from
+`vox_stream_advance_mel`. `core_mel::compute` with `Layout::MelsTime`
+emits `(n_mels, T)` row-major — T fast, n_mels slow — which is exactly
+what the encoder graph's mel input expects (ggml `ne=(T_mel, n_mels)`).
+The streaming code had a transpose-on-copy loop that wrote it as
+`(T, n_mels)` per row, sending mel and time axes to the encoder
+swapped. The encoder produced plausible-looking but content-incorrect
+audio embeds (cos~0.987 vs batch on the very first chunk, where the
+expected value is cos~1.0 since the input is all-zero left-pad
+silence). The model read these as noise and emitted only
+streaming-pad tokens. Removing the transpose and keeping `mel_pending`
++ `conv0_lctx` in `(n_mels, T)` per-band-contiguous layout restored
+cos≥0.9999 across all non-tail-pad chunks.
+
+Smaller fix bundled in: encoder K/V cache is F32, not F16. The batch
+encoder runs F32 throughout; F16 KV cache (which the LLM uses
+successfully because the LLM was trained with F16 KV) introduces
+precision loss across the encoder's 32 layers. Cost: 393 MB per stream
+at the SWA cap of 750 frames. TODO: re-measure F16 cache with the mel
+layout fix in place — F16 may now be sufficient.
+
+**Latency target NOT met by phase 1+1.5.** ≤240 ms first-token target
+requires further encoder optimisation (Q4_K Metal kernels, larger
+chunks, decoder thread overlap with next-chunk encode). Phase 2 work.
+Phase 1+1.5 ships the streaming API + bit-exact correctness; the
+realtime-feed property is the remaining work.
+
+**Working-tree hygiene incident (parallel-agent reset).** Mid-session,
+a concurrent process reset `src/voxtral4b.{cpp,h}` and PLAN/HISTORY to
+HEAD via `git checkout`/`git restore`, dropping the in-flight phase 1.5
+edits. Recovered them from `git stash@{0}` ("On main: parallel-agent
+docs + voxtral4b") which captured the work before the reset. Confirms
+the LEARNINGS rule "never stash/relocate unrelated changes; the
+working tree is shared by parallel agents" — and adds the corollary
+that `git stash` from a parallel agent IS a recovery vector when the
+working tree gets reset under you.

@@ -56,6 +56,41 @@ void voxtral4b_kv_reset(struct voxtral4b_context* ctx);
 float* voxtral4b_run_llm_kv(struct voxtral4b_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
                             int* out_n_tokens, int* out_vocab_size);
 
+// ── Native streaming (PLAN #7) ──────────────────────────────────────────────
+// Synchronous-incremental streaming for the realtime model. Causal+SWA
+// encoder + per-layer K/V cache + per-conv left-context state lets
+// `feed()` process audio chunk-by-chunk without re-encoding. `flush()`
+// runs the LLM prefill (prefix + accumulated audio embeds + suffix) and
+// the greedy decode loop. Validated against single-shot `_transcribe`
+// byte-for-byte (after SP `▁ → space` lstrip).
+//
+// PTT/dictation semantics: `feed` continuously, `flush` triggers the
+// final decode and populates `get_text`. Live-during-speech captions
+// are out of phase 1 scope (PLAN #7 phase 2).
+//
+// Audio length is bounded by the encoder's SWA window
+// (`audio_swa = 750` frames = ~15s); attempts to feed beyond that are
+// truncated at the front (oldest audio dropped).
+
+struct voxtral4b_stream;
+
+struct voxtral4b_stream* voxtral4b_stream_open(struct voxtral4b_context* ctx, int step_ms, int length_ms);
+
+// `pcm` is float32 mono at 16 kHz. Returns 0 on success, <0 on error.
+int voxtral4b_stream_feed(struct voxtral4b_stream* s, const float* pcm, int n_samples);
+
+// Copies the un-read transcript text into `out` (NUL-terminated, truncated to `cap`-1).
+// `out_t0_s` / `out_t1_s` give the cumulative window's audio time bounds.
+// Returns 1 if there's text to read, 0 if not, <0 on error.
+int voxtral4b_stream_get_text(struct voxtral4b_stream* s, char* out, int cap, double* out_t0_s, double* out_t1_s,
+                              int64_t* out_decode_counter);
+
+// Force a final decode over all audio fed so far. Idempotent. Returns 1
+// on success (even if no new text), <0 on error.
+int voxtral4b_stream_flush(struct voxtral4b_stream* s);
+
+void voxtral4b_stream_close(struct voxtral4b_stream* s);
+
 #ifdef __cplusplus
 }
 #endif

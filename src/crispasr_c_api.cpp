@@ -420,6 +420,10 @@ struct crispasr_stream {
 
     // PLAN #62c follow-on — opaque moonshine_streaming_stream*; same pattern.
     void* moonshine_streaming_state = nullptr;
+
+    // PLAN #7 — opaque voxtral4b_stream*; native incremental encoder + LLM
+    // decode-on-flush. Mutually exclusive with `ctx`.
+    void* voxtral4b_stream_state = nullptr;
 };
 
 CA_EXPORT crispasr_stream* crispasr_stream_open(whisper_context* ctx, int n_threads, int step_ms, int length_ms,
@@ -456,6 +460,12 @@ CA_EXPORT void crispasr_stream_close(crispasr_stream* s) {
     if (s->moonshine_streaming_state) {
         moonshine_streaming_stream_close((moonshine_streaming_stream*)s->moonshine_streaming_state);
         s->moonshine_streaming_state = nullptr;
+    }
+#endif
+#if __has_include("voxtral4b.h")
+    if (s->voxtral4b_stream_state) {
+        voxtral4b_stream_close((voxtral4b_stream*)s->voxtral4b_stream_state);
+        s->voxtral4b_stream_state = nullptr;
     }
 #endif
     delete s;
@@ -550,6 +560,11 @@ CA_EXPORT int crispasr_stream_feed(crispasr_stream* s, const float* pcm, int n_s
                                                n_samples);
     }
 #endif
+#if __has_include("voxtral4b.h")
+    if (s->voxtral4b_stream_state) {
+        return voxtral4b_stream_feed((voxtral4b_stream*)s->voxtral4b_stream_state, pcm, n_samples);
+    }
+#endif
     s->accum.insert(s->accum.end(), pcm, pcm + n_samples);
     s->stream_time_s += (double)n_samples / 16000.0;
 
@@ -576,6 +591,12 @@ CA_EXPORT int crispasr_stream_get_text(crispasr_stream* s, char* out_text, int o
     if (s->moonshine_streaming_state) {
         return moonshine_streaming_stream_get_text((moonshine_streaming_stream*)s->moonshine_streaming_state, out_text,
                                                    out_cap, out_t0_s, out_t1_s, out_counter);
+    }
+#endif
+#if __has_include("voxtral4b.h")
+    if (s->voxtral4b_stream_state) {
+        return voxtral4b_stream_get_text((voxtral4b_stream*)s->voxtral4b_stream_state, out_text, out_cap, out_t0_s,
+                                          out_t1_s, out_counter);
     }
 #endif
     if (!s->has_output) {
@@ -613,6 +634,11 @@ CA_EXPORT int crispasr_stream_flush(crispasr_stream* s) {
 #if __has_include("moonshine_streaming.h")
     if (s->moonshine_streaming_state) {
         return moonshine_streaming_stream_flush((moonshine_streaming_stream*)s->moonshine_streaming_state);
+    }
+#endif
+#if __has_include("voxtral4b.h")
+    if (s->voxtral4b_stream_state) {
+        return voxtral4b_stream_flush((voxtral4b_stream*)s->voxtral4b_stream_state);
     }
 #endif
     if (s->accum.empty())
@@ -3378,6 +3404,23 @@ CA_EXPORT crispasr_stream* crispasr_session_stream_open(crispasr_session* s, int
             return nullptr;
         auto* w = new crispasr_stream();
         w->moonshine_streaming_state = ms;
+        return w;
+    }
+#endif
+#ifdef CA_HAVE_VOXTRAL4B
+    if (s->voxtral4b_ctx) {
+        // PLAN #7 — native incremental encoder + decode-on-flush.
+        // step_ms / length_ms are accepted for ABI parity but currently
+        // ignored (decode happens at flush in phase 1).
+        (void)n_threads;
+        (void)keep_ms;
+        (void)language;
+        (void)translate;
+        voxtral4b_stream* vs = voxtral4b_stream_open(s->voxtral4b_ctx, step_ms, length_ms);
+        if (!vs)
+            return nullptr;
+        auto* w = new crispasr_stream();
+        w->voxtral4b_stream_state = vs;
         return w;
     }
 #endif

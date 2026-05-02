@@ -24,7 +24,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 | **HIGH** | [#62 Streaming + mic library API](#62-streaming--mic-library-api) | M-L | crispasr_stream_* whisper-only; needs Python/Rust wrappers (Dart has), generalize to session handle, library-level mic via miniaudio, native streaming for moonshine-streaming + kyutai-stt + voxtral4b |
 | **MEDIUM** | [#60 llama.cpp/llamafile perf trick ports](#60-cross-backend-perf-tricks-llamacpp--llamafile-ports) | 14 items | 60a/b/c/d/f/g DONE; 60e env-flag wired across 9 backends (mimo-asr validated, others awaiting per-backend cosine pass); 60h-n parked/skip |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
-| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | |
+| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | phase 1 + 1.5 SHIPPED (incremental encoder bit-exact-batch on JFK; default-on); phase 2 (live captions) deferred |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
 | **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
@@ -71,10 +71,91 @@ NOT audio→phoneme. Runs on transcription output.
 
 ## 7. Native voxtral4b streaming
 
-Expose voxtral4b's native 240ms-2.4s latency streaming via pre_hook
-audio frame injection. Needs threading (encoder thread + decoder thread).
+### Phase 1 — SHIPPED via batch-encoder-at-flush
 
-**Effort:** ~200-300 LOC. High complexity.
+**Status (May 2026):** Streaming API surface delivered. `crispasr_session_stream_open`
+on a voxtral4b session returns a stream handle that accepts `feed()` /
+`flush()` / `get_text()`. Bit-exact-batch on JFK validated. Phase 1
+ships as the supported PTT/dictation path (`feed` continuously, `flush`
+returns the transcript).
+
+**Implementation:** `voxtral4b_stream_*` C ABI in `src/voxtral4b.{h,cpp}` +
+adapter wiring (`src/crispasr_c_api.cpp` ~387/450/543/570/609/3343).
+Mirrors the kyutai/moonshine streaming-state field pattern. `feed()`
+accumulates PCM only; `flush()` runs the batch mel + encoder once over
+the full PCM, then performs the streaming-prompt prefill (BOS + 38
+STREAMING_PAD = 39 tokens, audio embeds added to first 39 prompt embeds)
+and the per-step audio-injection greedy decode loop, exactly mirroring
+`examples/cli/crispasr_backend_voxtral4b.cpp`. Audio is auto-padded with
+32 left-pad tokens of silence at stream open and right-aligned + 10
+right-pad tokens at flush time.
+
+**Bench (M1, Q4_K, JFK 11s):** feed = 1 ms (no per-chunk work),
+flush = 8.5 s, transcript byte-for-byte = batch.
+
+**Latency target NOT met by phase 1:** ≤240 ms first-token requires
+incremental encoder during `feed`. Phase 1.5 below.
+
+### Phase 1.5 — SHIPPED, incremental encoder
+
+The incremental encoder is now the default path. Audio embeds bit-match
+the batch encoder on JFK (cos≥0.9999 across all non-tail-pad chunks;
+the final chunk diverges by construction because batch's last mel frame
+includes right-side `center_pad` data that streaming doesn't emit).
+Transcript matches batch byte-for-byte. Set
+`CRISPASR_VOXTRAL4B_STREAM_BATCH_ENCODER=1` to fall back to the whole-
+clip batch encoder at flush (kept as a regression-debug switch).
+
+**Root cause that gated 1.5.** A two-axis layout transpose in
+`vox_stream_advance_mel`. `core_mel::compute` with `Layout::MelsTime`
+emits `(n_mels, T)` row-major (T fast, n_mels slow), which is exactly
+what the encoder graph's mel input expects. The streaming code had a
+"transpose on copy" loop that wrote it as `(T, n_mels)` — sending
+mel-and-time-axes to the encoder swapped, which produced plausible-
+looking but content-incorrect audio embeds. Fix: remove the transpose;
+keep `mel_pending` and `conv0_lctx` in `(n_mels, T)` per-band-
+contiguous layout end-to-end.
+
+A second smaller fix: F32 K/V cache instead of F16. The batch encoder
+runs F32 throughout; the F16 KV cache the LLM uses (which works because
+the LLM was trained with F16 KV) was applying to the encoder where it
+introduced precision loss across 32 layers. F32 cache is 393 MB at the
+SWA cap of 750 frames × 32 layers × 32 heads × 64 head_dim — heavy but
+tractable. (TODO: measure whether F16 cache loses cos≥0.999 once the
+mel layout is correct; might be safe to revert.)
+
+**Wall-clock (M1, Q4_K, JFK 11 s, no other workload).**
+- feed = ~24 s (~170 ms per 80 ms chunk = 2.1× realtime). Encoder is
+  the dominant cost during feed.
+- flush = ~10 s (LLM decode-loop dominates).
+- Combined = ~34 s for 11 s audio = 0.32× realtime. Same total cost as
+  batch transcribe; streaming distributes it across feed + flush
+  instead of bunching it at flush.
+
+**Bit-exact-batch validation:** `tools/bench_streaming_latency.py
+--check-batch-equality` PASSES on JFK with the incremental encoder
+default-on.
+
+### Phase 2 (deferred) — sub-second first-token + live captions
+
+For sub-second first-token (≤240 ms target), the path forward is one
+or more of:
+- **Encoder Q4_K-aware kernels.** The encoder runs F32 weights × Q4_K
+  weights (mostly Q4_K). On Metal Q4_K matmul is the dominant feed
+  cost; profile + optimise.
+- **Larger chunks during feed.** 80 ms chunks fire the kernel launch
+  overhead 12.5× per second of audio; 240 ms chunks would fire it
+  ~4×, often improving Metal throughput.
+- **Decoder thread overlapping audio injection.** Once feed can keep
+  up with realtime audio rate, a decoder thread can run in parallel
+  with the next chunk's encode, giving sub-second first-token after
+  flush.
+
+Live captions during speech are the second deferred deliverable. The
+synchronous incremental encoder already supports it — phase 2 just
+needs a periodic auto-decode + stable-prefix commit heuristic on
+top of the existing feed/get_text API. Not blocked by anything in
+the C++ runtime.
 
 ---
 

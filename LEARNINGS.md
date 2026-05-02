@@ -6918,10 +6918,57 @@ streaming. Threads only help if the bench shows you can't keep up with
 audio rate at synchronous feed cadence. Don't pre-spend the LOC budget
 on threads the architecture didn't need.
 
-PLAN #7 phase 1 shipped the API + bit-exact-batch on JFK in ~600 LOC
-total (including the bench harness), no C++ threads. Phase 1.5
-(incremental encoder bug fix) is the only remaining work to hit the
-≤240 ms first-token target.
+PLAN #7 phase 1 + 1.5 shipped the API + the incremental encoder, both
+bit-exact-batch on JFK, ~600 LOC + ~150 LOC bench harness, no C++
+threads. The remaining latency win (≤240 ms first-token) is
+encoder-kernel optimisation work (Q4_K Metal kernels, larger chunks,
+decoder thread overlap with next-chunk encode), not a threading-the-
+whole-thing problem.
+
+## Lesson — `core_mel::Layout::MelsTime` emits T-fast, n_mels-slow; matching ggml's mel-input convention; don't transpose on the way in
+
+Hit during PLAN #7 phase 1.5. `core_mel::compute(Layout::MelsTime)`
+returns `(n_mels, T)` row-major — per-band-row contiguous, i.e. for
+band m, all T timesteps are stored sequentially before band m+1's row
+starts. So `mel[m * T + t]` indexes element (band m, time t).
+
+The encoder graph (in `voxtral4b.cpp:534`) creates the mel input as
+`ggml_new_tensor_2d(F32, T_mel, n_mels)`. ggml's `ne[0]` is the FAST
+axis, so this tensor has T fast, n_mels slow — exactly matching
+core_mel's output. `ggml_backend_tensor_set(mel_tensor, mel_data, ...)`
+just memcpys the bytes; the convention matches **only if** you treat
+the data as already-(T, n_mels) layout-compatible.
+
+Phase 1.5 streaming code originally had a "transpose on copy" loop
+that wrote `mel_pending` as per-frame interleaved
+(`mel_pending[t * n_mels + m]` = m fast, t slow), assuming the encoder
+expected per-frame-row layout. The encoder saw mel and time axes
+**swapped**: each "time step" the conv stem processed actually
+contained values from many time positions of one mel band. The output
+was plausible (real numbers, similar magnitudes to batch) but
+content-meaningless. The LLM read the resulting audio embeddings as
+noise and emitted only streaming-pad tokens (id=32, filtered to empty
+transcript).
+
+**Generalisable rule.** When wiring a streaming-mode mel feed into a
+graph whose batch sibling consumes `core_mel::compute` output directly,
+just memcpy the chunks; do NOT transpose. Keep all internal mel
+buffers (`mel_pending`, conv left-context) in the same `(n_mels, T)`
+per-band-contiguous layout. Cross-chunk concatenation requires
+interleaving per-band rows (each new chunk's row m gets appended
+after the previous chunks' row m, not at the end of the linear buffer)
+— a ~10-line loop, not a transpose.
+
+Diagnostic signature: for an all-zero input (e.g. the 32 left-pad
+tokens of silence in voxtral4b's prompt prefix), the streaming and
+batch encoder MUST produce identical outputs (cos = 1.0). Cosine
+~0.99 with non-trivial element-wise differences on a zero-input chunk
+is the fingerprint of an axis-orientation bug or a precision/dtype
+mismatch in the K/V cache. Distinguish: a transpose preserves
+sum-of-squares but scrambles per-element values; a dtype mismatch
+(F16 vs F32) introduces a uniform low-magnitude noise floor without
+scrambling. Both can compound across deep encoders to where the LLM
+treats the embeds as silence.
 
 ## Lesson — `language="auto"` is a hand grenade for backends that embed language codes literally
 
