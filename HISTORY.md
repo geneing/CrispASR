@@ -1892,6 +1892,93 @@ text-only session-API holdout. §61 audit updated with current
 DONE / OPEN status for each sub-item (61a-c/e/f DONE; 61d/g/h/i/j
 queued; 61k blocked on 60k).
 
+**65a-residue gemma4-e2b session-API word probs (commit
+946f624).** gemma4-e2b already used `core_greedy_decode::run` for
+its decode loop — switching to `run_with_probs` was straight-
+forward: capture the prefill-step prob via
+`core_greedy_decode::softmax_of`, route surviving (non-special)
+ids + probs through optional `out_token_ids` / `out_token_probs`
+parameters on `gemma4_e2b_transcribe_impl`. Public additions:
+`gemma4_e2b_transcribe_with_probs`, `gemma4_e2b_result_free`,
+`gemma4_e2b_token_text`. Session adapter applies SentencePiece
+▁→space decode per-token (Gemma's vocab uses ▁ markers) and runs
+the shared `emit_words_from_tokens` helper. With this commit
+**every ASR backend has a token-prob path through the session
+API** — no more text-only fallbacks for transcription.
+
+**61d Best-of-N for the LLM-style decoder quartet (commit
+946f624).** The temperature work in 9ffb196 gave glm-asr /
+kyutai-stt / moonshine / omniasr-llm multinomial sampling. To
+make `--best-of N --temperature T > 0` actually draw N independent
+samples (rather than collapse to one repeated sample because the
+per-call seed was deterministic from audio), each backend gained
+a sticky `*_set_seed(ctx, seed)` setter:
+
+* moonshine: new `seed_override` field on `moonshine_context`,
+  mixed into the existing xorshift-derived `rng_state` in the
+  decode loop. seed=0 falls through to audio-derived seed (legacy
+  single-shot bit-identical behaviour).
+* omniasr-llm: same pattern — `seed_override` field mixed into
+  the encoder-data-derived `rng_state` of
+  `omniasr_transcribe_llm`.
+* glm-asr / kyutai-stt: both sample via libc `rand()` (static
+  helper with no context arg). `*_set_seed(ctx, unsigned)` calls
+  `srand(seed)` instead — process-global, but best-of-N at the
+  adapter level is sequential so the pattern works. Documented
+  as "serialize at adapter".
+
+Adapter pattern (identical across all four backends):
+
+```cpp
+const int n_runs = (params.temperature > 0 && params.best_of > 1)
+                     ? params.best_of : 1;
+result* best = nullptr;
+double best_score = -1.0;
+for (int run = 0; run < n_runs; run++) {
+    backend_set_seed(ctx,
+        run == 0 ? 0 : (uint64_t)run * 0x9E3779B97F4A7C15ULL);
+    auto* cand = backend_transcribe_with_probs(ctx, ...);
+    double score = mean(cand->token_probs);
+    if (!best || score > best_score) { swap; }
+    else { backend_result_free(cand); }
+}
+```
+
+Run 0 always uses seed 0 → sticky override falls back to the
+audio-derived seed → bit-identical to single-shot. Only runs
+1..N-1 inject salt.
+
+Smoke (moonshine on JFK with `-tp 0.7 --best-of 3`):
+```
+crispasr[moonshine]: best-of-3 picked score=0.9190
+And so my fellow American, ask not what your country can do for
+you, ask what you can do for your country.
+```
+Greedy baseline transcribes "fellow-american asked"; best-of-3 —
+choosing the highest-mean-prob sample of 3 — got "fellow
+American, ask" which is the actually-correct transcription. Real
+quality win, not just diversity. README "Best-of-N" row gains
+4 ✔.
+
+**Closures and deferrals.** With this commit, PLAN #65 is fully
+closed (no more text-only ASR backends in the session API). PLAN
+#61 closes 61a-f (20 cells gained across the audit). Remaining
+open: 61h beam search (~300 LOC shared infra, queued), 61j
+translate (empirical validation across 3 backends, queued).
+Deferred with documented reason:
+
+* 61g `--ask` — target backends (glm-asr, omniasr-llm) are not
+  instruction-tuned. glm-asr's prompt is hardcoded ids, no live
+  tokenizer; omniasr-llm uses FLORES-200 lang ids, not chat.
+  Both would need empirical validation before plumbing the toggle.
+* 61i flash-attn for fc-ctc — `core_conformer::build_block`'s
+  rel-pos path (Q·K + R·Q_v + rel_shift) doesn't fit
+  `ggml_flash_attn_ext` (no rel-pos hook). Would need positional-
+  encoding swap or custom flash kernel.
+* 65b binding word_p exposure for Go/Java/Ruby/JS — those
+  bindings are TTS-only today; full Session ASR API surface is a
+  separate scope (~150 LOC + design per binding).
+
 ### 66. Feature-matrix closure pass — sticky setters + streaming + mic + Go/Java/Ruby parity (May 2026)
 
 Six commits (`d963e3a`, `947262f`, `041471f`, `89687f0`, `5534588`

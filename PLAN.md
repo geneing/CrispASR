@@ -1304,11 +1304,12 @@ landed. Remaining open: gemma4-e2b token-prob API + Go/Java/Ruby/JS
 binding word accessors (the latter partially handled by parallel
 worker in `5534588`).
 
-### 65a-residue. gemma4-e2b session-API word probs — OPEN
+### 65a-residue. gemma4-e2b session-API word probs — **DONE → [HISTORY §65](HISTORY.md)**
 
-Last text-only backend. Refactor `gemma4_e2b_transcribe` into
-`_impl` + `_with_probs` mirroring the moonshine/omniasr pattern.
-~80 LOC.
+Last text-only ASR backend closed. `gemma4_e2b_transcribe_impl` +
+`_with_probs` + `_token_text` shipped; session adapter wires
+through SentencePiece ▁→space + `emit_words_from_tokens`. Every
+ASR backend now has a token-prob path through the session API.
 
 ### 65b-residue. Remaining bindings (JS only)
 
@@ -1324,35 +1325,26 @@ The README "Feature matrix" was missing checkmarks for many cells
 where the underlying model already supported the feature. Tracker
 for closing the remaining gaps.
 
-### 61a-c, 61e, 61f — **DONE → [HISTORY §65](HISTORY.md)**
+### 61a-f — **DONE → [HISTORY §65](HISTORY.md)**
 
 | Sub-item | Outcome |
 |---|---|
 | 61a Auto-download for fc-ctc + wav2vec2 | 2 ✔ |
 | 61b Per-token confidence × 7 backends | 7 ✔ (full row, 15/15) |
 | 61c Kyutai native + word timestamps | 2 ✔ |
+| 61d Best-of-N × 4 LLM-style decoders | 4 ✔ |
 | 61e Temperature for omniasr-llm | 1 ✔ |
 | 61f Punctuation toggle × 4 LLM-style decoders | 4 ✔ |
-| **Subtotal** | **16 cells gained** |
+| **Subtotal** | **20 cells gained** |
 
-### 61d. Best-of-N for LLM-style decoder quartet — OPEN
+### 61g. Audio Q&A (`--ask`) — DEFERRED
 
-**Tier:** 2. **Effort:** ~80 LOC per backend. **Cells:** 4.
-
-`glm-asr`, `kyutai-stt`, `moonshine`, `omniasr-llm` all support
-temperature now. Best-of-N adds: a per-call seed parameter
-(otherwise N runs of same audio give N identical samples), an
-N-run loop, scoring by mean prob, picking the winner. Pattern
-already exists in `crispasr_backend_qwen3.cpp:272-345`.
-
-### 61g. Audio Q&A (`--ask`) for glm-asr / omniasr-llm — OPEN
-
-**Tier:** 2. **Effort:** ~80 LOC per backend. **Cells:** 2.
-
-Inject `params.ask` into the chat template. voxtral4b is
-streaming-only; doesn't fit. Validation: probe each model with a
-known-good Q&A clip; if output is sensible, plumb. Otherwise mark
-backend with `*` (granite/qwen3 do this).
+glm-asr is an ASR fine-tune (hardcoded prompt ids, no live
+tokenizer for arbitrary instructions); omniasr-llm uses FLORES-200
+language conditioning, not chat. Both would need empirical
+validation showing the model honours an instruction prompt before
+plumbing the toggle. Out of scope until a backend lands that's
+actually instruction-tuned.
 
 ### 61h. Beam search for LLM family + enc-dec — OPEN
 
@@ -1366,14 +1358,12 @@ by one token, get logits). All four LLM backends share it. For
 canary/cohere/moonshine, beam lives in the per-model decoder loop;
 one PR per backend.
 
-### 61i. Flash attention for fc-ctc — OPEN
+### 61i. Flash attention for fc-ctc — DEFERRED
 
-**Tier:** 3. **Effort:** ~80 LOC. **Cells:** 1-2.
-
-fc-ctc reuses the canary_ctc runtime (encoder-only Conformer with
-conventional attention). Flip `use_flash` flag in
-`canary_ctc_context_params`, route through fc-ctc adapter. wav2vec2
-deferred — its encoder lives outside `core_attn`; modest payoff.
+`core_conformer::build_block`'s rel-pos path (`Q·K + R·Q_v +
+rel_shift`) doesn't fit `ggml_flash_attn_ext` — the kernel has no
+rel-pos hook. Would need either a positional-encoding swap or a
+custom flash kernel. Reopen after PLAN #58 / Conformer rewrite.
 
 ### 61j. Translate + source/target lang for voxtral4b / glm-asr / omniasr-llm — OPEN
 
@@ -1542,10 +1532,12 @@ specific flag on a specific backend** (per PLAN #59 policy).
 
 ## 66. Wrapper publishing bootstrap — required before language registries can ship
 
-**Status:** OPEN — blocks `release-wrappers.yml` on every tag push;
-has been failing on every release since v0.5.0 (the workflow is
-correctly written but the registries reject the publish because
-the packages have never been registered there). Confirmed on v0.5.4
+**Status:** OPEN, auto-trigger silenced. The `tags: ['v*']` push
+trigger on `release-wrappers.yml` is now COMMENTED OUT so future tag
+pushes don't keep producing red runs while we're not ready to
+bootstrap. Workflow stays in the repo on `workflow_dispatch` only —
+manual dispatch still works for ad-hoc testing during bootstrap.
+Failed on every release since v0.5.0; confirmed again on v0.5.4
 (`gh run view 25248028443`).
 
 The CI workflow pushes to three registries automatically on every
@@ -1600,9 +1592,13 @@ takes over via the existing workflow.
 
 ### Resilience improvements landed alongside this entry
 
-`release-wrappers.yml` is updated so a single registry's
-misconfiguration doesn't fail the whole workflow:
+`release-wrappers.yml` is updated so when we DO re-enable the
+auto-trigger, a single registry's misconfiguration doesn't fail the
+whole workflow:
 
+- Auto-trigger on `tags: ['v*']` is currently **commented out**.
+  Re-enable by un-commenting the two lines (`push:` /
+  `tags: ['v*']`) after bootstrap completes.
 - Each job runs a fast secret/config presence check at the top and
   echoes a clear "skipping: registry X not configured" instead of
   letting `cargo` / `twine` emit cryptic auth errors deep in the
@@ -1610,7 +1606,7 @@ misconfiguration doesn't fail the whole workflow:
 - Each job uses `continue-on-error: true` so the others still try.
 - Workflow comment block updated to reference this PLAN section.
 
-After bootstrap completes, the next tag push (v0.5.5+) should
+After bootstrap + re-enabling the trigger, the next tag push should
 publish all three wrappers cleanly.
 
 ---
