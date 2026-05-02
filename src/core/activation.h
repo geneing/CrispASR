@@ -52,11 +52,11 @@ static inline ggml_tensor* snake_alpha(ggml_context* ctx, ggml_tensor* x, ggml_t
 // Input  beta:  (C,)    F32, per-channel amplitude log-scale.
 // Output:       (C, T)  F32.
 static inline ggml_tensor* snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor* alpha, ggml_tensor* beta) {
-    ggml_tensor* ea = ggml_exp(ctx, alpha);              // (C,)
+    ggml_tensor* ea = ggml_exp(ctx, alpha);                   // (C,)
     ggml_tensor* inv_eb = ggml_exp(ctx, ggml_neg(ctx, beta)); // (C,) = 1 / exp(β)
-    ggml_tensor* xa = ggml_mul(ctx, x, ea);              // (C, T)
+    ggml_tensor* xa = ggml_mul(ctx, x, ea);                   // (C, T)
     ggml_tensor* s = ggml_sin(ctx, xa);
-    ggml_tensor* s2 = ggml_mul(ctx, s, s);               // (C, T)
+    ggml_tensor* s2 = ggml_mul(ctx, s, s); // (C, T)
     ggml_tensor* scaled = ggml_mul(ctx, s2, inv_eb);
     return ggml_add(ctx, x, scaled);
 }

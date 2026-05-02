@@ -122,8 +122,7 @@ static inline ggml_tensor* convt1d_crop(ggml_context* ctx, ggml_tensor* x, ggml_
     const int T_out = T_unpad - crop_left - crop_right;
     y = ggml_reshape_2d(ctx, y, T_unpad, Cout);
     if (crop_left > 0 || crop_right > 0) {
-        y = ggml_view_2d(ctx, y, T_out, Cout, (size_t)T_unpad * sizeof(float),
-                         (size_t)crop_left * sizeof(float));
+        y = ggml_view_2d(ctx, y, T_out, Cout, (size_t)T_unpad * sizeof(float), (size_t)crop_left * sizeof(float));
         y = ggml_cont(ctx, y); // (T_out, Cout)
     }
     y = ggml_cont(ctx, ggml_transpose(ctx, y)); // (Cout, T_out)
