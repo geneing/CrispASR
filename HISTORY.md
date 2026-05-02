@@ -2415,7 +2415,7 @@ chunks, decoder thread overlap with next-chunk encode). Phase 2 work.
 Phase 1+1.5 ships the streaming API + bit-exact correctness; the
 realtime-feed property is the remaining work.
 
-**Phase 2 partial — chunk-size + timing instrumentation (May 2026).**
+**Phase 2 partial — chunk-size + timing instrumentation + default-unification (May 2026).**
 - Default internal encoder chunk bumped 80 ms → 240 ms
   (`CRISPASR_VOXTRAL4B_STREAM_CHUNK_MS` env-var override). 2.6× feed
   speedup on JFK 11 s (24 s → 9.3 s); bit-exact-batch unaffected.
@@ -2424,6 +2424,13 @@ realtime-feed property is the remaining work.
 - Per-stage timing instrumentation (`CRISPASR_VOXTRAL4B_STREAM_TIMING=1`)
   prints encoder-drain / prefill / first-text-token / per-step p50/p95
   / total flush wall-clock to stderr.
+- Default-unification fix: feed() was incremental-by-default but flush()
+  was batch-encoder-by-default — opposite-default bug from the stash
+  restoration. Each flush threw away the streaming encoder's audio_embeds
+  and re-ran the whole encoder over the full PCM. Unified to incremental
+  on both paths (`CRISPASR_VOXTRAL4B_STREAM_BATCH_ENCODER=1` to opt out).
+  Wins: encoder drain at flush 2064 ms → 1016 ms; first-text-token
+  2674 ms → 1646 ms.
 
 **Architectural floor for first-text-token latency** (revealed by
 the timing pass on M1 Q4_K JFK 11 s):
