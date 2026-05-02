@@ -2102,3 +2102,43 @@ Word-exact (only minor `Kartoffel-Orpheus-Test` hyphenation drift). Synthetic va
 **HF upload economics.** Per-file `api.upload_file` (sequential, README first) was the working recipe; `api.create_commit` with a 4-op transaction hung on token-refresh `RemoteDisconnected` mid-upload (43 min in TCP CLOSE_WAIT before kill). Xet dedup is dramatic when uploads share a base model: orpheus 10.1 GB upload was 576 MB net new bytes (Llama-3.2-3B base shared with the unsloth mirror); the synthetic Kartoffel 12 GB upload was ~5.1 GB net new because most chunks deduped against the natural variant which had landed an hour earlier.
 
 **Gated-repo gotcha.** `SebastianBodza/Kartoffel_Orpheus-3B_german_*` are click-through gated. Even when authenticated as `cstr`, `snapshot_download` returned 401 — diagnosed as a token-loading bug: when `HF_HOME` is overridden, the lib looks for `$HF_HOME/token` instead of the default `~/.cache/huggingface/token`. Drop the `HF_HOME` override and it works. Direct `requests.head` with explicit `Authorization` header worked all along, which is what made the diagnosis tractable.
+
+### 68. v0.5.4 release + wrapper-publish auto-trigger silenced (May 2026)
+
+Tagged `v0.5.4` at commit `1c0e996`, `release.yml` (binary artifacts +
+GitHub release page) + `Publish Docker image` ran cleanly. **291 commits
+since v0.5.3** (April 27); highlights in the tag annotation:
+
+- MiMo-V2.5-ASR end-to-end (PLAN #51) + perf wave (#51b/b' step-decode
+  KV reuse, #60d fused QKV, #60e KV-quant env wired across 9 backends).
+- Qwen3-TTS family (Base 1.7B, VoiceDesign 1.7B, CustomVoice 0.6B/1.7B).
+- Orpheus-3B-FT TTS + lex-au-orpheus-de + Kartoffel_Orpheus DE natural.
+- granite-speech-4.1 plus + nar variants.
+- Per-token confidence + per-word probability across 14 backends.
+- Streaming + mic library API (PLAN #62 a/b/d).
+- Zero-copy mmap GGUF loader (`CRISPASR_GGUF_MMAP=1`), preload, mlock,
+  WILLNEED + MADV_RANDOM helpers (PLAN #60a/b/c/f/g).
+- Vibevoice cache-bypass extended to Vulkan + CUDA (issue #47, geneing).
+
+**Wrapper-publish workflow silenced.** `release-wrappers.yml`'s
+`tags: ['v*']` auto-trigger has been failing on every release since
+v0.5.0 because the three target packages
+(`crispasr-sys`/`crispasr` on crates.io, `crispasr` on PyPI, `crispasr`
+on pub.dev) **have never been registered** — the registries reject
+the very first publish from a CI-only flow because there's no prior
+owner record to verify against. v0.5.4 confirmed it again
+(`gh run view 25248028443`).
+
+Decision: comment out the auto-trigger so future tag pushes don't keep
+producing red runs; keep `workflow_dispatch` so manual ad-hoc testing
+still works during eventual bootstrap. Bootstrap procedure is documented
+end-to-end in PLAN §66 with exact per-registry commands. Workflow is
+also hardened (per-job `continue-on-error: true` + secret-presence
+prechecks) so when we re-enable the trigger, a single registry's
+misconfiguration won't fail the whole workflow.
+
+PLAN §67 carries forward the rest of this session's deferred
+follow-ups in one place: F16 mimo-asr re-upload, per-backend Q8_0 KV
+cosine validation, vibevoice CUDA cache reuse re-test,
+SYCL/HIP/ROCm cache-bypass extension, `MADV_RANDOM` per-backend
+wiring, disk5 cleanup, legacy `build.yml` audit.

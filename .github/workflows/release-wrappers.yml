@@ -31,9 +31,16 @@ name: Release language wrappers
 # "skipping: <registry> not configured" message instead of letting `cargo`
 # / `twine` emit cryptic auth errors deep in the log.
 
+# Auto-trigger on tag push is DISABLED until the per-registry bootstrap
+# documented in PLAN.md §66 is complete (none of crispasr-sys / crispasr
+# / pub.dev/crispasr exist on their respective registries yet, so every
+# auto-run since v0.5.0 has failed). The workflow stays here so we can
+# manually dispatch a publish from the Actions UI for ad-hoc testing
+# during the bootstrap, and so we can flip the trigger back on (uncomment
+# `push: tags: ['v*']` below) the moment bootstrap is done.
 on:
-  push:
-    tags: ['v*']
+  # push:
+  #   tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
