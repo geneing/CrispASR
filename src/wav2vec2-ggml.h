@@ -143,6 +143,29 @@ std::vector<float> wav2vec2_compute_logits(const wav2vec2_model& m, const float*
 std::string wav2vec2_greedy_decode(const wav2vec2_model& m, const float* logits, int T);
 
 /**
+ * Per-emission record from greedy CTC decode: one entry per non-blank emitted
+ * symbol after blank-strip + repeat-collapse. `prob` is the softmax probability
+ * of the picked token at the first frame where it was emitted (i.e. the frame
+ * the collapsed run started). `frame_start` / `frame_end` index the CTC
+ * encoder frame grid (use `wav2vec2_frame_dur()` for seconds-per-frame).
+ */
+struct wav2vec2_token_prob {
+    std::string text;
+    int32_t id = -1;
+    float prob = 0.0f;
+    int frame_start = 0; // first frame of the collapsed run
+    int frame_end = 0;   // last frame of the collapsed run (inclusive)
+};
+
+/**
+ * Greedy CTC decode that also returns per-emission token probabilities.
+ * The concatenation of `text` fields (with "|" → " " mapping applied) is
+ * equivalent to the output of `wav2vec2_greedy_decode`.
+ */
+std::vector<wav2vec2_token_prob> wav2vec2_greedy_decode_with_probs(const wav2vec2_model& m, const float* logits,
+                                                                   int T);
+
+/**
  * Compute the encoder frame duration in seconds.
  * For standard wav2vec2 at 16 kHz with default strides this is 0.02 s (50 fps).
  */

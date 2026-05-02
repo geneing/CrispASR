@@ -26,6 +26,31 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
 int moonshine_encode(struct moonshine_context* ctx, const float* audio, int n_samples, float** out_features,
                      int* out_seq_len, int* out_hidden_dim);
 void moonshine_free(struct moonshine_context* ctx);
+
+// Sticky sampling temperature. 0 = greedy argmax (default). > 0 enables
+// multinomial sampling from softmax(logits/temperature).
+void moonshine_set_temperature(struct moonshine_context* ctx, float temperature);
+
+// Single-token piece lookup. The returned pointer is owned by the context
+// and stable until the next call to this function. Returns empty string
+// for special tokens / out-of-range ids.
+const char* moonshine_token_text(struct moonshine_context* ctx, int token_id);
+
+// Result of `moonshine_transcribe_with_probs`: full decoded text + parallel
+// arrays of token ids and per-token softmax probabilities. `n_tokens`
+// excludes BOS / EOS. All pointers are malloc'd; free with
+// `moonshine_result_free`.
+struct moonshine_result {
+    char* text;
+    int* token_ids;
+    float* token_probs;
+    int n_tokens;
+};
+
+struct moonshine_result* moonshine_transcribe_with_probs(struct moonshine_context* ctx, const float* audio,
+                                                         int n_samples);
+
+void moonshine_result_free(struct moonshine_result* r);
 void moonshine_print_model_info(struct moonshine_context* ctx);
 
 void moonshine_set_n_threads(struct moonshine_context* ctx, int n_threads);

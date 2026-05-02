@@ -34,6 +34,26 @@ struct mimo_asr_context* mimo_asr_init_from_file(const char* path_model, struct 
 // the path via `mimo_asr_set_tokenizer_path` before the first call.
 char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* pcm, int n_samples);
 
+// Variant that additionally returns per-emitted-token ids and softmax
+// probabilities. `n_tokens` matches the count of tokens emitted by greedy
+// decode (including special tokens that get string-replaced from the visible
+// transcript — callers that want strict alignment should re-tokenise the
+// returned text). Free with mimo_asr_result_free.
+struct mimo_asr_result {
+    char* text;
+    int* token_ids;
+    float* token_probs;
+    int n_tokens;
+};
+
+struct mimo_asr_result* mimo_asr_transcribe_with_probs(struct mimo_asr_context* ctx, const float* pcm, int n_samples);
+
+void mimo_asr_result_free(struct mimo_asr_result* r);
+
+// Token-id → vocab piece (not detokenised — caller may need to apply
+// SentencePiece ▁→space). Returns empty string for out-of-range / special.
+const char* mimo_asr_token_text(struct mimo_asr_context* ctx, int id);
+
 // Set the path to the audio-tokeniser GGUF (cstr/mimo-tokenizer-GGUF).
 // Required before the first transcribe call. Returns 0 on success.
 int mimo_asr_set_tokenizer_path(struct mimo_asr_context* ctx, const char* path);

@@ -41,7 +41,7 @@ public:
         // friends) are English-only greedy-CTC models with no native
         // timestamp or punctuation control. Word-level timestamps via the
         // CTC aligner second pass (-am) work when requested.
-        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS;
+        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE;
     }
 
     bool init(const whisper_params& p) override {
@@ -71,19 +71,36 @@ public:
             return out;
         }
 
-        // Stage 2: greedy CTC collapse → SentencePiece-detokenized text.
-        char* text = canary_ctc_greedy_decode(ctx_, logits, T_enc, V);
+        // Stage 2: greedy CTC collapse → SentencePiece-detokenized text +
+        // per-emission probabilities.
+        canary_ctc_decode_result* r = canary_ctc_greedy_decode_with_probs(ctx_, logits, T_enc, V);
         std::free(logits);
-        if (!text) {
+        if (!r || !r->text) {
             fprintf(stderr, "crispasr[fastconformer-ctc]: greedy_decode failed\n");
+            if (r)
+                canary_ctc_decode_result_free(r);
             return out;
         }
 
         crispasr_segment seg;
         seg.t0 = t_offset_cs;
         seg.t1 = t_offset_cs + (int64_t)((double)n_samples / 16000.0 * 100.0);
-        seg.text = text;
-        std::free(text);
+        seg.text = r->text;
+
+        const int frame_dur_cs = canary_ctc_frame_dur_cs(ctx_);
+        seg.tokens.reserve((size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            crispasr_token tok;
+            tok.id = r->token_ids[i];
+            tok.confidence = r->token_probs[i];
+            if (r->text_lengths[i] > 0)
+                tok.text.assign(r->text + r->text_offsets[i], (size_t)r->text_lengths[i]);
+            tok.t0 = t_offset_cs + (int64_t)r->frame_starts[i] * frame_dur_cs;
+            tok.t1 = t_offset_cs + (int64_t)(r->frame_ends[i] + 1) * frame_dur_cs;
+            seg.tokens.push_back(std::move(tok));
+        }
+        canary_ctc_decode_result_free(r);
+
         out.push_back(std::move(seg));
         return out;
     }

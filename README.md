@@ -126,12 +126,12 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 | Native timestamps | ✔ | ✔ | ✔ | ✔ | | | | | | | | | | | |
 | CTC timestamps | | | ✔ | | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | ✔ | | ✔ |
 | Word-level timing | ✔ | ✔ | ✔ | ✔ | `-am` | `-am` | `-am` | `-am` | `-am` | `-am` | `-am` | | `-am` | `-am` | `-am` |
-| Per-token confidence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | | | | | | |
+| Per-token confidence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | Language auto-detect | ✔ | ✔ | LID | LID | LID | LID | LID | ✔ | LID | LID | ✔ | LID | LID | LID | LID |
 | Speech translation | ✔ | | ✔ | | ✔ | ✔ | | ✔ | | | | | | | |
 | Speaker diarization | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | all | all | all | all | all | all | all |
 | Grammar (GBNF) | ✔ | | | | | | | | | | | | | | |
-| Temperature sampling | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | | ✔ | ✔ | | | |
+| Temperature sampling | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | | ✔ | ✔ | | ✔ | |
 | Beam search | ✔ | | | | | | | | | | | | ✔ | | |
 | Best-of-N (`--best-of`) | ✔ | | | | ✔ | ✔ | ✔ | ✔ | | | | | | | |
 | Flash attention | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | | ✔ | ✔ | ✔ | ✔ | ✔ |
@@ -141,7 +141,7 @@ Run `crispasr --list-backends` to see it live. Each backend declares capabilitie
 | Source / target language | | | ✔ | | ✔ | ✔ | | ✔ | | | | | | | |
 | Audio Q&A (`--ask`) | | | | | * | ✔ | | * | | | | | | | |
 | Streaming (`--stream/--mic/--live`) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| Auto-download (`-m auto`) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | | | ✔ | ✔ | ✔ | ✔ | ✔ |
+| Auto-download (`-m auto`) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 
 **Key:** ✔ = native/built-in, `-am` = via CTC forced aligner (`-am canary-ctc-aligner.gguf` or `-am qwen3-forced-aligner.gguf`), **LID** = via external language identification pre-step (`-l auto`), **all** = via `--diarize` post-step (not declared by backend but always available), **pp** = via `--punc-model` post-processor (FireRedPunc or fullstop-punc), * = omniasr-LLM has KV cache (CTC variant does not).
 

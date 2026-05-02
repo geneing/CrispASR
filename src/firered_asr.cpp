@@ -1655,7 +1655,12 @@ static void conv2d_subsample_cpu(const float* features, int n_frames, int n_mels
 // Transcribe (CTC path)
 // ===========================================================================
 
-extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const float* samples, int n_samples) {
+// Internal entry point. When `out_token_ids` and `out_token_probs` are
+// non-null, the AR path additionally fills them with one entry per emitted
+// (non-special) token from the winning beam. CTC-fallback path does not
+// populate them. Returns nullptr / empty out on failure.
+static char* firered_asr_transcribe_impl(struct firered_asr_context* ctx, const float* samples, int n_samples,
+                                         std::vector<int>* out_token_ids, std::vector<float>* out_token_probs) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
 
@@ -1904,6 +1909,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
         int beam_size = beam_size_effective;
         struct beam_hyp {
             std::vector<int> tokens;
+            std::vector<float> token_logprobs; // parallel to tokens but skipping the SOS at index 0
             float score = 0;
             bool finished = false;
             std::vector<std::shared_ptr<std::vector<float>>> sa_k, sa_v; // [n_layers][history]
@@ -2102,6 +2108,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
             struct candidate {
                 int src_beam, token;
                 float score;
+                float token_logprob; // log-softmax of the picked token at this step (0 for finished beams)
             };
             std::vector<candidate> cands;
             cands.reserve(beam_size * beam_size + beam_size);
@@ -2298,14 +2305,14 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
 
                 for (int k = 0; k < beam_size; k++) {
                     if (top_idx[k] >= 0) {
-                        cands.push_back({bi, top_idx[k], beams[bi].score + top_score[k]});
+                        cands.push_back({bi, top_idx[k], beams[bi].score + top_score[k], top_score[k]});
                     }
                 }
             } // end per-beam computation
 
             for (int bi = 0; bi < beam_size; bi++)
                 if (beams[bi].finished)
-                    cands.push_back({bi, hp.eos_id, beams[bi].score});
+                    cands.push_back({bi, hp.eos_id, beams[bi].score, 0.0f});
 
             std::sort(cands.begin(), cands.end(),
                       [](const candidate& a, const candidate& b) { return a.score > b.score; });
@@ -2321,6 +2328,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                     new_beams[b].finished = true;
                 else {
                     new_beams[b].tokens.push_back(cands[b].token);
+                    new_beams[b].token_logprobs.push_back(cands[b].token_logprob);
                     new_beams[b].finished = false;
                 }
             }
@@ -2336,6 +2344,7 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
             if (beams[b].score > beams[best_beam].score)
                 best_beam = b;
         auto& tokens = beams[best_beam].tokens;
+        auto& tok_logprobs = beams[best_beam].token_logprobs;
 
         // Decode tokens
         std::string result;
@@ -2366,6 +2375,12 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
                         }
                     }
                     result += decoded;
+                    if (out_token_ids && out_token_probs) {
+                        out_token_ids->push_back(tid);
+                        // tok_logprobs is parallel to tokens[1..]; index i-1.
+                        const float lp = (i - 1 < (int)tok_logprobs.size()) ? tok_logprobs[i - 1] : 0.0f;
+                        out_token_probs->push_back(expf(lp));
+                    }
                 }
             }
         }
@@ -2497,6 +2512,39 @@ extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const f
     memcpy(out, result.c_str(), result.size());
     out[result.size()] = '\0';
     return out;
+}
+
+extern "C" char* firered_asr_transcribe(struct firered_asr_context* ctx, const float* samples, int n_samples) {
+    return firered_asr_transcribe_impl(ctx, samples, n_samples, nullptr, nullptr);
+}
+
+extern "C" struct firered_asr_result* firered_asr_transcribe_with_probs(struct firered_asr_context* ctx,
+                                                                        const float* samples, int n_samples) {
+    std::vector<int> token_ids;
+    std::vector<float> token_probs;
+    char* text = firered_asr_transcribe_impl(ctx, samples, n_samples, &token_ids, &token_probs);
+    if (!text)
+        return nullptr;
+
+    auto* r = (firered_asr_result*)calloc(1, sizeof(firered_asr_result));
+    r->text = text;
+    r->n_tokens = (int)token_ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        memcpy(r->token_ids, token_ids.data(), sizeof(int) * (size_t)r->n_tokens);
+        memcpy(r->token_probs, token_probs.data(), sizeof(float) * (size_t)r->n_tokens);
+    }
+    return r;
+}
+
+extern "C" void firered_asr_result_free(struct firered_asr_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
 }
 
 extern "C" const char* firered_asr_token_text(struct firered_asr_context* ctx, int id) {

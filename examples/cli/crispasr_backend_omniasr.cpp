@@ -15,7 +15,7 @@ public:
     OmniasrBackend() = default;
 
     const char* name() const override { return "omniasr"; }
-    uint32_t capabilities() const override { return 0; }
+    uint32_t capabilities() const override { return CAP_TOKEN_CONFIDENCE; }
 
     bool init(const whisper_params& params) override {
         omniasr_context_params cp = omniasr_context_default_params();
@@ -37,21 +37,53 @@ public:
 
     std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
                                              const whisper_params& params) override {
-        (void)t_offset_cs;
         (void)params;
         std::vector<crispasr_segment> out;
         if (!ctx_)
             return out;
 
-        char* text = omniasr_transcribe(ctx_, samples, n_samples);
-        if (text) {
-            crispasr_segment seg;
+        // LLM variant: capture per-token confidence. CTC variant returns
+        // nullptr from the with_probs path — fall back to the plain entry.
+        omniasr_result* r = omniasr_transcribe_with_probs(ctx_, samples, n_samples);
+        crispasr_segment seg;
+        seg.t0 = t_offset_cs;
+        seg.t1 = t_offset_cs + (int64_t)(n_samples * 100 / 16000);
+        if (r) {
+            if (r->text)
+                seg.text = r->text;
+            seg.tokens.reserve((size_t)r->n_tokens);
+            for (int i = 0; i < r->n_tokens; i++) {
+                crispasr_token tok;
+                tok.id = r->token_ids[i];
+                tok.confidence = r->token_probs[i];
+                const char* piece = omniasr_token_text(ctx_, r->token_ids[i]);
+                if (piece && piece[0]) {
+                    std::string p = piece;
+                    std::string decoded;
+                    for (size_t ci = 0; ci < p.size(); ci++) {
+                        if ((unsigned char)p[ci] == 0xE2 && ci + 2 < p.size() && (unsigned char)p[ci + 1] == 0x96 &&
+                            (unsigned char)p[ci + 2] == 0x81) {
+                            decoded += ' ';
+                            ci += 2;
+                        } else {
+                            decoded += p[ci];
+                        }
+                    }
+                    tok.text = std::move(decoded);
+                }
+                seg.tokens.push_back(std::move(tok));
+            }
+            omniasr_result_free(r);
+        } else {
+            // CTC variant: text only.
+            char* text = omniasr_transcribe(ctx_, samples, n_samples);
+            if (!text)
+                return out;
             seg.text = text;
-            seg.t0 = t_offset_cs;
-            seg.t1 = t_offset_cs + (int64_t)(n_samples * 100 / 16000);
-            out.push_back(std::move(seg));
             free(text);
         }
+        if (!seg.text.empty())
+            out.push_back(std::move(seg));
         return out;
     }
 

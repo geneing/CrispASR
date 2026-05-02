@@ -21,6 +21,7 @@ struct moonshine_context {
     moonshine_tokenizer tokenizer;
     ggml_backend_t backend = nullptr;
     std::string result_text;
+    std::string scratch_token_text; // backs `moonshine_token_text` return value
 
     // Decoder state
     moonshine_kv_cache kv_self;
@@ -29,6 +30,7 @@ struct moonshine_context {
     int enc_len = 0;
 
     int n_threads = 4;
+    float temperature = 0.0f; // 0 = greedy argmax; > 0 = multinomial sampling
     moonshine_timing timing = {};
 };
 
@@ -906,10 +908,18 @@ static int moonshine_decode_step(struct moonshine_context* ctx, int32_t token_id
 
 // ---------- Transcribe ----------
 
-const char* moonshine_transcribe(struct moonshine_context* ctx, const float* audio, int n_samples) {
-    if (!ctx || !audio || n_samples <= 0) {
-        return "";
-    }
+// Internal: run encoder + greedy/sampled decode loop. Always populates
+// `out_tokens`. When `out_token_probs` is non-null, also fills it with the
+// softmax probability of the picked token at each step (parallel to
+// `out_tokens`). Returns 0 on success.
+static int moonshine_transcribe_impl(struct moonshine_context* ctx, const float* audio, int n_samples,
+                                     std::vector<int32_t>& out_tokens, std::vector<float>* out_token_probs) {
+    out_tokens.clear();
+    if (out_token_probs)
+        out_token_probs->clear();
+
+    if (!ctx || !audio || n_samples <= 0)
+        return -1;
 
     const auto& hp = ctx->model.hparams;
 
@@ -921,7 +931,7 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
     // 1. Run encoder
     int ret = moonshine_run_encoder(ctx, audio, n_samples);
     if (ret != 0) {
-        return "";
+        return ret;
     }
 
     // 2. Init KV caches
@@ -932,12 +942,12 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
     int max_len = max_gen + 1; // +1 for BOS
 
     if (!moonshine_kv_cache_init(ctx->kv_self, hp.dec_n_layers, max_len, hp.n_kv_heads, hp.head_dim)) {
-        return "";
+        return -2;
     }
 
     if (!moonshine_kv_cache_init(ctx->kv_cross, hp.dec_n_layers, ctx->enc_len, hp.n_kv_heads, hp.head_dim)) {
         ctx->kv_self.reset();
-        return "";
+        return -2;
     }
 
     // 3. Precompute cross-attention KV
@@ -945,7 +955,7 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
     if (ret != 0) {
         ctx->kv_self.reset();
         ctx->kv_cross.reset();
-        return "";
+        return ret;
     }
 
     auto t_encode_done = std::chrono::high_resolution_clock::now();
@@ -976,10 +986,23 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
         ggml_free(plan_ctx);
     }
 
-    // 5. Greedy decode loop
-    std::vector<int32_t> tokens;
+    // 5. Decode loop. Picks via argmax when temperature == 0, otherwise
+    // softmax(logits/T) + multinomial sample.
     int32_t token = (int32_t)hp.bos_token_id;
-    std::vector<float> logits(hp.vocab_size);
+    std::vector<float> logits((size_t)hp.vocab_size);
+    const float T = ctx->temperature;
+    const bool sample = (T > 0.0f);
+
+    // Per-call seed: derive from samples + audio length so repeated runs are
+    // deterministic but different from each other.
+    uint64_t rng_state = 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)audio ^ (uint64_t)n_samples;
+    auto rand_uniform = [&]() -> float {
+        // xorshift64
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        return (float)((rng_state >> 11) & 0x1FFFFF) / (float)(1 << 21);
+    };
 
     for (int step = 0; step < max_len; step++) {
         ret = moonshine_decode_step(ctx, token, logits, gallocr);
@@ -987,37 +1010,138 @@ const char* moonshine_transcribe(struct moonshine_context* ctx, const float* aud
             break;
         }
 
-        // Argmax
-        int32_t best = 0;
-        float best_val = logits[0];
-        for (int i = 1; i < (int)hp.vocab_size; i++) {
-            if (logits[i] > best_val) {
-                best_val = logits[i];
-                best = i;
+        const int V = (int)hp.vocab_size;
+        int32_t picked = 0;
+        float picked_prob = 0.0f;
+
+        if (!sample) {
+            // Greedy argmax
+            int32_t best = 0;
+            float best_val = logits[0];
+            for (int i = 1; i < V; i++) {
+                if (logits[i] > best_val) {
+                    best_val = logits[i];
+                    best = i;
+                }
             }
+            picked = best;
+            if (out_token_probs) {
+                // Softmax of the picked logit (numerically stable).
+                float mx = best_val;
+                float s = 0.f;
+                for (int i = 0; i < V; i++)
+                    s += expf(logits[i] - mx);
+                picked_prob = 1.0f / s;
+            }
+        } else {
+            // Multinomial sample from softmax(logits / T).
+            float mx = logits[0];
+            for (int i = 1; i < V; i++)
+                if (logits[i] > mx)
+                    mx = logits[i];
+            std::vector<float> probs((size_t)V);
+            float s = 0.f;
+            const float inv_T = 1.0f / T;
+            for (int i = 0; i < V; i++) {
+                probs[i] = expf((logits[i] - mx) * inv_T);
+                s += probs[i];
+            }
+            const float inv_s = 1.0f / s;
+            for (int i = 0; i < V; i++)
+                probs[i] *= inv_s;
+            float u = rand_uniform();
+            float c = 0.f;
+            picked = V - 1;
+            for (int i = 0; i < V; i++) {
+                c += probs[i];
+                if (u <= c) {
+                    picked = i;
+                    break;
+                }
+            }
+            if (out_token_probs)
+                picked_prob = probs[picked];
         }
 
-        if (best == (int32_t)hp.eos_token_id) {
+        if (picked == (int32_t)hp.eos_token_id) {
             break;
         }
 
-        tokens.push_back(best);
-        token = best;
+        out_tokens.push_back(picked);
+        if (out_token_probs)
+            out_token_probs->push_back(picked_prob);
+        token = picked;
     }
 
     auto t_decode_done = std::chrono::high_resolution_clock::now();
     ctx->timing.decode_ms = std::chrono::duration<double, std::milli>(t_decode_done - t_encode_done).count();
-    ctx->timing.n_tokens = (int)tokens.size();
+    ctx->timing.n_tokens = (int)out_tokens.size();
 
-    // 6. Convert to text
-    ctx->result_text = ctx->tokenizer.tokens_to_text(tokens);
-
-    // 7. Cleanup
+    // Cleanup
     ggml_gallocr_free(gallocr);
     ctx->kv_self.reset();
     ctx->kv_cross.reset();
 
+    return 0;
+}
+
+const char* moonshine_transcribe(struct moonshine_context* ctx, const float* audio, int n_samples) {
+    if (!ctx)
+        return "";
+
+    std::vector<int32_t> tokens;
+    if (moonshine_transcribe_impl(ctx, audio, n_samples, tokens, nullptr) != 0)
+        return "";
+
+    ctx->result_text = ctx->tokenizer.tokens_to_text(tokens);
     return ctx->result_text.c_str();
+}
+
+extern "C" struct moonshine_result* moonshine_transcribe_with_probs(struct moonshine_context* ctx, const float* audio,
+                                                                    int n_samples) {
+    if (!ctx)
+        return nullptr;
+
+    std::vector<int32_t> tokens;
+    std::vector<float> probs;
+    if (moonshine_transcribe_impl(ctx, audio, n_samples, tokens, &probs) != 0)
+        return nullptr;
+
+    ctx->result_text = ctx->tokenizer.tokens_to_text(tokens);
+
+    auto* r = (moonshine_result*)calloc(1, sizeof(moonshine_result));
+    r->n_tokens = (int)tokens.size();
+    r->text = strdup(ctx->result_text.c_str());
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            r->token_ids[i] = tokens[i];
+            r->token_probs[i] = (i < (int)probs.size()) ? probs[i] : 0.0f;
+        }
+    }
+    return r;
+}
+
+extern "C" void moonshine_result_free(struct moonshine_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
+}
+
+extern "C" void moonshine_set_temperature(struct moonshine_context* ctx, float temperature) {
+    if (ctx)
+        ctx->temperature = (temperature > 0.0f) ? temperature : 0.0f;
+}
+
+extern "C" const char* moonshine_token_text(struct moonshine_context* ctx, int token_id) {
+    if (!ctx)
+        return "";
+    ctx->scratch_token_text = ctx->tokenizer.token_to_piece(token_id);
+    return ctx->scratch_token_text.c_str();
 }
 
 void moonshine_free(struct moonshine_context* ctx) {

@@ -153,12 +153,20 @@ struct glm_asr_context {
 
 // ===========================================================================
 // Temperature-aware token selection
-static int sample_token(const float* logits, int vocab, float temperature) {
+static int sample_token(const float* logits, int vocab, float temperature, float* out_prob = nullptr) {
     if (temperature <= 0.0f) {
         int best = 0;
         for (int i = 1; i < vocab; i++)
             if (logits[i] > logits[best])
                 best = i;
+        if (out_prob) {
+            // Numerically stable softmax of the picked logit.
+            float maxv = logits[best];
+            float s = 0.f;
+            for (int i = 0; i < vocab; i++)
+                s += expf(logits[i] - maxv);
+            *out_prob = 1.0f / s;
+        }
         return best;
     }
     float maxv = logits[0];
@@ -171,14 +179,22 @@ static int sample_token(const float* logits, int vocab, float temperature) {
         probs[i] = expf((logits[i] - maxv) / temperature);
         sum += probs[i];
     }
-    float r = ((float)rand() / (float)RAND_MAX) * sum;
+    const float inv_sum = 1.0f / sum;
+    for (int i = 0; i < vocab; i++)
+        probs[i] *= inv_sum;
+    float r = ((float)rand() / (float)RAND_MAX);
     float acc = 0;
+    int picked = vocab - 1;
     for (int i = 0; i < vocab; i++) {
         acc += probs[i];
-        if (acc >= r)
-            return i;
+        if (acc >= r) {
+            picked = i;
+            break;
+        }
     }
-    return vocab - 1;
+    if (out_prob)
+        *out_prob = probs[picked];
+    return picked;
 }
 
 // Implementation
@@ -471,7 +487,12 @@ extern "C" int32_t* glm_asr_tokenize(struct glm_asr_context* ctx, const char* te
 // Stub implementations — the full pipeline will be implemented iteratively
 // following the voxtral.cpp pattern. For now, expose the API surface.
 
-extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* samples, int n_samples) {
+// Internal: transcribe and (optionally) capture per-token ids + softmax probs.
+// When `out_token_ids` and `out_token_probs` are non-null, both are populated
+// in lock-step with the emitted (non-special, non-EOS) text tokens. The
+// returned char* is malloc'd and owned by the caller.
+static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* samples, int n_samples,
+                                     std::vector<int32_t>* out_token_ids, std::vector<float>* out_token_probs) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
 
@@ -556,7 +577,8 @@ extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* sa
 
     // First token: argmax
     int next = 0;
-    next = sample_token(logits, vocab, ctx->params.temperature);
+    float next_prob = 0.0f;
+    next = sample_token(logits, vocab, ctx->params.temperature, &next_prob);
     free(logits);
 
     // Decode loop
@@ -576,29 +598,35 @@ extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* sa
             break;
 
         // Append token text (with GPT-2 byte-level BPE decoding)
+        bool emitted = false;
         if (next >= 0 && next < (int)ctx->model.vocab.size()) {
             const auto& tok = ctx->model.vocab[next];
-            // Skip special tokens
-            if (tok.size() >= 2 && tok[0] == '<' && tok[1] == '|')
-                continue;
-            // Decode GPT-2 byte-level BPE: Ġ→space, Ċ→newline, etc.
-            for (size_t ci = 0; ci < tok.size();) {
-                unsigned char c = (unsigned char)tok[ci];
-                if (c == 0xC4 && ci + 1 < tok.size()) {
-                    unsigned char c2 = (unsigned char)tok[ci + 1];
-                    if (c2 == 0xA0) {
-                        result += ' '; // Ġ = U+0120 = space
-                        ci += 2;
-                        continue;
-                    } else if (c2 == 0x8A) {
-                        result += '\n'; // Ċ = U+010A = newline
-                        ci += 2;
-                        continue;
+            // Skip special tokens (no text contribution and no out-vector entry)
+            if (!(tok.size() >= 2 && tok[0] == '<' && tok[1] == '|')) {
+                // Decode GPT-2 byte-level BPE: Ġ→space, Ċ→newline, etc.
+                for (size_t ci = 0; ci < tok.size();) {
+                    unsigned char c = (unsigned char)tok[ci];
+                    if (c == 0xC4 && ci + 1 < tok.size()) {
+                        unsigned char c2 = (unsigned char)tok[ci + 1];
+                        if (c2 == 0xA0) {
+                            result += ' '; // Ġ = U+0120 = space
+                            ci += 2;
+                            continue;
+                        } else if (c2 == 0x8A) {
+                            result += '\n'; // Ċ = U+010A = newline
+                            ci += 2;
+                            continue;
+                        }
                     }
+                    result += (char)c;
+                    ci++;
                 }
-                result += (char)c;
-                ci++;
+                emitted = true;
             }
+        }
+        if (emitted && out_token_ids && out_token_probs) {
+            out_token_ids->push_back(next);
+            out_token_probs->push_back(next_prob);
         }
 
         // Forward one token
@@ -611,11 +639,45 @@ extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* sa
             break;
         n_past++;
 
-        next = sample_token(lg, vocab, ctx->params.temperature);
+        next = sample_token(lg, vocab, ctx->params.temperature, &next_prob);
         free(lg);
     }
 
     return strdup(result.c_str());
+}
+
+extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* samples, int n_samples) {
+    return glm_asr_transcribe_impl(ctx, samples, n_samples, nullptr, nullptr);
+}
+
+extern "C" struct glm_asr_result* glm_asr_transcribe_with_probs(struct glm_asr_context* ctx, const float* samples,
+                                                                int n_samples) {
+    std::vector<int32_t> ids;
+    std::vector<float> probs;
+    char* text = glm_asr_transcribe_impl(ctx, samples, n_samples, &ids, &probs);
+    if (!text)
+        return nullptr;
+    auto* r = (glm_asr_result*)calloc(1, sizeof(glm_asr_result));
+    r->text = text;
+    r->n_tokens = (int)ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            r->token_ids[i] = ids[i];
+            r->token_probs[i] = probs[i];
+        }
+    }
+    return r;
+}
+
+extern "C" void glm_asr_result_free(struct glm_asr_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
 }
 
 extern "C" float* glm_asr_compute_mel(struct glm_asr_context* ctx, const float* samples, int n_samples, int* out_n_mels,

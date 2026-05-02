@@ -41,6 +41,23 @@ char* firered_asr_transcribe(struct firered_asr_context* ctx, const float* sampl
 // Token text lookup.
 const char* firered_asr_token_text(struct firered_asr_context* ctx, int id);
 
+// Result of `firered_asr_transcribe_with_probs`: full transcript + parallel
+// arrays of token ids + per-token softmax probabilities (winning beam only).
+// `n_tokens` excludes SOS and EOS. `text` is the post-processed UTF-8
+// transcript (▁→space, EOS-stripped). All pointers are malloc'd; free with
+// `firered_asr_result_free`.
+struct firered_asr_result {
+    char* text;
+    int* token_ids;
+    float* token_probs;
+    int n_tokens;
+};
+
+struct firered_asr_result* firered_asr_transcribe_with_probs(struct firered_asr_context* ctx, const float* samples,
+                                                             int n_samples);
+
+void firered_asr_result_free(struct firered_asr_result* r);
+
 #ifdef __cplusplus
 }
 #endif

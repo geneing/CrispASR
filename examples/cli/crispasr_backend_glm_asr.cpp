@@ -17,7 +17,7 @@ public:
     const char* name() const override { return "glm-asr"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_TEMPERATURE | CAP_LANGUAGE_DETECT | CAP_AUTO_DOWNLOAD;
+        return CAP_TIMESTAMPS_CTC | CAP_TEMPERATURE | CAP_LANGUAGE_DETECT | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE;
     }
 
     bool init(const whisper_params& params) override {
@@ -32,25 +32,64 @@ public:
 
     std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
                                              const whisper_params& params) override {
+        (void)params;
         std::vector<crispasr_segment> out;
         if (!ctx_)
             return out;
 
-        char* text = glm_asr_transcribe(ctx_, samples, n_samples);
-        if (!text)
+        glm_asr_result* r = glm_asr_transcribe_with_probs(ctx_, samples, n_samples);
+        if (!r || !r->text)
             return out;
 
         crispasr_segment seg;
         seg.t0 = t_offset_cs;
         seg.t1 = t_offset_cs + (int64_t)((double)n_samples / 16000.0 * 100.0);
-        seg.text = text;
-        free(text);
+        seg.text = r->text;
 
         // Trim leading/trailing whitespace
         while (!seg.text.empty() && (seg.text.front() == ' ' || seg.text.front() == '\n'))
             seg.text.erase(seg.text.begin());
         while (!seg.text.empty() && (seg.text.back() == ' ' || seg.text.back() == '\n'))
             seg.text.pop_back();
+
+        // GPT-2 byte-level BPE decoder: Ġ (U+0120, UTF-8 0xC4 0xA0) → space,
+        // Ċ (U+010A, UTF-8 0xC4 0x8A) → newline. All other bytes pass through.
+        auto decode_bpe_piece = [](const char* raw) -> std::string {
+            std::string out;
+            if (!raw)
+                return out;
+            for (size_t ci = 0; raw[ci] != '\0';) {
+                unsigned char c = (unsigned char)raw[ci];
+                if (c == 0xC4 && raw[ci + 1] != '\0') {
+                    unsigned char c2 = (unsigned char)raw[ci + 1];
+                    if (c2 == 0xA0) {
+                        out += ' ';
+                        ci += 2;
+                        continue;
+                    }
+                    if (c2 == 0x8A) {
+                        out += '\n';
+                        ci += 2;
+                        continue;
+                    }
+                }
+                out += (char)c;
+                ci++;
+            }
+            return out;
+        };
+
+        // Per-token confidence; no per-token timestamps (GLM-ASR's LLM
+        // decoder isn't time-aligned).
+        seg.tokens.reserve((size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            crispasr_token tok;
+            tok.id = r->token_ids[i];
+            tok.confidence = r->token_probs[i];
+            tok.text = decode_bpe_piece(glm_asr_token_text(ctx_, r->token_ids[i]));
+            seg.tokens.push_back(std::move(tok));
+        }
+        glm_asr_result_free(r);
 
         if (!seg.text.empty())
             out.push_back(std::move(seg));

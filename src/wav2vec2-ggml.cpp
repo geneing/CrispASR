@@ -406,12 +406,23 @@ static void grouped_conv1d_same(const float* x, const float* w, const float* b, 
 // Input/output: channel-first [C, T] F32 on CPU.
 // w_f32: pre-dequantized F32 weight [K, C_in/G, C_out], layout [K*cpg, C_out] row-major
 // b_f32: F32 bias [C_out] or nullptr.
+//
+// Padding is applied on the CPU side (zero-pad into a wider input buffer)
+// rather than via ggml_pad_ext, because the Metal backend does not support
+// the PAD op and wav2vec2_load always picks the best available backend.
 static bool ggml_grouped_conv1d_same(const float* x_cf, float* y_cf, int C, int K, int G, int T, const float* w_f32,
                                      const float* b_f32, ggml_backend_t backend) {
     int cpg = C / G;
     // Asymmetric "same" padding: pad_l + pad_r = K-1, output length = T
     int pad_l = (K - 1) / 2;
     int pad_r = K - 1 - pad_l;
+    int T_pad = T + pad_l + pad_r;
+
+    // CPU-side zero-pad: per-channel buffer of size [T_pad, C] = (T+K-1)·C floats.
+    // Memory: e.g. 1024·(1024+30) ≈ 4 MB for the pos_conv largest case.
+    std::vector<float> x_padded((size_t)T_pad * (size_t)C, 0.0f);
+    for (int c = 0; c < C; c++)
+        memcpy(x_padded.data() + (size_t)c * T_pad + pad_l, x_cf + (size_t)c * T, (size_t)T * sizeof(float));
 
     size_t n_tensors = G * 12 + 20;
     size_t mem = ggml_tensor_overhead() * n_tensors + ggml_graph_overhead_custom(4096, false);
@@ -420,14 +431,10 @@ static bool ggml_grouped_conv1d_same(const float* x_cf, float* y_cf, int C, int 
     if (!ctx0)
         return false;
 
-    // Input [T, C] — channel-first data maps directly (ne[0]=T contiguous per channel)
-    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T, C);
-    ggml_set_name(inp, "gc_in");
-    ggml_set_input(inp);
-
-    // Pad input: [T, C] → [T+pad_l+pad_r, C] via ggml_pad_ext
-    ggml_tensor* padded = ggml_pad_ext(ctx0, inp, pad_l, pad_r, 0, 0, 0, 0, 0, 0);
-    int T_pad = T + pad_l + pad_r;
+    // Input is the already-padded buffer [T_pad, C] (channel-first, ne[0]=T_pad contiguous).
+    ggml_tensor* padded = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_pad, C);
+    ggml_set_name(padded, "gc_in");
+    ggml_set_input(padded);
 
     // Weight [K, cpg, C] (all groups packed along last dim)
     ggml_tensor* w_full = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, K, cpg, C);
@@ -481,7 +488,8 @@ static bool ggml_grouped_conv1d_same(const float* x_cf, float* y_cf, int C, int 
         return false;
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_in"), x_cf, 0, (size_t)C * T * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_in"), x_padded.data(), 0,
+                            (size_t)C * T_pad * sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_w"), w_f32, 0, (size_t)K * cpg * C * sizeof(float));
     if (b_full)
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_b"), b_f32, 0, (size_t)C * sizeof(float));
@@ -1928,4 +1936,56 @@ std::string wav2vec2_greedy_decode(const wav2vec2_model& m, const float* logits,
     auto lo = result.find_first_not_of(' ');
     auto hi = result.find_last_not_of(' ');
     return (lo == std::string::npos) ? "" : result.substr(lo, hi - lo + 1);
+}
+
+std::vector<wav2vec2_token_prob> wav2vec2_greedy_decode_with_probs(const wav2vec2_model& m, const float* logits,
+                                                                   int T) {
+    const auto& hp = m.hparams;
+    const int V = (int)hp.vocab_size;
+    const int blank_id = (int)hp.pad_token_id;
+    const int vocab_n = (int)m.vocab.size();
+
+    std::vector<wav2vec2_token_prob> out;
+    out.reserve((size_t)T / 2);
+
+    // Collect raw frame-level argmax + prob first (one pass, O(T*V)).
+    std::vector<int> argmax(T);
+    std::vector<float> argmax_prob(T);
+    for (int t = 0; t < T; t++) {
+        const float* lv = logits + t * V;
+        int best_id = (int)(std::max_element(lv, lv + V) - lv);
+        // Numerically stable softmax over V (V is ~30-100 here, cheap).
+        float mx = lv[best_id];
+        float s = 0.f;
+        for (int v = 0; v < V; v++)
+            s += expf(lv[v] - mx);
+        argmax[t] = best_id;
+        argmax_prob[t] = 1.f / s; // exp(lv[best]-mx) == 1
+    }
+
+    // CTC collapse: emit on transitions, skip blanks + special tokens.
+    int prev_id = -1;
+    int run_start = 0; // first frame where current id was seen
+    for (int t = 0; t <= T; t++) {
+        int cur = (t == T) ? -1 : argmax[t];
+        if (cur != prev_id) {
+            // Close the previous run (if it was an emittable, non-blank token).
+            if (prev_id >= 0 && prev_id != blank_id && prev_id < vocab_n) {
+                const std::string& tok = m.vocab[prev_id];
+                if (tok != "<unk>" && tok != "<s>" && tok != "</s>") {
+                    wav2vec2_token_prob tp;
+                    tp.id = prev_id;
+                    tp.text = (tok == "|") ? " " : tok;
+                    tp.prob = argmax_prob[run_start];
+                    tp.frame_start = run_start;
+                    tp.frame_end = t - 1;
+                    out.push_back(std::move(tp));
+                }
+            }
+            prev_id = cur;
+            run_start = t;
+        }
+    }
+
+    return out;
 }

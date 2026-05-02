@@ -37,6 +37,23 @@ void omniasr_free(struct omniasr_context* ctx);
 // Returns malloc'd UTF-8 string, caller frees with free().
 char* omniasr_transcribe(struct omniasr_context* ctx, const float* samples, int n_samples);
 
+// Variant for the LLM model variant: returns text plus per-token ids and
+// softmax probabilities (CPU-side argmax + softmax). Returns nullptr for the
+// CTC variant — use omniasr_transcribe instead. Free with omniasr_result_free.
+struct omniasr_result {
+    char* text;
+    int* token_ids;
+    float* token_probs;
+    int n_tokens;
+};
+
+struct omniasr_result* omniasr_transcribe_with_probs(struct omniasr_context* ctx, const float* samples, int n_samples);
+
+void omniasr_result_free(struct omniasr_result* r);
+
+// Token text lookup (id → vocab piece, no detokenisation).
+const char* omniasr_token_text(struct omniasr_context* ctx, int id);
+
 #ifdef __cplusplus
 }
 #endif

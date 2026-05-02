@@ -75,6 +75,31 @@ int canary_ctc_align_words(struct canary_ctc_context* ctx,
 // transcript string. Useful as a sanity check that the model loads correctly.
 char* canary_ctc_greedy_decode(struct canary_ctc_context* ctx, const float* logits, int T_enc, int vocab_total);
 
+// Greedy CTC decode that also returns per-emission token info: one entry
+// per non-blank, non-special emitted symbol after blank-strip + repeat-collapse.
+// `probs[i]` is the softmax probability of the picked token at frame
+// `frame_starts[i]` (the first frame of the collapsed run).
+// `frame_ends[i]` is the last frame (inclusive) of that run.
+// `text_offsets[i]` / `text_lengths[i]` index into the result `text` field
+// so callers can extract the substring corresponding to each emission
+// without repeating the ▁→space mapping.
+// Returns nullptr on failure. Caller frees with canary_ctc_decode_result_free.
+struct canary_ctc_decode_result {
+    char* text;
+    int* token_ids;
+    float* token_probs;
+    int* frame_starts;
+    int* frame_ends;
+    int* text_offsets;
+    int* text_lengths;
+    int n_tokens;
+};
+
+struct canary_ctc_decode_result* canary_ctc_greedy_decode_with_probs(struct canary_ctc_context* ctx,
+                                                                     const float* logits, int T_enc, int vocab_total);
+
+void canary_ctc_decode_result_free(struct canary_ctc_decode_result* r);
+
 // Hyperparameters
 int canary_ctc_n_vocab(struct canary_ctc_context* ctx);
 int canary_ctc_blank_id(struct canary_ctc_context* ctx);

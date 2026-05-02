@@ -702,6 +702,137 @@ extern "C" char* canary_ctc_greedy_decode(struct canary_ctc_context* ctx, const 
     return strdup(trimmed.c_str());
 }
 
+extern "C" struct canary_ctc_decode_result* canary_ctc_greedy_decode_with_probs(struct canary_ctc_context* ctx,
+                                                                                const float* logits, int T_enc,
+                                                                                int V) {
+    if (!ctx || !logits || T_enc <= 0 || V <= 0)
+        return nullptr;
+
+    const int blank = (int)ctx->model.hparams.blank_id;
+    const auto& vocab = ctx->vocab.id_to_token;
+    const int vocab_n = (int)vocab.size();
+
+    // First pass: per-frame argmax + numerically stable softmax(argmax).
+    // The header advertises log-probs, but to stay correct against future
+    // graph changes we compute full softmax (≤16k vocab × ~100 frames; cheap).
+    std::vector<int> arg(T_enc);
+    std::vector<float> argp(T_enc);
+    for (int t = 0; t < T_enc; t++) {
+        const float* lv = logits + (size_t)t * V;
+        int best = (int)(std::max_element(lv, lv + V) - lv);
+        float mx = lv[best];
+        float s = 0.f;
+        for (int v = 0; v < V; v++)
+            s += expf(lv[v] - mx);
+        arg[t] = best;
+        argp[t] = 1.f / s; // exp(lv[best] - mx) == 1
+    }
+
+    // Second pass: CTC collapse. Track each emitted (non-blank, non-special)
+    // token's text + prob + frame range + text-offset into the output string.
+    struct emission {
+        int id;
+        float prob;
+        int frame_start;
+        int frame_end;
+        std::string piece; // already-detokenised piece (▁→' ' applied; word-leading ' ' included)
+    };
+    std::vector<emission> emits;
+    emits.reserve((size_t)T_enc / 4);
+
+    int prev = -1;
+    int run_start = 0;
+    for (int t = 0; t <= T_enc; t++) {
+        int cur = (t == T_enc) ? -1 : arg[t];
+        if (cur != prev) {
+            if (prev >= 0 && prev != blank && prev < vocab_n) {
+                const std::string& tok = vocab[prev];
+                std::string piece;
+                bool is_special = false;
+                if (tok.size() >= 3 && (unsigned char)tok[0] == 0xE2 && (unsigned char)tok[1] == 0x96 &&
+                    (unsigned char)tok[2] == 0x81) {
+                    piece = ' ';
+                    piece += tok.substr(3);
+                } else if (tok.size() >= 2 && tok[0] == '<' && tok.back() == '>') {
+                    is_special = true;
+                } else {
+                    piece = tok;
+                }
+                if (!is_special) {
+                    emission e;
+                    e.id = prev;
+                    e.prob = argp[run_start];
+                    e.frame_start = run_start;
+                    e.frame_end = t - 1;
+                    e.piece = std::move(piece);
+                    emits.push_back(std::move(e));
+                }
+            }
+            prev = cur;
+            run_start = t;
+        }
+    }
+
+    // Build the output text by concatenation (matches canary_ctc_greedy_decode
+    // exactly, including the trim-leading-space step).
+    std::string concatenated;
+    std::vector<std::pair<int, int>> piece_offsets; // (offset_in_concatenated, length)
+    piece_offsets.reserve(emits.size());
+    for (const auto& e : emits) {
+        piece_offsets.emplace_back((int)concatenated.size(), (int)e.piece.size());
+        concatenated += e.piece;
+    }
+    auto lo = concatenated.find_first_not_of(' ');
+    auto hi = concatenated.find_last_not_of(' ');
+    int trim_lead = (lo == std::string::npos) ? 0 : (int)lo;
+    std::string trimmed = (lo == std::string::npos) ? "" : concatenated.substr(lo, hi - lo + 1);
+    int trim_trail = (int)concatenated.size() - (int)(trimmed.size() + trim_lead);
+
+    // Apply the same trim to the per-emission offsets/lengths so the offsets
+    // index into `trimmed` instead of `concatenated`. Pieces that fall
+    // entirely inside the trimmed region get clamped lengths.
+    auto* r = (canary_ctc_decode_result*)calloc(1, sizeof(canary_ctc_decode_result));
+    r->text = strdup(trimmed.c_str());
+    r->n_tokens = (int)emits.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        r->frame_starts = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->frame_ends = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->text_offsets = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->text_lengths = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        const int trimmed_end = trim_lead + (int)trimmed.size();
+        for (int i = 0; i < r->n_tokens; i++) {
+            r->token_ids[i] = emits[i].id;
+            r->token_probs[i] = emits[i].prob;
+            r->frame_starts[i] = emits[i].frame_start;
+            r->frame_ends[i] = emits[i].frame_end;
+            int s = piece_offsets[i].first;
+            int e = s + piece_offsets[i].second;
+            // Clip to trimmed window, then translate to trimmed-relative offsets.
+            int cs = std::max(s, trim_lead);
+            int ce = std::min(e, trimmed_end);
+            r->text_offsets[i] = std::max(0, cs - trim_lead);
+            r->text_lengths[i] = std::max(0, ce - cs);
+        }
+        (void)trim_trail;
+    }
+    return r;
+}
+
+extern "C" void canary_ctc_decode_result_free(struct canary_ctc_decode_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r->frame_starts);
+    free(r->frame_ends);
+    free(r->text_offsets);
+    free(r->text_lengths);
+    free(r);
+}
+
 // ---------------------------------------------------------------------------
 // Subword tokenisation: SentencePiece-style greedy longest-prefix match
 // ---------------------------------------------------------------------------

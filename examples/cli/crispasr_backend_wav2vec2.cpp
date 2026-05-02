@@ -23,7 +23,9 @@ public:
 
     const char* name() const override { return "wav2vec2"; }
 
-    uint32_t capabilities() const override { return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS; }
+    uint32_t capabilities() const override {
+        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE;
+    }
 
     bool init(const whisper_params& p) override {
         model_ = std::make_unique<wav2vec2_model>();
@@ -56,15 +58,37 @@ public:
         const int V = (int)model_->hparams.vocab_size;
         const int T = (int)(logits.size() / V);
 
-        std::string text = wav2vec2_greedy_decode(*model_, logits.data(), T);
+        auto token_probs = wav2vec2_greedy_decode_with_probs(*model_, logits.data(), T);
+
+        // Reassemble text from token-level emissions (matches greedy_decode
+        // output: "|" → " ", trim leading/trailing spaces).
+        std::string text;
+        text.reserve(token_probs.size());
+        for (const auto& tp : token_probs)
+            text += tp.text;
+        auto lo = text.find_first_not_of(' ');
+        auto hi = text.find_last_not_of(' ');
+        text = (lo == std::string::npos) ? "" : text.substr(lo, hi - lo + 1);
 
         if (getenv("WAV2VEC2_BENCH"))
-            fprintf(stderr, "wav2vec2: decoded %d frames → %zu chars\n", T, text.size());
+            fprintf(stderr, "wav2vec2: decoded %d frames → %zu chars (%zu emissions)\n", T, text.size(),
+                    token_probs.size());
 
         crispasr_segment seg;
         seg.t0 = t_offset_cs;
         seg.t1 = t_offset_cs + (int64_t)((double)n_samples / 16000.0 * 100.0);
         seg.text = text;
+        const float frame_dur_s = wav2vec2_frame_dur(*model_);
+        seg.tokens.reserve(token_probs.size());
+        for (const auto& tp : token_probs) {
+            crispasr_token tok;
+            tok.text = tp.text;
+            tok.id = tp.id;
+            tok.confidence = tp.prob;
+            tok.t0 = t_offset_cs + (int64_t)(tp.frame_start * frame_dur_s * 100.0);
+            tok.t1 = t_offset_cs + (int64_t)((tp.frame_end + 1) * frame_dur_s * 100.0);
+            seg.tokens.push_back(std::move(tok));
+        }
         out.push_back(std::move(seg));
         return out;
     }

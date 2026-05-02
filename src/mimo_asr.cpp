@@ -1505,7 +1505,13 @@ static float* mimo_asr_run_lm(mimo_asr_context* ctx, const int32_t* input_ids_9x
     return out;
 }
 
-extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* pcm, int n_samples) {
+// Internal: shared implementation for `mimo_asr_transcribe` and
+// `mimo_asr_transcribe_with_probs`. When `out_token_ids` and
+// `out_token_probs` are non-null, both are populated in lock-step with
+// the emitted tokens (one entry per greedy step, including the EOS-trimmed
+// trailing token). Returns a malloc'd char* matching the visible transcript.
+static char* mimo_asr_transcribe_impl(struct mimo_asr_context* ctx, const float* pcm, int n_samples,
+                                      std::vector<int32_t>* out_token_ids, std::vector<float>* out_token_probs) {
     if (!ctx || !pcm || n_samples <= 0)
         return nullptr;
 
@@ -1593,7 +1599,9 @@ extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* 
     }
     const double t_prefill1 = bench ? now_ms() : 0.0;
     int vocab = (int)ctx->hp.llm_vocab;
-    auto argmax = [&](const float* L) {
+    // Returns the picked id; when `out_p` is non-null also writes the
+    // numerically stable softmax probability of that pick.
+    auto pick = [&](const float* L, float* out_p) {
         int best = 0;
         float bv = L[0];
         for (int i = 1; i < vocab; i++)
@@ -1601,15 +1609,32 @@ extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* 
                 bv = L[i];
                 best = i;
             }
+        if (out_p) {
+            float s = 0.f;
+            for (int i = 0; i < vocab; i++)
+                s += expf(L[i] - bv);
+            *out_p = (s > 0.f) ? (1.0f / s) : 0.0f;
+        }
         return best;
     };
 
     int n_past_groups = T_total / gs;
     std::vector<int32_t> generated;
+    std::vector<float> generated_probs;
     generated.reserve((size_t)max_new);
-    int next = argmax(logits);
+    // Only collect per-step softmax when the caller asked for it. For mimo's
+    // 151k vocab the per-step softmax adds ~150k expf calls (~ms-scale) on
+    // top of the LM forward, and the legacy argmax-only path must stay
+    // bit-identical and fast.
+    const bool capture_probs = (out_token_ids && out_token_probs);
+    if (capture_probs)
+        generated_probs.reserve((size_t)max_new);
+    float prob = 0.0f;
+    int next = pick(logits, capture_probs ? &prob : nullptr);
     free(logits);
     generated.push_back(next);
+    if (capture_probs)
+        generated_probs.push_back(prob);
 
     // 6. Greedy decode loop. Each step uses the lightweight T=1 step
     //    graph (51b/51b'): no audio path, fixed Lk for cached-graph
@@ -1624,10 +1649,12 @@ extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* 
         float* L = mimo_asr_run_lm_step(ctx, next, n_past_groups);
         if (!L)
             return nullptr;
-        next = argmax(L);
+        next = pick(L, capture_probs ? &prob : nullptr);
         free(L);
         n_past_groups++;
         generated.push_back(next);
+        if (capture_probs)
+            generated_probs.push_back(prob);
         decode_steps++;
     }
     const double t_decode1 = bench ? now_ms() : 0.0;
@@ -1644,8 +1671,15 @@ extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* 
     // 7. Detokenize. The upstream drops the last token (typically
     //    <|im_end|>) and string-replaces <|empty|>/<|eot|>/<|eostm|>
     //    out of the visible transcript.
-    if (!generated.empty() && (generated.back() == ctx->id_im_end || generated.back() == ctx->id_eos))
+    if (!generated.empty() && (generated.back() == ctx->id_im_end || generated.back() == ctx->id_eos)) {
         generated.pop_back();
+        if (capture_probs && !generated_probs.empty())
+            generated_probs.pop_back();
+    }
+    if (capture_probs) {
+        *out_token_ids = generated;
+        *out_token_probs = generated_probs;
+    }
 
     std::string detok = core_bpe::detokenize(ctx->vocab, generated.data(), generated.size());
 
@@ -1693,6 +1727,46 @@ extern "C" void mimo_asr_free(struct mimo_asr_context* ctx) {
     if (ctx->backend_cpu)
         ggml_backend_free(ctx->backend_cpu);
     delete ctx;
+}
+
+extern "C" char* mimo_asr_transcribe(struct mimo_asr_context* ctx, const float* pcm, int n_samples) {
+    return mimo_asr_transcribe_impl(ctx, pcm, n_samples, nullptr, nullptr);
+}
+
+extern "C" struct mimo_asr_result* mimo_asr_transcribe_with_probs(struct mimo_asr_context* ctx, const float* pcm,
+                                                                  int n_samples) {
+    std::vector<int32_t> ids;
+    std::vector<float> probs;
+    char* text = mimo_asr_transcribe_impl(ctx, pcm, n_samples, &ids, &probs);
+    if (!text)
+        return nullptr;
+    auto* r = (mimo_asr_result*)calloc(1, sizeof(mimo_asr_result));
+    r->text = text;
+    r->n_tokens = (int)ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            r->token_ids[i] = ids[i];
+            r->token_probs[i] = probs[i];
+        }
+    }
+    return r;
+}
+
+extern "C" void mimo_asr_result_free(struct mimo_asr_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
+}
+
+extern "C" const char* mimo_asr_token_text(struct mimo_asr_context* ctx, int id) {
+    if (!ctx || id < 0 || id >= (int)ctx->vocab.size())
+        return "";
+    return ctx->vocab[id].c_str();
 }
 
 extern "C" void mimo_asr_set_n_threads(struct mimo_asr_context* ctx, int n_threads) {

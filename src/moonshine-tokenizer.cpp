@@ -102,6 +102,17 @@ std::string moonshine_tokenizer::tokens_to_text(const std::vector<int32_t>& toke
     return trim(text);
 }
 
+std::string moonshine_tokenizer::token_to_piece(int32_t token) const {
+    if (token < 0 || (size_t)token >= vocab.size())
+        return "";
+    const auto& bytes = vocab[token];
+    if (bytes.size() > 2 && bytes.front() == '<' && bytes.back() == '>')
+        return "";
+    std::string s(bytes.begin(), bytes.end());
+    s = replace_all(s, "\xE2\x96\x81", " ");
+    return s;
+}
+
 size_t moonshine_tokenizer::vocab_size() const {
     return vocab.size();
 }

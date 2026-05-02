@@ -35,6 +35,18 @@ void glm_asr_free(struct glm_asr_context* ctx);
 // Returns malloc'd UTF-8 string, caller frees with free().
 char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* samples, int n_samples);
 
+// Same as above but additionally returns per-token ids + softmax probs.
+// Free with glm_asr_result_free.
+struct glm_asr_result {
+    char* text;
+    int* token_ids;
+    float* token_probs;
+    int n_tokens;
+};
+
+struct glm_asr_result* glm_asr_transcribe_with_probs(struct glm_asr_context* ctx, const float* samples, int n_samples);
+void glm_asr_result_free(struct glm_asr_result* r);
+
 // Pipeline building blocks for differential testing:
 
 // Compute mel spectrogram from raw PCM. Returns malloc'd (n_mels, T_mel) F32.

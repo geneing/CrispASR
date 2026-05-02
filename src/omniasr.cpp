@@ -97,6 +97,12 @@ struct omniasr_context {
     int kv_n_used = 0;
     // Compute buffer for ggml graph building
     std::vector<uint8_t> compute_meta;
+
+    // Per-call capture buffers used by omniasr_transcribe_with_probs.
+    // Non-null pointers are filled by the LLM transcribe path. Reset to
+    // nullptr by the public greedy entry.
+    std::vector<int32_t>* capture_token_ids = nullptr;
+    std::vector<float>* capture_token_probs = nullptr;
 };
 
 struct omniasr_perf {
@@ -533,7 +539,8 @@ static bool omniasr_alloc_kv_cache(omniasr_context* ctx, int max_ctx) {
 // ===========================================================================
 
 static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
-                                    omniasr_perf* perf);
+                                    omniasr_perf* perf, std::vector<int32_t>* out_token_ids = nullptr,
+                                    std::vector<float>* out_token_probs = nullptr);
 
 // ===========================================================================
 // Transcribe
@@ -780,7 +787,8 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
         if (ctx->params.verbosity >= 1)
             fprintf(stderr, "omniasr-llm: encoder done [%d, %d], running decoder...\n", d_e, T_e);
 
-        char* out = omniasr_transcribe_llm(ctx, enc_out_data, d_e, T_e, &perf);
+        char* out = omniasr_transcribe_llm(ctx, enc_out_data, d_e, T_e, &perf, ctx->capture_token_ids,
+                                           ctx->capture_token_probs);
         perf.t_total_us = ggml_time_us() - t_total0;
         omniasr_perf_print(perf, n_samples, ctx->params.verbosity);
         return out;
@@ -999,11 +1007,15 @@ static ggml_cgraph* omniasr_build_dec_graph(omniasr_context* ctx, int n_past, in
     return gf;
 }
 
-static bool omniasr_run_dec_token(omniasr_context* ctx, int token_id, int n_past, int& next_token, omniasr_perf* perf) {
+static bool omniasr_run_dec_token(omniasr_context* ctx, int token_id, int n_past, int& next_token, omniasr_perf* perf,
+                                  std::vector<float>* out_logits = nullptr) {
     int32_t input_id = token_id;
     int32_t position = n_past;
 
-    ggml_cgraph* gf = omniasr_build_dec_graph(ctx, n_past, 1, true, true);
+    // When the caller wants raw logits we must build the logits-mode graph
+    // (output_token_id=false) so the final ggml_argmax doesn't strip them.
+    const bool need_logits = (out_logits != nullptr);
+    ggml_cgraph* gf = omniasr_build_dec_graph(ctx, n_past, 1, true, !need_logits);
     if (perf && perf->decode_nodes == 0)
         perf->decode_nodes = ggml_graph_n_nodes(gf);
     ggml_backend_sched_reset(ctx->sched);
@@ -1028,11 +1040,26 @@ static bool omniasr_run_dec_token(omniasr_context* ctx, int token_id, int n_past
         perf->n_dec_steps++;
     }
 
-    ggml_tensor* nt = ggml_graph_get_tensor(gf, "next_token");
-    int32_t id = 0;
     t0 = ggml_time_us();
-    ggml_backend_tensor_get(nt, &id, 0, sizeof(id));
-    next_token = id;
+    if (need_logits) {
+        ggml_tensor* lg = ggml_graph_get_tensor(gf, "logits");
+        const int V = (int)lg->ne[0];
+        out_logits->resize((size_t)V);
+        ggml_backend_tensor_get(lg, out_logits->data(), 0, (size_t)V * sizeof(float));
+        int best = 0;
+        float best_v = (*out_logits)[0];
+        for (int i = 1; i < V; i++)
+            if ((*out_logits)[i] > best_v) {
+                best_v = (*out_logits)[i];
+                best = i;
+            }
+        next_token = best;
+    } else {
+        ggml_tensor* nt = ggml_graph_get_tensor(gf, "next_token");
+        int32_t id = 0;
+        ggml_backend_tensor_get(nt, &id, 0, sizeof(id));
+        next_token = id;
+    }
     if (perf)
         perf->t_decode_logits_us += ggml_time_us() - t0;
     return true;
@@ -1098,7 +1125,7 @@ static ggml_cgraph* omniasr_build_prefill_graph(omniasr_context* ctx, int d_enc,
 
 static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
                                 bool use_lang, int lang_id, int lid_marker_id, int prefix_len, int& next_token,
-                                omniasr_perf* perf) {
+                                omniasr_perf* perf, std::vector<float>* out_logits = nullptr) {
     std::vector<int32_t> positions(prefix_len);
     for (int i = 0; i < prefix_len; i++)
         positions[i] = i;
@@ -1114,7 +1141,8 @@ static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& 
     int32_t lang = lang_id;
     int32_t bos = ctx->model.hp.bos_id;
 
-    ggml_cgraph* gf = omniasr_build_prefill_graph(ctx, d_enc, T_enc, use_lang, prefix_len, true);
+    const bool need_logits = (out_logits != nullptr);
+    ggml_cgraph* gf = omniasr_build_prefill_graph(ctx, d_enc, T_enc, use_lang, prefix_len, !need_logits);
     if (perf)
         perf->prefill_nodes = ggml_graph_n_nodes(gf);
     ggml_backend_sched_reset(ctx->sched);
@@ -1146,18 +1174,34 @@ static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& 
     if (perf)
         perf->t_prefill_compute_us += ggml_time_us() - t0;
 
-    ggml_tensor* nt = ggml_graph_get_tensor(gf, "next_token");
-    int32_t id = 0;
     t0 = ggml_time_us();
-    ggml_backend_tensor_get(nt, &id, 0, sizeof(id));
-    next_token = id;
+    if (need_logits) {
+        ggml_tensor* lg = ggml_graph_get_tensor(gf, "logits");
+        const int V = (int)lg->ne[0];
+        out_logits->resize((size_t)V);
+        ggml_backend_tensor_get(lg, out_logits->data(), 0, (size_t)V * sizeof(float));
+        int best = 0;
+        float best_v = (*out_logits)[0];
+        for (int i = 1; i < V; i++)
+            if ((*out_logits)[i] > best_v) {
+                best_v = (*out_logits)[i];
+                best = i;
+            }
+        next_token = best;
+    } else {
+        ggml_tensor* nt = ggml_graph_get_tensor(gf, "next_token");
+        int32_t id = 0;
+        ggml_backend_tensor_get(nt, &id, 0, sizeof(id));
+        next_token = id;
+    }
     if (perf)
         perf->t_decode_logits_us += ggml_time_us() - t0;
     return true;
 }
 
 static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
-                                    omniasr_perf* perf) {
+                                    omniasr_perf* perf, std::vector<int32_t>* out_token_ids,
+                                    std::vector<float>* out_token_probs) {
     auto& m = ctx->model;
     auto& hp = m.hp;
 
@@ -1227,14 +1271,26 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
     if (ctx->kv_buf)
         ggml_backend_buffer_clear(ctx->kv_buf, 0);
     ctx->kv_n_used = 0;
-    // 4. Prefill decoder with entire prefix
+    // 4. Prefill decoder with entire prefix. Capture logits when the caller
+    // wants per-token confidence so the first token's prob can be recorded.
     int cur_token = 0;
+    float cur_prob = 0.0f;
+    const bool want_probs = (out_token_ids && out_token_probs);
+    std::vector<float> step_logits;
     if (!omniasr_run_prefill(ctx, encoder_out, d_enc, T_enc, use_lang, lang_id, lid_marker_id, prefix_len, cur_token,
-                             perf)) {
+                             perf, want_probs ? &step_logits : nullptr)) {
         fprintf(stderr, "omniasr-llm: prefill failed\n");
         return nullptr;
     }
     ctx->kv_n_used = prefix_len;
+    if (want_probs && !step_logits.empty()) {
+        const int V = (int)step_logits.size();
+        float mx = step_logits[cur_token];
+        float s = 0.f;
+        for (int i = 0; i < V; i++)
+            s += expf(step_logits[i] - mx);
+        cur_prob = 1.0f / s;
+    }
 
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "omniasr-llm: prefill done (%d tokens)\n", prefix_len);
@@ -1245,8 +1301,13 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
         fprintf(stderr, "  prefill → token=%d (%s)\n", cur_token,
                 cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
 
-    if (cur_token != hp.eos_id)
+    if (cur_token != hp.eos_id) {
         output_tokens.push_back(cur_token);
+        if (want_probs) {
+            out_token_ids->push_back(cur_token);
+            out_token_probs->push_back(cur_prob);
+        }
+    }
 
     // 6. Autoregressive generation: one token at a time
     for (int step = 0; (int)output_tokens.size() < max_gen && cur_token != hp.eos_id; step++) {
@@ -1255,7 +1316,8 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
         }
 
         int n_past = prefix_len + step;
-        if (!omniasr_run_dec_token(ctx, cur_token, n_past, cur_token, perf)) {
+        if (!omniasr_run_dec_token(ctx, cur_token, n_past, cur_token, perf,
+                                   want_probs ? &step_logits : nullptr)) {
             fprintf(stderr, "omniasr-llm: decode step %d failed\n", step);
             break;
         }
@@ -1263,6 +1325,15 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
         if (cur_token == hp.eos_id)
             break;
         output_tokens.push_back(cur_token);
+        if (want_probs && !step_logits.empty()) {
+            const int V = (int)step_logits.size();
+            float mx = step_logits[cur_token];
+            float s = 0.f;
+            for (int i = 0; i < V; i++)
+                s += expf(step_logits[i] - mx);
+            out_token_ids->push_back(cur_token);
+            out_token_probs->push_back(1.0f / s);
+        }
 
         if (ctx->params.verbosity >= 2 && step < 5)
             fprintf(stderr, "  gen %d: token=%d (%s)\n", step, cur_token,
@@ -1306,4 +1377,64 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
     memcpy(out, result.c_str(), result.size());
     out[result.size()] = '\0';
     return out;
+}
+
+extern "C" struct omniasr_result* omniasr_transcribe_with_probs(struct omniasr_context* ctx, const float* samples,
+                                                                int n_samples) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+    // Only the LLM variant produces per-token logits. The CTC variant emits
+    // characters via argmax over the encoder head; not currently surfaced.
+    if (ctx->model.hp.model_type != 1)
+        return nullptr;
+
+    std::vector<int32_t> ids;
+    std::vector<float> probs;
+    ctx->capture_token_ids = &ids;
+    ctx->capture_token_probs = &probs;
+    char* text = omniasr_transcribe(ctx, samples, n_samples);
+    ctx->capture_token_ids = nullptr;
+    ctx->capture_token_probs = nullptr;
+    if (!text)
+        return nullptr;
+
+    // Filter to non-special ids (mirrors the detokenisation filter so the
+    // emitted text/tokens stay aligned).
+    auto& hp = ctx->model.hp;
+    auto* r = (omniasr_result*)calloc(1, sizeof(omniasr_result));
+    r->text = text;
+    std::vector<int> kept_ids;
+    std::vector<float> kept_probs;
+    kept_ids.reserve(ids.size());
+    kept_probs.reserve(ids.size());
+    for (size_t i = 0; i < ids.size(); i++) {
+        int tid = ids[i];
+        if (tid == hp.bos_id || tid == hp.eos_id || tid == hp.pad_id || tid == hp.unk_id)
+            continue;
+        kept_ids.push_back(tid);
+        kept_probs.push_back(i < probs.size() ? probs[i] : 0.0f);
+    }
+    r->n_tokens = (int)kept_ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        memcpy(r->token_ids, kept_ids.data(), sizeof(int) * (size_t)r->n_tokens);
+        memcpy(r->token_probs, kept_probs.data(), sizeof(float) * (size_t)r->n_tokens);
+    }
+    return r;
+}
+
+extern "C" void omniasr_result_free(struct omniasr_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
+}
+
+extern "C" const char* omniasr_token_text(struct omniasr_context* ctx, int id) {
+    if (!ctx || id < 0 || id >= (int)ctx->model.vocab.size())
+        return "";
+    return ctx->model.vocab[id].c_str();
 }

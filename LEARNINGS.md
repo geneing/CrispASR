@@ -794,6 +794,62 @@ cos_min ≥ 0.999983 against the Python reference (8/8 stages PASS).
 Marked with `// CrispASR patch` in the kernel. **MUST RE-APPLY after
 every ggml bump.**
 
+### Metal `GGML_OP_PAD` only supports right-side pads — and only matters on direct compute
+
+ggml's Metal backend rejects `GGML_OP_PAD` whenever any of the
+left-side pad params (`lp0`, `lp1`, `lp2`, `lp3` — op-params indices
+0/2/4/6) is non-zero. See
+`ggml/src/ggml-metal/ggml-metal-device.m:131-138`:
+
+```c
+case GGML_OP_PAD:
+    if (ggml_get_op_params_i32(op, 8) != 0) return false; // circular
+    return (ggml_get_op_params_i32(op, 0) == 0) && (ggml_get_op_params_i32(op, 2) == 0) &&
+           (ggml_get_op_params_i32(op, 4) == 0) && (ggml_get_op_params_i32(op, 6) == 0);
+```
+
+`ggml_pad` (right-only) always satisfies this. `ggml_pad_ext` does
+not — any left-pad on any dim trips the rejection.
+
+**The catch:** when the rejection fires depends on how the graph is
+run. `ggml_backend_sched_graph_compute` queries `supports_op` and
+falls unsupported ops back to a CPU sub-backend transparently. So
+in scheduler-based code paths a left-pad just gets routed to CPU
+and inference works. **`ggml_backend_graph_compute(backend, gf)`
+called directly has no fallback — Metal sees the unsupported op and
+crashes with `unsupported op 'PAD'`.**
+
+**Repro that bit us (May 2026):** wav2vec2's standalone
+`ggml_grouped_conv1d_same` (`src/wav2vec2-ggml.cpp`, called for the
+positional conv branch) used `ggml_pad_ext(ctx, x, pad_l, pad_r, …)`
+with `pad_l = (K-1)/2` ≈ 63 inside a graph dispatched via
+`ggml_backend_graph_compute(m.backend, gf)` where `m.backend` is
+`ggml_backend_init_best()` — Metal on Apple Silicon. Crash:
+`ggml_metal_op_encode_impl: error: unsupported op 'PAD'` on the
+first inference.
+
+**Fix:** zero-pad on the host into a wider input buffer, set the
+input tensor at the pre-padded shape, and skip the in-graph PAD op
+entirely. Per-call cost is one `vector<float>` zero-fill + memcpy
+of `T_pad * C * 4` bytes (≈2.8 MB for wav2vec2-large) — under 1 ms
+on M1, well below the noise floor on a 690 ms inference.
+
+**Audit rule going forward:** if you call
+`ggml_backend_graph_compute(backend, gf)` directly (without the
+scheduler) and the graph contains a left-side `ggml_pad_ext`, you
+have a Metal landmine. As of the May 2026 audit, the only live
+direct-compute callers are moonshine (`src/moonshine.cpp:572,693,892`),
+moonshine_streaming, orpheus_snac, whisper (`src/crispasr.cpp`),
+and wav2vec2-ggml. None of them currently have left-pads except the
+already-fixed wav2vec2 site. Every other left-pad in the tree
+(kyutai_stt, firered_asr, qwen3_tts, marblenet_vad, gemma4_e2b,
+vibevoice) runs through a scheduler and is safe by construction.
+
+The dead `build_pos_conv_graph` in `wav2vec2-ggml.cpp:615` retains
+the unfixed pattern but is gated off (`include_pos_conv=false`); if
+that path is ever revived (e.g. for data2vec multi-layer pos_conv),
+port the same CPU-pad fix.
+
 ### Qwen3-TTS runtime voice prompt bug: RVQ encode layout mismatch
 
 For `qwen3-tts`, "runtime WAV clone sounds wrong, baked voice-pack
