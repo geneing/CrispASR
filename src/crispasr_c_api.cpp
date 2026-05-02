@@ -775,6 +775,8 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
         backend = "voxtral4b";
     else if (strcmp(arch, "granite-speech") == 0)
         backend = "granite";
+    else if (strcmp(arch, "granite_nle") == 0 || strcmp(arch, "granite-nle") == 0)
+        backend = "granite-4.1-nar";
     else if (strcmp(arch, "fastconformer-ctc") == 0)
         backend = "fastconformer-ctc";
     else if (strcmp(arch, "canary-ctc") == 0)

@@ -285,6 +285,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "kokoro";
     if (contains_ci("styletts") && contains_ci("ljspeech"))
         return "kokoro";
+    if (contains_ci("granite") && contains_ci("nar"))
+        return "granite-4.1-nar";
     if (contains_ci("granite") && contains_ci("speech"))
         return "granite";
     if (contains_ci("glm") && contains_ci("asr"))
