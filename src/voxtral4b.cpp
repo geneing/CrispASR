@@ -1868,14 +1868,13 @@ extern "C" int voxtral4b_stream_flush(struct voxtral4b_stream* s) {
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     };
 
-    // PLAN #7 phase 1 ships with batch-encoder-at-flush as the default.
-    // The incremental encoder graph (chunked encode during feed()) is wired
-    // up but currently produces audio embeds that don't drive correct decode
-    // — the LLM sees them as silence-like and emits only streaming-pad tokens.
-    // Phase 1.5 will debug the incremental path; opt in via env var until then.
-    // The streaming API surface + adapter wiring is identical either way; the
-    // env var only swaps the encoder source.
-    const bool use_incremental = getenv("CRISPASR_VOXTRAL4B_STREAM_INCREMENTAL") != nullptr;
+    // PLAN #7 phase 1.5 default: incremental encoder ran during feed(), so
+    // s->audio_embeds is already populated. Flush just drains any residual
+    // mel/encoder/projector + runs the LLM decode. Set
+    // CRISPASR_VOXTRAL4B_STREAM_BATCH_ENCODER=1 to ignore the streaming
+    // encoder's output and re-run the batch encoder at flush — regression-
+    // debug switch matching the same env var on the feed path.
+    const bool use_incremental = (getenv("CRISPASR_VOXTRAL4B_STREAM_BATCH_ENCODER") == nullptr);
 
     // Right-pad the user audio: align to a SAMPLES_PER_TOKEN boundary, then
     // append kRightPadTokens worth of trailing zeros. Internal padding —
