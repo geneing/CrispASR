@@ -1,0 +1,257 @@
+// src/core/beam_decode.h — shared autoregressive beam-search decode loop.
+//
+// Companion to `core_greedy_decode::run_with_probs`. Same callback shape
+// at the call site (a single `replay_fn`), but instead of picking one
+// argmax / sampled token per step, this helper expands the top
+// `beam_size` hypotheses in parallel and prunes globally to keep the
+// highest-cumulative-logprob beams alive. Returns the winning beam's
+// tokens + per-token softmax probabilities.
+//
+// KV strategy — replay-from-prefix
+// --------------------------------
+// Beam search needs each beam to have its own KV state, but the LLM-style
+// runtime backends (glm-asr, kyutai-stt, omniasr-llm, moonshine via
+// decode step) keep KV in a single context-owned buffer. To avoid adding
+// a per-backend `kv_save` / `kv_restore` API, we exploit the fact that
+// every call to "advance the LM by these tokens at this n_past" lets us
+// write KV slots at any logical position. Each step rebuilds each beam's
+// KV by replaying its full generated suffix from the post-prompt anchor.
+//
+// Cost: O(beam_size × T²/2) extra forward work for T generated tokens vs
+// greedy's O(T). Acceptable for beam_size = 2-4 since the audio encoder
+// typically dominates wall time on these backends. If perf is bad on
+// long generations, the right next step is `*_kv_save` / `*_kv_restore`
+// per backend, not making this helper smarter.
+//
+// Caller contract
+// ---------------
+// Caller is responsible for:
+//   * Running the prompt prefill so KV slots [0, prompt_len) hold the
+//     prompt's K/V.
+//   * Capturing the prefill logits at the last prompt position.
+//   * Providing a `replay_fn(ctx, tokens, n_tokens, prompt_len)` that
+//     overwrites KV slots [prompt_len, prompt_len + n_tokens) with the
+//     given suffix's K/V and returns the last-position logits as a
+//     malloc'd `float*` of size `vocab_size` (or nullptr on failure).
+//     The helper free()s the returned buffer.
+//   * Resetting KV after `run_with_probs` returns (state is undefined
+//     since each beam-step overwrites slots).
+//
+// For backends that natively expose a batched
+// `forward(ctx, embeds, n_tokens, n_past)` — like glm-asr's
+// `glm_asr_run_llm_kv` — the replay_fn is a one-liner that embeds +
+// forwards. For backends with a per-token API (like omniasr-llm's
+// `omniasr_run_dec_token`), the replay_fn loops over tokens internally.
+//
+// Usage (glm-asr):
+//
+//     core_beam_decode::Config cfg;
+//     cfg.max_new_tokens = 512;
+//     cfg.eos_id         = hp.eos_token_ids[0];
+//     cfg.vocab_size     = hp.llm_vocab;
+//     cfg.beam_size      = params.beam_size;
+//     cfg.prompt_len     = (int)prompt_ids.size();
+//
+//     auto replay = [ctx](const int32_t* toks, int n, int prompt_len) -> float* {
+//         float* emb = glm_asr_embed_tokens(ctx, toks, n);
+//         if (!emb) return nullptr;
+//         float* lg = glm_asr_run_llm_kv(ctx, emb, n, prompt_len, nullptr, nullptr);
+//         std::free(emb);
+//         return lg;
+//     };
+//
+//     auto r = core_beam_decode::run_with_probs(ctx, prefill_lg, replay, cfg);
+//
+// Header-only so the compiler inlines each caller's concrete callable
+// at the call site (matching the greedy helper's pattern).
+
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <utility>
+#include <vector>
+
+namespace core_beam_decode {
+
+struct Config {
+    int max_new_tokens = 512; // hard cap on generated tokens
+    int eos_id = 2;           // stop-on-this-token in beam[0]
+    int vocab_size = 0;       // required
+    int beam_size = 1;        // 1 = degenerate to greedy-via-beam (still works, just expensive)
+    int prompt_len = 0;       // n_past after prompt prefill (replay anchor)
+};
+
+struct Result {
+    std::vector<int32_t> tokens; // generated tokens of the winning beam
+    std::vector<float> probs;    // softmax prob of each picked token in [0,1]
+};
+
+namespace detail {
+
+// Internal beam state. Tokens are the generated suffix only (post-prompt).
+struct Beam {
+    std::vector<int32_t> tokens;
+    std::vector<float> probs;
+    double cum_logprob = 0.0;
+    bool finished = false;
+};
+
+// Numerically-stable log-Z (log normaliser of softmax over `logits`).
+inline double compute_logZ(const float* logits, int vocab) {
+    float mx = logits[0];
+    for (int k = 1; k < vocab; k++)
+        if (logits[k] > mx)
+            mx = logits[k];
+    double sum = 0.0;
+    for (int k = 0; k < vocab; k++)
+        sum += std::exp((double)(logits[k] - mx));
+    return (double)mx + std::log(sum);
+}
+
+// Pick top-K tokens from `logits` and return their log-softmax values.
+// `out_ids` and `out_lps` are sized to K, sorted descending by logit.
+inline void top_k_log_softmax(const float* logits, int vocab, int K, std::vector<int>& out_ids,
+                              std::vector<double>& out_lps) {
+    if (K > vocab)
+        K = vocab;
+    out_ids.resize((size_t)K);
+    out_lps.resize((size_t)K);
+
+    const double logZ = compute_logZ(logits, vocab);
+
+    std::vector<int> idx((size_t)vocab);
+    for (int i = 0; i < vocab; i++)
+        idx[(size_t)i] = i;
+    std::partial_sort(idx.begin(), idx.begin() + K, idx.end(),
+                      [logits](int a, int b) { return logits[a] > logits[b]; });
+    for (int i = 0; i < K; i++) {
+        out_ids[(size_t)i] = idx[(size_t)i];
+        out_lps[(size_t)i] = (double)logits[idx[(size_t)i]] - logZ;
+    }
+}
+
+} // namespace detail
+
+// Run the beam decode loop.
+//
+// Template parameters:
+//   Ctx      : the model's opaque context type.
+//   ReplayFn : callable with signature
+//                `float * (Ctx*, const int32_t* tokens, int n_tokens, int prompt_len)`.
+//              Must overwrite KV slots [prompt_len, prompt_len + n_tokens)
+//              and return a malloc'd `float*` containing the last-position
+//              logits ([vocab_size, 1]). Returning nullptr terminates that
+//              beam.
+//
+// Pre-condition: caller has populated KV slots [0, prompt_len) with the
+// prompt's K/V; `prefill_logits` is the [V, 1] logits at the last prompt
+// position (caller-owned, not freed by this helper).
+//
+// Post-condition: KV is left in an undefined state — caller must reset
+// it before the next transcription.
+template <typename Ctx, typename ReplayFn>
+inline Result run_with_probs(Ctx* ctx, const float* prefill_logits, ReplayFn replay_fn, const Config& cfg) {
+    using detail::Beam;
+
+    Result result;
+    if (!prefill_logits || cfg.vocab_size <= 0)
+        return result;
+
+    const int B = (cfg.beam_size > 0) ? cfg.beam_size : 1;
+    const int V = cfg.vocab_size;
+
+    // 1. Initial beams: top-B from prefill logits.
+    std::vector<int> first_ids;
+    std::vector<double> first_lps;
+    detail::top_k_log_softmax(prefill_logits, V, B, first_ids, first_lps);
+
+    std::vector<Beam> beams((size_t)first_ids.size());
+    for (size_t i = 0; i < first_ids.size(); i++) {
+        beams[i].tokens.push_back(first_ids[i]);
+        beams[i].probs.push_back((float)std::exp(first_lps[i]));
+        beams[i].cum_logprob = first_lps[i];
+        if (first_ids[i] == cfg.eos_id)
+            beams[i].finished = true;
+    }
+    // top_k_log_softmax already returns descending; beams are sorted.
+
+    if (beams.empty())
+        return result;
+
+    // 2. Per-step expand-and-prune.
+    while ((int)beams[0].tokens.size() < cfg.max_new_tokens && !beams[0].finished) {
+        struct Cand {
+            int beam_idx;
+            int token;
+            double cum_logprob;
+            float token_prob;
+            bool from_finished; // carry-forward of an already-finished beam
+        };
+        std::vector<Cand> cands;
+        cands.reserve((size_t)B * (size_t)B + (size_t)B);
+
+        for (size_t bi = 0; bi < beams.size(); bi++) {
+            auto& b = beams[bi];
+            if (b.finished) {
+                cands.push_back({(int)bi, cfg.eos_id, b.cum_logprob, 1.0f, true});
+                continue;
+            }
+
+            float* lg = replay_fn(ctx, b.tokens.data(), (int)b.tokens.size(), cfg.prompt_len);
+            if (!lg) {
+                b.finished = true;
+                continue;
+            }
+
+            std::vector<int> ids;
+            std::vector<double> lps;
+            detail::top_k_log_softmax(lg, V, B, ids, lps);
+            std::free(lg);
+
+            for (size_t j = 0; j < ids.size(); j++) {
+                Cand c;
+                c.beam_idx = (int)bi;
+                c.token = ids[j];
+                c.cum_logprob = b.cum_logprob + lps[j];
+                c.token_prob = (float)std::exp(lps[j]);
+                c.from_finished = false;
+                cands.push_back(c);
+            }
+        }
+
+        if (cands.empty())
+            break;
+
+        const size_t keep = std::min<size_t>((size_t)B, cands.size());
+        std::partial_sort(cands.begin(), cands.begin() + keep, cands.end(),
+                          [](const Cand& a, const Cand& b) { return a.cum_logprob > b.cum_logprob; });
+        cands.resize(keep);
+
+        std::vector<Beam> next_beams;
+        next_beams.reserve(keep);
+        for (auto& c : cands) {
+            Beam nb = beams[(size_t)c.beam_idx]; // copy parent
+            if (c.from_finished) {
+                next_beams.push_back(std::move(nb));
+                continue;
+            }
+            nb.tokens.push_back(c.token);
+            nb.probs.push_back(c.token_prob);
+            nb.cum_logprob = c.cum_logprob;
+            if (c.token == cfg.eos_id)
+                nb.finished = true;
+            next_beams.push_back(std::move(nb));
+        }
+        beams = std::move(next_beams);
+    }
+
+    // 3. Best beam is beams[0] (top-of-cands ordering preserved by partial_sort).
+    result.tokens = std::move(beams[0].tokens);
+    result.probs = std::move(beams[0].probs);
+    return result;
+}
+
+} // namespace core_beam_decode

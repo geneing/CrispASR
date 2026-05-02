@@ -1979,6 +1979,53 @@ Deferred with documented reason:
   bindings are TTS-only today; full Session ASR API surface is a
   separate scope (~150 LOC + design per binding).
 
+**61h beam search (partial, May 2026 — this session).** Shipped the
+shared infra and one of four target cells; the other three are
+deferred for a perf-real reason that the original PLAN entry didn't
+foresee.
+
+**What landed:**
+
+- `src/core/beam_decode.h` — header-only template helper mirroring
+  `core_greedy_decode::run_with_probs`. Takes a single `replay_fn`
+  callback `(ctx, tokens, n_tokens, prompt_len) → float*` that
+  rebuilds the given beam's KV state and returns last-position
+  logits. Strategy is *replay-from-prefix*: each beam-step embeds +
+  forwards the entire generated suffix from the post-prompt anchor
+  (the C-API stays unchanged, no `*_kv_save` / `*_kv_restore`
+  needed). Top-K logits → cumulative log-prob → global prune. Stops
+  when `beams[0]` ends in EOS.
+- `glm-asr` adapter — `cp.beam_size = params.beam_size` plumbed
+  through; `glm_asr_transcribe_impl` dispatches to
+  `core_beam_decode::run_with_probs` post-prefill when
+  `beam_size > 1`. The replay lambda is `glm_asr_embed_tokens` +
+  `glm_asr_run_llm_kv` (which already supports batched
+  `(emb, n_tokens, n_past)` calls). `CAP_BEAM_SEARCH` added to
+  capabilities. README "Beam search" row gains 1 ✔ for glm-asr.
+
+**Greedy regression check:** `crispasr --backend glm-asr -bs 1 -f
+samples/jfk.wav` produces "And so, my fellow Americans, ask not what
+your country can do for you. Ask what you can do for your country."
+(unchanged from before the refactor).
+
+**Why the other three target backends got deferred.**
+`omniasr-llm`, `kyutai-stt`, and `moonshine` each have a per-step
+decode of the form "advance the LM by ONE token at the current KV
+position, return logits". Replay-from-prefix on those would do
+`O(B × T²)` *single-token* graph rebuilds — each rebuild is a fresh
+`ggml_init` + scheduler reset + Metal command buffer + sync. Even
+on glm-asr (which only needs `O(B × T)` *batched* rebuilds) the
+total Metal compute at `beam_size=2` on 11 s JFK was still many
+minutes per run during this session — replay-from-prefix is just
+expensive once `T` grows past ~50. The honest fix is per-backend
+`*_kv_save` / `*_kv_restore` so each beam can have a real branched
+state, instead of paying `O(T²)` to rebuild it from scratch every
+step. Reopen those rows when that infra lands. PLAN.md #61h was
+re-statused from OPEN to IN PROGRESS with a sub-table showing which
+sub-steps shipped vs. deferred.
+
+See LEARNINGS.md "Replay-from-prefix beam search is `O(B × T²)`".
+
 ### 66. Feature-matrix closure pass — sticky setters + streaming + mic + Go/Java/Ruby parity (May 2026)
 
 Six commits (`d963e3a`, `947262f`, `041471f`, `89687f0`, `5534588`
@@ -2142,3 +2189,42 @@ follow-ups in one place: F16 mimo-asr re-upload, per-backend Q8_0 KV
 cosine validation, vibevoice CUDA cache reuse re-test,
 SYCL/HIP/ROCm cache-bypass extension, `MADV_RANDOM` per-backend
 wiring, disk5 cleanup, legacy `build.yml` audit.
+
+### 69. PLAN #62c kyutai-stt streaming — chunked-batch over rolling window (May 2026)
+
+**Done.** `crispasr_session_stream_open` now routes to a
+kyutai-backed rolling-window stream when `s->kyutai_ctx` is set;
+the four whisper-typed `crispasr_stream_*` functions
+(feed/get_text/flush/close) branch on a new optional
+`kyutai_stream_state` field on `crispasr_stream`. ~200 LOC across
+three files, well under the 300-LOC PLAN estimate.
+
+**Why chunked-batch, not true incremental.** The PLAN's original
+"refactor `_transcribe` into incremental encode + decode + state
+carry-over" path assumed the Mimi encoder was at worst causal.
+Pre-impl exploration found `src/kyutai_stt.cpp:660` calls
+`ggml_flash_attn_ext(..., nullptr, ...)` — **non-causal**, every
+encoder-transformer frame attends to every other. True streaming
+therefore can't bit-match batch without either O(n²) re-encoding
+or swapping in sliding-window attention (~500-700 LOC, deviates
+from training). Chunked-batch sidesteps both: each decode runs the
+existing single-shot `kyutai_stt_transcribe_ex` over the last
+`length_ms` of audio, so each window is bit-exact-batch by
+construction.
+
+**Validation.**
+- Final stream output on JFK matches single-shot batch byte-for-byte
+  (after both are lstripped of the SentencePiece `▁ → space`).
+- Intermediate decodes show expected rolling-window behavior:
+  "America" at decode #3 (6 s window) flips to "Americans" at
+  decode #4 (8 s) once the LM has more context.
+- Whisper streaming path unchanged — `ggml-tiny.bin` still produces
+  a coherent JFK transcript through the same
+  `crispasr_session_stream_open` → `crispasr_stream_feed`/`get_text`
+  chain.
+
+**Out of scope but trivially next.** `moonshine-streaming` is also
+single-shot today; the same chunked-batch pattern (rolling-window
+wrapper + `moonshine_stream_state` field) would land in ~50 LOC.
+Voxtral4b stays separate (PLAN #7 — needs a real decoder-thread
+refactor).

@@ -15,6 +15,7 @@
 #endif
 
 #include "core/attention.h"
+#include "core/beam_decode.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
@@ -201,7 +202,7 @@ static int sample_token(const float* logits, int vocab, float temperature, float
 // ===========================================================================
 
 extern "C" struct glm_asr_context_params glm_asr_context_default_params(void) {
-    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true, /*temperature=*/0.0f};
+    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true, /*temperature=*/0.0f, /*beam_size=*/1};
 }
 
 extern "C" int glm_asr_encoder_frames_from_mel_frames(int T_mel) {
@@ -575,17 +576,6 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
     if (!logits)
         return nullptr;
 
-    // First token: argmax
-    int next = 0;
-    float next_prob = 0.0f;
-    next = sample_token(logits, vocab, ctx->params.temperature, &next_prob);
-    free(logits);
-
-    // Decode loop
-    std::string result;
-    int n_past = (int)ids.size();
-    const int max_tokens = 512;
-
     auto is_eos = [&](int id) {
         for (int i = 0; i < hp.n_eos; i++)
             if (id == hp.eos_token_ids[i])
@@ -593,54 +583,100 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
         return false;
     };
 
-    for (int step = 0; step < max_tokens; step++) {
-        if (is_eos(next))
-            break;
+    // Generated token sequence (post-prompt) and per-token softmax probs,
+    // produced by either the greedy or beam-search path below.
+    std::vector<int32_t> gen_ids;
+    std::vector<float> gen_probs;
+    const int max_tokens = 512;
+    const int beam_size = ctx->params.beam_size > 0 ? ctx->params.beam_size : 1;
 
-        // Append token text (with GPT-2 byte-level BPE decoding)
-        bool emitted = false;
-        if (next >= 0 && next < (int)ctx->model.vocab.size()) {
-            const auto& tok = ctx->model.vocab[next];
-            // Skip special tokens (no text contribution and no out-vector entry)
-            if (!(tok.size() >= 2 && tok[0] == '<' && tok[1] == '|')) {
-                // Decode GPT-2 byte-level BPE: Ġ→space, Ċ→newline, etc.
-                for (size_t ci = 0; ci < tok.size();) {
-                    unsigned char c = (unsigned char)tok[ci];
-                    if (c == 0xC4 && ci + 1 < tok.size()) {
-                        unsigned char c2 = (unsigned char)tok[ci + 1];
-                        if (c2 == 0xA0) {
-                            result += ' '; // Ġ = U+0120 = space
-                            ci += 2;
-                            continue;
-                        } else if (c2 == 0x8A) {
-                            result += '\n'; // Ċ = U+010A = newline
-                            ci += 2;
-                            continue;
-                        }
-                    }
-                    result += (char)c;
-                    ci++;
+    if (beam_size > 1) {
+        // Beam search: replay-from-prefix via core_beam_decode helper.
+        // Sampling and beam search are mutually exclusive — beam ignores
+        // temperature (deterministic top-K expansion).
+        core_beam_decode::Config cfg;
+        cfg.max_new_tokens = max_tokens;
+        cfg.eos_id = (hp.n_eos > 0) ? hp.eos_token_ids[0] : 2;
+        cfg.vocab_size = vocab;
+        cfg.beam_size = beam_size;
+        cfg.prompt_len = (int)ids.size();
+
+        auto replay = [](glm_asr_context* c, const int32_t* toks, int n, int prompt_len) -> float* {
+            float* emb = glm_asr_embed_tokens(c, toks, n);
+            if (!emb)
+                return nullptr;
+            float* lg = glm_asr_run_llm_kv(c, emb, n, prompt_len, nullptr, nullptr);
+            std::free(emb);
+            return lg;
+        };
+        auto r = core_beam_decode::run_with_probs(ctx, logits, replay, cfg);
+        free(logits);
+        gen_ids = std::move(r.tokens);
+        gen_probs = std::move(r.probs);
+    } else {
+        // Greedy / temperature-sampled path (unchanged behaviour).
+        int next = 0;
+        float next_prob = 0.0f;
+        next = sample_token(logits, vocab, ctx->params.temperature, &next_prob);
+        free(logits);
+
+        gen_ids.push_back(next);
+        gen_probs.push_back(next_prob);
+
+        int n_past = (int)ids.size();
+        for (int step = 0; step < max_tokens - 1; step++) {
+            if (is_eos(next))
+                break;
+            float* emb = glm_asr_embed_tokens(ctx, &next, 1);
+            if (!emb)
+                break;
+            float* lg = glm_asr_run_llm_kv(ctx, emb, 1, n_past, nullptr, nullptr);
+            free(emb);
+            if (!lg)
+                break;
+            n_past++;
+            next = sample_token(lg, vocab, ctx->params.temperature, &next_prob);
+            free(lg);
+            gen_ids.push_back(next);
+            gen_probs.push_back(next_prob);
+        }
+    }
+
+    // Detokenise: GPT-2 byte-level BPE → UTF-8. Drop EOS / special tokens
+    // and stop accumulating once an EOS is seen (matches greedy behaviour
+    // even for beam: beam[0] may end in EOS, which we skip in output).
+    std::string result;
+    for (size_t gi = 0; gi < gen_ids.size(); gi++) {
+        const int id = gen_ids[gi];
+        if (is_eos(id))
+            break;
+        if (id < 0 || id >= (int)ctx->model.vocab.size())
+            continue;
+        const auto& tok = ctx->model.vocab[id];
+        // Skip special tokens (no text contribution and no out-vector entry).
+        if (tok.size() >= 2 && tok[0] == '<' && tok[1] == '|')
+            continue;
+        for (size_t ci = 0; ci < tok.size();) {
+            unsigned char c = (unsigned char)tok[ci];
+            if (c == 0xC4 && ci + 1 < tok.size()) {
+                unsigned char c2 = (unsigned char)tok[ci + 1];
+                if (c2 == 0xA0) {
+                    result += ' '; // Ġ = U+0120 = space
+                    ci += 2;
+                    continue;
+                } else if (c2 == 0x8A) {
+                    result += '\n'; // Ċ = U+010A = newline
+                    ci += 2;
+                    continue;
                 }
-                emitted = true;
             }
+            result += (char)c;
+            ci++;
         }
-        if (emitted && out_token_ids && out_token_probs) {
-            out_token_ids->push_back(next);
-            out_token_probs->push_back(next_prob);
+        if (out_token_ids && out_token_probs) {
+            out_token_ids->push_back(id);
+            out_token_probs->push_back(gi < gen_probs.size() ? gen_probs[gi] : 0.0f);
         }
-
-        // Forward one token
-        float* emb = glm_asr_embed_tokens(ctx, &next, 1);
-        if (!emb)
-            break;
-        float* lg = glm_asr_run_llm_kv(ctx, emb, 1, n_past, nullptr, nullptr);
-        free(emb);
-        if (!lg)
-            break;
-        n_past++;
-
-        next = sample_token(lg, vocab, ctx->params.temperature, &next_prob);
-        free(lg);
     }
 
     return strdup(result.c_str());

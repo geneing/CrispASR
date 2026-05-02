@@ -17,8 +17,8 @@ public:
     const char* name() const override { return "glm-asr"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_TEMPERATURE | CAP_LANGUAGE_DETECT | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE |
-               CAP_PUNCTUATION_TOGGLE;
+        return CAP_TIMESTAMPS_CTC | CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_LANGUAGE_DETECT | CAP_AUTO_DOWNLOAD |
+               CAP_TOKEN_CONFIDENCE | CAP_PUNCTUATION_TOGGLE;
     }
 
     bool init(const whisper_params& params) override {
@@ -27,6 +27,7 @@ public:
         cp.verbosity = params.no_prints ? 0 : 1;
         cp.use_gpu = crispasr_backend_should_use_gpu(params);
         cp.temperature = params.temperature;
+        cp.beam_size = params.beam_size > 0 ? params.beam_size : 1;
         ctx_ = glm_asr_init_from_file(params.model.c_str(), cp);
         return ctx_ != nullptr;
     }

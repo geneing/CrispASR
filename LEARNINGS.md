@@ -6605,3 +6605,107 @@ of each stub so the next session can find them. Ideally the
 stubs would be deleted in favour of a unified runtime-level
 implementation (since the CLI logic is what they SHOULD do), but
 that's a larger refactor.
+
+### Replay-from-prefix beam search is `O(B × T²)` — only practical for backends with batched forward + short generations (PLAN #61h)
+
+Adding beam search to an LLM-style decode loop without a per-backend
+`*_kv_save` / `*_kv_restore` C-API leaves one option: at every
+beam-step, for every beam, embed the *entire* generated suffix and
+run it through `forward_fn(emb, n_tokens, n_past=prompt_len)` so
+the KV slots `[prompt_len, prompt_len + suffix_len)` get overwritten
+with that beam's K/V. The last-position logits are the next-step
+expansion candidates. Top-K + global prune. Done.
+
+This works perfectly on paper. The cost is `O(B × T²)` — for `T=75`
+generated tokens and `B=2` you do ~5,600 token-forwards vs ~75 for
+greedy, a ~75× slowdown. The PLAN #61h scoping note ("acceptable
+for `beam_size = 2-4` since the prompt is the dominant cost") was
+optimistic: the *audio encoder* dominates wall time, not the prompt
+prefill, so the decode-loop blow-up dominates the *post-encoder*
+phase and isn't amortised by anything.
+
+What actually matters in practice is whether the backend's forward
+is **batched**:
+
+- **glm-asr's `glm_asr_run_llm_kv(emb, n_tokens, n_past)`** — one
+  graph, one `ggml_backend_sched_alloc_graph`, one Metal command
+  buffer per call. So `O(B × T)` *batched* calls per beam decode,
+  each call doing `O(T)` Metal work. Slow but tractable on short
+  audio.
+- **omniasr-llm / moonshine** — per-step decode is one-token-only
+  with implicit `kv_self.n`. Replay would do `O(B × T²)` *single-
+  token* graph rebuilds (each one a fresh `ggml_init` + scheduler
+  reset + Metal sync). On Metal the per-call overhead is ~1-2 ms,
+  so 5,600 calls = ~5-10 s of pure overhead before any compute.
+
+The lesson when scoping a beam-search effort:
+
+1. Check the per-step decode signature first. If it's
+   `(token_id, n_past) → logits` (one token at a time, implicit KV
+   advance), replay-from-prefix is **not** an acceptable shortcut.
+   Either ship `*_kv_save` / `*_kv_restore` for the backend, or
+   defer beam search.
+2. If the forward is **already batched** (`(emb, n_tokens, n_past) →
+   logits`), replay-from-prefix is a fine starting point — the
+   helper goes in `src/core/`, the per-backend wiring is ~30 LOC.
+   Document the perf characteristic so the next person doesn't
+   surprise themselves running `--beam-size 5` on a long clip.
+3. The right *long-term* fix for either case is per-beam KV
+   branching (a real save/restore, not a state replay). That's a
+   per-backend ABI add, not a "shared helper" change. Don't conflate
+   the two scopes.
+
+Reference: `src/core/beam_decode.h` (the helper), `src/glm_asr.cpp`
+beam dispatch (the batched-forward case that does work), and the
+deferred sub-steps in PLAN #61h.
+
+## Lesson — chunked-batch is the right streaming default when the encoder is non-causal
+
+PLAN #62c wired kyutai-stt into the unified streaming Session API.
+The original ~300 LOC estimate assumed "refactor `_transcribe` into
+incremental encode + decode + state carry-over" — true streaming
+with sub-second latency. Pre-impl exploration surfaced a deeper
+trap than the earlier "streaming in name doesn't mean streaming
+in API" lesson: the Mimi encoder transformer
+(`src/kyutai_stt.cpp:660`) calls
+`ggml_flash_attn_ext(..., nullptr, ...)` — **fully non-causal**,
+every encoder frame attends to every other including future ones.
+
+True incremental encoding under that constraint requires either:
+- **Re-encode the growing audio every chunk** — O(n²) cost over a
+  session, defeats sub-second latency for anything past ~30s;
+- **Replace the encoder transformer with sliding-window attention**
+  (mimics moshi's `StreamingTransformer` with bounded lookback).
+  ~500-700 LOC, deviates from training, fails the "≥99.9% cosine
+  vs batch" gate by construction at chunk boundaries.
+
+The chunked-batch alternative — buffer audio in `feed`, every
+`step_ms` re-run the existing single-shot `_transcribe` over the
+last `length_ms` of audio, replace the cumulative output — sidesteps
+both. Each window is bit-exact-batch by construction; latency is
+≥ `step_ms`; compute scales with window size, not session length.
+This is exactly what whisper's `crispasr_stream_*` already does. It
+took ~200 LOC including the dispatch wiring (struct field + four
+`if (kyutai_state) return ...` branches).
+
+**Generalisable rule.** When a "streaming" feature request lands,
+look at the encoder's attention pattern *before* costing the work:
+
+| Encoder | Streaming options | Default choice |
+|---|---|---|
+| Causal (left-padding only) | True incremental possible; per-conv left-context cache + per-call KV carry. | Either, depending on latency budget. |
+| Non-causal full-sequence | Chunked-batch (bit-exact, simple) **or** sliding-window attention (cheap, lossy). | Chunked-batch unless a consumer has a hard sub-second SLA. |
+| Bidirectional with cross-attention | Same as non-causal. | Chunked-batch. |
+
+Chunked-batch buys ~80% of the streaming-API value (live captions,
+mic dictation, push-to-talk transcription) at ~30% of the cost. The
+remaining 20% (sub-second latency for very long sessions) only
+matters when an actual consumer says so — and even then, the
+chunked-batch wrapper is the natural adapter layer for the eventual
+incremental impl, so the work isn't wasted.
+
+Reference: `src/kyutai_stt.cpp` `kyutai_stt_stream_*`
+(the implementation), `src/crispasr_c_api.cpp:387` `crispasr_stream`
+struct's `kyutai_stream_state` field + the four
+`if (s->kyutai_stream_state)` branches in feed/get_text/flush/close,
+and PLAN #62c for the options-evaluated record.

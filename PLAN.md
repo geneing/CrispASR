@@ -1346,17 +1346,35 @@ validation showing the model honours an instruction prompt before
 plumbing the toggle. Out of scope until a backend lands that's
 actually instruction-tuned.
 
-### 61h. Beam search for LLM family + enc-dec — OPEN
+### 61h. Beam search for LLM family + enc-dec — IN PROGRESS
 
 **Tier:** 3. **Effort:** ~300 LOC for shared decoder + 30 LOC per
 backend. **Cells:** 8 (LLM quartet + qwen3/granite/voxtral4b +
 canary/cohere/moonshine via per-model loop).
 
-Generic `core_beam_decode` in `src/core/`: takes the same step
-callbacks as `crispasr_llm_pipeline.h::run_with_probs` (advance KV
-by one token, get logits). All four LLM backends share it. For
-canary/cohere/moonshine, beam lives in the per-model decoder loop;
-one PR per backend.
+| Sub-step | Outcome |
+|---|---|
+| Generic `core_beam_decode` helper (header-only) | DONE → [HISTORY §65](HISTORY.md) |
+| glm-asr beam path (`-bs N`) | DONE — 1 ✔ |
+| omniasr-llm / kyutai-stt / moonshine LLM-side beam | DEFERRED ↓ |
+| qwen3/granite/voxtral4b/voxtral session-API beam | DEFERRED ↓ |
+| canary/cohere/moonshine encoder-decoder beam | DEFERRED ↓ |
+
+**What's deferred and why.** The shared helper uses
+*replay-from-prefix* (each step rebuilds each beam's KV by re-running
+its full generated suffix from the post-prompt anchor) so the C-API
+surface stays unchanged. Cost is `O(B × T²)` forward passes for `T`
+generated tokens. That works on glm-asr because
+`glm_asr_run_llm_kv(emb, n, n_past)` is already a batched call —
+beam=2 on 11 s JFK lands in seconds on Metal. For
+**omniasr-llm / moonshine** the per-step decode is one-token-at-a-time
+with implicit KV position, so each beam-step would do `B × T`
+single-token graph rebuilds (~100× greedy cost on Metal). For
+**kyutai-stt** the audio-token-per-frame architecture doesn't fit the
+LLM-style replay template at all — beam would have to live in the
+per-frame loop. The honest fix for all three is a per-backend
+`*_kv_save` / `*_kv_restore` C-API; reopen those rows when that lands.
+See LEARNINGS.md "Replay-from-prefix beam search is `O(B × T²)`".
 
 ### 61i. Flash attention for fc-ctc — DEFERRED
 
