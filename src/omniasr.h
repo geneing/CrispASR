@@ -25,6 +25,7 @@ struct omniasr_context_params {
     const char* language; // ISO 639-3 lang code for LLM (e.g. "eng_Latn"), NULL for auto
     bool use_gpu;         // false => force CPU backend
     float temperature;    // 0 = greedy argmax, >0 = softmax sampling
+    int beam_size;        // 1 = greedy/sampled (default); >1 = deterministic beam search (LLM variant only)
 };
 
 struct omniasr_context_params omniasr_context_default_params(void);
@@ -58,6 +59,12 @@ const char* omniasr_token_text(struct omniasr_context* ctx, int id);
 // deterministically from the encoder output. Non-zero values let
 // best-of-N callers draw independent samples from the same audio.
 void omniasr_set_seed(struct omniasr_context* ctx, uint64_t seed);
+
+// Sticky beam size for the LLM decoder. 1 = greedy/sampled (default).
+// >1 = deterministic beam search via per-beam KV snapshot/restore.
+// Mutually exclusive with temperature sampling — beam path always picks
+// by cumulative log-prob. CTC variant ignores this.
+void omniasr_set_beam_size(struct omniasr_context* ctx, int beam_size);
 
 #ifdef __cplusplus
 }

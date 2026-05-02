@@ -15,7 +15,11 @@ public:
     OmniasrBackend() = default;
 
     const char* name() const override { return "omniasr"; }
-    uint32_t capabilities() const override { return CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE | CAP_PUNCTUATION_TOGGLE; }
+    uint32_t capabilities() const override {
+        // Beam-search applies only to the LLM variant; the matrix lists it
+        // there. CTC variant ignores beam_size at the decode layer.
+        return CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_PUNCTUATION_TOGGLE;
+    }
 
     bool init(const whisper_params& params) override {
         omniasr_context_params cp = omniasr_context_default_params();
@@ -23,6 +27,7 @@ public:
         cp.max_new_tokens = params.max_new_tokens > 0 ? params.max_new_tokens : cp.max_new_tokens;
         cp.verbosity = params.no_prints ? 0 : 1;
         cp.temperature = params.temperature;
+        cp.beam_size = params.beam_size > 0 ? params.beam_size : 1;
         cp.use_gpu = crispasr_backend_should_use_gpu(params);
         if (getenv("OMNIASR_DEBUG"))
             cp.verbosity = 2;

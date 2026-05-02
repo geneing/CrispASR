@@ -6,6 +6,7 @@
 
 #include "omniasr.h"
 #include "core/attention.h"
+#include "core/beam_decode.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 
@@ -162,6 +163,7 @@ extern "C" struct omniasr_context_params omniasr_context_default_params(void) {
     p.language = nullptr;
     p.use_gpu = true;
     p.temperature = 0.0f;
+    p.beam_size = 1;
     return p;
 }
 
@@ -1279,12 +1281,14 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
     ctx->kv_n_used = 0;
     // 4. Prefill decoder with entire prefix. Capture logits when the caller
     // wants per-token confidence OR when temperature sampling is requested
-    // (we need raw logits to draw a multinomial sample).
+    // (we need raw logits to draw a multinomial sample) OR when beam search
+    // is on (the helper seeds initial beams from prefill logits).
     int cur_token = 0;
     float cur_prob = 0.0f;
     const bool want_probs = (out_token_ids && out_token_probs);
     const bool sampling = (ctx->params.temperature > 0.0f);
-    const bool capture_logits = (want_probs || sampling);
+    const bool beam = (ctx->params.beam_size > 1);
+    const bool capture_logits = (want_probs || sampling || beam);
     std::vector<float> step_logits;
 
     // Per-call seed: derive deterministically from the audio buffer so
@@ -1367,49 +1371,107 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "omniasr-llm: prefill done (%d tokens)\n", prefix_len);
 
-    // 5. Greedy argmax from prefill graph → first generated token
+    // 5. Greedy / beam → emit output tokens.
     std::vector<int> output_tokens;
     if (ctx->params.verbosity >= 2)
         fprintf(stderr, "  prefill → token=%d (%s)\n", cur_token,
                 cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
 
-    if (cur_token != hp.eos_id) {
-        output_tokens.push_back(cur_token);
-        if (want_probs) {
-            out_token_ids->push_back(cur_token);
-            out_token_probs->push_back(cur_prob);
-        }
-    }
+    if (beam) {
+        // Beam path: seed B beams from prefill logits, then per-beam KV
+        // snapshot/restore through core_beam_decode::run_with_probs_branched.
+        // Mutually exclusive with greedy/sampled below — we return after.
+        struct omniasr_kv_snap {
+            std::vector<uint8_t> k_data;
+            std::vector<uint8_t> v_data;
+        };
+        auto save = [](omniasr_context* c) -> omniasr_kv_snap* {
+            auto* s = new omniasr_kv_snap();
+            const size_t kb = ggml_nbytes(c->kv_k);
+            const size_t vb = ggml_nbytes(c->kv_v);
+            s->k_data.resize(kb);
+            s->v_data.resize(vb);
+            ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, kb);
+            ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, vb);
+            return s;
+        };
+        auto restore = [](omniasr_context* c, omniasr_kv_snap* s) {
+            ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
+            ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
+        };
+        auto snap_free = [](omniasr_kv_snap* s) { delete s; };
+        std::vector<float> step_buf;
+        auto step = [&step_buf, perf](omniasr_context* c, int32_t tok, int n_past) -> float* {
+            int dummy = 0;
+            if (!omniasr_run_dec_token(c, tok, n_past, dummy, perf, &step_buf))
+                return nullptr;
+            const int V = (int)step_buf.size();
+            float* out = (float*)std::malloc((size_t)V * sizeof(float));
+            std::memcpy(out, step_buf.data(), (size_t)V * sizeof(float));
+            return out;
+        };
 
-    // 6. Autoregressive generation: one token at a time
-    for (int step = 0; (int)output_tokens.size() < max_gen && cur_token != hp.eos_id; step++) {
-        if (cur_token < 0 || cur_token >= tok_emb_size) {
-            break; // Invalid token
+        core_beam_decode::Config cfg;
+        cfg.max_new_tokens = max_gen;
+        cfg.eos_id = hp.eos_id;
+        cfg.vocab_size = (int)step_logits.size(); // captured at prefill (== logits tensor ne[0])
+        cfg.beam_size = ctx->params.beam_size;
+        cfg.prompt_len = prefix_len;
+
+        if (cfg.vocab_size <= 0) {
+            fprintf(stderr, "omniasr-llm: beam path requires prefill to capture logits\n");
+        } else {
+            auto r = core_beam_decode::run_with_probs_branched(ctx, step_logits.data(), save, restore, snap_free, step,
+                                                               cfg);
+            for (size_t i = 0; i < r.tokens.size(); i++) {
+                if (r.tokens[i] == hp.eos_id)
+                    break;
+                output_tokens.push_back(r.tokens[i]);
+                if (want_probs) {
+                    out_token_ids->push_back(r.tokens[i]);
+                    out_token_probs->push_back(r.probs[i]);
+                }
+            }
+        }
+    } else {
+        if (cur_token != hp.eos_id) {
+            output_tokens.push_back(cur_token);
+            if (want_probs) {
+                out_token_ids->push_back(cur_token);
+                out_token_probs->push_back(cur_prob);
+            }
         }
 
-        int n_past = prefix_len + step;
-        if (!omniasr_run_dec_token(ctx, cur_token, n_past, cur_token, perf,
-                                   capture_logits ? &step_logits : nullptr)) {
-            fprintf(stderr, "omniasr-llm: decode step %d failed\n", step);
-            break;
-        }
-        if (capture_logits && !step_logits.empty()) {
-            // Same override as the prefill step — sampling when temp > 0,
-            // otherwise the run helper's argmax pick stands.
-            pick_from_logits(step_logits, cur_token, cur_prob);
-        }
+        // 6. Autoregressive generation: one token at a time
+        for (int step = 0; (int)output_tokens.size() < max_gen && cur_token != hp.eos_id; step++) {
+            if (cur_token < 0 || cur_token >= tok_emb_size) {
+                break; // Invalid token
+            }
 
-        if (cur_token == hp.eos_id)
-            break;
-        output_tokens.push_back(cur_token);
-        if (want_probs)
-            out_token_probs->push_back(cur_prob);
-        if (want_probs)
-            out_token_ids->push_back(cur_token);
+            int n_past = prefix_len + step;
+            if (!omniasr_run_dec_token(ctx, cur_token, n_past, cur_token, perf,
+                                       capture_logits ? &step_logits : nullptr)) {
+                fprintf(stderr, "omniasr-llm: decode step %d failed\n", step);
+                break;
+            }
+            if (capture_logits && !step_logits.empty()) {
+                // Same override as the prefill step — sampling when temp > 0,
+                // otherwise the run helper's argmax pick stands.
+                pick_from_logits(step_logits, cur_token, cur_prob);
+            }
 
-        if (ctx->params.verbosity >= 2 && step < 5)
-            fprintf(stderr, "  gen %d: token=%d (%s)\n", step, cur_token,
-                    cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
+            if (cur_token == hp.eos_id)
+                break;
+            output_tokens.push_back(cur_token);
+            if (want_probs)
+                out_token_probs->push_back(cur_prob);
+            if (want_probs)
+                out_token_ids->push_back(cur_token);
+
+            if (ctx->params.verbosity >= 2 && step < 5)
+                fprintf(stderr, "  gen %d: token=%d (%s)\n", step, cur_token,
+                        cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
+        }
     }
 
     if (ctx->params.verbosity >= 1)
@@ -1514,4 +1576,9 @@ extern "C" const char* omniasr_token_text(struct omniasr_context* ctx, int id) {
 extern "C" void omniasr_set_seed(struct omniasr_context* ctx, uint64_t seed) {
     if (ctx)
         ctx->seed_override = seed;
+}
+
+extern "C" void omniasr_set_beam_size(struct omniasr_context* ctx, int beam_size) {
+    if (ctx)
+        ctx->params.beam_size = (beam_size > 0) ? beam_size : 1;
 }
