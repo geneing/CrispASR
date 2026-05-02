@@ -824,7 +824,12 @@ extern "C" float* vibevoice_encode_speech(struct vibevoice_context* ctx, const f
 // Transcribe
 // ===========================================================================
 
-extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float* samples, int n_samples) {
+// Internal: shared implementation for `vibevoice_transcribe` and
+// `vibevoice_transcribe_with_probs`. When `out_token_ids` and
+// `out_token_probs` are non-null, both are populated in lock-step with the
+// emitted (non-stop) tokens. Returns malloc'd UTF-8 transcript.
+static char* vibevoice_transcribe_impl(struct vibevoice_context* ctx, const float* samples, int n_samples,
+                                       std::vector<int32_t>* out_token_ids, std::vector<float>* out_token_probs) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
 
@@ -1258,11 +1263,24 @@ extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float
         fprintf(stderr, "vibevoice: prefill done\n");
 
     // 10. Autoregressive generation
-    auto argmax = [](const std::vector<float>& lg) -> int {
+    // Token pick: argmax + optional softmax prob. Vibevoice's vocab is
+    // Qwen2.5 (~152k); softmax is gated behind out_p so the legacy
+    // text-only path stays bit-identical to before.
+    const bool capture_probs = (out_token_ids && out_token_probs);
+    auto pick = [&](const std::vector<float>& lg, float* out_p) -> int {
         int best = 0;
+        float bv = lg[0];
         for (int i = 1; i < (int)lg.size(); i++)
-            if (lg[i] > lg[best])
+            if (lg[i] > bv) {
+                bv = lg[i];
                 best = i;
+            }
+        if (out_p) {
+            float s = 0.f;
+            for (int i = 0; i < (int)lg.size(); i++)
+                s += expf(lg[i] - bv);
+            *out_p = (s > 0.f) ? (1.0f / s) : 0.0f;
+        }
         return best;
     };
 
@@ -1273,9 +1291,14 @@ extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float
     auto is_stop = [&](int tok) { return tok == IM_END || tok == EOS_TOKEN; };
 
     std::vector<int> output_tokens;
-    int cur_token = argmax(logits);
-    if (!is_stop(cur_token))
+    std::vector<float> output_probs;
+    float prob = 0.0f;
+    int cur_token = pick(logits, capture_probs ? &prob : nullptr);
+    if (!is_stop(cur_token)) {
         output_tokens.push_back(cur_token);
+        if (capture_probs)
+            output_probs.push_back(prob);
+    }
 
     if (ctx->params.verbosity >= 2)
         fprintf(stderr, "  prefill → token=%d\n", cur_token);
@@ -1295,13 +1318,19 @@ extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float
             vibevoice_dump_f32(dump_dir, name, logits.data(), logits.size());
         }
 
-        cur_token = argmax(logits);
+        cur_token = pick(logits, capture_probs ? &prob : nullptr);
         if (is_stop(cur_token))
             break;
         output_tokens.push_back(cur_token);
+        if (capture_probs)
+            output_probs.push_back(prob);
 
         if (ctx->params.verbosity >= 2 && step < 5)
             fprintf(stderr, "  gen %d: token=%d\n", step, cur_token);
+    }
+    if (capture_probs) {
+        out_token_ids->assign(output_tokens.begin(), output_tokens.end());
+        *out_token_probs = output_probs;
     }
 
     if (ctx->params.verbosity >= 1)
@@ -4175,4 +4204,44 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
     if (out_n_samples)
         *out_n_samples = trimmed_len;
     return out_buf;
+}
+
+extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float* samples, int n_samples) {
+    return vibevoice_transcribe_impl(ctx, samples, n_samples, nullptr, nullptr);
+}
+
+extern "C" struct vibevoice_result* vibevoice_transcribe_with_probs(struct vibevoice_context* ctx,
+                                                                    const float* samples, int n_samples) {
+    std::vector<int32_t> ids;
+    std::vector<float> probs;
+    char* text = vibevoice_transcribe_impl(ctx, samples, n_samples, &ids, &probs);
+    if (!text)
+        return nullptr;
+    auto* r = (vibevoice_result*)calloc(1, sizeof(vibevoice_result));
+    r->text = text;
+    r->n_tokens = (int)ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            r->token_ids[i] = ids[i];
+            r->token_probs[i] = probs[i];
+        }
+    }
+    return r;
+}
+
+extern "C" void vibevoice_result_free(struct vibevoice_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
+}
+
+extern "C" const char* vibevoice_token_text(struct vibevoice_context* ctx, int id) {
+    if (!ctx || id < 0 || id >= (int)ctx->model.vocab.size())
+        return "";
+    return ctx->model.vocab[id].c_str();
 }

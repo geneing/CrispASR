@@ -1324,9 +1324,9 @@ probabilities. Specifics in [HISTORY.md §65](HISTORY.md).
 | mimo-asr | DONE | new `mimo_asr_transcribe_with_probs` (gated softmax) |
 | qwen3 | DONE | session path drives building blocks + `core_greedy_decode` |
 | granite (3.x / 4.0 / 4.1 / 4.1-plus) | DONE | session path drives building blocks + chat-template selection |
-| **vibevoice** | OPEN | runtime exposes `char*` only; no token-prob API |
-| **gemma4-e2b** | OPEN | same |
-| **moonshine-streaming** | OPEN | same |
+| vibevoice | DONE | new `vibevoice_transcribe_with_probs` (Qwen2 byte-level BPE decode in adapter) |
+| moonshine-streaming | DONE | new `moonshine_streaming_transcribe_with_probs` (shared moonshine tokenizer) |
+| **gemma4-e2b** | OPEN | runtime exposes `char*` only; no token-prob API |
 
 **Bindings updated:** Rust `crispasr-sys` FFI, Rust `crispasr` crate's
 `SessionWord.confidence`, Python `_binding.py` (with `hasattr` probe

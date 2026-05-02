@@ -1682,21 +1682,9 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
 
     // Backends below all return a `char * malloc`'d transcript — we package
     // the whole thing into a single segment with no word timings. They're
-    // LLM-style decoders (or ASR without native word-level alignment);
-    // word timestamps would need CTC alignment as a post-step.
-    auto run_char_transcribe = [&](char* raw) -> crispasr_session_result* {
-        if (!raw) {
-            delete r;
-            return nullptr;
-        }
-        crispasr_session_seg seg;
-        seg.text = raw;
-        seg.t0 = 0;
-        seg.t1 = (int64_t)((double)n_samples * 100.0 / 16000.0);
-        r->segments.push_back(std::move(seg));
-        std::free(raw);
-        return r;
-    };
+    // (Historical run_char_transcribe lambda removed — every backend now
+    // either has a token-prob path or uses the explicit text-only fallback
+    // block at the bottom of this function. See PLAN #65.)
 
 #ifdef CA_HAVE_CANARY
     if (s->backend == "canary" && s->canary_ctx) {
@@ -2174,7 +2162,41 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         };
 
         const std::vector<float> pcm24 = resample_16k_to_24k(pcm, n_samples);
-        return run_char_transcribe(vibevoice_transcribe(s->vibevoice_ctx, pcm24.data(), (int)pcm24.size()));
+        vibevoice_result* vr =
+            vibevoice_transcribe_with_probs(s->vibevoice_ctx, pcm24.data(), (int)pcm24.size());
+        if (!vr || !vr->text) {
+            if (vr)
+                vibevoice_result_free(vr);
+            delete r;
+            return nullptr;
+        }
+        std::vector<ca_token_record> toks;
+        toks.reserve((size_t)vr->n_tokens);
+        for (int i = 0; i < vr->n_tokens; i++) {
+            ca_token_record tk;
+            const char* raw = vibevoice_token_text(s->vibevoice_ctx, vr->token_ids[i]);
+            if (raw && *raw) {
+                std::string s_raw = raw;
+                // Skip Qwen2 special tokens like <|im_end|>; the runtime
+                // filter in vibevoice_transcribe_impl strips them from the
+                // segment text but the per-token list keeps them with empty
+                // text so confidence indices stay aligned with the ids.
+                if (!(s_raw.size() >= 4 && s_raw[0] == '<' && s_raw[1] == '|'))
+                    tk.text = gpt2_byte_decode(s_raw); // Qwen2 byte-level BPE
+            }
+            tk.t0 = -1;
+            tk.t1 = -1;
+            tk.p = vr->token_probs[i];
+            toks.push_back(std::move(tk));
+        }
+        crispasr_session_seg seg;
+        seg.text = vr->text;
+        seg.t0 = 0;
+        seg.t1 = (int64_t)((double)n_samples * 100.0 / 16000.0);
+        seg.words = emit_words_from_tokens(toks);
+        vibevoice_result_free(vr);
+        r->segments.push_back(std::move(seg));
+        return r;
     }
 #endif
 #ifdef CA_HAVE_CTC
@@ -2438,9 +2460,30 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         char* text = nullptr;
         bool need_free = true;
 #ifdef CA_HAVE_MOONSHINE_STREAMING
-        if (!text && s->backend == "moonshine-streaming" && s->moonshine_streaming_ctx)
-            text = moonshine_streaming_transcribe((moonshine_streaming_context*)s->moonshine_streaming_ctx, pcm,
-                                                  n_samples);
+        if (!text && s->backend == "moonshine-streaming" && s->moonshine_streaming_ctx) {
+            moonshine_streaming_result* msr = moonshine_streaming_transcribe_with_probs(
+                (moonshine_streaming_context*)s->moonshine_streaming_ctx, pcm, n_samples);
+            if (msr && msr->text) {
+                std::vector<ca_token_record> toks;
+                toks.reserve((size_t)msr->n_tokens);
+                for (int i = 0; i < msr->n_tokens; i++) {
+                    ca_token_record tk;
+                    const char* piece = moonshine_streaming_token_text(
+                        (moonshine_streaming_context*)s->moonshine_streaming_ctx, msr->token_ids[i]);
+                    if (piece && piece[0])
+                        tk.text = piece;
+                    tk.t0 = -1;
+                    tk.t1 = -1;
+                    tk.p = msr->token_probs[i];
+                    toks.push_back(std::move(tk));
+                }
+                char* dup = strdup(msr->text);
+                moonshine_streaming_result_free(msr);
+                return package_with_tokens(dup, std::move(toks));
+            }
+            if (msr)
+                moonshine_streaming_result_free(msr);
+        }
 #endif
 #ifdef CA_HAVE_GEMMA4_E2B
         if (!text && s->backend == "gemma4-e2b" && s->gemma4_e2b_ctx)

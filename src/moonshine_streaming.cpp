@@ -676,10 +676,19 @@ static int run_encoder(moonshine_streaming_context* ctx, const float* frontend_o
 // TODO: implement full decoder with KV cache
 // For now, placeholder showing the structure
 
-extern "C" char* moonshine_streaming_transcribe(struct moonshine_streaming_context* ctx, const float* pcm,
-                                                int n_samples) {
+// Internal: optional per-token capture. The legacy
+// `moonshine_streaming_transcribe` calls this with nullptr out-vectors.
+static char* moonshine_streaming_transcribe_impl(struct moonshine_streaming_context* ctx, const float* pcm,
+                                                 int n_samples, std::vector<int32_t>* out_token_ids,
+                                                 std::vector<float>* out_token_probs) {
     if (!ctx || !pcm || n_samples <= 0)
         return nullptr;
+
+    const bool capture_probs = (out_token_ids && out_token_probs);
+    if (capture_probs) {
+        out_token_ids->clear();
+        out_token_probs->clear();
+    }
 
     auto& m = ctx->model;
 
@@ -971,15 +980,25 @@ extern "C" char* moonshine_streaming_transcribe(struct moonshine_streaming_conte
         ggml_backend_tensor_get(ggml_graph_get_tensor(dgf, "logits"), logits_data.data(), 0, vocab * sizeof(float));
         ggml_free(dctx);
 
-        // Greedy argmax
+        // Greedy argmax + optional softmax probability of the picked token.
         int best = 0;
+        float bv = logits_data[0];
         for (int i = 1; i < vocab; i++)
-            if (logits_data[i] > logits_data[best])
+            if (logits_data[i] > bv) {
+                bv = logits_data[i];
                 best = i;
+            }
 
         if (best == (int)hp.eos_token_id)
             break;
         tokens.push_back(best);
+        if (capture_probs) {
+            float s = 0.f;
+            for (int i = 0; i < vocab; i++)
+                s += expf(logits_data[i] - bv);
+            out_token_ids->push_back(best);
+            out_token_probs->push_back((s > 0.f) ? (1.0f / s) : 0.0f);
+        }
         cur_token = best;
         kv_pos++;
 
@@ -1021,4 +1040,49 @@ extern "C" void moonshine_streaming_set_n_threads(struct moonshine_streaming_con
         if (ctx->backend)
             ggml_backend_cpu_set_n_threads(ctx->backend, n_threads);
     }
+}
+
+extern "C" char* moonshine_streaming_transcribe(struct moonshine_streaming_context* ctx, const float* pcm,
+                                                int n_samples) {
+    return moonshine_streaming_transcribe_impl(ctx, pcm, n_samples, nullptr, nullptr);
+}
+
+extern "C" struct moonshine_streaming_result* moonshine_streaming_transcribe_with_probs(
+    struct moonshine_streaming_context* ctx, const float* pcm, int n_samples) {
+    std::vector<int32_t> ids;
+    std::vector<float> probs;
+    char* text = moonshine_streaming_transcribe_impl(ctx, pcm, n_samples, &ids, &probs);
+    if (!text)
+        return nullptr;
+    auto* r = (moonshine_streaming_result*)calloc(1, sizeof(moonshine_streaming_result));
+    r->text = text;
+    r->n_tokens = (int)ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            r->token_ids[i] = ids[i];
+            r->token_probs[i] = probs[i];
+        }
+    }
+    return r;
+}
+
+extern "C" void moonshine_streaming_result_free(struct moonshine_streaming_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
+}
+
+extern "C" const char* moonshine_streaming_token_text(struct moonshine_streaming_context* ctx, int id) {
+    if (!ctx)
+        return "";
+    // moonshine-streaming uses the same shared moonshine tokenizer as moonshine.
+    // Single-id detokenize via token_to_piece (returns empty for special tokens).
+    static thread_local std::string scratch;
+    scratch = ctx->tokenizer.token_to_piece(id);
+    return scratch.c_str();
 }

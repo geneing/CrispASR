@@ -34,6 +34,24 @@ void vibevoice_free(struct vibevoice_context* ctx);
 // Returns malloc'd UTF-8 string, caller frees with free().
 char* vibevoice_transcribe(struct vibevoice_context* ctx, const float* samples, int n_samples);
 
+// Variant that additionally returns per-emitted-token ids and softmax
+// probabilities. Free with vibevoice_result_free.
+struct vibevoice_result {
+    char* text;
+    int* token_ids;
+    float* token_probs;
+    int n_tokens;
+};
+
+struct vibevoice_result* vibevoice_transcribe_with_probs(struct vibevoice_context* ctx, const float* samples,
+                                                         int n_samples);
+void vibevoice_result_free(struct vibevoice_result* r);
+
+// Token-id → vocab piece (raw, with Qwen2/GPT-2 byte-level BPE markers
+// like Ġ / Ċ — caller may need to decode). Returns empty string for
+// out-of-range ids.
+const char* vibevoice_token_text(struct vibevoice_context* ctx, int id);
+
 // ── Stage-level API for differential testing ─────────────────────────────────
 
 // Run the acoustic σ-VAE encoder. Returns a malloc'd float array of shape
