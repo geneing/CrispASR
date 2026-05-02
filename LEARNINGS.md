@@ -5860,3 +5860,43 @@ forward share a graph builder should parameterise the captures.
 Same shape applies to vibevoice (4 prefill stages),
 qwen3-asr (3 prefill stages), parakeet (encoder-side stages) —
 all currently capture all stages unconditionally.
+
+## Lesson 4 — mmap loader makes large F16 *loadable* but not *fast* on RAM-tight hosts
+
+PLAN #51a (CPU + Metal mmap loaders, commit `9710f80`) and #60a
+(`posix_madvise(WILLNEED)` async readahead, commit `f1f4bce`)
+together remove the OOM wall: a 16 GB F16 GGUF can now be
+*opened* on a 16 GB Mac without `_platform_memmove` thrashing
+swap. RSS during load stays around 1-2 GB instead of climbing
+to 12+ GB.
+
+**But "loadable" is not the same as "usable in real time."** The
+fundamental constraint is unchanged: a 16 GB F16 working set
+needs **≥20 GB RAM** to comfortably fit + leave headroom for
+activations + KV cache + audio tokenizer + the OS. On a 16 GB
+Mac, prefill compute walks layer-by-layer through weights that
+keep getting page-evicted between accesses; every re-touched
+page costs a synchronous read from disk (~5-10 ms each on a
+99%-full external — and our build dir lives on one).
+PLAN #51c F16 attempt hit this: 51 min wall clock, 0.1 % CPU,
+prefill never finished.
+
+**Generalises to every 7B+-class speech-LLM** in our family
+(MiMo-ASR, qwen3-asr-7B variants if we ship them, voxtral4b at
+the boundary):
+
+- F16 loads fine on 32+ GB boxes — ship the F16 GGUF for those
+  users, document them as the recommended target.
+- On 16 GB boxes default to Q4_K — fits comfortably (4-5 GB
+  resident), warm decode hits 0.79 s/step (51b/b' result).
+- Don't try to bench F16 cold-start on a 16 GB box; the result
+  will be dominated by page-fault wait, not by compute. Use
+  Q4_K as the bench dtype and rely on the F16 cosine
+  validation on a larger box to confirm numerical fidelity.
+
+Diagnostic signature of the thrash mode (so you recognize it
+fast next time): `ps -p <pid> -o %cpu,%mem,rss,etime,state` shows
+`%CPU=0.0-0.5`, `STAT=SN` or `UN`, `RSS` *decreasing* over time
+as the OS pages out the process under memory pressure, while
+`vm_stat` reports very low `Pages free`. Don't wait it out —
+either move to a larger-RAM box or switch dtype.

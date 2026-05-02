@@ -186,11 +186,51 @@ env exposes prefill/decode timing.
 
 Q4_K dequant on every matmul is the largest single cost at decode
 time. F16 weights are ~2× larger but skip the dequant loop
-entirely. Once 51a (mmap loader) lands, F16 decode on M1 should
-hit ≥1× realtime on the JFK clip (Q4_K is currently 0.2×
-including Metal JIT, ~0.3× warm).
+entirely.
 
-Effort: **Small** once 51a is in.
+**Status (May 2026): code path works, validation deferred to a
+larger-RAM box.**
+
+PLAN #51a's CPU mmap loader landed (commit `9710f80`) — Metal
+mmap loader landed too (same commit) — and #60a added the
+`posix_madvise(WILLNEED)` readahead hint (commit `f1f4bce`).
+Together these mean **no code change is needed for 51c** — just
+point `crispasr` at the F16 GGUF with `CRISPASR_GGUF_MMAP=1`. We
+verified the load path works (no OOM, mmap'd weights at 1.9 GB
+RSS on a 16 GB box, prefill compute starts).
+
+What we couldn't validate end-to-end on this box:
+
+- **JFK transcript byte-equality on F16**: prefill compute
+  thrashes because the 16 GB F16 working set doesn't fit in 16 GB
+  RAM. Pages get evicted as compute walks layers, every
+  re-access faults from the disk5 external (99% full, often
+  contended by other workers). One bench attempt ran for 51 min
+  with 0.1% CPU and never finished prefill.
+- **Decode speedup measurement**: same root cause — needs warm
+  cache, which we can't achieve.
+
+The ceiling is **hardware, not code**: 16 GB F16 weights need
+≥20 GB RAM to comfortably fit + leave headroom for activations +
+KV cache + audio tokenizer. On a 32+ GB box this should "just
+work" and hit the work order's ≥1× realtime target.
+
+Files **not** touched (no code change required):
+- `src/mimo_asr.cpp` — the runtime is dtype-agnostic; F16 weights
+  flow through the existing `core_attn::kv_self_attn` matmul kernels
+  on Metal without modification.
+- `src/core/gguf_loader.cpp` — already wired (60a + #51a).
+
+Validation deferral notes:
+- Run `CRISPASR_GGUF_MMAP=1 ./build-ninja-compile/bin/crispasr --backend mimo-asr -m /path/to/mimo-asr-f16.gguf --codec-model /path/to/mimo-tokenizer-q4_k.gguf -f samples/jfk.wav` on a 32+ GB box to validate transcript + bench.
+- If F16 prefill hits ≥1× realtime as predicted, ship the F16
+  GGUF as the recommended quant and demote Q4_K to a memory-tight
+  fallback. Until then both are shipped on `cstr/mimo-asr-GGUF`
+  with Q4_K as the default.
+
+Effort: **0 LOC** (validation only). The originally-scoped
+"Effort: Small" assumed code work that turned out to be unneeded
+once the mmap loader landed.
 
 ---
 
