@@ -152,6 +152,12 @@ struct kokoro_phoneme_cache {
             lru.pop_back();
         }
     }
+
+    void clear() {
+        std::lock_guard<std::mutex> g(mu);
+        lru.clear();
+        idx.clear();
+    }
 };
 
 } // namespace
@@ -2594,6 +2600,12 @@ extern "C" int kokoro_set_language(struct kokoro_context* ctx, const char* espea
         return -1;
     ctx->espeak_lang = espeak_lang;
     return 0;
+}
+
+extern "C" void kokoro_phoneme_cache_clear(struct kokoro_context* ctx) {
+    if (!ctx)
+        return;
+    ctx->phon_cache.clear();
 }
 
 extern "C" int32_t* kokoro_phonemes_to_ids(struct kokoro_context* ctx, const char* phonemes, int* out_n) {

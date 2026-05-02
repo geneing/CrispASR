@@ -55,6 +55,11 @@ int kokoro_load_voice_pack(struct kokoro_context* ctx, const char* path);
 // Override the espeak-ng language (default "en-us"). Returns 0 on success.
 int kokoro_set_language(struct kokoro_context* ctx, const char* espeak_lang);
 
+// Drop every cached (lang, text) → IPA entry. Cheap and safe to call
+// concurrently. Intended for long-running daemons that resynthesize
+// across many speakers and want bounded memory.
+void kokoro_phoneme_cache_clear(struct kokoro_context* ctx);
+
 // Tokenise a phoneme string (already-IPA) into the model's vocab.
 // Returns malloc'd int32_t[*out_n] — caller frees with free().
 int32_t* kokoro_phonemes_to_ids(struct kokoro_context* ctx, const char* phonemes, int* out_n);

@@ -2488,6 +2488,16 @@ CA_EXPORT int crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path,
                                                          int out_path_len, char* out_picked, int out_picked_len) {
     return crispasr_kokoro_resolve_fallback_voice(model_path, lang, out_path, out_path_len, out_picked, out_picked_len);
 }
+
+// Drop the per-session phoneme cache. No-op if the session has no kokoro
+// context loaded. Returns 0 on success, -1 if `s` is null. (PLAN #56 #5)
+CA_EXPORT int crispasr_session_kokoro_clear_phoneme_cache(crispasr_session* s) {
+    if (!s)
+        return -1;
+    if (s->kokoro_ctx)
+        kokoro_phoneme_cache_clear(s->kokoro_ctx);
+    return 0;
+}
 #else
 CA_EXPORT bool crispasr_kokoro_lang_is_german_abi(const char*) {
     return false;
@@ -2500,5 +2510,8 @@ CA_EXPORT int crispasr_kokoro_resolve_model_for_lang_abi(const char*, const char
 }
 CA_EXPORT int crispasr_kokoro_resolve_fallback_voice_abi(const char*, const char*, char*, int, char*, int) {
     return 2;
+}
+CA_EXPORT int crispasr_session_kokoro_clear_phoneme_cache(crispasr_session*) {
+    return 0;
 }
 #endif
