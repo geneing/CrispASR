@@ -488,8 +488,7 @@ static bool ggml_grouped_conv1d_same(const float* x_cf, float* y_cf, int C, int 
         return false;
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_in"), x_padded.data(), 0,
-                            (size_t)C * T_pad * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_in"), x_padded.data(), 0, (size_t)C * T_pad * sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_w"), w_f32, 0, (size_t)K * cpg * C * sizeof(float));
     if (b_full)
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "gc_b"), b_f32, 0, (size_t)C * sizeof(float));

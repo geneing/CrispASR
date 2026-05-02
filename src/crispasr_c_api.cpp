@@ -854,14 +854,31 @@ static const std::vector<int>& gpt2_byte_decoder() {
         return dec;
     dec.assign(0x200, -1);
     std::vector<int> bs, cs;
-    for (int b = 0x21; b <= 0x7e; b++) { bs.push_back(b); cs.push_back(b); }
-    for (int b = 0xa1; b <= 0xac; b++) { bs.push_back(b); cs.push_back(b); }
-    for (int b = 0xae; b <= 0xff; b++) { bs.push_back(b); cs.push_back(b); }
+    for (int b = 0x21; b <= 0x7e; b++) {
+        bs.push_back(b);
+        cs.push_back(b);
+    }
+    for (int b = 0xa1; b <= 0xac; b++) {
+        bs.push_back(b);
+        cs.push_back(b);
+    }
+    for (int b = 0xae; b <= 0xff; b++) {
+        bs.push_back(b);
+        cs.push_back(b);
+    }
     int n = 0;
     for (int b = 0; b < 256; b++) {
         bool present = false;
-        for (int x : bs) if (x == b) { present = true; break; }
-        if (!present) { bs.push_back(b); cs.push_back(256 + n); n++; }
+        for (int x : bs)
+            if (x == b) {
+                present = true;
+                break;
+            }
+        if (!present) {
+            bs.push_back(b);
+            cs.push_back(256 + n);
+            n++;
+        }
     }
     for (size_t i = 0; i < bs.size(); i++)
         if ((size_t)cs[i] < dec.size())
@@ -877,13 +894,26 @@ static std::string gpt2_byte_decode(const std::string& s) {
     while (i < s.size()) {
         unsigned char c = (unsigned char)s[i];
         int cp = 0, len = 1;
-        if (c < 0x80) { cp = c; len = 1; }
-        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
-        else { i++; continue; }
-        if (i + len > s.size()) break;
-        for (int k = 1; k < len; k++) cp = (cp << 6) | (s[i + k] & 0x3F);
+        if (c < 0x80) {
+            cp = c;
+            len = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            cp = c & 0x1F;
+            len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            cp = c & 0x0F;
+            len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            cp = c & 0x07;
+            len = 4;
+        } else {
+            i++;
+            continue;
+        }
+        if (i + len > s.size())
+            break;
+        for (int k = 1; k < len; k++)
+            cp = (cp << 6) | (s[i + k] & 0x3F);
         i += len;
         if (cp >= 0 && cp < (int)dec.size() && dec[cp] >= 0)
             out.push_back((char)dec[cp]);
@@ -1522,8 +1552,8 @@ static crispasr_session_result* run_voxtral_family(Ctx* ctx, const VoxtralFamily
         std::string decoded;
         decoded.reserve(piece.size());
         for (size_t ci = 0; ci < piece.size(); ci++) {
-            if ((unsigned char)piece[ci] == 0xE2 && ci + 2 < piece.size() &&
-                (unsigned char)piece[ci + 1] == 0x96 && (unsigned char)piece[ci + 2] == 0x81) {
+            if ((unsigned char)piece[ci] == 0xE2 && ci + 2 < piece.size() && (unsigned char)piece[ci + 1] == 0x96 &&
+                (unsigned char)piece[ci + 2] == 0x81) {
                 decoded += ' ';
                 ci += 2;
             } else {
@@ -1761,8 +1791,7 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         int spliced = 0;
         for (size_t i = 0; i < ids.size() && spliced < N_enc; i++) {
             if (ids[i] == audio_pad_id) {
-                std::memcpy(text_embeds + i * pdim, audio_embeds + (size_t)spliced * pdim,
-                            pdim * sizeof(float));
+                std::memcpy(text_embeds + i * pdim, audio_embeds + (size_t)spliced * pdim, pdim * sizeof(float));
                 spliced++;
             }
         }
@@ -1801,7 +1830,7 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         dec_cfg.eos_id = eos_id;
         dec_cfg.vocab_size = vocab;
         auto dec = core_greedy_decode::run_with_probs(s->qwen3_ctx, first_tok, first_p, (int)ids.size(),
-                                                       qwen3_asr_embed_tokens, qwen3_asr_run_llm_kv, dec_cfg);
+                                                      qwen3_asr_embed_tokens, qwen3_asr_run_llm_kv, dec_cfg);
 
         // Detokenize, filtering out qwen3's metadata wrapper tokens
         // (<|im_start|>, <asr_text>, "language <name>", etc.) the same
@@ -1945,8 +1974,8 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         } else {
             // granite-4.0-1b legacy hardcoded ids: "USER: " + transcription request.
             static const int32_t kPrefix4[] = {6584, 25, 220};
-            static const int32_t kSuffix4[] = {4919, 499, 1380, 3191, 279, 8982, 1139, 264,
-                                                5439, 3645, 30, 198, 36660, 3931, 2891, 25};
+            static const int32_t kSuffix4[] = {4919, 499,  1380, 3191, 279,   8982, 1139, 264,
+                                               5439, 3645, 30,   198,  36660, 3931, 2891, 25};
             prefix_ids.assign(kPrefix4, kPrefix4 + (sizeof(kPrefix4) / sizeof(kPrefix4[0])));
             suffix_ids.assign(kSuffix4, kSuffix4 + (sizeof(kSuffix4) / sizeof(kSuffix4[0])));
         }
@@ -2002,8 +2031,7 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         dec_cfg.eos_id = eos_tok;
         dec_cfg.vocab_size = vocab;
         auto dec = core_greedy_decode::run_with_probs(s->granite_ctx, first_tok, first_p, total_prompt,
-                                                       granite_speech_embed_tokens, granite_speech_run_llm_kv,
-                                                       dec_cfg);
+                                                      granite_speech_embed_tokens, granite_speech_run_llm_kv, dec_cfg);
 
         // Detokenize batch via granite's own merge logic for the segment
         // text. Per-token text comes from gpt2_byte_decode of single ids
@@ -2269,8 +2297,7 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
 #endif
 #ifdef CA_HAVE_KYUTAI
     if ((s->backend == "kyutai-stt" || s->backend == "kyutai" || s->backend == "moshi-stt") && s->kyutai_ctx) {
-        kyutai_stt_result* kr =
-            kyutai_stt_transcribe_with_probs((kyutai_stt_context*)s->kyutai_ctx, pcm, n_samples);
+        kyutai_stt_result* kr = kyutai_stt_transcribe_with_probs((kyutai_stt_context*)s->kyutai_ctx, pcm, n_samples);
         if (!kr || !kr->text) {
             if (kr)
                 kyutai_stt_result_free(kr);
@@ -2371,8 +2398,7 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
     if ((s->backend == "omniasr" || s->backend == "omniasr-ctc" || s->backend == "omniasr-llm") && s->omniasr_ctx) {
         // LLM variant produces per-token probs; CTC variant returns nullptr
         // here — fall through to the plain-text path below.
-        omniasr_result* oar =
-            omniasr_transcribe_with_probs((omniasr_context*)s->omniasr_ctx, pcm, n_samples);
+        omniasr_result* oar = omniasr_transcribe_with_probs((omniasr_context*)s->omniasr_ctx, pcm, n_samples);
         if (oar && oar->text) {
             std::vector<ca_token_record> toks;
             toks.reserve((size_t)oar->n_tokens);
@@ -3143,6 +3169,30 @@ CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* te
 
 CA_EXPORT void crispasr_pcm_free(float* pcm) {
     free(pcm);
+}
+
+// =========================================================================
+// Streaming session API (PLAN #62b — generalize stream_open from
+// whisper_context* to crispasr_session*).
+//
+// Today only the whisper backend is wired through (it's what the
+// rolling-window engine in `crispasr_stream_*` was built for); future
+// backends (moonshine-streaming, kyutai-stt, voxtral4b) plug in here
+// by routing `crispasr_session_stream_feed` to their native streaming
+// entry points.
+//
+// Returns nullptr if the session's backend doesn't support streaming.
+// =========================================================================
+
+CA_EXPORT crispasr_stream* crispasr_session_stream_open(crispasr_session* s, int n_threads, int step_ms, int length_ms,
+                                                        int keep_ms, const char* language, int translate) {
+    if (!s)
+        return nullptr;
+    if (s->whisper_ctx)
+        return crispasr_stream_open(s->whisper_ctx, n_threads, step_ms, length_ms, keep_ms, language, translate);
+    // Future: route to moonshine_streaming / kyutai_stt native streaming
+    // engines here when 62c lands. For now, only whisper streams.
+    return nullptr;
 }
 
 CA_EXPORT void crispasr_session_close(crispasr_session* s) {

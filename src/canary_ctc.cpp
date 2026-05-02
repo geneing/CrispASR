@@ -703,8 +703,7 @@ extern "C" char* canary_ctc_greedy_decode(struct canary_ctc_context* ctx, const 
 }
 
 extern "C" struct canary_ctc_decode_result* canary_ctc_greedy_decode_with_probs(struct canary_ctc_context* ctx,
-                                                                                const float* logits, int T_enc,
-                                                                                int V) {
+                                                                                const float* logits, int T_enc, int V) {
     if (!ctx || !logits || T_enc <= 0 || V <= 0)
         return nullptr;
 

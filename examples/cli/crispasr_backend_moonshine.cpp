@@ -15,9 +15,7 @@ public:
 
     const char* name() const override { return "moonshine"; }
 
-    uint32_t capabilities() const override {
-        return CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE;
-    }
+    uint32_t capabilities() const override { return CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE; }
 
     bool init(const whisper_params& params) override {
         struct moonshine_init_params mp = {};

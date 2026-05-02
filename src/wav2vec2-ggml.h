@@ -162,8 +162,7 @@ struct wav2vec2_token_prob {
  * The concatenation of `text` fields (with "|" → " " mapping applied) is
  * equivalent to the output of `wav2vec2_greedy_decode`.
  */
-std::vector<wav2vec2_token_prob> wav2vec2_greedy_decode_with_probs(const wav2vec2_model& m, const float* logits,
-                                                                   int T);
+std::vector<wav2vec2_token_prob> wav2vec2_greedy_decode_with_probs(const wav2vec2_model& m, const float* logits, int T);
 
 /**
  * Compute the encoder frame duration in seconds.
