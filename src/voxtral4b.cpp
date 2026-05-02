@@ -20,16 +20,20 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -1627,6 +1631,29 @@ struct voxtral4b_stream {
     std::vector<float> decode_logits; // last-position logits for next argmax
     int decode_steps_done;        // total decode steps run (for timing telemetry)
 
+    // ── Decoder thread (PLAN #7 phase 4) ───────────────────────────────────
+    // When `decoder_thread_enabled` is true, vox_stream_drain_decode runs
+    // on a worker thread instead of the caller's thread. Feed pushes
+    // audio_embeds and signals the worker; the worker drains decode steps
+    // while audio is available. Lets feed() return without waiting for
+    // decode — critical for mic-driven live captions where the audio
+    // thread must stay current.
+    //
+    // sched_mutex serializes all ggml_backend_sched access (the encoder
+    // graphs from feed and the LLM forward from worker share ctx->sched).
+    // On Metal that means the encoder and LLM still run sequentially on
+    // the GPU, but the CPU-side feed() returns immediately after queuing
+    // audio_embeds. On a faster GPU with kernel parallelism the
+    // encoder + LLM may actually overlap; the architecture supports it
+    // without further code changes.
+    bool decoder_thread_enabled;
+    std::thread worker_thread;
+    std::mutex sched_mutex;        // serializes encoder + decoder access to ctx->sched
+    std::mutex decode_state_mutex; // protects decode_*, audio_embeds, out_text*
+    std::condition_variable cond_var;
+    std::atomic<bool> shutdown_requested;
+    std::atomic<bool> worker_idle; // true when worker is waiting on cond_var (no pending work)
+
     // ── Output ────────────────────────────────────────────────────────────
     std::string out_text;
     std::string out_text_unread;
@@ -2054,6 +2081,43 @@ static int vox_stream_drain_decode(voxtral4b_stream* s) {
     return 0;
 }
 
+// PLAN #7 phase 4 worker thread main loop. Sleeps on cond_var until
+// either shutdown or there's audio to decode. Drains while it can,
+// then sleeps again. Holds sched_mutex + decode_state_mutex for each
+// drain call — feed() acquires sched_mutex around encoder ops, so
+// they alternate (no GPU parallelism on Metal, but feed() doesn't
+// wait for the entire decode loop the way it does in single-threaded
+// live mode).
+static void vox_stream_decoder_worker(voxtral4b_stream* s) {
+    while (!s->shutdown_requested.load()) {
+        {
+            std::unique_lock<std::mutex> lk(s->decode_state_mutex);
+            s->worker_idle.store(true);
+            s->cond_var.wait(lk, [&]() {
+                if (s->shutdown_requested.load())
+                    return true;
+                if (!s->decode_started || s->decode_finished)
+                    return false;
+                const int proj_out = (int)s->ctx->model.hparams.proj_out_dim;
+                const int N_audio = (int)(s->audio_embeds.size() / proj_out);
+                return N_audio > s->decode_adapter_pos;
+            });
+            if (s->shutdown_requested.load())
+                break;
+            s->worker_idle.store(false);
+        }
+        // Acquire sched_mutex around the LLM forward calls inside drain.
+        // The drain helper itself reads/writes decode state while holding
+        // decode_state_mutex's contract loosely — we hold both throughout
+        // for safety. On M1 the LLM forward dominates so the lock-hold
+        // duration is the LLM step time.
+        std::lock_guard<std::mutex> sched_lk(s->sched_mutex);
+        std::lock_guard<std::mutex> state_lk(s->decode_state_mutex);
+        (void)vox_stream_drain_decode(s);
+    }
+    s->worker_idle.store(true);
+}
+
 } // namespace
 
 extern "C" struct voxtral4b_stream* voxtral4b_stream_open(struct voxtral4b_context* ctx, int /*step_ms*/,
@@ -2098,6 +2162,9 @@ extern "C" struct voxtral4b_stream* voxtral4b_stream_open(struct voxtral4b_conte
     s->decode_out_vocab = 0;
     s->decode_last_argmax_id = 0;
     s->decode_steps_done = 0;
+    s->decoder_thread_enabled = (getenv("CRISPASR_VOXTRAL4B_STREAM_DECODER_THREAD") != nullptr);
+    s->shutdown_requested = false;
+    s->worker_idle = true;
     s->out_t0_s = 0.0;
     s->out_t1_s = 0.0;
     s->has_output = false;
@@ -2108,6 +2175,13 @@ extern "C" struct voxtral4b_stream* voxtral4b_stream_open(struct voxtral4b_conte
     if (vox_stream_alloc_enc_kv(s) != 0) {
         delete s;
         return nullptr;
+    }
+    // PLAN #7 phase 4: optionally start a decoder worker thread. Only
+    // useful in live-decode mode (in PTT mode all decode happens in flush,
+    // no parallelism opportunity). Implies live decode.
+    if (s->decoder_thread_enabled) {
+        s->live_decode_enabled = true; // decoder thread implies live mode
+        s->worker_thread = std::thread(vox_stream_decoder_worker, s);
     }
     // Pre-feed 32 STREAMING_PAD-tokens worth of zero audio so the encoder's
     // first 32 frames are silence-encoded, matching the batch CLI adapter.
@@ -2149,31 +2223,34 @@ extern "C" int voxtral4b_stream_feed(struct voxtral4b_stream* s, const float* pc
     if (use_batch_encoder)
         return 0;
 
-    // Emit any new mel frames now possible.
-    if (vox_stream_advance_mel(s) < 0)
-        return -2;
-
-    // Run encoder chunks while we have ≥ chunk_mel_frames pending.
-    const int n_mels = (int)s->ctx->model.hparams.n_mels;
-    while ((int)(s->mel_pending.size() / n_mels) >= s->chunk_mel_frames) {
-        const int rc = vox_stream_run_encoder_chunk(s);
-        if (rc <= 0)
-            break;
+    // PLAN #7 phase 4: when the decoder thread is running, the worker
+    // also calls into ggml's sched on the LLM. Hold sched_mutex around
+    // the encoder + projector + prefill so encoder/decoder serialize
+    // cleanly on Metal. (No GPU parallelism on M1; the win is feed()
+    // returning before the decode catches up — the worker drains in
+    // the background.)
+    {
+        std::lock_guard<std::mutex> sched_lk(s->sched_mutex);
+        if (vox_stream_advance_mel(s) < 0)
+            return -2;
+        const int n_mels = (int)s->ctx->model.hparams.n_mels;
+        while ((int)(s->mel_pending.size() / n_mels) >= s->chunk_mel_frames) {
+            const int rc = vox_stream_run_encoder_chunk(s);
+            if (rc <= 0)
+                break;
+        }
+        if (vox_stream_advance_projector(s) < 0)
+            return -3;
+        if (vox_stream_maybe_prefill(s) < 0)
+            return -4;
     }
 
-    // Project any complete groups of 4 enc frames.
-    if (vox_stream_advance_projector(s) < 0)
-        return -3;
-
-    // PLAN #7 phase 3: speculative prefill once we have enough audio_embeds.
-    // Skipped here on negative return to avoid masking errors.
-    if (vox_stream_maybe_prefill(s) < 0)
-        return -4;
-
-    // PLAN #7 phase 3 — live decode (CRISPASR_VOXTRAL4B_STREAM_LIVE=1):
-    // run as many decode steps as new audio_embeds allow, appending text
-    // to out_text / out_text_unread as it commits.
-    if (s->live_decode_enabled && s->decode_started && !s->decode_finished) {
+    if (s->decoder_thread_enabled) {
+        // Worker thread is responsible for decode. Notify it that
+        // audio_embeds have grown. Feed returns immediately.
+        s->cond_var.notify_one();
+    } else if (s->live_decode_enabled && s->decode_started && !s->decode_finished) {
+        // Single-threaded live decode: drain inline.
         if (vox_stream_drain_decode(s) < 0)
             return -5;
     }
@@ -2418,13 +2495,33 @@ extern "C" int voxtral4b_stream_flush(struct voxtral4b_stream* s) {
 
     // Drain decode — runs all remaining tokens until EOS or audio exhausted.
     // In live mode many will already be drained from feed; in PTT mode this
-    // does the entire decode loop.
+    // does the entire decode loop. With decoder_thread_enabled, signal
+    // the worker and wait for it to be idle.
     auto t_decode_start = std::chrono::steady_clock::now();
     const int decode_steps_before = s->decode_steps_done;
-    const std::string out_text_before = s->out_text;
-    const int decode_first_text = s->out_text.empty() ? 0 : 1;
-    if (vox_stream_drain_decode(s) < 0)
-        return -9;
+
+    if (s->decoder_thread_enabled) {
+        // Wake worker so it picks up any final audio_embeds from the
+        // flush-time encoder drain above. Then wait until it goes idle.
+        s->cond_var.notify_one();
+        for (;;) {
+            // Hand off briefly so worker can grab the lock if needed.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::unique_lock<std::mutex> lk(s->decode_state_mutex);
+            const int proj_out = (int)s->ctx->model.hparams.proj_out_dim;
+            const int N_audio_now = (int)(s->audio_embeds.size() / proj_out);
+            const bool caught_up = s->decode_finished || s->decode_adapter_pos >= N_audio_now;
+            if (caught_up && s->worker_idle.load())
+                break;
+            // Re-notify in case worker missed our earlier signal due to
+            // a tight wait/check race.
+            lk.unlock();
+            s->cond_var.notify_one();
+        }
+    } else {
+        if (vox_stream_drain_decode(s) < 0)
+            return -9;
+    }
     const int new_decode_steps = s->decode_steps_done - decode_steps_before;
     if (timing && new_decode_steps > 0) {
         const double decode_ms = std::chrono::duration<double, std::milli>(
@@ -2434,8 +2531,6 @@ extern "C" int voxtral4b_stream_flush(struct voxtral4b_stream* s) {
                 "voxtral4b_stream timing: drain %d decode steps in %.1f ms (avg %.1f ms/step); flush total %.1f ms\n",
                 new_decode_steps, decode_ms, decode_ms / std::max(1, new_decode_steps), elapsed_ms());
     }
-    (void)decode_first_text;
-    (void)out_text_before;
 
     // Trim leading/trailing whitespace from out_text (live mode may have
     // committed leading spaces from `▁` SP-marker tokens).
@@ -2454,6 +2549,9 @@ extern "C" int voxtral4b_stream_get_text(struct voxtral4b_stream* s, char* out, 
                                           double* out_t1_s, int64_t* out_decode_counter) {
     if (!s || !out || cap <= 0)
         return -1;
+    // PLAN #7 phase 4: protect out_text_unread + counter from concurrent
+    // worker-thread writes.
+    std::lock_guard<std::mutex> lk(s->decode_state_mutex);
     if (s->out_text_unread.empty()) {
         out[0] = '\0';
         if (out_t0_s) *out_t0_s = s->out_t0_s;
@@ -2480,6 +2578,12 @@ extern "C" void voxtral4b_stream_set_live_decode(struct voxtral4b_stream* s, int
 extern "C" void voxtral4b_stream_close(struct voxtral4b_stream* s) {
     if (!s)
         return;
+    // PLAN #7 phase 4: shut down + join the decoder worker thread.
+    if (s->worker_thread.joinable()) {
+        s->shutdown_requested.store(true);
+        s->cond_var.notify_all();
+        s->worker_thread.join();
+    }
     if (s->enc_kv_buf)
         ggml_backend_buffer_free(s->enc_kv_buf);
     if (s->enc_kv_ctx)
