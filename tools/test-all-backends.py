@@ -85,12 +85,17 @@ class Backend:
     notes: str = ""
     extra_files: tuple[tuple[str, str, str], ...] = ()
     approx_size_mb: int | None = None
+    # TTS-specific extras (only needed for tts-roundtrip capability)
+    voice_file: str | None = None     # e.g. kokoro-voice-af_heart.gguf
+    codec_model: str | None = None    # e.g. qwen3-tts-tokenizer-12hz-q8_0.gguf
+    tts_extra_args: tuple[str, ...] = ()
 
 
 # Capability → ALL backends that advertise it, populated below.
 CAPABILITIES_KNOWN = (
     "transcribe", "json-output", "stream", "beam", "best-of-n",
     "temperature", "word-timestamps", "punctuation", "vad", "lid",
+    "tts-roundtrip",
 )
 
 
@@ -175,6 +180,16 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/voxtral-mini-3b-2507-GGUF", "voxtral-mini-3b-2507-q4_k.gguf",
             timeout_s=300, approx_size_mb=1900,
             capabilities=("transcribe", "json-output", "temperature")),
+
+    # ---- TTS backends (tts-roundtrip capability) ----
+    Backend("kokoro",     "Kokoro 82M (TTS)",    "kokoro-82m-q8_0.gguf",
+            "cstr/kokoro-82m-GGUF", "kokoro-82m-q8_0.gguf",
+            timeout_s=120, approx_size_mb=90,
+            capabilities=("tts-roundtrip",),
+            voice_file="kokoro-voice-af_heart.gguf",
+            extra_files=(("kokoro-voice-af_heart.gguf",
+                          "cstr/kokoro-82m-GGUF",
+                          "kokoro-voice-af_heart.gguf"),)),
 )
 
 
@@ -820,6 +835,129 @@ RUNNERS["vad"] = test_vad
 RUNNERS["lid"] = test_lid
 
 
+# ---- tts-roundtrip ---------------------------------------------------------
+
+
+# Reference parakeet model — TTS roundtrip uses parakeet as the ASR
+# ground truth. Kept in sync with the parakeet entry in REGISTRY.
+_PARAKEET_REF = ("parakeet-tdt-0.6b-v3-q4_k.gguf",
+                 "cstr/parakeet-tdt-0.6b-v3-GGUF",
+                 "parakeet-tdt-0.6b-v3-q4_k.gguf")
+
+# Fixed phrase — pangram with clean word boundaries, no proper nouns or
+# tricky punctuation.
+_TTS_PHRASE = "The quick brown fox jumps over the lazy dog"
+
+
+def _ensure_parakeet(models_dir: Path, skip_missing: bool) -> Path | None:
+    for cand in (models_dir / _PARAKEET_REF[0], models_dir / _PARAKEET_REF[2]):
+        if cand.is_file():
+            return cand
+    if skip_missing:
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        downloaded = hf_hub_download(_PARAKEET_REF[1], _PARAKEET_REF[2],
+                                     local_dir=str(models_dir))
+        return Path(downloaded)
+    except Exception:
+        return None
+
+
+def test_tts_roundtrip(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Synthesize a fixed phrase via the backend's TTS path, transcribe
+    the result with parakeet, and compare WER to the original phrase.
+
+    Smoke: WER <= 0.20 (TTS quality varies + parakeet has its own ~0%
+    error baseline, so this leaves headroom for prosody artefacts).
+    Full: WER <= 0.10 — tighter, only acceptable if TTS is high-fidelity
+    and the test phrase is a clean pangram.
+    """
+    crispasr, model, models_dir, use_gpu, skip_missing = (
+        ctx["crispasr"], ctx["model"], ctx["models_dir"], ctx["use_gpu"],
+        ctx["skip_missing"])
+    if not b.voice_file:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "FAIL",
+                           "backend declared tts-roundtrip but voice_file unset")
+    voice_path = models_dir / b.voice_file
+    if not voice_path.is_file():
+        return TestOutcome(b.name, "tts-roundtrip", tier, "SKIP",
+                           f"voice file {b.voice_file} missing in {models_dir}")
+    parakeet = _ensure_parakeet(models_dir, skip_missing)
+    if not parakeet:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "SKIP",
+                           "parakeet reference model unavailable "
+                           f"(needs {_PARAKEET_REF[0]} for ASR ground truth)")
+    out_wav = REPO_ROOT / "build" / "test-fixtures" / f"tts_{b.name}.wav"
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    # Step 1: synthesize
+    syn_cmd = [
+        str(crispasr), "-m", str(model),
+        "--voice", str(voice_path),
+        "--tts", _TTS_PHRASE,
+        "--tts-output", str(out_wav),
+        "--no-prints",
+    ]
+    if b.codec_model:
+        codec_path = models_dir / b.codec_model
+        if not codec_path.is_file():
+            return TestOutcome(b.name, "tts-roundtrip", tier, "SKIP",
+                               f"codec model {b.codec_model} missing")
+        syn_cmd += ["--codec-model", str(codec_path)]
+    syn_cmd += list(b.tts_extra_args)
+    if not use_gpu:
+        syn_cmd.append("-ng")
+    t0 = time.time()
+    try:
+        r = subprocess.run(syn_cmd, capture_output=True, text=True,
+                           timeout=b.timeout_s)
+    except subprocess.TimeoutExpired:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "TIMEOUT",
+                           f"TTS subprocess timed out", time.time() - t0)
+    syn_elapsed = time.time() - t0
+    if r.returncode != 0:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "CRASH",
+                           f"TTS synth failed: {(r.stderr or '')[-300:]}",
+                           syn_elapsed)
+    if not out_wav.is_file() or out_wav.stat().st_size < 1000:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "FAIL",
+                           f"TTS produced no usable output ({out_wav})",
+                           syn_elapsed)
+    # Step 2: parakeet ASR roundtrip
+    asr_cmd = [str(crispasr), "--backend", "parakeet", "-m", str(parakeet),
+               "-f", str(out_wav), "--no-prints"]
+    if not use_gpu:
+        asr_cmd.append("-ng")
+    t1 = time.time()
+    try:
+        r2 = subprocess.run(asr_cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "TIMEOUT",
+                           "parakeet roundtrip timed out", syn_elapsed + 120)
+    asr_elapsed = time.time() - t1
+    total_w = syn_elapsed + asr_elapsed
+    if r2.returncode != 0:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "CRASH",
+                           f"parakeet ASR failed: {(r2.stderr or '')[-300:]}",
+                           total_w)
+    transcript = parse_transcript(r2.stdout)
+    werv = wer(_TTS_PHRASE, transcript)
+    extra = {"phrase": _TTS_PHRASE, "transcript": transcript[:120], "wer": werv}
+    threshold = 0.10 if tier == "full" else 0.20
+    if werv is None:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "PASS",
+                           "transcript present (jiwer missing)", total_w, extra)
+    if werv > threshold:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "FAIL",
+                           f"roundtrip WER {werv:.1%} > {threshold:.0%}",
+                           total_w, extra)
+    return TestOutcome(b.name, "tts-roundtrip", tier, "PASS",
+                       f"roundtrip WER={werv:.1%}", total_w, extra)
+
+
+RUNNERS["tts-roundtrip"] = test_tts_roundtrip
+
+
 # ---------------------------------------------------------------------------
 # Profile + tier resolution
 # ---------------------------------------------------------------------------
@@ -947,6 +1085,7 @@ def main() -> int:
             "crispasr": crispasr, "model": model, "audio": audio,
             "audio_duration": audio_duration, "models_dir": models_dir,
             "use_gpu": not args.cpu, "wer_threshold": args.wer_threshold,
+            "skip_missing": args.skip_missing,
         }
         # Run each advertised capability whose tier != ignore.
         for cap in b.capabilities:
