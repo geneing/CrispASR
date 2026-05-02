@@ -6362,3 +6362,80 @@ Python exception in the callback unwinds through the ctypes
 boundary into miniaudio's loop and corrupts the device. All
 three trampolines catch + suppress callback exceptions, writing
 to stderr instead.
+
+### miniaudio's `MINIAUDIO_IMPLEMENTATION` in a `.cpp` TU breaks on iOS / tvOS / watchOS
+
+Hit on the v0.5.4 release CI iOS build (commit `76bf2d5` →
+`1c0e996` fix). When `MINIAUDIO_IMPLEMENTATION` is defined inside
+a `.cpp` translation unit on Apple platforms, miniaudio's
+CoreAudio backend pulls in `AVFoundation/AVBase.h`, which
+includes `Foundation/NSObjCRuntime.h`. That header uses
+Objective-C types (`NSString`, `id`, etc.) which the C++
+front-end cannot parse — the compiler emits a wall of
+`expected unqualified-id` and `unknown type name 'NSString'`
+errors.
+
+macOS happens to "work" anyway because the targets we exercise
+in regular CI use the macOS build matrix and the same `.cpp`
+hits AVFoundation just fine when `TARGET_OS_OSX` is in scope —
+but iOS / tvOS / watchOS hit the issue.
+
+Three options:
+
+1. **Rename to `.mm`** and let it be parsed as Objective-C++.
+   Cleanest semantically but requires a CMake conditional + adds
+   an Objective-C++ source file to a project that's otherwise
+   pure C++.
+2. **Define `MA_NO_DEVICE_IO`** for iOS/tvOS/watchOS — drops the
+   ma_device_* symbols on those platforms but keeps the audio
+   decoder intact. We took this path because the static-lib
+   build artifact for those platforms is consumed by host apps
+   that handle mic capture themselves (via AVAudioEngine + the
+   AVAudioSession privacy-prompt context the static lib doesn't
+   own anyway). See `src/crispasr_audio.cpp` + `src/crispasr_mic.cpp`
+   for the gate (`#if TARGET_OS_IOS || TARGET_OS_TV ||
+   TARGET_OS_WATCH`).
+3. **Exclude the file from the iOS build entirely** via CMake.
+   Loses the audio decoder too — usually too aggressive.
+
+If you ever need to enable mic capture on iOS in the static lib
+itself, option 1 is the right move (rename + CMake conditional).
+For "wrapper apps own mic capture" use cases, option 2 stays.
+
+### First publish to a language registry can't be CI-only — bootstrap matters
+
+Project-specific shape (PLAN §66) but the generic pattern
+applies to every new language-binding push: **all three of
+crates.io, PyPI, and pub.dev reject a CI-only first publish**
+because they have no prior owner record to verify the OIDC /
+token exchange against. The CI workflow you write for `v*` tag
+pushes will fail every release until someone manually does the
+first publish from a workstation:
+
+- crates.io: `cargo login` + `cargo publish` (one-time, then
+  `CARGO_REGISTRY_TOKEN` covers all future releases).
+- PyPI: configure a "pending publisher" at
+  https://pypi.org/manage/account/publishing/ pointing to the
+  workflow file + environment, OR upload v0 with a manual
+  `twine upload` first.
+- pub.dev: `dart pub publish` is interactive (browser login) for
+  the first version of any package; only after that can the
+  Admin → Automated Publishing toggle take over.
+
+**When to set up the workflow:** keep the per-tag publish flow
+in the repo from day one (so you don't forget) but **comment
+out the `tags: ['v*']` auto-trigger and keep
+`workflow_dispatch` only** until bootstrap is done. Otherwise
+every tag push produces a red CI run that obscures real
+failures. Document the bootstrap procedure inline in the
+workflow comment block AND in PLAN.md so the human picking it
+up later doesn't have to spelunk for the per-registry magic
+words.
+
+Resilience pattern that pays off when you DO re-enable the
+trigger: every job gets `continue-on-error: true` (so a
+misconfiguration of one registry doesn't fail the others) and
+a fast "secret/config presence check" at the top that prints a
+clear `::warning::` + `exit 78` (neutral) when prerequisites
+are missing — instead of letting `cargo` / `twine` emit
+cryptic auth errors deep in the log.
