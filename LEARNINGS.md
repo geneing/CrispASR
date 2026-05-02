@@ -6479,3 +6479,129 @@ does, the gate is fine and the bug is in the lib's env-var
 handling. `HUGGINGFACE_HUB_CACHE` (cache-dir-only) does NOT have
 the same effect — only `HF_HOME` reroutes the token. Easy to
 assume both env vars behave the same; they don't.
+
+### Gating per-token softmax preserves fast paths on large-vocab decoders (PLAN #61b/#65)
+
+When adding `*_transcribe_with_probs` to a decoder backend, the
+natural shape is to refactor the `argmax` lambda into a `pick(L,
+float* out_p)` that ALSO emits the picked token's softmax
+probability. The temptation is to call it unconditionally so the
+new public entry shares one code path with the legacy text-only
+entry. Don't.
+
+For small-vocab models this is fine — voxtral's ~32k tokens cost
+~32k `expf` per step, microseconds on M1. For large-vocab decoders
+the picture changes: mimo-asr's vocab is **151,680 Qwen2 tokens**.
+A single per-token softmax adds ~150k `expf` calls — about
+0.5–1 ms on M1 and proportionally more on slower backends. Across
+30 emitted tokens that's 15–30 ms of pure overhead, which is
+measurable on the runtime path the CLI actually uses.
+
+The fix is a one-liner gate at the call site, NOT inside `pick`:
+
+```cpp
+const bool capture_probs = (out_token_ids && out_token_probs);
+int next = pick(logits, capture_probs ? &prob : nullptr);
+```
+
+`pick` then short-circuits the softmax loop when `out_p == nullptr`:
+
+```cpp
+if (out_p) {
+    float s = 0.f;
+    for (int i = 0; i < V; i++) s += expf(L[i] - bv);
+    *out_p = (s > 0.f) ? (1.f / s) : 0.f;
+}
+```
+
+The legacy path (`mimo_asr_transcribe`, called by the CLI) passes
+`nullptr` out-vectors → `capture_probs` false → no softmax →
+bit-identical fast behaviour. The new path
+(`mimo_asr_transcribe_with_probs`, called by the session API) pays
+the softmax cost only when the caller actually wants probs. Same
+pattern applied to vibevoice (~152k vocab), moonshine, and
+omniasr-llm. For small-vocab cases (firered ~9k, canary-ctc ~16k)
+the gate is cosmetic but doesn't hurt.
+
+### Best-of-N seed propagation: xorshift mix-in for sampler-owned RNG, `srand` for libc-rand (PLAN #61d)
+
+Adding best-of-N to a backend with multinomial sampling requires
+the N runs to draw INDEPENDENT samples. If the per-call seed is
+deterministic in the audio (e.g. `seed = audio_ptr ^ n_samples`),
+running the same audio N times gives N IDENTICAL samples — no
+diversity, best-of-N collapses to single-shot.
+
+Two patterns observed across the LLM-style decoder quartet:
+
+**Pattern A — sampler owns its RNG state** (moonshine, omniasr-llm).
+The sampler runs a context-local xorshift, so threading a sticky
+`seed_override` field on the context is straightforward:
+
+```cpp
+uint64_t rng_state = 0x9E3779B97F4A7C15ull
+    ^ (uint64_t)(uintptr_t)audio
+    ^ (uint64_t)n_samples
+    ^ (ctx->seed_override * 0xBF58476D1CE4E5B9ull);
+if (rng_state == 0) rng_state = 0x9E3779B97F4A7C15ull;  // safety
+```
+
+The adapter injects `run_index * 0x9E37…` salt for runs 1..N-1
+and 0 for run 0 (which falls back to audio-derived seed →
+bit-identical to single-shot).
+
+**Pattern B — sampler uses libc `rand()`** (glm-asr, kyutai-stt).
+Their multinomial samplers are `static` helpers with no context
+arg. Threading per-context xorshift through the helper signature
+is invasive. Pragmatic alternative: `*_set_seed(ctx, unsigned)`
+calls `srand(seed)` when non-zero, no-op otherwise. Caveat:
+`srand` is **process-global** — concurrent best-of-N from
+multiple threads racing through the same process would interleave
+seed manipulations. Document and serialize at the adapter level
+(natural pattern anyway, since best-of-N is a sequential N-run
+loop in one transcribe call).
+
+Convention used everywhere: **run 0 always uses seed 0 → sticky
+override defaults → legacy single-shot bit-identical behaviour**.
+Existing callers who don't pass `--best-of N` get the exact same
+trajectory as before; only the explicit best-of-N path draws
+different samples.
+
+### Stub `_transcribe` masks broken session API: a runtime can be "working" via the CLI but null via the session API (PLAN #65)
+
+When integrating a backend through the CrispASR session API, the
+default move is to call its `*_transcribe(ctx, samples, n_samples)`
+entry point. For most backends that works. For **qwen3 and
+granite**, that entry point is a 3-line stub that returns null
+(`granite_speech_transcribe`) or empty (`qwen3_asr_transcribe`) —
+yet the CLI works fine because `crispasr_backend_qwen3.cpp` /
+`_granite.cpp` drive the building blocks (`*_compute_mel`,
+`*_run_encoder`, `*_tokenize`, `*_embed_tokens`, `*_kv_init`,
+`*_run_llm_kv`, `*_token_text`) directly.
+
+Symptom: `crispasr_session_open(...) → crispasr_session_transcribe(...)`
+returns a `crispasr_session_result*` with one segment whose
+`.text` is empty (or nullptr return). The session call doesn't
+error; upstream wrappers see "transcription succeeded with no
+text" and report nothing went wrong.
+
+Detection: search the runtime `.cpp` for the public `_transcribe`
+entry point and inspect the body. If it's:
+
+```cpp
+extern "C" char* qwen3_asr_transcribe(qwen3_asr_context*, const float*, int) {
+    return strdup("");  // or: return nullptr;
+}
+```
+
+…the runtime is a building-block kit, not a complete pipeline.
+The session API has to replicate the CLI adapter's flow. Pattern:
+read the CLI adapter (`examples/cli/crispasr_backend_*.cpp`),
+port the prompt construction + decode loop into the session path
+in `c_api.cpp`. Use `core_greedy_decode::run_with_probs` for the
+autoregressive loop — that infra was designed for this.
+
+Worth a `// TODO: complete` or `assert(0 && "stub")` at the top
+of each stub so the next session can find them. Ideally the
+stubs would be deleted in favour of a unified runtime-level
+implementation (since the CLI logic is what they SHOULD do), but
+that's a larger refactor.
