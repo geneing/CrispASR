@@ -6864,20 +6864,24 @@ That model uses a completely different streaming-prompt convention:
 
 The CLI adapter at `examples/cli/crispasr_backend_voxtral4b.cpp:67-220`
 implements this correctly because it was hand-written for the realtime
-model. The Python `session.transcribe()` path goes through
-`run_voxtral_family` and produces a runtime crash on arbitrary audio
-sizes — not a regression from any recent change, just a long-standing
-oversight that nobody hit because the python session.transcribe() for
-voxtral4b was never the supported path.
+model. The Python `session.transcribe()` path historically went through
+`run_voxtral_family` and produced a runtime crash on arbitrary audio
+sizes (the [INST]...[TRANSCRIBE] template + no audio padding broke the
+projector's stride-8 alignment). PLAN #7 phase 1.5 also fixed this:
+the voxtral4b branch in `crispasr_session_transcribe_lang` now routes
+through the streaming API (open + feed + flush + get_text), which uses
+the streaming-prompt convention and the right audio padding. Same
+implementation, two entry points.
 
 **Generalisable rule.** When a new audio-LLM checkpoint shares an
 encoder family with an existing backend but has a different "Realtime"
 or "Streaming" suffix in its name, **read its tokenizer config and its
 model card's prompt example before assuming the family orchestrator
 applies**. The C-ABI dispatch can route to a per-checkpoint backend
-adapter (the CLI does this); the unified `crispasr_session_transcribe`
-path needs an explicit branch for any model that breaks the family
-template.
+adapter; the unified `crispasr_session_transcribe` path needs an
+explicit branch for any model that breaks the family template — and
+once you've built the streaming path with the right convention, the
+session.transcribe path can DRY through it.
 
 ## Lesson — when an encoder is causal + SWA *and* the LLM has a KV cache, "streaming" is synchronous, not threaded
 

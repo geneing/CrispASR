@@ -2189,19 +2189,41 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
 #endif
 #ifdef CA_HAVE_VOXTRAL4B
     if (s->backend == "voxtral4b" && s->voxtral4b_ctx) {
-        delete r;
-        VoxtralFamilyOps<voxtral4b_context> ops;
-        ops.compute_mel = &voxtral4b_compute_mel;
-        ops.run_encoder = &voxtral4b_run_encoder;
-        ops.tokenize = &voxtral4b_tokenize;
-        ops.embed_tokens = &voxtral4b_embed_tokens;
-        ops.kv_init = &voxtral4b_kv_init;
-        ops.kv_reset = &voxtral4b_kv_reset;
-        ops.run_llm_kv = &voxtral4b_run_llm_kv;
-        ops.token_text = &voxtral4b_token_text;
-        ops.audio_pad_id = 24;
-        ops.eos_id = 2;
-        return run_voxtral_family(s->voxtral4b_ctx, ops, pcm, n_samples, lang, s->ask);
+        // Voxtral-Mini-4B-Realtime-2602 uses a streaming-prompt convention
+        // (BOS + 38 STREAMING_PAD + audio-injection pre_hook) that's
+        // qualitatively different from voxtral-3B's [INST]...[TRANSCRIBE]
+        // template. The unified `run_voxtral_family` orchestrator above
+        // assumes the 3B template and crashes on arbitrary audio sizes
+        // (projector stride-8 misalignment). PLAN #7 phase 1+1.5's streaming
+        // implementation has the right prompt convention; route session
+        // transcribe through it. Bit-exact match to the CLI batch path,
+        // validated via tools/bench_streaming_latency.py --check-batch-equality.
+        (void)lang;    // voxtral4b-realtime is en-only via the CLI adapter
+        (void)s->ask;  // streaming path doesn't take Q&A prompts (yet)
+        voxtral4b_stream* vs = voxtral4b_stream_open(s->voxtral4b_ctx, /*step_ms*/ 0, /*length_ms*/ 0);
+        if (!vs) {
+            delete r;
+            return nullptr;
+        }
+        if (voxtral4b_stream_feed(vs, pcm, n_samples) != 0 || voxtral4b_stream_flush(vs) != 1) {
+            voxtral4b_stream_close(vs);
+            delete r;
+            return nullptr;
+        }
+        std::vector<char> buf(8192, 0);
+        double t0_s = 0.0, t1_s = 0.0;
+        int64_t counter = 0;
+        voxtral4b_stream_get_text(vs, buf.data(), (int)buf.size(), &t0_s, &t1_s, &counter);
+        voxtral4b_stream_close(vs);
+        crispasr_session_seg seg;
+        seg.text = std::string(buf.data());
+        seg.t0 = (int64_t)(t0_s * 100.0);
+        seg.t1 = (int64_t)(t1_s * 100.0);
+        // No per-token records from the streaming API today; word splitting
+        // falls back to whitespace via emit_words_from_tokens(empty).
+        seg.words = emit_words_from_tokens({});
+        r->segments.push_back(std::move(seg));
+        return r;
     }
 #endif
 #ifdef CA_HAVE_WAV2VEC2
