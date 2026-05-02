@@ -1636,6 +1636,16 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
 
         parakeet_word_data cur = {};
         bool have_cur = false;
+        // Per-word probability: arithmetic mean of contributing tokens'
+        // softmax probabilities. Tracked alongside `cur`.
+        float cur_p_sum = 0.0f;
+        int cur_p_cnt = 0;
+
+        auto flush_cur = [&]() {
+            if (cur_p_cnt > 0)
+                cur.p = cur_p_sum / (float)cur_p_cnt;
+            words.push_back(cur);
+        };
 
         for (int i = 0; i < r->n_tokens; i++) {
             const auto& td = r->tokens[i];
@@ -1657,8 +1667,10 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
             const bool is_new_word = !is_punct && (has_leading_space || !space_prefix_style);
 
             if (is_new_word && have_cur) {
-                words.push_back(cur);
+                flush_cur();
                 cur = {};
+                cur_p_sum = 0.0f;
+                cur_p_cnt = 0;
                 have_cur = false;
             }
 
@@ -1667,6 +1679,8 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
                 have_cur = true;
             }
             cur.t1 = td.t1;
+            cur_p_sum += td.p;
+            cur_p_cnt += 1;
 
             // Append, dropping the leading space.
             const char* src = td.text + (has_leading_space ? 1 : 0);
@@ -1679,7 +1693,7 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
             cur.text[cur_len + add] = '\0';
         }
         if (have_cur)
-            words.push_back(cur);
+            flush_cur();
 
         // Post-process: insert minimum gaps after sentence-ending punctuation.
         // The TDT decoder often produces contiguous timestamps even across

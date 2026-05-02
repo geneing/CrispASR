@@ -48,6 +48,7 @@ struct parakeet_word_data {
     char text[64]; // word text (no leading space)
     int64_t t0;    // start time, centiseconds (from first sub-word)
     int64_t t1;    // end time,   centiseconds (from last sub-word)
+    float p;       // mean softmax probability across the word's sub-word tokens [0,1]
 };
 
 struct parakeet_result {
