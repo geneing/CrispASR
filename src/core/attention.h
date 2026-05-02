@@ -439,19 +439,26 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
     ggml_tensor* V_new_perm = ggml_permute(ctx0, V, 0, 2, 1, 3);
 
     // ---- Write into the persistent KV cache at [n_past, n_past+T) ----
-    if (kv_indices) {
-        // Scatter via ggml_set_rows: destination row indices come from the
-        // runtime kv_indices tensor, so the same graph plan is correct for
-        // any n_past. ggml_set_rows requires F32 source rows; K_new_perm /
-        // V_new_perm are F32 throughout the helper (mul_mat → reshape →
-        // optional rms_norm/mul → rope_ext, all type-preserving), and the
-        // F32→F16 store into the cache is handled by the op itself.
+    // The default ggml_cpy(F32, slice-of-cache) path requires the
+    // destination to be contiguous when the source/dst types differ
+    // (CPU backend's `dup_to_q` aborts otherwise, and Metal's CPY also
+    // skips non-contiguous quantised dst). For a quantised cache —
+    // PLAN #60e CRISPASR_KV_QUANT={q8_0,q4_0} — we instead always use
+    // `ggml_set_rows` with a per-token row-index tensor, which both
+    // backends accept for F32→Q* directly. When the caller already
+    // supplies `kv_indices` (cached-graph reuse path) we honour that;
+    // otherwise we synthesise the indices from `positions` (which is
+    // [n_past..n_past+T) by construction for RoPE — exactly the row
+    // ids set_rows needs).
+    const bool quant_kv = ggml_is_quantized(kv_k->type);
+    if (kv_indices || quant_kv) {
+        ggml_tensor* eff_idx = kv_indices ? kv_indices : positions;
         ggml_tensor* k_layer =
             ggml_view_3d(ctx0, kv_k, hd, kv_k->ne[1], n_kv, kv_k->nb[1], kv_k->nb[2], (size_t)il * kv_k->nb[3]);
         ggml_tensor* v_layer =
             ggml_view_3d(ctx0, kv_v, hd, kv_v->ne[1], n_kv, kv_v->nb[1], kv_v->nb[2], (size_t)il * kv_v->nb[3]);
-        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, k_layer, K_new_perm, kv_indices));
-        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, v_layer, V_new_perm, kv_indices));
+        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, k_layer, K_new_perm, eff_idx));
+        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, v_layer, V_new_perm, eff_idx));
     } else {
         ggml_tensor* k_view = ggml_view_4d(ctx0, kv_k, hd, T, n_kv, 1, kv_k->nb[1], kv_k->nb[2], kv_k->nb[3],
                                            (size_t)il * kv_k->nb[3] + (size_t)n_past * kv_k->nb[1]);
@@ -467,19 +474,22 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
     // default F16 path the strided per-layer view becomes a contiguous
     // F16 tensor via ggml_cont (a CPY F16→F16 op). For a quantized
     // cache the equivalent CPY (Q8_0→Q8_0 etc.) isn't supported by
-    // Metal, so we use ggml_cast(...,F16) which lowers to a Metal-backed
-    // CPY Q*→F16 — i.e. dequantize-on-read. The cache *storage* still
-    // uses ~half the bytes (for Q8_0); reads pay one dequant pass per
-    // layer per step. Flash-attn-ext on Metal accepts Q8_0/Q4_0/... K/V
-    // natively, but only for tightly-packed inputs; the strided
-    // per-layer view forces this materialise step regardless.
+    // Metal, so we use ggml_cast(...,F32) which lowers to CPY Q*→F32
+    // — supported on both Metal and the CPU backend (the CPU `dup`
+    // dispatch only implements `Q*→F32` for the dequant-on-read path,
+    // not `Q*→F16`; so F32 is the only safe target if the scheduler
+    // splits the op). The cache *storage* still uses ~half the bytes
+    // (for Q8_0); reads pay one dequant pass per layer per step.
+    // Flash-attn-ext on Metal accepts F32 K/V natively (and F16 / quant
+    // too) but mixing types across K and V isn't supported, so both
+    // sides cast to the same dtype.
     ggml_tensor* k_layer_view =
         ggml_view_3d(ctx0, kv_k, hd, Lk, n_kv, kv_k->nb[1], kv_k->nb[2], (size_t)il * kv_k->nb[3]);
     ggml_tensor* v_layer_view =
         ggml_view_3d(ctx0, kv_v, hd, Lk, n_kv, kv_v->nb[1], kv_v->nb[2], (size_t)il * kv_v->nb[3]);
-    ggml_tensor* Kfull = ggml_is_quantized(kv_k->type) ? ggml_cast(ctx0, k_layer_view, GGML_TYPE_F16)
+    ggml_tensor* Kfull = ggml_is_quantized(kv_k->type) ? ggml_cast(ctx0, k_layer_view, GGML_TYPE_F32)
                                                        : ggml_cont(ctx0, k_layer_view);
-    ggml_tensor* Vfull = ggml_is_quantized(kv_v->type) ? ggml_cast(ctx0, v_layer_view, GGML_TYPE_F16)
+    ggml_tensor* Vfull = ggml_is_quantized(kv_v->type) ? ggml_cast(ctx0, v_layer_view, GGML_TYPE_F32)
                                                        : ggml_cont(ctx0, v_layer_view);
 
     // ---- GQA expansion ----
