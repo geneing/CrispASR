@@ -1692,26 +1692,47 @@ static bool backend_is_metal(ggml_backend_t b) {
     return name && std::strncmp(name, "MTL", 3) == 0;
 }
 
+// Vulkan hits the same `GGML_ASSERT(src_backend_id != -1)` failure as Metal
+// when the cached pred-head graph is reused across `sched_reset()` — see
+// issue #47 (geneing). Both schedulers rebuild the view→buffer-id mapping
+// on reset and lose track of view tensors created against the previous
+// build. Fall back to rebuild-each-call for both, same as the Metal path.
+//
+// CUDA / SYCL / HIP likely have the same bug — they're multi-backend
+// schedulers with the same view→buffer-id-on-reset behaviour — but no
+// CUDA / SYCL / HIP user has reported the assert yet. Until the bug is
+// repro'd on those backends we keep them on the cache-reuse fast path
+// (the original commit `e586f5e` noted ~30% per-synthesis savings on
+// "CPU/CUDA/Vulkan" — Vulkan was just disproven, so the CUDA half of
+// that claim is now also untested). Add the relevant prefix to the name
+// check below if a CUDA / SYCL / HIP report comes in.
+static bool backend_needs_fresh_pred_graph(ggml_backend_t b) {
+    if (!b)
+        return false;
+    const char* name = ggml_backend_name(b);
+    return name && (std::strncmp(name, "MTL", 3) == 0 || std::strncmp(name, "Vulkan", 6) == 0);
+}
+
 // Get or build the cached prediction head graph.
 // The graph structure is the same for a given n_frames — only input
 // tensor data changes. Building once and reusing with
-// ggml_backend_sched_reset saves ~30% per synthesis on CPU/CUDA/Vulkan.
+// ggml_backend_sched_reset saves ~30% per synthesis on CPU/CUDA.
 //
-// Metal exception: after ggml_backend_sched_reset(), reusing the same
-// graph fires GGML_ASSERT(src_backend_id != -1) inside
+// Metal + Vulkan exception: after ggml_backend_sched_reset(), reusing the
+// same graph fires GGML_ASSERT(src_backend_id != -1) inside
 // ggml_backend_sched_split_graph — some tensor view's buffer-id linkage
-// doesn't survive the reset on the Metal scheduler specifically.
-// Reproducible with the streaming Q4_0 we built locally AND with the
-// canonical Q4_K from cstr/VibeVoice-7B-GGUF, so it's the cache + Metal
-// scheduler interaction, not the model file. For Metal we fall back to
-// rebuild-each-call (matches what build_decoder_graph does) — a few
-// percent slower per diffusion sub-step but TTS actually runs.
+// doesn't survive the reset on those schedulers. Reproducible with the
+// streaming Q4_0 we built locally AND with the canonical Q4_K from
+// cstr/VibeVoice-7B-GGUF, so it's the cache + scheduler interaction, not
+// the model file. For these backends we fall back to rebuild-each-call
+// (matches what build_decoder_graph does) — a few percent slower per
+// diffusion sub-step but TTS actually runs.
 //
 // The proper long-term fix is upstream ggml — make the scheduler's
 // view-tensor backend mapping survive sched_reset() — at which point
 // this branch can collapse back to always-cache.
 static ggml_cgraph* get_pred_head_graph(vibevoice_context* ctx, int n_frames) {
-    const bool reuse_ok = !backend_is_metal(ctx->backend);
+    const bool reuse_ok = !backend_needs_fresh_pred_graph(ctx->backend);
 
     if (reuse_ok && ctx->pred_graph && ctx->pred_graph_n_frames == n_frames)
         return ctx->pred_graph;
