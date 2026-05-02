@@ -1432,7 +1432,7 @@ subprocess hacks.
 | Dart `Session.stream*()` | ✅ via `_StreamOpen/_StreamFeed/...` | ✅ unchanged |
 | Library mic API (`crispasr_mic_*`) | ❌ (CLI subprocess only) | ✅ via miniaudio `ma_device` |
 | Mic in Python/Rust/Dart | ❌ | ✅ — `Session.start_mic_streaming(callback)` |
-| moonshine-streaming wired to stream API | ✅ chunked-batch over rolling window (build-clean, E2E pending GGUF) | shipped, see #62c below |
+| moonshine-streaming wired to stream API | ✅ chunked-batch over rolling window | shipped + E2E validated, see #62c below |
 | kyutai-stt wired to stream API | ✅ chunked-batch over rolling window | shipped, see #62c below |
 | voxtral4b native streaming | ❌ (PLAN #7) | unchanged — separate item |
 
@@ -1511,10 +1511,18 @@ whisper-typed `crispasr_stream_*` functions branch on it.
 **Moonshine-streaming** also shipped via the same chunked-batch
 pattern (~120 LOC in `src/moonshine_streaming.{h,cpp}` +
 `moonshine_streaming_state` field on `crispasr_stream` + four
-dispatch branches). Build-clean and symbols exported; end-to-end
-JFK validation deferred until a moonshine-streaming GGUF is
-available locally (only the non-streaming `moonshine` variant is
-on disk today).
+dispatch branches). E2E validated word-perfect against batch on
+JFK using `moonshine-streaming-tiny-f32.gguf`.
+
+**Found in passing — `moonshine-streaming` F16 batch crash.** The
+F16 GGUF (`moonshine-streaming-tiny-f16.gguf`, 84 MB) crashes
+inside `moonshine_streaming_transcribe_impl` with `tensor read out
+of bounds` in `ggml_backend_tensor_set_2d_async`. The F32 GGUF
+(168 MB) works fine via both batch and streaming. Likely an F16
+tensor stride/dtype path inside the batch transcribe — unrelated
+to the streaming wrapper, which only calls `_transcribe` in a
+loop. Open as a separate item once a consumer needs the F16
+size on this backend.
 
 **Voxtral4b native streaming** — see #62e / PLAN #7.
 
