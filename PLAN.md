@@ -1306,34 +1306,39 @@ hand-off prompt at the end of the May 2026 perf-wave session.
 
 ---
 
-### 60d. Fused QKV per LM layer — **DONE (mimo-asr Q4_K, voxtral4b Q4_K) → [HISTORY §64, §71](HISTORY.md)**
+### 60d. Fused QKV per LM layer — **DONE (mimo-asr Q4_K, voxtral4b Q4_K, qwen3-asr Q4_K, voxtral 3B Q4_K opt-in) → [HISTORY §64, §71](HISTORY.md)**
 
 mimo-asr Q4_K runtime fuse (May 2026, HISTORY §64). voxtral4b Q4_K
 runtime fuse (May 2026, HISTORY §71, ~7-8 % decode speedup on M1).
 
-**Open follow-up (well-scoped, low-risk):** the runtime fuse pattern
-in `qwen3_asr.cpp:1433` and `qwen3_tts.cpp:4986` gates on
-`attn_q_w->type == GGML_TYPE_F32 || GGML_TYPE_F16`. That gate is
-overly conservative — row-wise quantized formats (Q4_K, Q4_0, Q5_K,
-Q8_0) concatenate cleanly along the output axis via byte-concat (each
-output row is a self-contained block group; no requantization
-needed). The voxtral4b implementation (~80 LOC) demonstrated that
-this works on Q4_K. Dropping the gate on qwen3_asr and qwen3_tts
-extends the same ~7-8 % decode speedup to Q4_K / Q8_0 users — which
-is most production users since Q4_K is the typical default for
-memory efficiency.
+**May 2026 portability pass.** The Q4_K / row-wise-quantized type-gate
+extension (drop the F16/F32 check, switch CPU→default-backend buffer
+allocation) ported to:
 
-Voxtral (3B) — like voxtral4b — has separate q/k/v LLM weights with
-no runtime fuse at all. Adding the same pattern (~80 LOC, mirror of
-voxtral4b's `voxtral4b_init_from_file` fuse block) would land the
-same ~7-8 % decode speedup.
+- `qwen3_asr.cpp:1433` — gate dropped, default-on. Q4_K users pick up
+  the fuse path. Transcript bit-correct on JFK; perf delta on
+  short-decode tasks like JFK is sub-noise (decode loop is ~30 tokens),
+  but consistent with voxtral4b's pattern: longer decodes amortise
+  more.
+- `qwen3_tts.cpp:4986` — gate dropped. Stays opt-in via
+  `QWEN3_TTS_FUSED_QKV=1` (matching prior F16/F32 default-off behaviour
+  pending a clean quiet-machine bench).
+- `voxtral.cpp` (3B) — full runtime fuse added (~80 LOC, mirror of
+  voxtral4b). **Opt-in via `CRISPASR_VOXTRAL_FUSED_QKV=1`** because
+  A/B on JFK Q4_K showed no measurable speedup (16.37 s vs 16.43 s,
+  within run-to-run noise). The voxtral4b 7-8 % win came from its
+  long decode loop (141 tokens incl. streaming-pad warmup); voxtral
+  3B's ~30-token normal-prompt decode is too short for the saved
+  kernel-launch overhead to surface above noise. ~500 MB extra
+  memory when enabled — opt-in keeps memory-tight deployments unpenalised.
 
-Targets:
-- `qwen3_asr.cpp:1433` — drop the F16/F32 type-gate, switch fused-buf
-  allocation from CPU buffer to default-backend buffer (otherwise Q
-  weights pay a backend-transfer cost per matmul).
-- `qwen3_tts.cpp:4986` — same.
-- `voxtral.cpp` — add full runtime fuse like voxtral4b.
+**Lesson learned:** the fuse value scales with the per-matmul
+kernel-launch overhead × decode-loop length. For Metal Q4_K on M1
+with ~30 µs/launch, voxtral4b's 30-layer × 141-step decode amortises
+the fuse meaningfully; voxtral 3B's 30-layer × 30-step decode does
+not. Captured in LEARNINGS § "not every matmul fusion is a win on
+Metal Q4_K — measure ROI in saved kernel launches, not saved input
+reads."
 
 ---
 

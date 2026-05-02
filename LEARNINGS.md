@@ -7118,13 +7118,18 @@ original author's caution, not a real correctness boundary for
 Q-formats. Verify by checking that `ggml_new_tensor_2d` accepts the
 quantized type at the fused output shape, then drop the gate.
 
-**Cross-backend portability (May 2026).** The same overly conservative
-gate exists at `qwen3_asr.cpp:1433` and `qwen3_tts.cpp:4986` — Q4_K /
-Q8_0 users of those two backends are silently missing the ~7-8 %
-decode speedup. Dropping the gate is a 1-line change per file.
-Voxtral (3B) has separate q/k/v weights with no runtime fuse at all;
-adding the voxtral4b pattern (~80 LOC) ports the same speedup.
-PLAN #60d's open follow-up tracks this work.
+**Cross-backend portability — DONE May 2026.** Same gate-drop landed
+in `qwen3_asr.cpp:1433` (default-on) and `qwen3_tts.cpp:4986` (kept
+opt-in). voxtral 3B got the full runtime fuse (~80 LOC mirror of
+voxtral4b), but **opt-in only** (`CRISPASR_VOXTRAL_FUSED_QKV=1`)
+because A/B on JFK Q4_K showed no measurable speedup — the
+voxtral4b 7-8 % win came from its long decode loop (141 tokens
+incl. streaming-pad warmup); voxtral 3B's ~30-token normal-prompt
+decode amortises the saved kernel-launches into run-to-run noise.
+**Lesson learned: fuse value scales with `decode-loop-length ×
+saved-kernel-launches × per-launch-overhead`** — short decodes
+don't amortise well. Same backend, different prompt convention
+→ different ROI.
 
 **One subtle gotcha** when porting the qwen3_asr pattern: the
 existing implementation allocates the fused buffer on the CPU
