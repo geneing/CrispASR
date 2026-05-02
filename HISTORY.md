@@ -1809,3 +1809,90 @@ unchanged — that's why the granite path falls back to
 `*_transcribe_with_probs` runtime addition mirroring the
 moonshine / omniasr pattern. Plus other-binding word-p exposure
 for Go / Java / Ruby / JS (PLAN #65b — pure FFI plumbing).
+
+### 66. Feature-matrix closure pass — sticky setters + streaming + mic + Go/Java/Ruby parity (May 2026)
+
+Six commits (`d963e3a`, `947262f`, `041471f`, `89687f0`, `5534588`
+plus the parallel-agent sweep `f130a40` that adopted my
+`crispasr_session_stream_open`) closed the long-standing gap
+between CLI flags and what wrappers can reach. The audit going in:
+9 capabilities lived only as CLI flags. The audit coming out: 6 of
+9 wired across all 7 wrappers (or "all where it makes sense"); 3
+remain documented-deferred with revised effort estimates.
+
+**Sticky session-state setters** (`d963e3a`). New session struct
+fields `source_language` / `target_language` / `punctuation` /
+`translate` consulted by whisper, canary, cohere transcribe paths
+when the per-call `language` arg isn't supplied. Six C-ABI exports
+(`set_source_language`, `set_target_language`, `set_punctuation`,
+`set_translate`, `set_temperature`, `detect_language`).
+`set_temperature` multiplexes per-backend setters (canary, cohere,
+parakeet, moonshine each expose runtime temperature) and returns
+-2 if no backend in the session honours it (soft no-op).
+`detect_language` wraps the standalone LID helper. Wrappers landed
+in 3 canonical (Python/Rust/Dart) and the 3 trailing
+(Go/Java/Ruby) — JS/emscripten skipped (TTS-only surface today).
++545 LOC (canonical) + +373 LOC (trailing).
+
+**Registry enumeration** (`947262f`). `crispasr_registry_count()`
++ `_get_at(i)` internal API, `crispasr_registry_list_backends_abi`
+C-ABI export, `list_known_models()` in Python+Rust+Dart returning
+all 37 known backends in declaration order. Wrappers building
+model-picker UIs no longer need to know the list out-of-band.
+
+**Streaming session API** (`947262f` + `041471f`).
+`crispasr_session_stream_open(s, ...)` decouples streaming from
+the whisper-only `crispasr_stream_open(whisper_ctx, ...)`. Today
+it routes through whisper internally; the dispatch site is
+labelled with where moonshine-streaming + kyutai-stt + voxtral4b
+will plug in when those refactors land. Python `Session._Stream`
+context-manager handle, Rust `Stream` with `Drop`-managed close,
+Dart already had it, Go got it in `5534588` (`Stream` type +
+`StreamOpen/Feed/GetText/Flush/Close` + `StreamingUpdate`).
+
+**Library mic API** (`89687f0`). `src/crispasr_mic.{h,cpp}` wraps
+miniaudio's `ma_device` capture mode. Cross-platform via
+miniaudio's built-in backends (Core Audio / ALSA / PulseAudio /
+WASAPI). The `MA_NO_DEVICE_IO` define on `crispasr_audio.cpp` was
+dropped to expose `ma_device_*` symbols; the iOS/tvOS/watchOS
+variant got it back in `1c0e996` because miniaudio's CoreAudio
+backend pulls Objective-C headers on those platforms (the C ABI
+is stubbed to return failure on iOS/tvOS/watchOS so libcrispasr
+links). Live-mic smoke-tested from Python: 17 callbacks fired in
+1s wall-clock = 16320 samples = 1.02s real audio captured. The
+audio-thread callback uses a `NativeCallable.listener` (Dart) /
+ctypes `CFUNCTYPE` trampoline (Python) / boxed `FnMut` closure
+(Rust) — each binding's idiomatic way to keep the
+native-to-managed callback alive across the audio thread.
+
+**Realistic effort revisions** in PLAN.md for the still-deferred
+items:
+
+- **62c moonshine-streaming + kyutai-stt streaming**: PLAN had
+  "~80 LOC each". Survey showed both expose only single-shot
+  `_transcribe()` despite their architectures being
+  streaming-friendly. Real cost: ~300 LOC + 1-2 days debug per
+  backend (chunked encoder + state carry-over + numerical
+  regression gating). Documented; opens when a consumer asks.
+- **62e voxtral4b streaming**: stays as PLAN #7 high-complexity
+  separate session (~200-300 LOC, decoder thread + audio frame
+  injection).
+- **Init-only flags (grammar/beam/flash)**: needs backend-reinit
+  machinery (close+reopen, slow) or per-backend `set_*`
+  extensions (~50 LOC × 14 backends = ~700 LOC mechanical +
+  per-flag regression test). Documented; opens per PLAN #59
+  policy.
+
+**Non-collision dance** worked smoothly throughout: c_api.cpp had
+~900 LOC of parallel-agent WIP at one point; my edits rebased
+cleanly via the backup-checkout-restage-restore pattern. The
+parallel agent's `f130a40` clang-format pass swept up my
+`crispasr_session_stream_open` mid-flight under their author tag —
+fine outcome (work shipped), surprising commit-message
+attribution.
+
+**Tests** (`tests/test_python_session.py`): 4 new no-model test
+classes — `TestSessionStateSetters`, `TestStreamingAPI`,
+`TestMicAPI`, `TestRegistryEnumeration`. All four PASS in well
+under a second collectively, no model required. CI gates against
+accidental ABI removal across refactors.

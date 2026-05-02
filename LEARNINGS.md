@@ -6269,3 +6269,96 @@ The proper long-term fix is upstream ggml — make
 `ggml_backend_sched_split_graph` recompute view→backend mapping
 from `view_src->buffer` rather than relying on cached ids. Once
 that lands, the bypass list collapses back to empty.
+
+# Cross-cutting lessons — session 2026-05-02 (feature-matrix closure)
+
+## Lesson — "streaming" in a backend's name doesn't mean streaming in its API
+
+`moonshine_streaming` (`src/moonshine_streaming.cpp`) and
+`kyutai_stt` (`src/kyutai_stt.cpp`) both have streaming-friendly
+*architectures* — sliding-window attention in moonshine, 12.5 Hz
+Mimi-frame-aligned text emission in kyutai. The PLAN inferred
+"~80 LOC each to wire into the unified stream API" from those
+architectural facts. **Wrong.**
+
+The actual public APIs are single-shot:
+
+- `moonshine_streaming_transcribe(ctx, pcm, n_samples) -> char*`
+- `kyutai_stt_transcribe(ctx, pcm, n_samples) -> char*`
+
+Both internally batch-encode the whole audio (kyutai resamples
+16 kHz → 24 kHz then runs the entire Mimi codec at once, then
+runs the whole LM loop). To reach low-latency streaming requires
+real refactoring: incremental encode (Mimi has sliding-window
+context — chunked encoding ≠ batch encoding bit-for-bit), per-call
+state carry-over (KV caches, partial decoder state, the
+`audio_delay_seconds` lookahead), and numerical regression
+gating (chunked vs batch on JFK should match within ~99.9%
+cosine; below that the chunk boundaries are emitting different
+tokens).
+
+**Realistic estimate: ~300 LOC + 1-2 days of debugging encoder
+boundary effects per backend**, not 80. Generalises: when a
+backend description says "streaming arch" but the C-API takes
+`(pcm, n_samples)` and returns a flat `char*`, assume the
+streaming bit hasn't been plumbed yet and budget accordingly.
+
+## Lesson — `MA_NO_DEVICE_IO` defines you forgot you set
+
+`crispasr_audio.cpp` shipped with three miniaudio optimisations
+since the start:
+
+```cpp
+#define MA_NO_DEVICE_IO  // we don't need playback/capture devices
+#define MA_NO_THREADING  // avoid pthreads coupling in the dylib
+#define MA_NO_GENERATION // skip synth helpers
+```
+
+These were correct when libcrispasr only decoded WAV/MP3/FLAC
+files. When PLAN #62d added `crispasr_mic_*` (which uses
+`ma_device_init/start/stop/uninit`), the link failed with
+"undefined symbol _ma_device_*" — the symbols had been compiled
+out by `MA_NO_DEVICE_IO`. Fix: drop `MA_NO_DEVICE_IO` (and
+`MA_NO_THREADING`, since device IO needs threading anyway).
+
+Diagnostic signature: `ld: Undefined symbols for architecture
+arm64: _ma_device_init / _ma_device_start / _ma_device_stop /
+_ma_device_uninit`, all referenced from a *new* TU that just
+`#include "miniaudio.h"`. Search for `MA_NO_*` defines in the
+TU that has `MINIAUDIO_IMPLEMENTATION` — that's where the
+symbols got dropped.
+
+**iOS / tvOS / watchOS caveat**: miniaudio's CoreAudio backend
+pulls AVFoundation Objective-C headers (NSString etc.) which a
+`.cpp` TU can't parse — would need `.mm`. So on those platforms
+keep `MA_NO_DEVICE_IO` defined and stub the `crispasr_mic_*` C
+ABI to return failure (so libcrispasr links). Host iOS apps do
+mic capture via AVAudioEngine and feed PCM into
+`crispasr_stream_feed` — they have the AVAudioSession +
+privacy-prompt context the static lib wouldn't. See
+`crispasr_audio.cpp:31-36` + `crispasr_mic.cpp:16-21`.
+
+## Lesson — audio-thread → managed-language callback patterns
+
+miniaudio's `ma_device` data callback fires from the audio
+thread. Each language binding needed a different trampoline to
+keep the native callback alive AND cross safely back to managed
+code:
+
+| Wrapper | Pattern |
+|---|---|
+| Python | `ctypes.CFUNCTYPE(...)` instance held on the `Mic` object so the ctypes thunk doesn't get GC'd. Trampoline copies the buffer via `np.ctypeslib.as_array(...).copy()` because miniaudio reuses the buffer after return. |
+| Rust | Boxed `FnMut(&[f32])` closure inside a `TrampolineState` struct, passed via `*mut c_void` userdata. The Box keeps the closure alive; a `Mutex` makes audio→main-thread access safe. |
+| Dart | `NativeCallable<...>.listener` — Dart's native interop pattern that automatically marshals the audio-thread call to the main isolate. Must call `trampoline.close()` in the destructor or the isolate leaks. |
+
+Common pitfall (all three): if the user supplies a closure /
+function and you don't keep a reference to the trampoline AT
+LEAST as long as the device runs, the audio thread fires into
+freed memory and you crash. The `Mic` handle in each binding
+owns the trampoline by composition.
+
+The audio thread also can't safely raise into managed code — a
+Python exception in the callback unwinds through the ctypes
+boundary into miniaudio's loop and corrupts the device. All
+three trampolines catch + suppress callback exceptions, writing
+to stderr instead.
