@@ -142,15 +142,17 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/qwen3-asr-0.6b-GGUF", "qwen3-asr-0.6b-q4_k.gguf",
             timeout_s=60, approx_size_mb=400,
             capabilities=("transcribe", "json-output")),
-    # OmniASR CTC ships at Q8_0 not Q4_K: Q4_K weights drift enough that
-    # the encoder's per-frame logits push borderline frames to blank,
-    # producing single-character drops on JFK ("fello americas" vs
-    # "fellow americans"). Q8_0 matches the FP32 Python reference
-    # byte-for-byte. CTC argmax is structurally more sensitive to weight
-    # drift than seq2seq with internal LM smoothing.
-    Backend("omniasr",    "OmniASR CTC 1B v2",   "omniasr-ctc-1b-v2-q8_0.gguf",
-            "cstr/omniASR-CTC-1B-v2-GGUF", "omniasr-ctc-1b-v2-q8_0.gguf",
-            timeout_s=120, approx_size_mb=1010,
+    # OmniASR CTC Q4_K now uses mixed quantization (head=4 encoder layers
+    # at F16, rest at Q4_K) by default in crispasr-quantize. Recovers
+    # nearly all of Q8_0's quality (5% WER on JFK from 1-word "americas"→
+    # "americans" diff that omniasr-llm shares; uniform Q4_K had 22.7%)
+    # at 658 MB vs Q8_0's 1.0 GB. See LEARNINGS "Q4_K is too lossy as
+    # the default for CTC-decoded ASR" + "head=4 sweep on omniasr-ctc"
+    # for the full diagnosis. To override (full quant, smaller, ~22% WER):
+    # CRISPASR_OMNIASR_QUANT_ALL=1 crispasr-quantize ...
+    Backend("omniasr",    "OmniASR CTC 1B v2",   "omniasr-ctc-1b-v2-q4_k.gguf",
+            "cstr/omniASR-CTC-1B-v2-GGUF", "omniasr-ctc-1b-v2-q4_k.gguf",
+            timeout_s=120, approx_size_mb=660,
             capabilities=("transcribe", "json-output")),
     Backend("omniasr-llm", "OmniASR LLM 300M",   "omniasr-llm-300m-v2-q4_k.gguf",
             "cstr/omniasr-llm-300m-v2-GGUF", "omniasr-llm-300m-v2-q4_k.gguf",

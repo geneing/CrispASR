@@ -7205,3 +7205,73 @@ perf-pass engineer a multi-day chase.
 The instrumentation cost was ~30 LOC and the diagnostic value was
 ~3 days of avoided guessing. Reference: `PLAN.md` §7 phase 2,
 `HISTORY.md` §71, `CRISPASR_VOXTRAL4B_STREAM_TIMING=1` env var.
+
+## Lesson — for CTC-decoded ASR, mixed Q4_K head-skip recovers nearly all Q8_0 quality
+
+Follow-up to the previous lesson ("Q4_K is too lossy as the default
+for CTC-decoded ASR"). Initial conclusion was "ship Q8_0" because
+uniform Q4_K dropped to 22.7% WER on JFK. Per-tensor weight cosine
+analysis (`/tmp/q4k_sensitivity.py`) showed all 289 Q4_K tensors
+drift uniformly (~0.997 cosine vs Q8_0). No single tensor is the
+culprit.
+
+Per-layer **activation** dump (via `OMNIASR_DUMP_DIR=/tmp/q4k-dump
+crispasr ...` on Q4_K vs Q8_0) revealed the real signal:
+
+| Stage | cos(Q4K, Q8) | drift |
+|---|---|---|
+| pcm_norm → pos_conv_out | 1.000 | 0% — frontend untouched (already F16/F32) |
+| enc_layer_0 → 32 | 0.998 → 0.991 | accumulates linearly through residual stream |
+| **enc_layer_36 → 47** | **0.988 → 0.982** | sharp acceleration |
+| logits | 0.9995 | one-frame argmax flips → CTC drops chars |
+
+**The wrong intervention.** Keeping the *last* 12 layers at F16
+(`CRISPASR_OMNIASR_KEEP_F16_TAIL=12`) made the output **worse** than
+uniform Q4_K — "fello amercas ... cuty" vs uniform's "fello americas
+... coutry". F16 math in the tail preserves the accumulated upstream
+noise more faithfully than Q4_K math does (Q4_K's quantization
+rounding sometimes happens to land back near the right bin).
+
+**The right intervention.** Keep the *first* 4 layers at F16
+(`CRISPASR_OMNIASR_KEEP_F16_HEAD=4`). Result:
+
+| Recipe | Size | WER | Output |
+|---|---|---|---|
+| Q4_K uniform | 551 MB | 22.7% | "fello americas as ... coutry" |
+| **Q4_K + head=4** | **658 MB** | **5%** | "fellow americas ... country" — 1-word diff |
+| Q4_K + head=8/12/16 | 766–982 MB | 5% | identical to head=4 |
+| Q8_0 | 1007 MB | 0% | byte-perfect vs FP32 reference |
+
+The residual "americans → americas" diff is the same as omniasr-LLM
+shows on the same audio — likely an aadel4-fine-tune artifact
+(model-internal), not quant-related. Promoting more layers to F16
+doesn't fix it.
+
+**Generalisable rule for residual-stream architectures.** Quantization
+errors compound through the residual stream of a transformer
+encoder. Where they manifest (late layers) is *not* where to fix them
+(early layers). The intervention has to be at the *entry point*:
+
+| Action | Effect on noise |
+|---|---|
+| Keep early layers at F16 | Stops noise from entering the residual stream — late layers run Q4_K math on clean signal and the rounding stays bounded |
+| Keep late layers at F16 | F16 math preserves accumulated noise faithfully — strictly worse than uniform Q4_K |
+| Uniform Q4_K | Quantization rounding occasionally cancels accumulated drift — better than tail-skip alone |
+
+For ASR specifically: head=4 is the smallest cutoff that prevents
+the compounding cascade in our 48-layer omniasr-ctc encoder. Exact
+N likely depends on encoder depth and residual-stream variance —
+expect a similar small constant for other CTC encoders in the
+1B+ class.
+
+**Action taken.** `examples/crispasr-quantize/main.cpp` now defaults
+`omniasr_keep_head = 4` for omniasr-ctc-detected GGUFs. Override
+via `CRISPASR_OMNIASR_KEEP_F16_HEAD=N` (N=0 → uniform Q4_K, useful
+for size-vs-quality trade-off study). `CRISPASR_OMNIASR_QUANT_ALL=1`
+opts out entirely (matching the granite-mini precedent). The test
+registry switches back to `omniasr-ctc-1b-v2-q4_k.gguf` (now meaning
+the head=4 mixed variant) at 658 MB.
+
+Reference: `examples/crispasr-quantize/main.cpp` (`omniasr_keep_head`
+default), `tools/test-all-backends.py` REGISTRY entry,
+`OMNIASR_DUMP_DIR` env (already in `src/omniasr.cpp`).

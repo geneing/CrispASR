@@ -112,6 +112,64 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     const bool granite_quant_all =
         is_granite_family && env_quant_all && *env_quant_all && *env_quant_all != '0';
 
+    // OmniASR-CTC: 48-layer wav2vec2-style encoder + CTC head. Per-layer
+    // activation cosine analysis on JFK (Q4_K vs Q8_0 dumps via
+    // OMNIASR_DUMP_DIR) shows drift accumulates: layers 0–35 stay at
+    // cos ≥ 0.995, layers 36–47 drop to ≈0.98. CTC argmax is structurally
+    // sensitive to compounded drift (no internal LM smoothing), so the
+    // tail-layer drop is enough to flip frames into the blank token,
+    // producing single-character drops on JFK. See LEARNINGS "Q4_K is
+    // too lossy as the default for CTC-decoded ASR" for the full
+    // diagnosis.
+    //
+    // Default: keep the last 12 encoder layers (cutoff = n_enc - 12) at
+    // F16; quantize earlier layers normally. Override the cutoff via env
+    // (count of tail layers to keep at F16; 0 = full quant, n_enc =
+    // skip whole encoder). Opt out entirely with
+    // CRISPASR_OMNIASR_QUANT_ALL=1 to ship a smaller variant at the
+    // documented ~22% WER cost.
+    const bool is_omniasr_ctc = (arch.find("omniasr-ctc") != std::string::npos) || (arch.find("omniasr_ctc") != std::string::npos);
+    int omniasr_n_enc = 0;
+    // Default: keep first 4 encoder layers at F16. Empirically determined
+    // by sweeping CRISPASR_OMNIASR_KEEP_F16_HEAD ∈ {0, 4, 8, 12, 16} on
+    // JFK (Q4_K + head=N → 5% WER) vs uniform Q4_K (22.7% WER) vs Q8_0
+    // (0% WER). head=4 is the smallest cutoff that prevents noise from
+    // compounding through the residual stream — it adds ~107 MB to the
+    // Q4_K size (551→658 MB) for ~17 percentage points of WER recovery.
+    //
+    // Counter-intuitive finding: tail-skip was WORSE than uniform Q4_K
+    // (preserves accumulated upstream noise more faithfully through F16
+    // math). Don't try to "save" the late layers; stop noise at entry.
+    int omniasr_keep_head = 4;
+    int omniasr_keep_tail = 0;
+    if (is_omniasr_ctc) {
+        int key = gguf_find_key(ctx_in, "omniasr.n_enc_layers");
+        if (key >= 0)
+            omniasr_n_enc = (int)gguf_get_val_u32(ctx_in, key);
+        if (const char* env_h = std::getenv("CRISPASR_OMNIASR_KEEP_F16_HEAD"))
+            omniasr_keep_head = std::max(0, atoi(env_h));
+        if (const char* env_t = std::getenv("CRISPASR_OMNIASR_KEEP_F16_TAIL"))
+            omniasr_keep_tail = std::max(0, atoi(env_t));
+    }
+    const char* env_omniasr_all = std::getenv("CRISPASR_OMNIASR_QUANT_ALL");
+    const bool omniasr_quant_all =
+        is_omniasr_ctc && env_omniasr_all && *env_omniasr_all && *env_omniasr_all != '0';
+    // Layers in [0, head_cutoff) stay F16; layers in [tail_cutoff, n_enc) stay F16.
+    const int omniasr_head_cutoff = is_omniasr_ctc && !omniasr_quant_all ? omniasr_keep_head : 0;
+    const int omniasr_tail_cutoff = is_omniasr_ctc && !omniasr_quant_all
+                                        ? std::max(0, omniasr_n_enc - omniasr_keep_tail)
+                                        : omniasr_n_enc;
+    if (is_omniasr_ctc && !omniasr_quant_all && (omniasr_keep_head + omniasr_keep_tail) > 0) {
+        if (omniasr_keep_head > 0 && omniasr_keep_tail == 0) {
+            printf("%s: omniasr-ctc — keeping enc.0-%d (head) at F16 to "
+                   "prevent CTC drift (CRISPASR_OMNIASR_QUANT_ALL=1 to override)\n",
+                   __func__, omniasr_head_cutoff - 1);
+        } else {
+            printf("%s: omniasr-ctc — keeping enc.0-%d (head) + enc.%d-%d (tail) at F16\n",
+                   __func__, omniasr_head_cutoff - 1, omniasr_tail_cutoff, omniasr_n_enc - 1);
+        }
+    }
+
     const int n_tensors = gguf_get_n_tensors(ctx_in);
     for (int i = 0; i < n_tensors; i++) {
         const char* name = gguf_get_tensor_name(ctx_in, i);
@@ -177,7 +235,28 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
                         !(sname.find("cls.") == 0 && ggml_nelements(t) < 65536) &&
                         // Skip OmniASR-LLM bridging tensors (enc_proj, lm_head, tok_emb, lang_emb)
                         (sname.find("enc_proj.") != 0) && (sname.find("lm_head.") != 0) &&
-                        (sname.find("tok_emb.") != 0) && (sname.find("lang_emb.") != 0);
+                        (sname.find("tok_emb.") != 0) && (sname.find("lang_emb.") != 0) &&
+                        // Skip OmniASR-CTC encoder layers in head/tail bands.
+                        // Names look like "enc.<idx>.attn.*" / "enc.<idx>.ffn.*";
+                        // skip if idx in [0, head_cutoff) ∪ [tail_cutoff, n_enc).
+                        ([&]() {
+                            if (!is_omniasr_ctc || omniasr_quant_all
+                                || (omniasr_head_cutoff == 0 && omniasr_tail_cutoff >= omniasr_n_enc))
+                                return true;
+                            if (sname.size() < 5 || sname.compare(0, 4, "enc.") != 0)
+                                return true;
+                            int idx = 0;
+                            size_t p = 4;
+                            while (p < sname.size() && sname[p] >= '0' && sname[p] <= '9') {
+                                idx = idx * 10 + (sname[p] - '0');
+                                p++;
+                            }
+                            if (p == 4)
+                                return true;
+                            const bool in_head = idx < omniasr_head_cutoff;
+                            const bool in_tail = idx >= omniasr_tail_cutoff;
+                            return !(in_head || in_tail);
+                        }());
 
         const int64_t ncols = t->ne[0];
         ggml_type qtype_used = qtype;
