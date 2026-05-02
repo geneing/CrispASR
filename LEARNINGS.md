@@ -6659,6 +6659,90 @@ Reference: `src/core/beam_decode.h` (the helper), `src/glm_asr.cpp`
 beam dispatch (the batched-forward case that does work), and the
 deferred sub-steps in PLAN #61h.
 
+### Branched-KV beam search — `shared_ptr<Holder>` is the right snap-lifetime contract (PLAN #61h follow-up)
+
+The replay-from-prefix lesson above ended on "the right long-term fix
+is per-beam KV branching". Implementing that for omniasr-llm,
+kyutai-stt, and moonshine surfaced one design subtlety worth its own
+note: **what owns the per-beam snapshot lifetime when siblings share a
+parent's snap?**
+
+The natural shape of branched beam-search is:
+
+```
+restore(parent.snap)
+logits = step_fn(parent.last_token, n_past)
+new_snap = save_fn()                  // captures state right after step
+for each top-K successor (≤ B):
+    child = parent + (token, prob)
+    child.snap = new_snap             // siblings share!
+```
+
+Multiple children of the same parent share `new_snap` — they each call
+`restore(new_snap)` on their next round, then make their own fresh
+snap from the post-step state. The snap itself is never mutated; it's
+a frozen byte buffer. Restore = `ggml_backend_tensor_set(snap → ctx)`.
+
+Manual ref-counting is a footgun. The first attempt tracked refcounts
+manually with a `parent_ref_count` array + an "aliased?" check at each
+prune step:
+
+```cpp
+for each parent: if no successor inherited its snap, snap_free_fn(parent.snap);
+```
+
+Three problems: (1) a parent selected by both a `from_finished` carry-
+forward AND a normal expansion shares the snap with one survivor and
+needs a fresh one for the other → tricky to express; (2) if you
+accidentally `snap_free_fn` a snap a successor still references,
+later restore reads freed memory and the result is silent corruption,
+not a crash; (3) the prune loop ends up with an O(B²) "is this snap
+aliased?" check per step.
+
+The fix that's correct without thinking: wrap the snap in a refcounted
+holder and let normal scope rules do it.
+
+```cpp
+struct Holder {
+    Snap snap;
+    SnapFreeFn* free_cb;
+    ~Holder() { (*free_cb)(snap); }
+    Holder(const Holder&) = delete;
+};
+auto wrap = [&snap_free_fn](Snap s) { return std::shared_ptr<Holder>(new Holder(s, &snap_free_fn)); };
+
+struct BeamS {
+    ...
+    std::shared_ptr<Holder> snap;
+};
+```
+
+Then "siblings share" becomes `child.snap = step_snaps[parent_idx]`
+(copy-by-value of the shared_ptr — refcount bumps). When `beams =
+move(next_beams)`, every old `beams[i].snap` and every unselected
+`step_snaps[i]` goes out of scope and the destructor fires
+`snap_free_fn` exactly when the last reference dies. No manual
+ref-tracking, no aliasing checks, impossible to double-free.
+
+This pattern is now the contract in `core_beam_decode::run_with_probs_branched`.
+The four callbacks the caller provides — `save_fn`, `restore_fn`,
+`snap_free_fn`, `step_fn` — do not need to know anything about
+sibling sharing or refcounting; they just operate on a single snap at
+a time. The helper handles the lifetime.
+
+For backend snapshots themselves, `ggml_backend_tensor_get` on the
+WHOLE per-layer (moonshine) or contiguous (omniasr-llm, kyutai-stt)
+KV tensor is the right cost-vs-correctness trade. Snap sizes:
+moonshine-tiny ≈ 3 MB, omniasr-llm-300m ≈ 30 MB, kyutai-stt-1b ≈
+50 MB per snap. Times B beams times T steps adds up — but the
+single-token decode work dominates anyway, and partial-tensor
+snapshots break the moment the KV tensor's stride includes the
+unwritten portion of `max_ctx`.
+
+References: `src/core/beam_decode.h` `run_with_probs_branched`
+template, `src/moonshine.cpp` / `src/omniasr.cpp` / `src/kyutai_stt.cpp`
+beam paths.
+
 ## Lesson — chunked-batch is the right streaming default when the encoder is non-causal
 
 PLAN #62c wired kyutai-stt into the unified streaming Session API.

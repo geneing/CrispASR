@@ -2251,3 +2251,79 @@ single-shot today; the same chunked-batch pattern (rolling-window
 wrapper + `moonshine_stream_state` field) would land in ~50 LOC.
 Voxtral4b stays separate (PLAN #7 — needs a real decoder-thread
 refactor).
+
+### 70. PLAN #61h beam search — branched-KV variant + 3 deferred backends shipped (May 2026)
+
+**Done.** Closed the three rows §65 left deferred under "61h beam
+search (partial)": omniasr-llm, kyutai-stt, moonshine. README "Beam
+search" gains 3 ✔ for a total of 6 across the matrix
+(whisper / glm-asr / kyutai-stt / firered / moonshine / omniasr).
+
+**The blocker, recap.** Original §65 entry shipped only glm-asr because
+the shared `core_beam_decode::run_with_probs` is *replay-from-prefix*
+— each beam's per-step decode replays the full generated suffix from
+the post-prompt anchor. For glm-asr's batched `glm_asr_run_llm_kv(emb,
+n, n_past)` that's `O(B × T)` batched forwards, fast enough. For
+omniasr-llm / kyutai-stt / moonshine — all of which have a
+single-token-per-call decode API — replay-from-prefix would do
+`O(B × T²)` *single-token* graph rebuilds, multi-minute on Metal.
+
+**The unblock.** `core_beam_decode::run_with_probs_branched` —
+header-only template, takes per-beam KV `save_fn` / `restore_fn` /
+`snap_free_fn` / `step_fn` callbacks. Snap holders are wrapped in
+`shared_ptr` inside the helper so siblings can share a parent's
+post-step snap without double-free. Cost drops to `O(B × T)` true
+single-token forwards. (The branched variant landed independently in
+commit `e9783d2`; the same author / parallel-worker pass also did the
+clang-format sweep in `db1149c` that bundled the kyutai-stt beam
+edits.)
+
+**Per-backend snapshot strategy.**
+
+* **moonshine** — `kv_self.k[il]` / `kv_self.v[il]` are per-layer
+  ggml tensors of shape `[head_dim, max_len, n_kv_heads]`. Snapshot
+  reads each layer's full tensor via `ggml_backend_tensor_get`; small
+  enough total (~MB-scale) to ignore. `kv_self.n` (the next-write
+  slot) goes into the snapshot too. `kv_cross` is precomputed once
+  outside the beam path and shared across beams.
+
+* **omniasr-llm** — `kv_k` / `kv_v` are single contiguous tensors of
+  shape `[head_dim, max_ctx, n_heads, n_layers]`. Snapshot reads the
+  whole tensor (~30 MB total for the 300m model). `kv_n_used` is
+  written by prefill but never read by the per-step decode (each
+  call passes `n_past` explicitly), so the snapshot can omit it.
+  Beam path activates only on the LLM variant; CTC is unaffected.
+
+* **kyutai-stt** — same KV layout as omniasr but the per-frame loop
+  is fundamentally different: each frame mixes audio code embeddings
+  + text token embedding into one LM step, and there is no EOS — the
+  loop runs to `T_frames`. Beam = top-K text-token decisions per
+  frame, with audio codes shared across all beams. Refactored the
+  per-frame body into `kyutai_lm_step(text_token, codes, frame_idx,
+  n_past, &out_logits)`; greedy + beam both call it. Beam Config:
+  `eos_id = -1`, `max_new_tokens = T_frames`, `prompt_len = 1`
+  (frame 0 is run manually to seed initial logits + populate KV
+  slot 0; helper handles frames 1..T_frames-1).
+
+**Validation on JFK (11 s, Metal, warm cache).** All three backends
+match greedy transcript at `-bs 1 / 2 / 4`; moonshine `-bs 4`
+actually improves quality.
+
+| Backend | model | `-bs 1` | `-bs 2` | `-bs 4` | Best transcript |
+|---|---|---|---|---|---|
+| moonshine | tiny-q4_k | 0.57s | 0.57s | 0.57s | "fellow Americans ask…" (beam=4 only) |
+| omniasr-llm | 300m-v2-q4_k | 38s | 23s | 70s | "fellow americas ask…" (all match greedy) |
+| kyutai-stt | 1b-q4_k | 5.1s | 8.6s | 14.2s | "fellow Americans, ask…" (all match greedy) |
+
+omniasr-llm `-bs 4` lands above the 60s "rough" PLAN gate but the
+per-step compute scales linearly (411 step calls for `-bs 4`,
+103 for `-bs 1`); the snapshot copy + Metal single-token graph
+dispatch overhead per call dominate, not the helper itself.
+
+**Closures.** PLAN #61h sub-table now has 6 of 8 lines DONE
+(generic helper × 2 + 4 backends). Two lines remain DEFERRED:
+session-API beam exposure for the qwen3/granite/voxtral4b/voxtral
+quartet (pure plumbing once the session API exposes `beam_size`),
+and per-decoder beam for the canary/cohere encoder-decoder pair.
+Both were never the heart of the §65 deferral — that was the
+`O(B × T²)` perf wall that the branched-KV variant tore down.

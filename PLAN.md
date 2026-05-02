@@ -1354,27 +1354,49 @@ canary/cohere/moonshine via per-model loop).
 
 | Sub-step | Outcome |
 |---|---|
-| Generic `core_beam_decode` helper (header-only) | DONE → [HISTORY §65](HISTORY.md) |
-| glm-asr beam path (`-bs N`) | DONE — 1 ✔ |
-| omniasr-llm / kyutai-stt / moonshine LLM-side beam | DEFERRED ↓ |
-| qwen3/granite/voxtral4b/voxtral session-API beam | DEFERRED ↓ |
-| canary/cohere/moonshine encoder-decoder beam | DEFERRED ↓ |
+| Generic `core_beam_decode` helper (header-only) — replay-from-prefix variant | DONE → [HISTORY §65](HISTORY.md) |
+| Branched-KV variant (`run_with_probs_branched`) — per-beam `save`/`restore`/`step` callbacks | DONE — `O(B × T)` single-token forwards |
+| glm-asr beam path (`-bs N`) | DONE — 1 ✔ (replay-from-prefix; batched LM helper) |
+| moonshine LLM-side beam | DONE — 1 ✔ (branched-KV; per-layer `kv_self.{k,v}` snapshot) |
+| omniasr-llm beam | DONE — 1 ✔ (branched-KV; whole-tensor `kv_k` / `kv_v` snapshot) |
+| kyutai-stt per-frame text-token beam | DONE — 1 ✔ (branched-KV; one pick per Mimi frame, audio codes shared across beams) |
+| qwen3/granite/voxtral4b/voxtral session-API beam | DEFERRED — pure plumbing once the session API exposes `beam_size` |
+| canary/cohere/moonshine encoder-decoder beam (per-decoder loop) | DEFERRED — separate scope from the LLM beam path |
 
-**What's deferred and why.** The shared helper uses
-*replay-from-prefix* (each step rebuilds each beam's KV by re-running
-its full generated suffix from the post-prompt anchor) so the C-API
-surface stays unchanged. Cost is `O(B × T²)` forward passes for `T`
-generated tokens. That works on glm-asr because
-`glm_asr_run_llm_kv(emb, n, n_past)` is already a batched call —
-beam=2 on 11 s JFK lands in seconds on Metal. For
-**omniasr-llm / moonshine** the per-step decode is one-token-at-a-time
-with implicit KV position, so each beam-step would do `B × T`
-single-token graph rebuilds (~100× greedy cost on Metal). For
-**kyutai-stt** the audio-token-per-frame architecture doesn't fit the
-LLM-style replay template at all — beam would have to live in the
-per-frame loop. The honest fix for all three is a per-backend
-`*_kv_save` / `*_kv_restore` C-API; reopen those rows when that lands.
-See LEARNINGS.md "Replay-from-prefix beam search is `O(B × T²)`".
+**What landed (May 2026 follow-up).** The original entry deferred
+omniasr-llm / kyutai-stt / moonshine because `replay_fn` does
+`O(B × T²)` single-token forwards for backends with one-token-at-a-
+time decode. Resolved by adding `core_beam_decode::run_with_probs_branched`
+— takes per-beam KV `save_fn`/`restore_fn`/`snap_free_fn`/`step_fn`
+callbacks. Cost drops to `O(B × T)`. Snap holders are refcounted via
+`shared_ptr` inside the helper so siblings can share a parent's snap
+without double-free.
+
+For each backend, KV snapshots are full-tensor `ggml_backend_tensor_get`
+on either per-layer (`moonshine`) or contiguous (`omniasr-llm`,
+`kyutai-stt`) K/V tensors. Cross-attention KV (moonshine, kyutai's
+audio codes) stays shared across beams.
+
+Smoke results on JFK (11 s, Metal, warm cache):
+
+| Backend | model | `-bs 1` | `-bs 2` | `-bs 4` |
+|---|---|---|---|---|
+| moonshine | tiny-q4_k | 0.57s | 0.57s | 0.57s (improved transcript) |
+| omniasr-llm | 300m-v2-q4_k | ~9.5s pure / 38s wall | ~22s | ~42s pure / 70s wall |
+| kyutai-stt | 1b-q4_k | 5.1s | 8.6s | 14.2s |
+
+Wall scales ~linearly with beam (each beam adds ~1× greedy compute).
+Transcripts match greedy at all beam sizes; moonshine's `-bs 4`
+actually improved quality on JFK ("fellow Americans" vs greedy's
+"fellow-american"). omniasr-llm at `-bs 4` lands above the 60s
+"rough" gate but well within order-of-magnitude.
+
+**Still deferred and why.** The session-API quartet (qwen3, granite,
+voxtral4b, voxtral) and the classic encoder-decoder backends (canary,
+cohere) need either session-API plumbing (just `set_beam_size`
+exposure) or a per-decoder beam path that reuses the cross-attention
+KV across all beams. Both are pure plumbing — reopen when the wave
+of enc-dec backends has a clear quality win to point at.
 
 ### 61i. Flash attention for fc-ctc — DEFERRED
 
