@@ -1491,11 +1491,30 @@ helper that sets up mic + stream + per-callback feed wiring.
 
 #### 62c (deferred). Native streaming for moonshine-streaming + kyutai-stt
 
-Both backends emit text per frame today but the unified Session
-calls them as batch. Wire them into `crispasr_session_stream_feed`
-so `session.stream_*()` gives true low-latency output for them
-(80ms frame for kyutai, ~250ms for moonshine-streaming). Each
-~80 LOC. Defer until 62a-d ship and a consumer asks.
+**Effort estimate revised after deeper survey (May 2026):** the
+original "~80 LOC each" was wrong. Both backends today expose only
+single-shot `<backend>_transcribe(ctx, pcm, n_samples)` — the
+"streaming" in moonshine-streaming refers to the model architecture
+(sliding-window attention), not the API. The kyutai 12.5 Hz
+frame-alignment is ideal architecturally but the impl resamples to
+24 kHz and runs Mimi-encode + LM in one shot.
+
+To wire into the stream API requires:
+- **Refactor `_transcribe` into incremental encode + decode + state
+  carry-over.** Mimi codec needs sliding-window context for stable
+  frame boundaries; kyutai LM has a delay_frames lookahead that
+  needs to know about partial input.
+- **Per-backend stream state struct + dispatch** in
+  `crispasr_session_stream_feed`. The current `crispasr_stream`
+  struct is whisper-coupled; either generalise it (discriminated
+  union) or add separate per-backend handles wrapped in a common
+  opaque type.
+- **Numerical regression risk**: chunked encoder ≠ batch encoder
+  bit-for-bit. Need `crispasr-diff` round-trip on JFK to gate.
+
+Realistic effort: **~300 LOC per backend + 1-2 days of debugging
+encoder boundary effects**. Not a "quick PR." Defer until a
+consumer explicitly needs sub-second-latency for one of these.
 
 #### 62e (deferred). Voxtral4b native streaming — see PLAN #7
 
@@ -1504,8 +1523,32 @@ frame injection. High complexity, separate session.
 
 ### Sequencing
 
-Ship a + b + d as one PR (~400 LOC). c and e are follow-ups when
-specific consumers request them (per PLAN #59's deferral policy).
-The output of a+b+d is enough to enable dictation across all 3
-canonical wrappers using whisper as the streaming engine, with a
-clean upgrade path for kyutai/moonshine-streaming when wired.
+a + b + d shipped as 947262f (a/b spec) + 041471f (Python+Rust
+streaming) + 89687f0 (mic). Go wrapper sticky setters + streaming
+shipped in this PLAN-uplift commit. c and e remain deferred per
+the revised effort estimates above — open them when a consumer
+explicitly needs sub-second latency on kyutai/moonshine/voxtral4b.
+
+### Init-only flag refactor (related deferral)
+
+CLI flags `--temperature`, `--beam-size`, `--flash-attn`, `--grammar`
+are baked into backend contexts at `_init_from_file()` time on every
+backend. Surfacing them as session-level setters means tearing down
++ reopening the context (~15-30s per swap depending on model size)
+or refactoring per-backend init to accept post-init parameter
+updates. The temperature setter (`crispasr_session_set_temperature`)
+already works via per-backend runtime setters that 4 backends
+expose; the others (beam/flash/grammar) would need either:
+
+- **Backend-reinit machinery** (close + reopen + load weights again)
+   — easy to write, slow to use, fine for "set once at session
+   creation" use cases.
+- **Per-backend `set_*` extensions** — each backend exposes a
+   runtime setter (parakeet/canary/cohere already have
+   `set_temperature`; extend to `set_beam` etc.). Per-backend work,
+   no unified machinery.
+
+Realistic effort: ~50 LOC per backend × 14 backends = ~700 LOC
+mechanical, but each one needs a regression test that the new flag
+actually changes output. **Defer until a consumer asks for a
+specific flag on a specific backend** (per PLAN #59 policy).

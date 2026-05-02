@@ -40,6 +40,14 @@ public final class CrispasrSession implements AutoCloseable {
         Pointer crispasr_session_synthesize(Pointer session, String text, IntByReference outNSamples);
         void    crispasr_pcm_free(Pointer pcm);
         int     crispasr_session_kokoro_clear_phoneme_cache(Pointer session);
+        int     crispasr_session_set_source_language(Pointer session, String lang);
+        int     crispasr_session_set_target_language(Pointer session, String lang);
+        int     crispasr_session_set_punctuation(Pointer session, int enable);
+        int     crispasr_session_set_translate(Pointer session, int enable);
+        int     crispasr_session_set_temperature(Pointer session, float temperature, long seed);
+        int     crispasr_session_detect_language(Pointer session, float[] pcm, int n_samples,
+                                                  String lid_model_path, int method,
+                                                  byte[] out_lang, int out_lang_cap, float[] out_prob);
 
         int crispasr_kokoro_resolve_model_for_lang_abi(
                 String modelPath, String lang, byte[] outPath, int outPathLen);
@@ -77,6 +85,54 @@ public final class CrispasrSession implements AutoCloseable {
     public void clearPhonemeCache() {
         int rc = Lib.INSTANCE.crispasr_session_kokoro_clear_phoneme_cache(handle);
         if (rc != 0) throw new IllegalStateException("clear_phoneme_cache failed (rc=" + rc + ")");
+    }
+
+    // ----- Sticky session-state setters (PLAN #59 partial unblock) -----
+
+    /** Sticky source-language hint (canary/cohere/voxtral/whisper). Empty clears. */
+    public void setSourceLanguage(String lang) {
+        int rc = Lib.INSTANCE.crispasr_session_set_source_language(handle, lang == null ? "" : lang);
+        if (rc != 0) throw new IllegalStateException("set_source_language failed (rc=" + rc + ")");
+    }
+
+    /** Sticky target-language. ≠ source on canary/cohere ⇒ translation. */
+    public void setTargetLanguage(String lang) {
+        int rc = Lib.INSTANCE.crispasr_session_set_target_language(handle, lang == null ? "" : lang);
+        if (rc != 0) throw new IllegalStateException("set_target_language failed (rc=" + rc + ")");
+    }
+
+    /** Toggle punctuation + capitalisation. Default true. */
+    public void setPunctuation(boolean enable) {
+        int rc = Lib.INSTANCE.crispasr_session_set_punctuation(handle, enable ? 1 : 0);
+        if (rc != 0) throw new IllegalStateException("set_punctuation failed (rc=" + rc + ")");
+    }
+
+    /** Whisper sticky --translate. */
+    public void setTranslate(boolean enable) {
+        int rc = Lib.INSTANCE.crispasr_session_set_translate(handle, enable ? 1 : 0);
+        if (rc != 0) throw new IllegalStateException("set_translate failed (rc=" + rc + ")");
+    }
+
+    /** Decoder temperature on backends with runtime control (canary/cohere/parakeet/moonshine). */
+    public void setTemperature(float temperature, long seed) {
+        int rc = Lib.INSTANCE.crispasr_session_set_temperature(handle, temperature, seed);
+        if (rc != 0 && rc != -2) throw new IllegalStateException("set_temperature failed (rc=" + rc + ")");
+    }
+
+    /** Auto-detect spoken language on raw 16 kHz mono PCM. method:
+     *  0=Whisper, 1=Silero, 2=Firered, 3=Ecapa. Returns the ISO code; the
+     *  confidence is written to {@code outConfidence[0]} (length 1 array).
+     */
+    public String detectLanguage(float[] pcm, String lidModelPath, int method, float[] outConfidence) {
+        byte[] outLang = new byte[16];
+        float[] prob = new float[]{ 0.0f };
+        int rc = Lib.INSTANCE.crispasr_session_detect_language(
+                handle, pcm, pcm.length, lidModelPath, method, outLang, outLang.length, prob);
+        if (rc != 0) throw new IllegalStateException("detect_language failed (rc=" + rc + ")");
+        if (outConfidence != null && outConfidence.length >= 1) outConfidence[0] = prob[0];
+        int n = 0;
+        while (n < outLang.length && outLang[n] != 0) n++;
+        return new String(outLang, 0, n, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**

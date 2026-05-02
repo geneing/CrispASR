@@ -42,6 +42,15 @@ extern float*                  crispasr_session_synthesize(struct CrispasrSessio
                                                            int* out_n_samples);
 extern void                    crispasr_pcm_free(float* pcm);
 extern int                     crispasr_session_kokoro_clear_phoneme_cache(struct CrispasrSession* s);
+extern int                     crispasr_session_set_source_language(struct CrispasrSession* s, const char* lang);
+extern int                     crispasr_session_set_target_language(struct CrispasrSession* s, const char* lang);
+extern int                     crispasr_session_set_punctuation(struct CrispasrSession* s, int enable);
+extern int                     crispasr_session_set_translate(struct CrispasrSession* s, int enable);
+extern int                     crispasr_session_set_temperature(struct CrispasrSession* s, float temperature,
+                                                                unsigned long long seed);
+extern int                     crispasr_session_detect_language(struct CrispasrSession* s, const float* pcm,
+                                                                int n_samples, const char* lid_model_path, int method,
+                                                                char* out_lang, int out_lang_cap, float* out_prob);
 extern int                     crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const char* lang,
                                                                           char* out_path, int out_path_len);
 extern int                     crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path, const char* lang,
@@ -78,6 +87,64 @@ static VALUE rb_session_clear_phoneme_cache(VALUE self, VALUE handle) {
     int rc = crispasr_session_kokoro_clear_phoneme_cache(s);
     if (rc != 0) rb_raise(rb_eRuntimeError, "clear_phoneme_cache failed (rc=%d)", rc);
     return Qnil;
+}
+
+// ---- Sticky session-state setters (PLAN #59 partial unblock) ----
+
+static VALUE rb_session_set_source_language(VALUE self, VALUE handle, VALUE lang) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_source_language(s, NIL_P(lang) ? "" : StringValueCStr(lang));
+    if (rc != 0) rb_raise(rb_eRuntimeError, "set_source_language failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_set_target_language(VALUE self, VALUE handle, VALUE lang) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_target_language(s, NIL_P(lang) ? "" : StringValueCStr(lang));
+    if (rc != 0) rb_raise(rb_eRuntimeError, "set_target_language failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_set_punctuation(VALUE self, VALUE handle, VALUE enable) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_punctuation(s, RTEST(enable) ? 1 : 0);
+    if (rc != 0) rb_raise(rb_eRuntimeError, "set_punctuation failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_set_translate(VALUE self, VALUE handle, VALUE enable) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_translate(s, RTEST(enable) ? 1 : 0);
+    if (rc != 0) rb_raise(rb_eRuntimeError, "set_translate failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_set_temperature(VALUE self, VALUE handle, VALUE temperature, VALUE seed) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_temperature(s, (float)NUM2DBL(temperature),
+                                              (unsigned long long)NUM2ULL(seed));
+    // rc == -2 = no backend supports it; soft no-op.
+    if (rc != 0 && rc != -2) rb_raise(rb_eRuntimeError, "set_temperature failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_detect_language(VALUE self, VALUE handle, VALUE pcm_arr, VALUE lid_path, VALUE method) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    Check_Type(pcm_arr, T_ARRAY);
+    long n = RARRAY_LEN(pcm_arr);
+    float* pcm = (float*)malloc(sizeof(float) * (size_t)n);
+    if (!pcm) rb_raise(rb_eNoMemError, "alloc failed");
+    for (long i = 0; i < n; i++) pcm[i] = (float)NUM2DBL(rb_ary_entry(pcm_arr, i));
+    char out_lang[16] = {0};
+    float prob = 0.0f;
+    int rc = crispasr_session_detect_language(s, pcm, (int)n, StringValueCStr(lid_path),
+                                              NUM2INT(method), out_lang, sizeof(out_lang), &prob);
+    free(pcm);
+    if (rc != 0) rb_raise(rb_eRuntimeError, "detect_language failed (rc=%d)", rc);
+    VALUE pair = rb_ary_new_capa(2);
+    rb_ary_push(pair, rb_str_new_cstr(out_lang));
+    rb_ary_push(pair, DBL2NUM((double)prob));
+    return pair;
 }
 
 static VALUE rb_session_set_voice(int argc, VALUE* argv, VALUE self) {
@@ -187,5 +254,11 @@ void init_ruby_crispasr_session(VALUE* mWhisper) {
     rb_define_singleton_method(mSession, "is_voice_design",      rb_session_is_voice_design,  1);
     rb_define_singleton_method(mSession, "synthesize",           rb_session_synthesize,       2);
     rb_define_singleton_method(mSession, "clear_phoneme_cache",  rb_session_clear_phoneme_cache, 1);
+    rb_define_singleton_method(mSession, "set_source_language",  rb_session_set_source_language, 2);
+    rb_define_singleton_method(mSession, "set_target_language",  rb_session_set_target_language, 2);
+    rb_define_singleton_method(mSession, "set_punctuation",      rb_session_set_punctuation, 2);
+    rb_define_singleton_method(mSession, "set_translate",        rb_session_set_translate, 2);
+    rb_define_singleton_method(mSession, "set_temperature",      rb_session_set_temperature, 3);
+    rb_define_singleton_method(mSession, "detect_language",      rb_session_detect_language, 4);
     rb_define_singleton_method(mSession, "kokoro_resolve_for_lang", rb_kokoro_resolve_for_lang, 2);
 }

@@ -22,6 +22,14 @@ typedef struct CrispasrSession CrispasrSession;
 CrispasrSession* crispasr_session_open(const char* model_path, int n_threads);
 void             crispasr_session_close(CrispasrSession* s);
 int              crispasr_session_set_codec_path(CrispasrSession* s, const char* path);
+int              crispasr_session_set_source_language(CrispasrSession* s, const char* lang);
+int              crispasr_session_set_target_language(CrispasrSession* s, const char* lang);
+int              crispasr_session_set_punctuation(CrispasrSession* s, int enable);
+int              crispasr_session_set_translate(CrispasrSession* s, int enable);
+int              crispasr_session_set_temperature(CrispasrSession* s, float temperature, unsigned long long seed);
+int              crispasr_session_detect_language(CrispasrSession* s, const float* pcm, int n_samples,
+                                                  const char* lid_model_path, int method,
+                                                  char* out_lang, int out_lang_cap, float* out_prob);
 int              crispasr_session_set_voice(CrispasrSession* s, const char* path, const char* ref_text_or_null);
 int              crispasr_session_set_speaker_name(CrispasrSession* s, const char* name);
 int              crispasr_session_n_speakers(CrispasrSession* s);
@@ -38,6 +46,16 @@ int crispasr_kokoro_resolve_model_for_lang_abi(const char* model_path, const cha
 int crispasr_kokoro_resolve_fallback_voice_abi(const char* model_path, const char* lang,
                                                char* out_path, int out_path_len,
                                                char* out_picked, int out_picked_len);
+
+// --- Streaming (PLAN #62) ---
+typedef struct CrispasrStream CrispasrStream;
+CrispasrStream* crispasr_session_stream_open(CrispasrSession* s, int n_threads, int step_ms,
+                                             int length_ms, int keep_ms, const char* language, int translate);
+int             crispasr_stream_feed(CrispasrStream* s, const float* pcm, int n_samples);
+int             crispasr_stream_get_text(CrispasrStream* s, char* out_text, int out_cap,
+                                         double* out_t0_s, double* out_t1_s, long long* out_counter);
+int             crispasr_stream_flush(CrispasrStream* s);
+void            crispasr_stream_close(CrispasrStream* s);
 */
 import "C"
 
@@ -82,6 +100,179 @@ func (s *CrispasrSession) ClearPhonemeCache() error {
 		return errors.New("crispasr_session_kokoro_clear_phoneme_cache failed")
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Sticky session-state setters (PLAN #59 partial unblock).
+// ---------------------------------------------------------------------------
+
+// SetSourceLanguage sets the sticky source-language hint (canary, cohere,
+// voxtral, whisper). Empty string clears. Per-call language args still win.
+func (s *CrispasrSession) SetSourceLanguage(lang string) error {
+	cl := C.CString(lang)
+	defer C.free(unsafe.Pointer(cl))
+	rc := C.crispasr_session_set_source_language(s.handle, cl)
+	if rc != 0 {
+		return errors.New("crispasr_session_set_source_language failed")
+	}
+	return nil
+}
+
+// SetTargetLanguage sets the sticky target-language. When ≠ source on
+// canary/cohere, the backend emits a translation. For whisper, pair with
+// SetTranslate(true).
+func (s *CrispasrSession) SetTargetLanguage(lang string) error {
+	cl := C.CString(lang)
+	defer C.free(unsafe.Pointer(cl))
+	rc := C.crispasr_session_set_target_language(s.handle, cl)
+	if rc != 0 {
+		return errors.New("crispasr_session_set_target_language failed")
+	}
+	return nil
+}
+
+// SetPunctuation toggles punctuation + capitalisation in the output
+// (canary/cohere natively; LLM backends via post-process strip). Default true.
+func (s *CrispasrSession) SetPunctuation(enable bool) error {
+	v := C.int(0)
+	if enable {
+		v = 1
+	}
+	rc := C.crispasr_session_set_punctuation(s.handle, v)
+	if rc != 0 {
+		return errors.New("crispasr_session_set_punctuation failed")
+	}
+	return nil
+}
+
+// SetTranslate enables whisper sticky --translate. For canary/cohere/voxtral
+// the equivalent is SetTargetLanguage ≠ source.
+func (s *CrispasrSession) SetTranslate(enable bool) error {
+	v := C.int(0)
+	if enable {
+		v = 1
+	}
+	rc := C.crispasr_session_set_translate(s.handle, v)
+	if rc != 0 {
+		return errors.New("crispasr_session_set_translate failed")
+	}
+	return nil
+}
+
+// SetTemperature sets the decoder temperature on backends that support
+// runtime control (canary, cohere, parakeet, moonshine). Other backends
+// silently no-op. seed is the RNG seed; pass 0 for time-based.
+func (s *CrispasrSession) SetTemperature(temperature float32, seed uint64) error {
+	rc := C.crispasr_session_set_temperature(s.handle, C.float(temperature), C.ulonglong(seed))
+	// rc == -2 means no backend in this session honours it — soft no-op.
+	if rc != 0 && rc != -2 {
+		return errors.New("crispasr_session_set_temperature failed")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (PLAN #62) — rolling-window decoder for whisper today.
+// ---------------------------------------------------------------------------
+
+// Stream is a streaming-decoder handle returned by Session.StreamOpen.
+// Feed PCM, pull text. Whisper-only at the C-ABI level today.
+type Stream struct {
+	handle *C.CrispasrStream
+}
+
+// StreamingUpdate is one commit from a streaming session — the latest
+// concatenated text + its absolute audio-time bounds. Counter increments
+// per commit; same value = no new text.
+type StreamingUpdate struct {
+	Text    string
+	T0      float64
+	T1      float64
+	Counter int64
+}
+
+// StreamOpen opens a rolling-window streaming decoder for this session.
+// Currently whisper-only at the C-ABI level. stepMs (default 3000) is
+// how often to commit a partial transcript; lengthMs (default 10000) is
+// the rolling window; keepMs (default 200) is the trailing audio carried.
+func (s *CrispasrSession) StreamOpen(stepMs, lengthMs, keepMs int, language string, translate bool) (*Stream, error) {
+	clang := C.CString(language)
+	defer C.free(unsafe.Pointer(clang))
+	tr := C.int(0)
+	if translate {
+		tr = 1
+	}
+	h := C.crispasr_session_stream_open(s.handle, C.int(4), C.int(stepMs), C.int(lengthMs), C.int(keepMs), clang, tr)
+	if h == nil {
+		return nil, errors.New("crispasr_session_stream_open failed (whisper-only today)")
+	}
+	return &Stream{handle: h}, nil
+}
+
+// Feed pushes 16 kHz mono float32 PCM. Returns 0 if still buffering, 1 if
+// a new partial transcript is ready (call GetText).
+func (st *Stream) Feed(pcm []float32) (int, error) {
+	if len(pcm) == 0 {
+		return 0, nil
+	}
+	rc := C.crispasr_stream_feed(st.handle, (*C.float)(unsafe.Pointer(&pcm[0])), C.int(len(pcm)))
+	if rc < 0 {
+		return 0, errors.New("crispasr_stream_feed failed")
+	}
+	return int(rc), nil
+}
+
+// GetText returns the latest committed transcript + absolute audio-time bounds.
+func (st *Stream) GetText() (StreamingUpdate, error) {
+	var buf [8192]C.char
+	var t0, t1 C.double
+	var counter C.longlong
+	rc := C.crispasr_stream_get_text(st.handle, &buf[0], C.int(len(buf)), &t0, &t1, &counter)
+	if rc < 0 {
+		return StreamingUpdate{}, errors.New("crispasr_stream_get_text failed")
+	}
+	return StreamingUpdate{
+		Text:    C.GoString(&buf[0]),
+		T0:      float64(t0),
+		T1:      float64(t1),
+		Counter: int64(counter),
+	}, nil
+}
+
+// Flush finalises any remaining buffered audio.
+func (st *Stream) Flush() error {
+	if rc := C.crispasr_stream_flush(st.handle); rc < 0 {
+		return errors.New("crispasr_stream_flush failed")
+	}
+	return nil
+}
+
+// Close releases the streaming handle.
+func (st *Stream) Close() {
+	if st != nil && st.handle != nil {
+		C.crispasr_stream_close(st.handle)
+		st.handle = nil
+	}
+}
+
+// DetectLanguage auto-detects the spoken language on raw 16 kHz mono PCM.
+// method: 0=Whisper, 1=Silero (default), 2=Firered, 3=Ecapa.
+// Returns the ISO 639-1 code and the model's confidence in [0, 1].
+func (s *CrispasrSession) DetectLanguage(pcm []float32, lidModelPath string, method int) (string, float32, error) {
+	cpath := C.CString(lidModelPath)
+	defer C.free(unsafe.Pointer(cpath))
+	var outLang [16]C.char
+	var outProb C.float
+	pcmPtr := (*C.float)(nil)
+	if len(pcm) > 0 {
+		pcmPtr = (*C.float)(unsafe.Pointer(&pcm[0]))
+	}
+	rc := C.crispasr_session_detect_language(s.handle, pcmPtr, C.int(len(pcm)), cpath, C.int(method),
+		&outLang[0], C.int(len(outLang)), &outProb)
+	if rc != 0 {
+		return "", 0, errors.New("crispasr_session_detect_language failed")
+	}
+	return C.GoString(&outLang[0]), float32(outProb), nil
 }
 
 // SetCodecPath loads a separate codec GGUF.
