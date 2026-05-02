@@ -62,9 +62,26 @@ public:
         // Resolve src/tgt language with the fallback chain:
         //   source_lang -> language
         //   target_lang -> source_lang (ASR) or "en" (--translate)
+        // Canary's prompt embeds the language token LITERALLY (e.g.
+        // "<|en|>"); it has no "auto" token. If the dispatcher's LID
+        // step failed and left params.language="auto", or the caller
+        // never set one, fall back to "en" with a stderr note. This is
+        // a defensive layer — the dispatcher should already have
+        // resolved this — but we keep it so canary degrades gracefully
+        // even if a future code path skips LID resolution.
         std::string src = params.source_lang.empty() ? params.language : params.source_lang;
+        if (src == "auto" || src.empty()) {
+            if (!params.no_prints) {
+                fprintf(stderr,
+                        "canary: no source language set (got '%s'); "
+                        "defaulting to 'en'. Pass `-l <lang>` or "
+                        "`--source-lang <lang>` to set explicitly.\n",
+                        src.c_str());
+            }
+            src = "en";
+        }
         std::string tgt = params.target_lang;
-        if (tgt.empty()) {
+        if (tgt.empty() || tgt == "auto") {
             tgt = params.translate ? std::string("en") : src;
         }
 

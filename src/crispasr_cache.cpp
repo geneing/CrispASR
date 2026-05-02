@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -438,15 +439,57 @@ bool fetch(const std::string& url, const std::string& dest, bool quiet) {
     return false;
 }
 
+// Build the well-known search list for already-on-disk model files.
+// Caller's cache_dir_override (or the canonical ~/.cache/crispasr) is
+// always tried first. Then we probe a small set of common locations
+// users typically already have populated, so an offline / flaky-network
+// invocation can succeed without re-downloading multi-GB GGUFs:
+//
+//   1. The dispatcher's chosen cache dir.
+//   2. $CRISPASR_MODELS_DIR (set by users with a dedicated model SSD).
+//   3. /Volumes/backups/ai/crispasr-models  (macOS dev convention).
+//   4. ~/.cache/crispasr-models           (legacy alt cache).
+//   5. ~/.cache/huggingface/hub           (raw HF download cache —
+//      filename match is rough, but worth a glance).
+//
+// The list is platform-agnostic; non-existent dirs are skipped silently.
+static std::vector<std::string> well_known_search_dirs(const std::string& cache_dir_override) {
+    std::vector<std::string> dirs;
+    dirs.push_back(dir(cache_dir_override));
+
+    if (const char* env = std::getenv("CRISPASR_MODELS_DIR"); env && *env) {
+        dirs.emplace_back(env);
+    }
+    dirs.emplace_back("/Volumes/backups/ai/crispasr-models");
+
+    const char* home = std::getenv("HOME");
+#ifdef _WIN32
+    if (!home || !*home)
+        home = std::getenv("USERPROFILE");
+#endif
+    if (home && *home) {
+        dirs.emplace_back(std::string(home) + "/.cache/crispasr-models");
+        dirs.emplace_back(std::string(home) + "/.cache/huggingface/hub");
+    }
+    return dirs;
+}
+
 std::string ensure_cached_file(const std::string& filename, const std::string& url, bool quiet,
                                const char* pretty_label, const std::string& cache_dir_override) {
-    const std::string dst = dir(cache_dir_override) + "/" + filename;
-    if (file_present(dst)) {
-        if (!quiet) {
-            fprintf(stderr, "%s: using cached %s\n", pretty_label, dst.c_str());
+    // Probe all well-known locations first. The first hit wins; we
+    // return its path directly (no copy into the canonical cache —
+    // that would waste disk for users with a dedicated model SSD).
+    for (const auto& d : well_known_search_dirs(cache_dir_override)) {
+        const std::string p = d + "/" + filename;
+        if (file_present(p)) {
+            if (!quiet) {
+                fprintf(stderr, "%s: using cached %s\n", pretty_label, p.c_str());
+            }
+            return p;
         }
-        return dst;
     }
+
+    const std::string dst = dir(cache_dir_override) + "/" + filename;
     if (!quiet) {
         fprintf(stderr, "%s: downloading %s\n", pretty_label, url.c_str());
     }

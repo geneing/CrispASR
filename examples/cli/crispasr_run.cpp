@@ -211,8 +211,26 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
                 fprintf(stderr, "crispasr: LID -> language = '%s' (%s, p=%.3f)\n", lid.lang_code.c_str(),
                         lid.source.c_str(), lid.confidence);
             }
-        } else if (!params.no_prints) {
-            fprintf(stderr, "crispasr: LID failed, falling back to params.language='%s'\n", params.language.c_str());
+        } else {
+            // LID couldn't run or returned nothing. Leaving params.language="auto"
+            // here propagates a literal "auto" string to backends that expect a
+            // real language code (e.g. canary embeds "<|en|>" directly), causing
+            // empty/garbage transcripts. Fall back to "en" — the safest default
+            // when LID is unavailable. The user can override with `-l <code>`.
+            if (params.language == "auto") {
+                if (!params.no_prints) {
+                    fprintf(stderr,
+                            "crispasr: LID failed and no -l was set — "
+                            "defaulting to 'en'. Pass `-l <code>` to override.\n");
+                }
+                params.language = "en";
+                if (params.source_lang.empty())
+                    params.source_lang = "en";
+            } else if (!params.no_prints) {
+                fprintf(stderr,
+                        "crispasr: LID failed, falling back to params.language='%s'\n",
+                        params.language.c_str());
+            }
         }
     }
 
