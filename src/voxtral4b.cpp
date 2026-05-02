@@ -21,12 +21,14 @@
 #endif
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1860,6 +1862,11 @@ extern "C" int voxtral4b_stream_flush(struct voxtral4b_stream* s) {
         return -1;
     const auto& hp = s->ctx->model.hparams;
     const int proj_out = (int)hp.proj_out_dim;
+    const bool timing = (getenv("CRISPASR_VOXTRAL4B_STREAM_TIMING") != nullptr);
+    auto t0 = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&t0]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
 
     // PLAN #7 phase 1 ships with batch-encoder-at-flush as the default.
     // The incremental encoder graph (chunked encode during feed()) is wired
@@ -2021,20 +2028,31 @@ extern "C" int voxtral4b_stream_flush(struct voxtral4b_stream* s) {
     }
     voxtral4b_kv_reset(s->ctx);
 
+    if (timing)
+        fprintf(stderr, "voxtral4b_stream timing: encoder+projector drain @ %.1f ms\n", elapsed_ms());
+
     int out_n_tok = 0, out_vocab = 0;
+    auto t_pre = std::chrono::steady_clock::now();
     float* logits =
         voxtral4b_run_llm_kv(s->ctx, prompt_emb, kStreamingPromptLen, 0, &out_n_tok, &out_vocab);
     std::free(prompt_emb);
     if (!logits || out_vocab <= 0)
         return -8;
+    if (timing)
+        fprintf(stderr, "voxtral4b_stream timing: prefill (39 tokens) %.1f ms; total @ %.1f ms\n",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_pre).count(),
+                elapsed_ms());
     int n_past = kStreamingPromptLen;
 
     const int eos_id = 2;
     int adapter_pos = kStreamingPromptLen; // next audio embed to inject
     std::string generated;
     generated.reserve(512);
+    std::vector<double> step_ms_log;
+    bool first_text_emitted = false;
 
     for (int step = 0; step < kMaxNewTokens; ++step) {
+        auto t_step = std::chrono::steady_clock::now();
         const float* last = logits + (size_t)(out_n_tok - 1) * (size_t)out_vocab;
         int best = 0;
         float best_score = last[0];
@@ -2070,6 +2088,12 @@ extern "C" int voxtral4b_stream_flush(struct voxtral4b_stream* s) {
             }
             generated += decoded;
             s->out_text_unread += decoded;
+            if (timing && !first_text_emitted) {
+                fprintf(stderr,
+                        "voxtral4b_stream timing: first text token at @ %.1f ms (step %d, id=%d)\n",
+                        elapsed_ms(), step, best);
+                first_text_emitted = true;
+            }
         }
 
         // Stop when audio is exhausted — matches the CLI pre_hook returning
@@ -2092,9 +2116,24 @@ extern "C" int voxtral4b_stream_flush(struct voxtral4b_stream* s) {
         if (!logits)
             break;
         n_past += 1;
+        if (timing)
+            step_ms_log.push_back(
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_step).count());
     }
     if (logits)
         std::free(logits);
+
+    if (timing && !step_ms_log.empty()) {
+        std::vector<double> sorted = step_ms_log;
+        std::sort(sorted.begin(), sorted.end());
+        const double p50 = sorted[sorted.size() / 2];
+        const double p95 = sorted[(sorted.size() * 95) / 100];
+        const double avg =
+            std::accumulate(sorted.begin(), sorted.end(), 0.0) / (double)sorted.size();
+        fprintf(stderr,
+                "voxtral4b_stream timing: %zu decode steps, avg %.1f ms p50 %.1f ms p95 %.1f ms; flush total %.1f ms\n",
+                step_ms_log.size(), avg, p50, p95, elapsed_ms());
+    }
 
     // Trim leading/trailing whitespace.
     while (!generated.empty() && (generated.front() == ' ' || generated.front() == '\t'))
