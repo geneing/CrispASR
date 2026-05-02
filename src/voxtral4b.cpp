@@ -105,6 +105,13 @@ struct voxtral4b_llm_block {
     ggml_tensor* attn_q_w = nullptr;
     ggml_tensor* attn_k_w = nullptr;
     ggml_tensor* attn_v_w = nullptr;
+    // Optional fused QKV (PLAN #7 phase 2). When non-null, the LLM forward
+    // takes the single-matmul path through `core_attn::kv_self_attn`'s
+    // `qkv_w` branch instead of three separate Q/K/V matmuls. Built at load
+    // time by byte-concatenating the per-projection weight tensors along
+    // the output axis (works for F16/F32 and quantized types since each
+    // output row is independent in row-wise quantized formats).
+    ggml_tensor* attn_qkv_w = nullptr;
     ggml_tensor* attn_out_w = nullptr;
     ggml_tensor* ffn_norm_w = nullptr;
     ggml_tensor* ffn_gate_w = nullptr;
@@ -175,6 +182,10 @@ struct voxtral4b_context {
     ggml_backend_buffer_t kv_buf = nullptr;
     ggml_tensor* kv_k = nullptr;
     ggml_tensor* kv_v = nullptr;
+
+    // PLAN #7 phase 2: fused QKV LLM-side. Allocated once at load time.
+    ggml_context* fused_ctx = nullptr;
+    ggml_backend_buffer_t fused_buf = nullptr;
 
     int n_threads = 4;
     int delay_tokens = 6;          // 480ms default
@@ -780,7 +791,8 @@ static ggml_cgraph* voxtral4b_build_graph_llm_kv(voxtral4b_context* ctx, int n_p
         // knobs in KvSelfAttnParams.
         ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, cur, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_out_w,
                                                     /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions, causal_mask,
-                                                    ctx->kv_k, ctx->kv_v, il, n_past, kvp);
+                                                    ctx->kv_k, ctx->kv_v, il, n_past, kvp,
+                                                    /*qkv_w*/ b.attn_qkv_w);
         cur = ggml_add(ctx0, residual, attn);
 
         // FFN: Post-attention RMSNorm + ada_rms_norm conditioning + SwiGLU
@@ -880,6 +892,69 @@ extern "C" struct voxtral4b_context* voxtral4b_init_from_file(const char* path,
         fprintf(stderr, "voxtral4b: ada_scales computed for delay=%d (%d ms)\n", ctx->delay_tokens,
                 ctx->delay_tokens * 80);
 
+    // PLAN #7 phase 2 — runtime fused QKV for the LLM. Concat each layer's
+    // q/k/v along the output axis into a single (d_model, q_dim+2*kv_dim)
+    // tensor. Works for F16/F32 directly and for row-wise quantized formats
+    // (Q4_K, Q4_0, Q8_0, etc.) by byte-concat: each output row is a self-
+    // contained quantized block group, so concatenation along the output
+    // axis is a pure memcpy. Skipped if any layer is missing q/k/v or has
+    // mismatched types/input-dims.
+    // Opt-out: set CRISPASR_VOXTRAL4B_FUSED_QKV=0.
+    {
+        const char* fuse_env = getenv("CRISPASR_VOXTRAL4B_FUSED_QKV");
+        const bool fuse_enabled = (fuse_env == nullptr) || (atoi(fuse_env) != 0);
+        auto& blocks = ctx->model.llm.blocks;
+        bool can_fuse = fuse_enabled && !blocks.empty();
+        if (can_fuse) {
+            const ggml_type t0 = blocks[0].attn_q_w ? blocks[0].attn_q_w->type : GGML_TYPE_F32;
+            for (auto& b : blocks) {
+                if (!b.attn_q_w || !b.attn_k_w || !b.attn_v_w || b.attn_q_w->type != t0 ||
+                    b.attn_k_w->type != t0 || b.attn_v_w->type != t0 ||
+                    b.attn_q_w->ne[0] != b.attn_k_w->ne[0] || b.attn_q_w->ne[0] != b.attn_v_w->ne[0]) {
+                    can_fuse = false;
+                    break;
+                }
+            }
+        }
+        if (can_fuse) {
+            const int hidden = (int)blocks[0].attn_q_w->ne[0];
+            const int q_out = (int)blocks[0].attn_q_w->ne[1];
+            const int kv_out = (int)blocks[0].attn_k_w->ne[1];
+            const int qkv_out = q_out + 2 * kv_out;
+            const ggml_type t0 = blocks[0].attn_q_w->type;
+            ggml_init_params fgp = {ggml_tensor_overhead() * blocks.size() + 256, nullptr, true};
+            ctx->fused_ctx = ggml_init(fgp);
+            if (ctx->fused_ctx) {
+                for (auto& b : blocks) {
+                    b.attn_qkv_w = ggml_new_tensor_2d(ctx->fused_ctx, t0, hidden, qkv_out);
+                }
+                ctx->fused_buf =
+                    ggml_backend_alloc_ctx_tensors_from_buft(ctx->fused_ctx, ggml_backend_get_default_buffer_type(ctx->backend));
+                if (ctx->fused_buf) {
+                    for (auto& b : blocks) {
+                        const size_t qb = ggml_nbytes(b.attn_q_w);
+                        const size_t kb = ggml_nbytes(b.attn_k_w);
+                        const size_t vb = ggml_nbytes(b.attn_v_w);
+                        std::vector<uint8_t> tmp(qb + kb + vb);
+                        ggml_backend_tensor_get(b.attn_q_w, tmp.data(), 0, qb);
+                        ggml_backend_tensor_get(b.attn_k_w, tmp.data() + qb, 0, kb);
+                        ggml_backend_tensor_get(b.attn_v_w, tmp.data() + qb + kb, 0, vb);
+                        ggml_backend_tensor_set(b.attn_qkv_w, tmp.data(), 0, tmp.size());
+                    }
+                    if (params.verbosity >= 1)
+                        fprintf(stderr, "voxtral4b: fused QKV for %zu LLM layers (%d+%d+%d→%d, type=%s)\n",
+                                blocks.size(), q_out, kv_out, kv_out, qkv_out, ggml_type_name(t0));
+                } else {
+                    // Allocation failed — fall back to separate Q/K/V.
+                    ggml_free(ctx->fused_ctx);
+                    ctx->fused_ctx = nullptr;
+                    for (auto& b : blocks)
+                        b.attn_qkv_w = nullptr;
+                }
+            }
+        }
+    }
+
     if (params.verbosity >= 1) {
         const auto& hp = ctx->model.hparams;
         fprintf(stderr,
@@ -899,6 +974,10 @@ extern "C" void voxtral4b_free(voxtral4b_context* ctx) {
         ggml_backend_buffer_free(ctx->kv_buf);
     if (ctx->kv_ctx)
         ggml_free(ctx->kv_ctx);
+    if (ctx->fused_buf)
+        ggml_backend_buffer_free(ctx->fused_buf);
+    if (ctx->fused_ctx)
+        ggml_free(ctx->fused_ctx);
     if (ctx->model.buf)
         ggml_backend_buffer_free(ctx->model.buf);
     if (ctx->model.ctx)
