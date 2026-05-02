@@ -24,7 +24,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 | **HIGH** | [#62 Streaming + mic library API](#62-streaming--mic-library-api) | M-L | crispasr_stream_* whisper-only; needs Python/Rust wrappers (Dart has), generalize to session handle, library-level mic via miniaudio, native streaming for moonshine-streaming + kyutai-stt + voxtral4b |
 | **MEDIUM** | [#60 llama.cpp/llamafile perf trick ports](#60-cross-backend-perf-tricks-llamacpp--llamafile-ports) | 14 items | 60a/b/c/d/f/g DONE; 60e env-flag wired across 9 backends (mimo-asr validated, others awaiting per-backend cosine pass); 60h-n parked/skip |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
-| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | phase 1 + 1.5 SHIPPED (incremental encoder bit-exact-batch on JFK; default-on); phase 2 (live captions) deferred |
+| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | phase 1 + 1.5 SHIPPED (incremental encoder, bit-exact-batch); phase 2 partial (240ms internal chunks default → 2.6× feed speedup; per-stage timing instrumentation revealed ≥663ms first-text-token floor from streaming-pad warmup); phase 2 remainder (kernel optimisation, live captions) deferred |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
 | **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
@@ -136,26 +136,49 @@ mel layout is correct; might be safe to revert.)
 --check-batch-equality` PASSES on JFK with the incremental encoder
 default-on.
 
-### Phase 2 (deferred) — sub-second first-token + live captions
+### Phase 2 — partial (perf instrumentation + chunk-size win)
 
-For sub-second first-token (≤240 ms target), the path forward is one
-or more of:
-- **Encoder Q4_K-aware kernels.** The encoder runs F32 weights × Q4_K
-  weights (mostly Q4_K). On Metal Q4_K matmul is the dominant feed
-  cost; profile + optimise.
-- **Larger chunks during feed.** 80 ms chunks fire the kernel launch
-  overhead 12.5× per second of audio; 240 ms chunks would fire it
-  ~4×, often improving Metal throughput.
-- **Decoder thread overlapping audio injection.** Once feed can keep
-  up with realtime audio rate, a decoder thread can run in parallel
-  with the next chunk's encode, giving sub-second first-token after
-  flush.
+**Shipped May 2026.**
+- **240 ms internal encoder chunks default** (`CRISPASR_VOXTRAL4B_STREAM_CHUNK_MS`
+  override). 2.6× feed speedup vs the original 80 ms chunks (24 s →
+  9.3 s for JFK 11 s on M1 Q4_K). Bit-exact-batch unaffected.
+- **Per-stage timing instrumentation** (`CRISPASR_VOXTRAL4B_STREAM_TIMING=1`).
+  Stderr prints encoder-drain / prefill / first-text-token / per-step
+  p50/p95 / total flush wall-clock. Used as the phase-2 perf-pass dev
+  loop.
 
-Live captions during speech are the second deferred deliverable. The
-synchronous incremental encoder already supports it — phase 2 just
-needs a periodic auto-decode + stable-prefix commit heuristic on
-top of the existing feed/get_text API. Not blocked by anything in
-the C++ runtime.
+**Architectural finding (M1 Q4_K JFK 11 s).** The ≤240 ms first-text-
+token target is **bounded below by the streaming-prompt convention**:
+
+| Stage | ms |
+|---|---|
+| Encoder drain at flush (Metal JIT + final-chunk + projector) | ~2064 |
+| LLM prefill (39-token streaming-prompt) | 247 |
+| 8 streaming-pad warmup steps × 52 ms each | ~416 |
+| First text-emitting decode step | ~52 |
+
+Even with a fully-warm encoder (encoder drain → 0), the prompt
+convention forces ≥ prefill (247) + 8 × decode (416) = **663 ms
+before the first text token can emit**. Beating 240 ms requires
+either a different prompt convention (model retraining) or a
+substantially faster Q4_K Metal kernel.
+
+### Phase 2 — remaining work (deferred)
+
+- **Encoder Q4_K Metal kernel optimisation.** Steady-state decode is
+  52 ms/token (excellent), but the encoder drain at flush spends
+  ~2 sec on Metal kernel JIT for projector + tail-chunk shapes. A
+  pre-warm path during stream_open could cut flush latency
+  significantly. Out of scope for the chunk-size phase 2 win.
+- **Fused QKV in LLM (PLAN #60d-style).** voxtral4b LLM has separate
+  q_w/k_w/v_w; fusing would reduce 3 → 1 matmul per layer. Estimated
+  ~14 % decode speedup → 52 → 45 ms/token. Worth ~1 s on JFK flush.
+- **Decoder thread overlapping audio injection.** Live-captions
+  oriented; not a first-token win for PTT.
+- **Live captions during speech** with stable-prefix commit. The
+  synchronous incremental encoder already supports it — needs a
+  periodic auto-decode + commit heuristic on top of the existing
+  feed/get_text API.
 
 ---
 

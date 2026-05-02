@@ -2415,6 +2415,32 @@ chunks, decoder thread overlap with next-chunk encode). Phase 2 work.
 Phase 1+1.5 ships the streaming API + bit-exact correctness; the
 realtime-feed property is the remaining work.
 
+**Phase 2 partial — chunk-size + timing instrumentation (May 2026).**
+- Default internal encoder chunk bumped 80 ms → 240 ms
+  (`CRISPASR_VOXTRAL4B_STREAM_CHUNK_MS` env-var override). 2.6× feed
+  speedup on JFK 11 s (24 s → 9.3 s); bit-exact-batch unaffected.
+  Constraint: must be a multiple of 80 ms (8 mel frames) so the
+  projector's stack-4 alignment lands on chunk boundaries.
+- Per-stage timing instrumentation (`CRISPASR_VOXTRAL4B_STREAM_TIMING=1`)
+  prints encoder-drain / prefill / first-text-token / per-step p50/p95
+  / total flush wall-clock to stderr.
+
+**Architectural floor for first-text-token latency** (revealed by
+the timing pass on M1 Q4_K JFK 11 s):
+
+| Stage | ms |
+|---|---|
+| Encoder drain at flush (Metal JIT + final-chunk + projector) | ~2064 |
+| LLM prefill (39-token streaming-prompt) | 247 |
+| 8 streaming-pad warmup steps × 52 ms each | ~416 |
+| First text-emitting decode step | ~52 |
+
+Even with a fully-warm encoder, the streaming-prompt convention forces
+≥ 663 ms before first text emits. ≤240 ms target requires either a
+different prompt convention (model retraining) or substantially faster
+Q4_K Metal kernels. Phase 2 remainder (encoder kernel pre-warm, LLM
+fused QKV, live-captions stable-prefix commit) deferred.
+
 **Working-tree hygiene incident (parallel-agent reset).** Mid-session,
 a concurrent process reset `src/voxtral4b.{cpp,h}` and PLAN/HISTORY to
 HEAD via `git checkout`/`git restore`, dropping the in-flight phase 1.5
