@@ -884,6 +884,44 @@ each backend. High-value gaps to close:
 
 ---
 
+## PLAN #51a — mmap loader F16 retest **[blocked: machine state]**
+
+Zero-copy mmap loader landed behind `CRISPASR_GGUF_MMAP=1` in commit
+`9710f80`. Validated on parakeet Q4_K (Metal/CPU/mmap, all gold JFK)
+and mimo-asr Q4_K (working-set RSS 5.5 GB → 760 MB). The F16 motivating
+case (mimo-asr-f16.gguf, 14.9 GB) showed the load-phase win in flight
+— ~910 MB working-set at 60 s elapsed vs the HANDOFF-predicted ~13 GB
+legacy peak — but end-to-end decode timing was forced to abort twice
+on this box because of concurrent jobs (parallel HF uploads, another
+session's legacy F16 test on the same file, qwen3-tts benches),
+13M+ swapins thrashing both processes down to <100 MB RSS at 0% CPU.
+
+**Retest required on an uncontended machine** before the env-flag
+default can be flipped:
+
+1. Confirm no other heavy job is hitting `/Volumes/backups` or the
+   same model file (`pgrep -af crispasr; pgrep -af 'hf upload'`).
+2. Run `CRISPASR_GGUF_MMAP=1 /usr/bin/time -lp ./build-ninja-compile/bin/crispasr --backend mimo-asr -m /Volumes/backups/ai/crispasr-models/mimo/mimo-asr-f16.gguf -f samples/jfk.wav -nt`.
+3. Capture peak RSS (should be < 8 GB; HANDOFF threshold) and that
+   the JFK transcript matches the gold output.
+4. Run `crispasr-diff mimo-asr <F16 GGUF> <ref.gguf>` per HANDOFF item 6
+   — should now run on a 16 GB Mac without thrashing.
+5. If both green, commit the default-flip
+   (`mmap_loader_enabled()` returns true unless env=0) and mark
+   PLAN #51a fully DONE in PLAN.md / HISTORY §62.
+
+After 51a flips, PLAN #51c (F16 step decode) becomes the trivial
+follow-up the HANDOFF promised — Q4_K dequant on every matmul drops,
+F16 decode on M1 should hit ≥1× realtime on JFK (Q4_K is currently
+~0.3× warm).
+
+Side note from the validation session: the conv_2d / conv_2d_dw
+F16×F16 MUL_MAT crash that was hitting `parakeet --no-gpu` (and any
+other backend with F16 conv kernels on CPU) was already shipped in
+`b85f56c` — that one's done.
+
+---
+
 ## Per-model follow-ups
 
 ### parakeet
