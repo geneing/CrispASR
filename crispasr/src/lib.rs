@@ -614,6 +614,17 @@ impl Session {
         unsafe { crispasr_sys::crispasr_pcm_free(ptr) };
         Ok(out)
     }
+
+    /// Drop the kokoro per-session phoneme cache. No-op for non-kokoro
+    /// backends. Useful for long-running daemons that resynthesize across
+    /// many speakers and want bounded memory. (PLAN #56 #5)
+    pub fn clear_phoneme_cache(&self) -> Result<(), String> {
+        let rc = unsafe { crispasr_sys::crispasr_session_kokoro_clear_phoneme_cache(self.handle) };
+        if rc != 0 {
+            return Err(format!("clear_phoneme_cache failed (rc={})", rc));
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

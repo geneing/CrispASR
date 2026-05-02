@@ -1236,6 +1236,20 @@ class Session:
         if rc != 0:
             raise RuntimeError(f"set_instruct failed (rc={rc}) for backend {self.backend!r}")
 
+    def clear_phoneme_cache(self) -> None:
+        """Drop the kokoro per-session phoneme cache.
+
+        No-op for non-kokoro backends. Useful for long-running daemons
+        that resynthesize across many speakers and want bounded memory.
+        """
+        if not hasattr(self._lib, "crispasr_session_kokoro_clear_phoneme_cache"):
+            return
+        self._lib.crispasr_session_kokoro_clear_phoneme_cache.argtypes = [ctypes.c_void_p]
+        self._lib.crispasr_session_kokoro_clear_phoneme_cache.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_kokoro_clear_phoneme_cache(self._handle)
+        if rc != 0:
+            raise RuntimeError(f"clear_phoneme_cache failed (rc={rc})")
+
     def is_voice_design(self) -> bool:
         """Return True iff the loaded model is a qwen3-tts VoiceDesign variant.
 

@@ -391,6 +391,9 @@ extern "C" {
         out_n_samples: *mut c_int,
     ) -> *mut f32;
     pub fn crispasr_pcm_free(pcm: *mut f32);
+    // Drop the kokoro per-session phoneme cache. No-op for non-kokoro
+    // backends. Returns 0 on success, -1 if `s` is null. (PLAN #56 #5)
+    pub fn crispasr_session_kokoro_clear_phoneme_cache(s: *mut CrispasrSession) -> c_int;
 
     pub fn crispasr_detect_backend_from_gguf(
         path: *const c_char,
