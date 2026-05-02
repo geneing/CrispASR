@@ -7297,3 +7297,57 @@ the head=4 mixed variant) at 658 MB.
 Reference: `examples/crispasr-quantize/main.cpp` (`omniasr_keep_head`
 default), `tools/test-all-backends.py` REGISTRY entry,
 `OMNIASR_DUMP_DIR` env (already in `src/omniasr.cpp`).
+
+## Lesson — design test infrastructure for both bandwidth-limited and disk-limited environments
+
+The first version of `tools/test-all-backends.py` had one cache
+strategy — download to `--models` dir, leave the file there. Worked
+fine on a dev box with a 2 TB SSD. Failed instantly on Kaggle (~20 GB
+disk, but bandwidth from HF is 100+ MB/s) where the registry totals
+~15 GB across 17 backends and the cumulative downloads quickly fill
+the volume.
+
+The pattern that scales to both:
+
+1. **Two named modes**, not a continuous knob:
+   - `keep` — the local-dev default. Bandwidth is the bottleneck;
+     we want to never re-download.
+   - `ephemeral` — the cloud-runner default. Disk is the
+     bottleneck; we want to never carry more than one big model
+     at a time.
+
+2. **Track downloaded-this-run vs pre-existing.** If a file was
+   already on disk when the run started, we never delete it — that
+   blob may be the user's curated cache. The implementation returns
+   a `FetchedModel(path, downloaded_files: list[Path])` from the
+   fetch helper; cleanup only iterates `downloaded_files`.
+
+3. **Pin "reference" models.** The matrix has a small handful of
+   models that get cross-used: `whisper-tiny` (every backend triggers
+   LID through it when `language="auto"`), `parakeet` (TTS-roundtrip
+   capability runners use it as ASR ground truth). Mark them
+   `is_reference=True` in the registry — cleanup is a no-op for
+   them. Without this, ephemeral mode would download whisper-tiny
+   17 times (or fail when the second TTS backend can't find
+   parakeet to do its roundtrip).
+
+4. **Cleanup in `try/finally`.** A tier runner that raises must NOT
+   leak the multi-GB download. Especially on Kaggle where a single
+   leaked blob can fill the volume and brick subsequent backends.
+
+5. **Pre-download disk-space check.** Each backend declares
+   `approx_size_mb`; before downloading, check
+   `shutil.disk_usage(dir).free` against `approx_size_mb + 2 GB
+   margin`. Half-filling the disk and then erroring is worse than
+   reporting `SKIP — need X, only Y free`.
+
+**Generalisable rule.** Test infrastructure should ship with two
+operational modes corresponding to the two common bottleneck
+profiles. A flag, not a heuristic — the user knows whether they're
+on a 2 TB SSD or a 20 GB Kaggle volume; let them say so. The
+mistake is shipping with one mode and "fixing" the other when it
+breaks; that creates churn the day you actually need to run on the
+opposite profile.
+
+Reference: `tools/test-all-backends.py` `FetchedModel` /
+`cleanup_downloaded` / `Backend.is_reference`, commit `0c90209`.
