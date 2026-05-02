@@ -1151,6 +1151,27 @@ faster, hits the lower end of the work order's 51b+51b' target
 band ("~1.5–2× from 51b alone, ~1.3× more from 51b'"). Transcript
 matches the gold byte-for-byte.
 
+**Cosine gate (crispasr-diff bf16-ref vs Q4_K-C++)** — five
+prefill stages reproduce the section 56 numbers exactly, confirming
+51b/b' do not perturb prefill numerics:
+
+| Stage | cos | section 56 |
+|---|---:|---:|
+| prefill_audio_features    | 0.998270 | 0.998 |
+| prefill_text_embeds       | 0.996284 | 0.996 |
+| prefill_inputs_embeds     | 0.997573 | 0.998 |
+| prefill_last_hidden       | 0.963177 | 0.963 |
+| prefill_text_logits_step0 | 0.981261 | 0.981 |
+
+Argmax of step-0 logits = 1597 (`' And'`), matches the reference
+and is consistent with the JFK transcript starting "And so, ...".
+The harness's strict 0.999 threshold doesn't apply to bf16-ref vs
+Q4_K-C++ (would need fp32 ref + ~28 GB RAM, blocked by 51a — see
+LEARNINGS lesson 3 of section 56). Ref archive at
+`/Volumes/backups/ai/mimo-asr-ref.gguf` (4.1 MB) regenerated via
+the 2-phase loader patch (commit `3945d7b`) which keeps peak
+memory under 16 GB.
+
 **Out of scope, queued for follow-up:** 51a (mmap-backed weight
 loader to drop the `_platform_memmove` into a fresh CPU backend
 buffer — saves ~12.7 GB resident on the F16 14.9 GB GGUF, but it
