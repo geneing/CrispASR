@@ -1008,8 +1008,7 @@ static std::vector<float> run_f0_predictor(chatterbox_s3gen_context* c,
 // stage_dump: if non-null, map is filled with named stage outputs after graph compute.
 static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                                            const std::vector<float>& mel, // (80, T_mel) channel-first
-                                           int T_mel,
-                                           std::map<std::string, std::vector<float>>* stage_dump = nullptr) {
+                                           int T_mel, std::map<std::string, std::vector<float>>* stage_dump = nullptr) {
     if (c->verbosity >= 1) {
         float mel_rms = 0, mel_max = 0;
         for (size_t i = 0; i < mel.size(); i++) {
@@ -1344,9 +1343,9 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
             if (!stage_dump) {
                 const float sine_amp = 0.1f;
                 const float noise_amp = sine_amp / 3.0f; // unvoiced amplitude
-                const int stft_nfft = istft_nfft;         // 16
-                const int stft_hop = istft_hop;            // 4
-                const int n_freq = stft_nfft / 2 + 1;     // 9
+                const int stft_nfft = istft_nfft;        // 16
+                const int stft_hop = istft_hop;          // 4
+                const int n_freq = stft_nfft / 2 + 1;    // 9
 
                 // 1. Generate noise waveform at audio rate
                 // T_audio matches what torch.stft with center=True expects to produce T_src frames:
@@ -1363,7 +1362,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     for (int i = 0; i < T_audio; i += 2) {
                         float u1 = next_u(), u2 = next_u();
                         // Clamp u1 away from 0 for log safety
-                        if (u1 < 1e-7f) u1 = 1e-7f;
+                        if (u1 < 1e-7f)
+                            u1 = 1e-7f;
                         float r = std::sqrt(-2.0f * std::log(u1));
                         float theta = 2.0f * (float)M_PI * u2;
                         source[i] = noise_amp * r * std::cos(theta);
@@ -1411,12 +1411,29 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
     // Dump stage outputs if requested
     if (stage_dump) {
         const char* dump_names[] = {
-            "voc_conv_pre",   "voc_ups_0",         "voc_rb_0",          "voc_ups_1",
-            "voc_rb_1",       "voc_ups_2",         "voc_rb_2",          "voc_conv_post",
-            "voc_rb0k0_snake1_d0", "voc_rb0k0_conv1_d0", "voc_rb0k0_snake2_d0", "voc_rb0k0_conv2_d0",
-            "voc_rb0k0_res_d0",    "voc_rb0k0_snake1_d1", "voc_rb0k0_conv1_d1", "voc_rb0k0_snake2_d1",
-            "voc_rb0k0_conv2_d1",  "voc_rb0k0_res_d1",    "voc_rb0k0_snake1_d2", "voc_rb0k0_conv1_d2",
-            "voc_rb0k0_snake2_d2", "voc_rb0k0_conv2_d2",  "voc_rb0k0_res_d2",
+            "voc_conv_pre",
+            "voc_ups_0",
+            "voc_rb_0",
+            "voc_ups_1",
+            "voc_rb_1",
+            "voc_ups_2",
+            "voc_rb_2",
+            "voc_conv_post",
+            "voc_rb0k0_snake1_d0",
+            "voc_rb0k0_conv1_d0",
+            "voc_rb0k0_snake2_d0",
+            "voc_rb0k0_conv2_d0",
+            "voc_rb0k0_res_d0",
+            "voc_rb0k0_snake1_d1",
+            "voc_rb0k0_conv1_d1",
+            "voc_rb0k0_snake2_d1",
+            "voc_rb0k0_conv2_d1",
+            "voc_rb0k0_res_d1",
+            "voc_rb0k0_snake1_d2",
+            "voc_rb0k0_conv1_d2",
+            "voc_rb0k0_snake2_d2",
+            "voc_rb0k0_conv2_d2",
+            "voc_rb0k0_res_d2",
         };
         for (auto& dn : dump_names) {
             ggml_tensor* t = ggml_graph_get_tensor(gf, dn);
@@ -1706,8 +1723,8 @@ extern "C" float* chatterbox_s3gen_vocode(struct chatterbox_s3gen_context* ctx, 
 }
 
 extern "C" float* chatterbox_s3gen_vocode_dump(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
-                                                int* out_n_samples, const char** stage_names, float** stage_data,
-                                                int* stage_sizes, int n_stages) {
+                                               int* out_n_samples, const char** stage_names, float** stage_data,
+                                               int* stage_sizes, int n_stages) {
     if (!ctx || !mel_cf || T_mel <= 0 || !out_n_samples)
         return nullptr;
     *out_n_samples = 0;

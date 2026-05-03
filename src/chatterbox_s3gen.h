@@ -42,8 +42,8 @@ float* chatterbox_s3gen_vocode(struct chatterbox_s3gen_context* ctx, const float
 // stage_sizes: caller-allocated array filled with element counts.
 // Returns PCM like chatterbox_s3gen_vocode. Caller frees stage_data[i] with free().
 float* chatterbox_s3gen_vocode_dump(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
-                                    int* out_n_samples, const char** stage_names, float** stage_data,
-                                    int* stage_sizes, int n_stages);
+                                    int* out_n_samples, const char** stage_names, float** stage_data, int* stage_sizes,
+                                    int n_stages);
 
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);
