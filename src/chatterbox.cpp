@@ -339,12 +339,18 @@ struct chatterbox_context {
     ggml_backend_sched_t sched = nullptr;
     std::vector<uint8_t> compute_meta;
 
-    // KV cache for T3 (lazy-allocated)
+    // KV cache for T3 (lazy-allocated) — conditioned pass
     ggml_context* kv_ctx = nullptr;
     ggml_backend_buffer_t kv_buf = nullptr;
-    ggml_tensor* kv_k = nullptr; // (n_layers, max_ctx, n_heads, head_dim)
+    ggml_tensor* kv_k = nullptr;
     ggml_tensor* kv_v = nullptr;
     int kv_max_ctx = 0;
+
+    // Second KV cache for CFG unconditioned pass
+    ggml_context* kv_cfg_ctx = nullptr;
+    ggml_backend_buffer_t kv_cfg_buf = nullptr;
+    ggml_tensor* kv_k_cfg = nullptr;
+    ggml_tensor* kv_v_cfg = nullptr;
 
     // S3Gen context (lazy-loaded from set_s3gen_path)
     std::string s3gen_path;
@@ -358,6 +364,10 @@ struct chatterbox_context {
             chatterbox_s3gen_free(s3gen_ctx);
         if (sched)
             ggml_backend_sched_free(sched);
+        if (kv_cfg_buf)
+            ggml_backend_buffer_free(kv_cfg_buf);
+        if (kv_cfg_ctx)
+            ggml_free(kv_cfg_ctx);
         if (kv_buf)
             ggml_backend_buffer_free(kv_buf);
         if (kv_ctx)
@@ -557,9 +567,21 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
 
     size_t kb = ggml_nbytes(c->kv_k);
     size_t vb = ggml_nbytes(c->kv_v);
+
+    // Also allocate CFG unconditioned KV cache (same size)
+    if (c->kv_cfg_buf) ggml_backend_buffer_free(c->kv_cfg_buf);
+    if (c->kv_cfg_ctx) ggml_free(c->kv_cfg_ctx);
+    struct ggml_init_params ip2 = {2 * ggml_tensor_overhead(), nullptr, true};
+    c->kv_cfg_ctx = ggml_init(ip2);
+    if (c->kv_cfg_ctx) {
+        c->kv_k_cfg = ggml_new_tensor_4d(c->kv_cfg_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+        c->kv_v_cfg = ggml_new_tensor_4d(c->kv_cfg_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+        c->kv_cfg_buf = ggml_backend_alloc_ctx_tensors(c->kv_cfg_ctx, c->backend);
+    }
+
     if (c->params.verbosity >= 1) {
-        fprintf(stderr, "chatterbox: kv cache %d MiB (hd=%d max=%d n_kv=%d nl=%d)\n", (int)((kb + vb) / 1048576), hd,
-                max_ctx, n_kv, nl);
+        fprintf(stderr, "chatterbox: kv cache %d MiB (hd=%d max=%d n_kv=%d nl=%d) + CFG\n",
+                (int)((kb + vb) * 2 / 1048576), hd, max_ctx, n_kv, nl);
     }
     return true;
 }
@@ -568,7 +590,11 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
 
 // Llama-520M transformer: inputs_embeds (D, T) → speech logits (speech_vocab,)
 // Uses core_attn::kv_self_attn for each layer, matching orpheus pattern.
-static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_tokens) {
+static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_tokens,
+                                      ggml_tensor* use_kv_k = nullptr, ggml_tensor* use_kv_v = nullptr) {
+    // Use provided KV tensors or default to c->kv_k/kv_v
+    if (!use_kv_k) use_kv_k = c->kv_k;
+    if (!use_kv_v) use_kv_v = c->kv_v;
     const auto& hp = c->hp;
     const int D = (int)hp.hidden_size;
     const int n_q = (int)hp.n_heads;
@@ -624,7 +650,7 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
         ggml_tensor* attn =
             core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
                                     /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
-                                    (T == 1) ? nullptr : causal_mask, c->kv_k, c->kv_v, (int)il, n_past, kvp);
+                                    (T == 1) ? nullptr : causal_mask, use_kv_k, use_kv_v, (int)il, n_past, kvp);
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
@@ -647,7 +673,8 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
 }
 
 // Run the T3 transformer on pre-built embeddings. Returns logits (speech_vocab,).
-static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens, int n_past) {
+static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens, int n_past,
+                        ggml_tensor* use_kv_k = nullptr, ggml_tensor* use_kv_v = nullptr) {
     if (n_past + n_tokens > c->kv_max_ctx) {
         fprintf(stderr, "chatterbox: kv overflow (%d+%d > %d)\n", n_past, n_tokens, c->kv_max_ctx);
         return nullptr;
@@ -671,7 +698,7 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
         }
     }
 
-    ggml_cgraph* gf = build_graph_t3_kv(c, n_past, n_tokens);
+    ggml_cgraph* gf = build_graph_t3_kv(c, n_past, n_tokens, use_kv_k, use_kv_v);
     ggml_backend_sched_reset(c->sched);
     if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
         fprintf(stderr, "chatterbox: failed to alloc T3 graph\n");
@@ -1131,26 +1158,62 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
         fprintf(stderr, "chatterbox: prefill %d tokens (max_speech=%d)\n", prefill_len, max_speech);
     }
 
-    // 5. Prefill: run the full prefix through the transformer
+    // 5. CFG setup: build unconditioned prefill if cfg_weight > 0
+    const float cfg_w = ctx->params.cfg_weight;
+    const bool use_cfg = (cfg_w > 0.0f && ctx->kv_k_cfg);
+    std::vector<float> uncond_embeds;
+    if (use_cfg) {
+        // Unconditioned: zero out text embeddings, keep cond + speech_start
+        uncond_embeds = prefill_embeds; // copy
+        const int D = ctx->hp.hidden_size;
+        int text_start = prefill_len - (int)text_tokens.size() - 1; // cond_len
+        int text_end = prefill_len - 1; // before speech_start
+        // Zero out text region
+        for (int i = text_start; i < text_end; i++) {
+            std::memset(&uncond_embeds[i * D], 0, D * sizeof(float));
+        }
+    }
+
+    // 6. Prefill: run the full prefix through the transformer
     int n_past = 0;
     float* logits = run_t3_kv(ctx, prefill_embeds.data(), prefill_len, n_past);
     if (!logits) {
         fprintf(stderr, "chatterbox: prefill failed\n");
         return nullptr;
     }
+    // Also prefill the unconditioned path
+    float* logits_uncond = nullptr;
+    int n_past_cfg = 0;
+    if (use_cfg) {
+        logits_uncond = run_t3_kv(ctx, uncond_embeds.data(), prefill_len, n_past_cfg,
+                                   ctx->kv_k_cfg, ctx->kv_v_cfg);
+        n_past_cfg += prefill_len;
+    }
     n_past += prefill_len;
 
-    // 6. AR decode loop
+    // 7. AR decode loop with CFG
     std::vector<int32_t> speech_tokens;
     speech_tokens.reserve(max_speech);
-    int speech_pos = 1; // speech_pos_emb index (0 was used for start token)
+    int speech_pos = 1;
 
     for (int step = 0; step < max_speech; step++) {
+        // Blend logits with CFG: logits = cond + cfg * (cond - uncond)
+        const int V = (int)ctx->hp.speech_vocab_size;
+        std::vector<float> blended(V);
+        if (use_cfg && logits_uncond) {
+            for (int i = 0; i < V; i++) {
+                blended[i] = logits[i] + cfg_w * (logits[i] - logits_uncond[i]);
+            }
+        } else {
+            std::memcpy(blended.data(), logits, V * sizeof(float));
+        }
+
         // Sample next token
-        int32_t tok = sample_token(logits, (int)ctx->hp.speech_vocab_size, ctx->params.temperature, ctx->params.min_p,
+        int32_t tok = sample_token(blended.data(), V, ctx->params.temperature, ctx->params.min_p,
                                    ctx->params.top_p, ctx->params.repetition_penalty, speech_tokens, ctx->rng_state);
         free(logits);
         logits = nullptr;
+        if (logits_uncond) { free(logits_uncond); logits_uncond = nullptr; }
 
         if (ctx->params.verbosity >= 2 && step < 16) {
             fprintf(stderr, "chatterbox[ar]: step=%d tok=%d\n", step, tok);
@@ -1170,16 +1233,23 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
         std::vector<float> tok_embed = build_speech_token_embed(ctx, tok, speech_pos);
         speech_pos++;
 
-        // Single-step decode
+        // Conditioned forward step
         logits = run_t3_kv(ctx, tok_embed.data(), 1, n_past);
         if (!logits) {
             fprintf(stderr, "chatterbox: decode step %d failed\n", step);
             break;
         }
         n_past++;
+
+        // Unconditioned forward step for CFG
+        if (use_cfg) {
+            logits_uncond = run_t3_kv(ctx, tok_embed.data(), 1, n_past_cfg,
+                                       ctx->kv_k_cfg, ctx->kv_v_cfg);
+            n_past_cfg++;
+        }
     }
-    if (logits)
-        free(logits);
+    if (logits) free(logits);
+    if (logits_uncond) free(logits_uncond);
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "chatterbox: AR emitted %zu speech tokens\n", speech_tokens.size());
