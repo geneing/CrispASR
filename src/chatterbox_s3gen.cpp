@@ -1261,9 +1261,10 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
             x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpost_b, 1, (int)cpost_b->ne[0]));
     }
 
-    // Clamp magnitude to prevent iSTFT overflow (Python clips at 100)
-    // but also clamp phase for stability
-    x = ggml_clamp(ctx0, x, -10.0f, 10.0f);
+    // Clamp STFT output to match Python reference range [-1.1, 1.7]
+    // with some headroom. Without source fusion providing stability,
+    // ResBlock outputs can exceed the expected range.
+    x = ggml_clamp(ctx0, x, -2.0f, 2.0f);
 
     ggml_set_name(x, "voc_stft");
     ggml_build_forward_expand(gf, x);
