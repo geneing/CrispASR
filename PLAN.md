@@ -32,13 +32,13 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
 | **MEDIUM** | [#58 MOSS-Audio-4B-Instruct](#58-moss-audio-4b-instruct) | Large | first audio-understanding (not just ASR) backend; introduces DeepStack cross-layer feature injection |
 | **MEDIUM** | [#59 Cross-binding C-ABI parity](#59-cross-binding-c-abi-parity) | Medium | Go now has full surface (✅ all 11 capabilities). Java has transcribe+align+LID. Ruby has transcribe. JS needs WebAssembly approach |
-| **DONE** | [#62 Streaming + mic library API](#62-streaming--mic-library-api) | M-L | All done: session-based stream API, Python/Rust/Dart/Go wrappers, miniaudio mic in all 3, moonshine-streaming+kyutai-stt+voxtral4b wired |
 | **MEDIUM** | [#60 llama.cpp/llamafile perf trick ports](#60-cross-backend-perf-tricks-llamacpp--llamafile-ports) | 14 items | 60a/b/c/d/f/g DONE; 60e env-flag wired across 9 backends (mimo-asr validated, others awaiting per-backend cosine pass); 60h-n parked/skip |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
-| **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | phase 1 + 1.5 + 2 + 3 + 4 SHIPPED (incremental encoder, bit-exact-batch, 240ms chunks, fused QKV LLM, combined-chunk flush, speculative prefill, **live captions during speech**, **decoder thread**) |
-| **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
-| **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
-| **DONE** | [#63 Feature matrix parity](#63-feature-matrix-parity) | Phased | All 9 phases complete → HISTORY §72 |
+| **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | Not started |
+| **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | Not started |
+| **DONE** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | Phases 1-4 shipped → HISTORY §71 |
+| **DONE** | [#62 Streaming + mic library API](#62-streaming--mic-library-api) | M-L | All wrappers ship it |
+| **DONE** | [#63 Feature matrix parity](#63-feature-matrix-parity) | Phased | All 9 phases → HISTORY §72 |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
 | **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | License unclear |
 
