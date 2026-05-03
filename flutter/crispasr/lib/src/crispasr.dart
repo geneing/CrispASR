@@ -1943,6 +1943,25 @@ class CrispasrSession {
     }
   }
 
+  /// Set best-of-N decoding on the session. For Whisper this maps to
+  /// `wparams.greedy.best_of` (Whisper picks the highest-scoring of N
+  /// internal decodes). For every other backend the C-side runs N
+  /// independent transcribes per call and returns the one with the
+  /// highest average per-token confidence — so this slider works
+  /// across the full backend set, not just sampling-capable ones.
+  /// `n <= 1` is a no-op (single decode, the historical default).
+  void setBestOf(int n) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_best_of')) {
+      throw UnsupportedError(
+          'crispasr_session_set_best_of not present in this libcrispasr build');
+    }
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_set_best_of');
+    final rc = fn(_handle, n);
+    if (rc != 0) throw Exception('setBestOf failed (rc=$rc)');
+  }
+
   /// Set decoder temperature on backends that support runtime control
   /// (canary, cohere, parakeet, moonshine). Other backends silently no-op.
   /// `seed` is the RNG seed; pass 0 for time-based.
