@@ -32,7 +32,7 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
 | **MEDIUM** | [#58 MOSS-Audio-4B-Instruct](#58-moss-audio-4b-instruct) | Large | first audio-understanding (not just ASR) backend; introduces DeepStack cross-layer feature injection |
 | **MEDIUM** | [#59 Cross-binding C-ABI parity](#59-cross-binding-c-abi-parity) | Medium | Go now has full surface (✅ all 11 capabilities). Java has transcribe+align+LID. Ruby has transcribe. JS needs WebAssembly approach |
-| **HIGH** | [#62 Streaming + mic library API](#62-streaming--mic-library-api) | M-L | crispasr_stream_* whisper-only; needs Python/Rust wrappers (Dart has), generalize to session handle, library-level mic via miniaudio, native streaming for moonshine-streaming + kyutai-stt + voxtral4b |
+| **DONE** | [#62 Streaming + mic library API](#62-streaming--mic-library-api) | M-L | All done: session-based stream API, Python/Rust/Dart/Go wrappers, miniaudio mic in all 3, moonshine-streaming+kyutai-stt+voxtral4b wired |
 | **MEDIUM** | [#60 llama.cpp/llamafile perf trick ports](#60-cross-backend-perf-tricks-llamacpp--llamafile-ports) | 14 items | 60a/b/c/d/f/g DONE; 60e env-flag wired across 9 backends (mimo-asr validated, others awaiting per-backend cosine pass); 60h-n parked/skip |
 | **LOW** | #41 Moonshine IPA / phoneme | High | Deferred |
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | phase 1 + 1.5 + 2 + 3 + 4 SHIPPED (incremental encoder, bit-exact-batch, 240ms chunks, fused QKV LLM, combined-chunk flush, speculative prefill, **live captions during speech**, **decoder thread**) |
@@ -1731,63 +1731,39 @@ subprocess hacks.
 
 ### Status
 
-| Piece | Today | After this work |
-|---|---|---|
-| `crispasr_stream_*` C-ABI | whisper-only (takes `whisper_context*`) | takes `crispasr_session*`; whisper still wired through |
-| Python `Session.stream_*()` | ❌ | ✅ |
-| Rust `Session::stream_*()` | ❌ | ✅ |
-| Dart `Session.stream*()` | ✅ via `_StreamOpen/_StreamFeed/...` | ✅ unchanged |
-| Library mic API (`crispasr_mic_*`) | ❌ (CLI subprocess only) | ✅ via miniaudio `ma_device` |
-| Mic in Python/Rust/Dart | ❌ | ✅ — `Session.start_mic_streaming(callback)` |
-| moonshine-streaming wired to stream API | ✅ chunked-batch over rolling window | shipped + E2E validated, see #62c below |
-| kyutai-stt wired to stream API | ✅ chunked-batch over rolling window | shipped, see #62c below |
-| voxtral4b native streaming | ❌ (PLAN #7) | unchanged — separate item |
+| Piece | Status |
+|---|---|
+| `crispasr_session_stream_*` C-ABI | ✅ takes `crispasr_session*` |
+| Python `Session.stream_*()` | ✅ DONE (stream_open/feed/get_text/flush/close + context manager) |
+| Rust `Session::stream_*()` | ✅ DONE (Stream struct with feed/get_text/flush, Drop auto-close) |
+| Dart `Session.stream*()` | ✅ DONE |
+| Go `Session.StreamOpen()` | ✅ DONE |
+| Library mic API (`crispasr_mic_*`) | ✅ DONE via miniaudio `ma_device` |
+| Mic in Python/Rust/Dart | ✅ DONE — `Mic.open(callback)` in all three |
+| moonshine-streaming wired to stream API | ✅ chunked-batch over rolling window |
+| kyutai-stt wired to stream API | ✅ chunked-batch over rolling window |
+| voxtral4b native streaming | ✅ DONE (PLAN #7 phases 1-4) |
 
 ### Sub-items
 
-#### 62a. Python + Rust streaming wrappers
+#### 62a. Python + Rust streaming wrappers — DONE
 
-Mirror the Dart surface (`StreamingUpdate { text, t0, t1 }` +
-`Session.stream_open / feed / get_text / flush / close`). ~50 LOC
-each side. Lazy `hasattr` / `providesSymbol` checks so older dylibs
-fall through gracefully.
+Already shipped. Python `Session.stream_open()` with context manager.
+Rust `Session::stream_open()` with `Stream` struct (Drop auto-close).
+Go `Session.StreamOpen()` added in #59 session. All use `hasattr` /
+`providesSymbol` guards for older dylib compat.
 
-#### 62b. Generalise `crispasr_stream_open` to a session handle
+#### 62b. Generalise `crispasr_stream_open` to a session handle — DONE
 
-Today: `crispasr_stream_open(whisper_context*, n_threads, step_ms,
-length_ms, ...)`. Add: `crispasr_session_stream_open(crispasr_session*,
-n_threads, step_ms, length_ms, ...)` that internally checks
-`s->whisper_ctx` and routes through. Keep the legacy
-`crispasr_stream_open` as a thin alias for source-compat. Future
-backends plug in by extending the dispatch in
-`crispasr_session_stream_feed` (kyutai/moonshine-streaming/voxtral4b).
+`crispasr_session_stream_open(crispasr_session*, ...)` ships and is
+what all wrappers call. Legacy `crispasr_stream_open` alias kept.
 
-Effort: ~30 LOC.
+#### 62d. Library-level mic API via miniaudio `ma_device` — DONE
 
-#### 62d. Library-level mic API via miniaudio `ma_device`
-
-`miniaudio.h` already ships with the codebase (used as a WAV
-decoder). Wrap `ma_device` capture mode in
-`src/crispasr_mic.{h,cpp}`:
-
-```c
-typedef void (*crispasr_mic_callback)(const float* pcm, int n_samples, void* userdata);
-struct crispasr_mic;
-crispasr_mic* crispasr_mic_open(int sample_rate, int channels,
-                                crispasr_mic_callback cb, void* userdata);
-int crispasr_mic_start(crispasr_mic*);
-int crispasr_mic_stop(crispasr_mic*);
-void crispasr_mic_close(crispasr_mic*);
-const char* crispasr_mic_default_device_name();
-```
-
-Cross-platform (Core Audio on macOS, ALSA/PulseAudio on Linux,
-WASAPI on Windows) via miniaudio's built-in backends. Library
-consumers get raw f32 PCM frames in their callback; combine with
-`session.stream_feed()` for end-to-end dictation.
-
-Effort: ~150 LOC. Wrappers add `Session.start_mic_streaming(cb)`
-helper that sets up mic + stream + per-callback feed wiring.
+`crispasr_mic_open/start/stop/close` shipped in `src/crispasr_mic.{h,cpp}`.
+Wrapped in Python (`Mic` context manager), Rust (`Mic::open(callback)`),
+Dart (`Mic.open`), Go (`Mic{open,start,stop,close}`), Java (JNA),
+Ruby (C ext). Cross-platform via miniaudio backends.
 
 #### 62c. kyutai-stt streaming — SHIPPED via chunked-batch
 
