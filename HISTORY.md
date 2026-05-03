@@ -2743,3 +2743,67 @@ for all tested backends.
 phonemizer. #9 (Parakeet TDT GPU) parked — encoder dominates, LSTM
 decoder <0.7s. #60 marked DONE. #62 already done (stale PLAN entry).
 Priority table deduplicated.
+
+### 76. PLAN #11 WebSocket streaming server (May 2026)
+
+Minimal RFC 6455 WebSocket server for real-time ASR streaming. ~300 LOC
+in `examples/server/ws_stream.{h,cpp}`. Runs on `--ws-port` (default:
+HTTP port + 1) alongside the existing httplib HTTP server.
+
+Protocol: client connects → server sends `{"status":"ready"}` →
+client sends binary PCM frames (16kHz mono float32) → server feeds
+to rolling-window streaming decoder → sends JSON text updates
+`{"text":"...","t0":0.0,"t1":1.5,"counter":N}` on each commit →
+client sends text `"flush"` to finalize → server responds with
+`{"text":"...","final":true}`.
+
+Implementation: self-contained SHA-1 + base64 for WS handshake,
+raw frame read/write per RFC 6455. One thread per connection, each
+with its own crispasr session + streaming decoder. No external
+dependencies. No TLS (reverse proxy for wss://).
+
+Files: `ws_stream.h` (C API), `ws_stream.cpp` (implementation),
+`server.cpp` (integration: `--ws-port` flag, startup/shutdown hooks),
+`CMakeLists.txt` (added ws_stream.cpp to build).
+
+### Session 2026-05-02/03 — full summary
+
+**PLAN items completed this session:**
+- **#11** WebSocket server → §76
+- **#41** Superseded by kokoro espeak-ng phonemizer
+- **#60** KV Q8_0 validated on 7 backends → §75
+- **#62** Already done (stale PLAN, re-audited)
+- **#63** Feature matrix parity, all 9 phases → §72
+
+**PLAN items with major progress:**
+- **#59** Binding parity: Go 14%→35% (full surface), Java 13%→30%, Ruby 15%→24% → §73
+
+**Issue fixes:**
+- **#48** granite-4.1-nar auto-detection (filename heuristic)
+- **#49** gemma4-e2b scheduler assertion + detokenization → §74
+- **#51** Windows build scripts (target + vswhere + exe check)
+- **#31** Docker CRISPASR_DIAGNOSTICS=1 env var → §74
+
+**CI / release:**
+- 6 cross-platform build fixes (MSVC M_PI, preferred_separator, Win32
+  InterlockedIncrement, Xcode POST_BUILD, Vulkan spirv-headers, git
+  subject sanitization for MSVC /D + POSIX sh)
+- v0.5.5 release shipped with 8 binary packages
+
+**New capabilities shipped:**
+- Beam search for granite + qwen3 (core_beam_decode wiring)
+- Flash attention declared for 6 backends (already in code)
+- CTC timestamps for 5 more backends
+- Auto-punctuation for CTC backends (FireRedPunc default)
+- Auto-download for omniasr + mimo-asr
+- gemma4-e2b in test registry (19 backends total)
+
+**Tests:**
+- 17 new Catch2 unit tests (core decode + registry)
+- 19/19 backends pass smoke, 0 failures on feature profile
+
+**PLAN state at session end:** 8 DONE (#7, #11, #41, #60, #62, #63
++ #59/#63 partial), 1 PARKED (#9), 2 BLOCKED (#42, #43). Open:
+#52 (TTS perf, needs quiet machine), #56 (phonemizer, needs external
+libs), #57 (Chatterbox CFM, multi-session), #58 (MOSS, large),
+#59 (Java/Ruby remaining gaps).
