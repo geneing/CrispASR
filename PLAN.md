@@ -27,7 +27,7 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | Priority | Item | Effort | Status |
 |---|---|---|---|
 | **MEDIUM** | [#52 Qwen3-TTS](#52-qwen3-tts) — perf pass | Medium | talker + code_predictor + codec + ECAPA + codec_encoder all done; only step-4 perf pass open (~137 ms/frame → real-time) |
-| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phases 1-2 DONE (Qwen3-TTS variants + Orpheus-3B base + lex-au-orpheus-de + Kartoffel natural + Kartoffel synthetic, all on HF + registry-resolved); phases 3-5 queued |
+| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phases 1-2 DONE; Phase 3 (Chatterbox CFM solver) is the gating piece — new arch type, ~1500 LOC, multi-session; T3 Llama AR reusable from orpheus, S3Gen denoiser + ODE integrator + HiFT vocoder are new |
 | **MEDIUM** | [#51c MiMo-V2.5-ASR F16 step decode](#51c-f16-step-decode) | Small | F16 step-decode validation blocked behind ≥32 GB box (see PLAN #51c); base runtime + Q4_K shipped → HISTORY §56 |
 | **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
 | **MEDIUM** | [#58 MOSS-Audio-4B-Instruct](#58-moss-audio-4b-instruct) | Large | first audio-understanding (not just ASR) backend; introduces DeepStack cross-layer feature injection |
