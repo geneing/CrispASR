@@ -31,8 +31,13 @@ COPY . .
 ARG CRISPASR_BUILD_JOBS
 RUN jobs="${CRISPASR_BUILD_JOBS:-$(nproc)}" && \
     cmake -S . -B build -G Ninja -DCRISPASR_BUILD_TESTS=OFF -DGGML_CUDA=1 \
-        -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;90-virtual" && \
+        -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;90-virtual" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" && \
     cmake --build build -j"${jobs}" --target crispasr-cli
+# --allow-shlib-undefined: see main-cuda.Dockerfile for rationale —
+# libggml-cuda.so wants libcuda.so.1 at link time but the stubs dir
+# only ships libcuda.so. Driver is mounted in by host's nvidia runtime
+# at exec time.
 
 RUN find /app/build -name "*.o" -delete && \
     find /app/build -name "*.a" -delete && \

@@ -34,8 +34,15 @@ COPY . .
 ARG CRISPASR_BUILD_JOBS
 RUN jobs="${CRISPASR_BUILD_JOBS:-$(nproc)}" && \
     cmake -S . -B build -G Ninja -DCRISPASR_BUILD_TESTS=OFF -DGGML_CUDA=1 \
-        -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;120-real;120-virtual" && \
+        -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;120-real;120-virtual" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" && \
     cmake --build build -j"${jobs}" --target crispasr-cli
+# --allow-shlib-undefined: libggml-cuda.so links against libcuda.so.1
+# (the CUDA driver), which lives outside the image — the host's nvidia
+# runtime mounts it in at runtime. The stubs dir on PATH gives us
+# `libcuda.so` (no .1 suffix) for build-time linking; without the flag
+# the final exe link fails on transitively-undefined `cuMem*` /
+# `cuDevice*` symbols even though they'll resolve at runtime.
 
 RUN find /app/build -name "*.o" -delete && \
     find /app/build -name "*.a" -delete && \
