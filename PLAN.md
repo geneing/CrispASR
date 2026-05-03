@@ -34,7 +34,7 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **MEDIUM** | [#59 Cross-binding C-ABI parity](#59-cross-binding-c-abi-parity) | Medium | Go now has full surface (✅ all 11 capabilities). Java has transcribe+align+LID. Ruby has transcribe. JS needs WebAssembly approach |
 | **DONE** | [#60 llama.cpp/llamafile perf trick ports](#60-cross-backend-perf-tricks-llamacpp--llamafile-ports) | 14 items | 60a-g DONE; 60e Q8_0 KV validated on 7 backends (all bit-exact or WER=0%); 60h-n parked/skip |
 | **DONE** | #41 Moonshine IPA / phoneme | — | Superseded by kokoro espeak-ng phonemizer (#56) |
-| **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | Not started |
+| **PARKED** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | Encoder 85%+ of time; LSTM+joint <0.7s; sequential steps limit GPU benefit |
 | **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | Not started |
 | **DONE** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | Phases 1-4 shipped → HISTORY §71 |
 | **DONE** | [#62 Streaming + mic library API](#62-streaming--mic-library-api) | M-L | All wrappers ship it |
@@ -334,6 +334,17 @@ many CPU threads submit work. **The architectural win is for:**
 
 Port LSTM predictor + joint head from CPU loops to ggml graphs. LSTM
 is sequential → per-step kernel launches. Encoder already 85%+ of time.
+
+**Assessment (May 2026):** JFK 11s takes 4.39s total. Encoder dominates
+(~3.7s). The LSTM predictor (2×640×640) + joint head (640→8198) run
+~22 steps for JFK — the CPU loops take <0.7s. The LSTM is inherently
+sequential (each step depends on prev hidden state), so GPU kernel
+launch overhead would eat most of the theoretical gain. On CPU, the
+tight C loops are already near-optimal for these matrix sizes.
+
+**Verdict:** PARKED. Not worth the complexity. Would only matter for
+GPU inference on very long audio (100+ tokens), where the encoder
+speedup from GPU is already the dominant improvement.
 
 **Effort:** ~150 LOC. Small gain.
 
