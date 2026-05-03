@@ -899,24 +899,25 @@ static std::vector<float> run_f0_predictor(
         int C_in = (layer == 0) ? 80 : C;
         int C_out = C;
 
-        // Read weights: (K, C_in, C_out) in ggml → stored row-major
-        std::vector<float> w(K * C_in * C_out);
+        // Read weights, handling F16→F32 conversion
+        size_t n_elem = (size_t)K * C_in * C_out;
+        std::vector<float> w_f32(n_elem);
         std::vector<float> b(C_out, 0.0f);
-        ggml_backend_tensor_get(wt, w.data(), 0, ggml_nbytes(wt));
-        if (bt) ggml_backend_tensor_get(bt, b.data(), 0, C_out * sizeof(float));
-
-        // Convert F16 weights to F32 if needed
-        std::vector<float> w_f32;
         if (wt->type == GGML_TYPE_F16) {
-            w_f32.resize(K * C_in * C_out);
-            const ggml_fp16_t* w16 = (const ggml_fp16_t*)w.data();
-            for (size_t i = 0; i < w_f32.size(); i++)
+            std::vector<char> raw(ggml_nbytes(wt));
+            ggml_backend_tensor_get(wt, raw.data(), 0, raw.size());
+            const ggml_fp16_t* w16 = (const ggml_fp16_t*)raw.data();
+            for (size_t i = 0; i < n_elem; i++)
                 w_f32[i] = ggml_fp16_to_fp32(w16[i]);
         } else {
-            w_f32 = std::move(w);
+            ggml_backend_tensor_get(wt, w_f32.data(), 0, n_elem * sizeof(float));
         }
+        if (bt) ggml_backend_tensor_get(bt, b.data(), 0, C_out * sizeof(float));
 
         // Conv1d with padding=1 (symmetric): out[t] = sum over k,c_in
+        // Input x is (T, C_in), weight is (C_out, C_in, K) in memory
+        // PyTorch Conv1d: out[co, t] = bias[co] + sum_ci sum_k w[co,ci,k] * x[ci, t+k-pad]
+        // Our layout: x[t * C_in + ci], w[co * C_in * K + ci * K + k]
         std::vector<float> out(T_mel * C_out, 0.0f);
         for (int t = 0; t < T_mel; t++) {
             for (int co = 0; co < C_out; co++) {
@@ -944,16 +945,14 @@ static std::vector<float> run_f0_predictor(
     ggml_tensor* cls_b = T(c, "s3.v.f0.cls.bias");
     std::vector<float> f0(T_mel, 0.0f);
     if (cls_w) {
-        std::vector<float> cw(C);
-        ggml_backend_tensor_get(cls_w, cw.data(), 0, ggml_nbytes(cls_w));
-        // Handle F16
-        std::vector<float> cw_f32;
+        std::vector<float> cw_f32(C);
         if (cls_w->type == GGML_TYPE_F16) {
-            cw_f32.resize(C);
-            const ggml_fp16_t* cw16 = (const ggml_fp16_t*)cw.data();
+            std::vector<char> raw(ggml_nbytes(cls_w));
+            ggml_backend_tensor_get(cls_w, raw.data(), 0, raw.size());
+            const ggml_fp16_t* cw16 = (const ggml_fp16_t*)raw.data();
             for (int i = 0; i < C; i++) cw_f32[i] = ggml_fp16_to_fp32(cw16[i]);
         } else {
-            cw_f32 = std::move(cw);
+            ggml_backend_tensor_get(cls_w, cw_f32.data(), 0, C * sizeof(float));
         }
         float cb = 0.0f;
         if (cls_b) ggml_backend_tensor_get(cls_b, &cb, 0, sizeof(float));
@@ -977,6 +976,18 @@ static std::vector<float> hift_vocoder_cpu(
     const int sample_rate = 24000;
     const int hop_length = 480; // 24000 / 50 Hz mel frame rate
     const int n_samples = T_mel * hop_length;
+
+    // Check mel stats before F0
+    {
+        float mel_rms = 0, mel_max = 0;
+        for (size_t i = 0; i < mel.size(); i++) {
+            mel_rms += mel[i] * mel[i];
+            if (std::abs(mel[i]) > mel_max) mel_max = std::abs(mel[i]);
+        }
+        mel_rms = std::sqrt(mel_rms / mel.size());
+        if (c->verbosity >= 1)
+            fprintf(stderr, "s3gen: vocoder input mel T=%d rms=%.3f max=%.3f\n", T_mel, mel_rms, mel_max);
+    }
 
     // Run F0 predictor
     std::vector<float> f0 = run_f0_predictor(c, mel, T_mel);
