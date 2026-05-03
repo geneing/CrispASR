@@ -82,6 +82,29 @@ long long    crispasr_align_result_word_t0(crispasr_align_result* r, int i);
 long long    crispasr_align_result_word_t1(crispasr_align_result* r, int i);
 void         crispasr_align_result_free(crispasr_align_result* r);
 
+// --- VAD (PLAN #59) ---
+int crispasr_vad_segments(const char* vad_model_path, const float* pcm, int n_samples,
+                          int sample_rate, float threshold, int min_speech_ms, int min_silence_ms,
+                          int n_threads, int use_gpu, float** out_spans);
+void crispasr_vad_free(float* spans);
+
+// --- Diarization (PLAN #59) ---
+struct crispasr_diarize_seg_abi {
+    long long t0_cs;
+    long long t1_cs;
+    int       speaker;
+    int       _pad;
+};
+struct crispasr_diarize_opts_abi {
+    int         method;
+    int         n_threads;
+    long long   slice_t0_cs;
+    const char* pyannote_model_path;
+};
+int crispasr_diarize_segments_abi(const float* left_pcm, const float* right_pcm, int n_samples,
+                                  int is_stereo, struct crispasr_diarize_seg_abi* segs, int n_segs,
+                                  const struct crispasr_diarize_opts_abi* opts);
+
 // --- Standalone LID (PLAN #59) ---
 int crispasr_detect_language_pcm(const float* samples, int n_samples, int method,
                                   const char* model_path, int n_threads, int use_gpu,
@@ -603,6 +626,113 @@ func DetectLanguagePCM(pcm []float32, method int, modelPath string, nThreads int
 		return "", 0, errors.New("language detection failed")
 	}
 	return C.GoString(&outLang[0]), float32(outProb), nil
+}
+
+// ---------------------------------------------------------------------------
+// Standalone VAD — speech segment detection
+// ---------------------------------------------------------------------------
+
+// VADSpan is one speech segment detected by VAD.
+type VADSpan struct {
+	T0 float64 // seconds
+	T1 float64
+}
+
+// VADSegments runs standalone VAD on 16 kHz mono PCM.
+// vadModelPath can be empty for auto-download of default Silero model.
+// Returns detected speech spans.
+func VADSegments(vadModelPath string, pcm []float32, sampleRate int, threshold float32,
+	minSpeechMs, minSilenceMs, nThreads int) ([]VADSpan, error) {
+	cm := C.CString(vadModelPath)
+	defer C.free(unsafe.Pointer(cm))
+	pcmPtr := (*C.float)(nil)
+	if len(pcm) > 0 {
+		pcmPtr = (*C.float)(unsafe.Pointer(&pcm[0]))
+	}
+	var outSpans *C.float
+	n := C.crispasr_vad_segments(cm, pcmPtr, C.int(len(pcm)), C.int(sampleRate),
+		C.float(threshold), C.int(minSpeechMs), C.int(minSilenceMs), C.int(nThreads), 0, &outSpans)
+	if n < 0 {
+		return nil, fmt.Errorf("VAD failed (rc=%d)", int(n))
+	}
+	if n == 0 || outSpans == nil {
+		return nil, nil
+	}
+	defer C.crispasr_vad_free(outSpans)
+	// outSpans is a flat array of [t0, t1, t0, t1, ...] with n pairs
+	spans := make([]VADSpan, int(n))
+	raw := unsafe.Slice((*float32)(unsafe.Pointer(outSpans)), int(n)*2)
+	for i := 0; i < int(n); i++ {
+		spans[i] = VADSpan{T0: float64(raw[i*2]), T1: float64(raw[i*2+1])}
+	}
+	return spans, nil
+}
+
+// ---------------------------------------------------------------------------
+// Speaker diarization
+// ---------------------------------------------------------------------------
+
+// DiarizeMethod selects the diarization algorithm.
+type DiarizeMethod int
+
+const (
+	DiarizeEnergy    DiarizeMethod = 0 // stereo-only, energy-based
+	DiarizeXCorr     DiarizeMethod = 1 // stereo-only, cross-correlation
+	DiarizeVADTurns  DiarizeMethod = 2 // mono-friendly, gap-based
+	DiarizePyannote  DiarizeMethod = 3 // pyannote v3 segmentation model
+)
+
+// DiarizeSeg is one input/output segment for diarization.
+type DiarizeSeg struct {
+	T0      int64 // centiseconds
+	T1      int64
+	Speaker int32 // output: -1 if unassigned
+}
+
+// DiarizeSegments assigns speaker labels to pre-segmented audio.
+// leftPCM is the mono or left-channel audio; rightPCM is the right channel
+// (nil for mono). segs are modified in-place with Speaker fields filled.
+func DiarizeSegments(leftPCM, rightPCM []float32, isStereo bool, segs []DiarizeSeg,
+	method DiarizeMethod, nThreads int, pyannoteModel string) error {
+	if len(segs) == 0 {
+		return nil
+	}
+	leftPtr := (*C.float)(unsafe.Pointer(&leftPCM[0]))
+	var rightPtr *C.float
+	nSamples := len(leftPCM)
+	if isStereo && len(rightPCM) > 0 {
+		rightPtr = (*C.float)(unsafe.Pointer(&rightPCM[0]))
+	}
+	cSegs := make([]C.struct_crispasr_diarize_seg_abi, len(segs))
+	for i, s := range segs {
+		cSegs[i].t0_cs = C.longlong(s.T0)
+		cSegs[i].t1_cs = C.longlong(s.T1)
+		cSegs[i].speaker = C.int(s.Speaker)
+	}
+	var cPyannote *C.char
+	if pyannoteModel != "" {
+		cPyannote = C.CString(pyannoteModel)
+		defer C.free(unsafe.Pointer(cPyannote))
+	}
+	opts := C.struct_crispasr_diarize_opts_abi{
+		method:              C.int(method),
+		n_threads:           C.int(nThreads),
+		slice_t0_cs:         0,
+		pyannote_model_path: cPyannote,
+	}
+	stereo := C.int(0)
+	if isStereo {
+		stereo = 1
+	}
+	rc := C.crispasr_diarize_segments_abi(leftPtr, rightPtr, C.int(nSamples), stereo,
+		&cSegs[0], C.int(len(cSegs)), &opts)
+	if rc != 0 {
+		return fmt.Errorf("diarize failed (rc=%d)", int(rc))
+	}
+	for i := range segs {
+		segs[i].Speaker = int32(cSegs[i].speaker)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
