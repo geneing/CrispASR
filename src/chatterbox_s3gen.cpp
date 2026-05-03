@@ -1164,9 +1164,14 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                 }
                 int T_x = (int)x->ne[0];
                 int T_si = (int)si->ne[0];
-                if (T_si > T_x) {
-                    si = ggml_view_2d(ctx0, si, T_x, (int)si->ne[1], si->nb[1], 0);
+                int T_min = std::min(T_x, T_si);
+                if (T_si > T_min) {
+                    si = ggml_view_2d(ctx0, si, T_min, (int)si->ne[1], si->nb[1], 0);
                     si = ggml_cont(ctx0, si);
+                }
+                if (T_x > T_min) {
+                    x = ggml_view_2d(ctx0, x, T_min, (int)x->ne[1], x->nb[1], 0);
+                    x = ggml_cont(ctx0, x);
                 }
                 x = ggml_add(ctx0, x, si);
             }
@@ -1298,14 +1303,6 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
     // LeakyReLU
     x = ggml_leaky_relu(ctx0, x, 0.1f, false);
 
-    // ReflectionPad1d((1, 0)): pad 1 sample on the left by reflecting x[:, :, 1]
-    {
-        int C_x = (int)x->ne[1];
-        ggml_tensor* pad_sample = ggml_view_2d(ctx0, x, 1, C_x, x->nb[1], 1 * x->nb[0]);
-        pad_sample = ggml_cont(ctx0, pad_sample);
-        x = ggml_concat(ctx0, pad_sample, x, 0);
-    }
-
     // conv_post: Conv1d(64→18, k=7, padding=3)
     ggml_tensor* cpost_w = T(c, "s3.v.cpost.weight");
     ggml_tensor* cpost_b = T(c, "s3.v.cpost.bias");
@@ -1338,31 +1335,72 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
     // Our mel is already channel-first (80, T) → no conversion needed!
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "voc_mel"), mel.data(), 0, mel.size() * sizeof(float));
 
-    // Generate source STFT: STFT of noise source (since F0≈0, source is noise)
+    // Generate source STFT: SineGen(F0) → STFT
+    // For unvoiced (F0≈0): noise * (sine_amp / 3), then proper windowed STFT.
     {
-        std::vector<float> src_stft(T_src * 18, 0.0f);
-        if (!stage_dump) {
-            // Normal mode: generate noise approximation of SineGen
-            float nsf_alpha = 0.1f; // SineGen sine_amp
-            uint64_t rng = 54321;
-            for (int t = 0; t < T_src; t++) {
-                // For unvoiced (F0=0): noise only, amplitude = nsf_alpha/3
-                rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
-                float noise = ((float)(int64_t)(rng >> 33) / (float)(1LL << 30)) - 1.0f;
-                float src = noise * nsf_alpha / 3.0f;
-                src_stft[t * 18 + 0] = src; // real[0] (DC)
-                for (int f = 1; f < 9; f++) {
-                    rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
-                    float phase = ((float)(rng >> 33) / (float)(1LL << 31)) * 2.0f * (float)M_PI;
-                    src_stft[t * 18 + f] = src * std::cos(phase) * 0.5f;     // real[f]
-                    src_stft[t * 18 + 9 + f] = src * std::sin(phase) * 0.5f; // imag[f]
+        ggml_tensor* src_t = ggml_graph_get_tensor(gf, "source_stft");
+        if (src_t) {
+            std::vector<float> src_stft(T_src * 18, 0.0f);
+            if (!stage_dump) {
+                const float sine_amp = 0.1f;
+                const float noise_amp = sine_amp / 3.0f; // unvoiced amplitude
+                const int stft_nfft = istft_nfft;         // 16
+                const int stft_hop = istft_hop;            // 4
+                const int n_freq = stft_nfft / 2 + 1;     // 9
+
+                // 1. Generate noise waveform at audio rate
+                // T_audio matches what torch.stft with center=True expects to produce T_src frames:
+                // T_src = floor(T_audio / stft_hop) + 1  →  T_audio = (T_src - 1) * stft_hop
+                int T_audio = (T_src - 1) * stft_hop;
+                std::vector<float> source(T_audio, 0.0f);
+                {
+                    // Gaussian-like noise via Box-Muller (matches torch.randn distribution)
+                    uint64_t rng = 54321;
+                    auto next_u = [&]() -> float {
+                        rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+                        return ((float)(rng >> 33) + 0.5f) / (float)(1ULL << 31);
+                    };
+                    for (int i = 0; i < T_audio; i += 2) {
+                        float u1 = next_u(), u2 = next_u();
+                        // Clamp u1 away from 0 for log safety
+                        if (u1 < 1e-7f) u1 = 1e-7f;
+                        float r = std::sqrt(-2.0f * std::log(u1));
+                        float theta = 2.0f * (float)M_PI * u2;
+                        source[i] = noise_amp * r * std::cos(theta);
+                        if (i + 1 < T_audio)
+                            source[i + 1] = noise_amp * r * std::sin(theta);
+                    }
+                }
+
+                // 2. Hann window for STFT
+                std::vector<float> stft_win(stft_nfft);
+                for (int i = 0; i < stft_nfft; i++)
+                    stft_win[i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * i / stft_nfft));
+
+                // 3. Windowed DFT: center=True → pad n_fft/2 on each side
+                int pad = stft_nfft / 2;
+                for (int frame = 0; frame < T_src; frame++) {
+                    int center = frame * stft_hop; // center sample in original signal
+                    // For each frequency bin, compute real and imag via DFT
+                    for (int f = 0; f < n_freq; f++) {
+                        float re = 0.0f, im = 0.0f;
+                        for (int n = 0; n < stft_nfft; n++) {
+                            int src_idx = center - pad + n; // with center padding
+                            float s = (src_idx >= 0 && src_idx < T_audio) ? source[src_idx] : 0.0f;
+                            float w = stft_win[n] * s;
+                            float angle = -2.0f * (float)M_PI * f * n / stft_nfft;
+                            re += w * std::cos(angle);
+                            im += w * std::sin(angle);
+                        }
+                        // ggml layout: ne[0]=T_src (fast), ne[1]=18 (slow)
+                        // Channel f is real, channel (n_freq+f) is imag
+                        src_stft[f * T_src + frame] = re;
+                        src_stft[(n_freq + f) * T_src + frame] = im;
+                    }
                 }
             }
-        }
-        // When stage_dump is active, source_stft is not in the graph (fusion skipped)
-        ggml_tensor* src_t = ggml_graph_get_tensor(gf, "source_stft");
-        if (src_t)
             ggml_backend_tensor_set(src_t, src_stft.data(), 0, src_stft.size() * sizeof(float));
+        }
     }
 
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
