@@ -75,6 +75,21 @@ public final class CrispasrSession implements AutoCloseable {
         float        crispasr_session_result_word_p(Pointer result, int iSeg, int iWord);
         void         crispasr_session_result_free(Pointer result);
 
+        // --- Alignment (PLAN #59) ---
+        Pointer crispasr_align_words_abi(String alignerModel, String transcript,
+                                         float[] samples, int nSamples, long tOffsetCs, int nThreads);
+        int    crispasr_align_result_n_words(Pointer result);
+        String crispasr_align_result_word_text(Pointer result, int i);
+        long   crispasr_align_result_word_t0(Pointer result, int i);
+        long   crispasr_align_result_word_t1(Pointer result, int i);
+        void   crispasr_align_result_free(Pointer result);
+
+        // --- Standalone LID (PLAN #59) ---
+        int crispasr_detect_language_pcm(float[] samples, int nSamples, int method,
+                                         String modelPath, int nThreads, int useGpu,
+                                         int gpuDevice, int flashAttn,
+                                         byte[] outLang, int outLangCap, float[] outProb);
+
         // --- Punctuation (PLAN #59) ---
         Pointer crispasr_punc_init(String modelPath);
         String  crispasr_punc_process(Pointer ctx, String text);
@@ -470,6 +485,56 @@ public final class CrispasrSession implements AutoCloseable {
             segs[i] = new Segment(text, t0, t1, words);
         }
         return segs;
+    }
+
+    // -----------------------------------------------------------------
+    // Forced alignment (PLAN #59)
+    // -----------------------------------------------------------------
+
+    /** One aligned word with timing. */
+    public static final class AlignedWord {
+        public final String text;
+        public final long t0, t1; // centiseconds
+        AlignedWord(String text, long t0, long t1) {
+            this.text = text; this.t0 = t0; this.t1 = t1;
+        }
+    }
+
+    /** Run CTC forced alignment on transcript + audio. */
+    public static AlignedWord[] alignWords(String alignerModel, String transcript,
+                                            float[] pcm, long tOffsetCs, int nThreads) {
+        Pointer r = Lib.INSTANCE.crispasr_align_words_abi(alignerModel, transcript,
+                pcm, pcm.length, tOffsetCs, nThreads);
+        if (r == null) throw new RuntimeException("alignment failed");
+        try {
+            int n = Lib.INSTANCE.crispasr_align_result_n_words(r);
+            AlignedWord[] words = new AlignedWord[n];
+            for (int i = 0; i < n; i++) {
+                words[i] = new AlignedWord(
+                    Lib.INSTANCE.crispasr_align_result_word_text(r, i),
+                    Lib.INSTANCE.crispasr_align_result_word_t0(r, i),
+                    Lib.INSTANCE.crispasr_align_result_word_t1(r, i));
+            }
+            return words;
+        } finally {
+            Lib.INSTANCE.crispasr_align_result_free(r);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Standalone language detection (PLAN #59)
+    // -----------------------------------------------------------------
+
+    /** Detect spoken language from raw 16 kHz mono PCM.
+     *  method: 0=Whisper, 1=Silero, 2=Firered, 3=Ecapa. */
+    public static String[] detectLanguagePcm(float[] pcm, int method, String modelPath, int nThreads) {
+        byte[] outLang = new byte[16];
+        float[] outProb = new float[1];
+        int rc = Lib.INSTANCE.crispasr_detect_language_pcm(pcm, pcm.length, method,
+                modelPath, nThreads, 0, 0, 0, outLang, outLang.length, outProb);
+        if (rc != 0) throw new RuntimeException("language detection failed");
+        String lang = new String(outLang).trim().replaceAll("\0", "");
+        return new String[]{lang, String.valueOf(outProb[0])};
     }
 
     // -----------------------------------------------------------------
