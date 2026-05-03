@@ -83,6 +83,23 @@ extern const char*  crispasr_punc_process(void* ctx, const char* text);
 extern void         crispasr_punc_free_text(const char* text);
 extern void         crispasr_punc_free(void* ctx);
 
+// --- VAD (PLAN #59) ---
+extern int  crispasr_vad_segments(const char* vad_model_path, const float* pcm, int n_samples,
+                                  int sample_rate, float threshold, int min_speech_ms, int min_silence_ms,
+                                  int n_threads, int use_gpu, float** out_spans);
+extern void crispasr_vad_free(float* spans);
+
+// --- Alignment (PLAN #59) ---
+struct crispasr_align_result;
+extern struct crispasr_align_result* crispasr_align_words_abi(const char* aligner_model, const char* transcript,
+                                                               const float* samples, int n_samples, int64_t t_offset_cs,
+                                                               int n_threads);
+extern int          crispasr_align_result_n_words(struct crispasr_align_result* r);
+extern const char*  crispasr_align_result_word_text(struct crispasr_align_result* r, int i);
+extern int64_t      crispasr_align_result_word_t0(struct crispasr_align_result* r, int i);
+extern int64_t      crispasr_align_result_word_t1(struct crispasr_align_result* r, int i);
+extern void         crispasr_align_result_free(struct crispasr_align_result* r);
+
 // --- Streaming (PLAN #62b): rolling-window decoder. Whisper-only at the C-ABI today.
 struct CrispasrStream;
 extern struct CrispasrStream* crispasr_session_stream_open(struct CrispasrSession* s, int n_threads,
@@ -298,6 +315,64 @@ static VALUE rb_session_transcribe(VALUE self, VALUE handle, VALUE pcm_arr) {
     }
     crispasr_session_result_free(r);
     return segments;
+}
+
+// CrispASR::Session.vad_segments(vad_model_path, pcm, sample_rate, threshold, min_speech_ms, min_silence_ms, n_threads)
+// -> [{t0:, t1:}]
+static VALUE rb_session_vad_segments(int argc, VALUE* argv, VALUE self) {
+    if (argc < 3) rb_raise(rb_eArgError, "vad_segments needs at least 3 args: vad_model_path, pcm, sample_rate");
+    const char* vad_path = StringValueCStr(argv[0]);
+    VALUE pcm_arr = argv[1];
+    int sr = NUM2INT(argv[2]);
+    float threshold = argc > 3 ? (float)NUM2DBL(argv[3]) : 0.5f;
+    int min_speech = argc > 4 ? NUM2INT(argv[4]) : 250;
+    int min_silence = argc > 5 ? NUM2INT(argv[5]) : 100;
+    int n_threads = argc > 6 ? NUM2INT(argv[6]) : 4;
+
+    long n = RARRAY_LEN(pcm_arr);
+    float* pcm = (float*)malloc(sizeof(float) * (size_t)n);
+    for (long i = 0; i < n; i++) pcm[i] = (float)NUM2DBL(rb_ary_entry(pcm_arr, i));
+
+    float* spans = NULL;
+    int n_segs = crispasr_vad_segments(vad_path, pcm, (int)n, sr, threshold, min_speech, min_silence, n_threads, 0, &spans);
+    free(pcm);
+    if (n_segs < 0) rb_raise(rb_eRuntimeError, "VAD failed (rc=%d)", n_segs);
+    VALUE result = rb_ary_new_capa(n_segs);
+    for (int i = 0; i < n_segs; i++) {
+        VALUE seg = rb_hash_new();
+        rb_hash_aset(seg, ID2SYM(rb_intern("t0")), DBL2NUM((double)spans[i * 2]));
+        rb_hash_aset(seg, ID2SYM(rb_intern("t1")), DBL2NUM((double)spans[i * 2 + 1]));
+        rb_ary_push(result, seg);
+    }
+    if (spans) crispasr_vad_free(spans);
+    return result;
+}
+
+// CrispASR::Session.align_words(aligner_model, transcript, pcm, n_threads) -> [{text:, t0:, t1:}]
+static VALUE rb_session_align_words(VALUE self, VALUE aligner_model, VALUE transcript, VALUE pcm_arr, VALUE n_threads_v) {
+    const char* model = StringValueCStr(aligner_model);
+    const char* text = StringValueCStr(transcript);
+    int n_threads = NUM2INT(n_threads_v);
+    long n = RARRAY_LEN(pcm_arr);
+    float* pcm = (float*)malloc(sizeof(float) * (size_t)n);
+    for (long i = 0; i < n; i++) pcm[i] = (float)NUM2DBL(rb_ary_entry(pcm_arr, i));
+
+    struct crispasr_align_result* r = crispasr_align_words_abi(model, text, pcm, (int)n, 0, n_threads);
+    free(pcm);
+    if (!r) rb_raise(rb_eRuntimeError, "alignment failed");
+
+    int nw = crispasr_align_result_n_words(r);
+    VALUE result = rb_ary_new_capa(nw);
+    for (int i = 0; i < nw; i++) {
+        VALUE w = rb_hash_new();
+        const char* wt = crispasr_align_result_word_text(r, i);
+        rb_hash_aset(w, ID2SYM(rb_intern("text")), rb_utf8_str_new_cstr(wt ? wt : ""));
+        rb_hash_aset(w, ID2SYM(rb_intern("t0")), LL2NUM(crispasr_align_result_word_t0(r, i)));
+        rb_hash_aset(w, ID2SYM(rb_intern("t1")), LL2NUM(crispasr_align_result_word_t1(r, i)));
+        rb_ary_push(result, w);
+    }
+    crispasr_align_result_free(r);
+    return result;
 }
 
 static VALUE rb_kokoro_resolve_for_lang(VALUE self, VALUE model_path, VALUE lang) {
@@ -606,6 +681,8 @@ void init_ruby_crispasr_session(VALUE* mWhisper) {
     rb_define_singleton_method(mSession, "is_voice_design",      rb_session_is_voice_design,  1);
     rb_define_singleton_method(mSession, "synthesize",           rb_session_synthesize,       2);
     rb_define_singleton_method(mSession, "transcribe",           rb_session_transcribe,       2);
+    rb_define_singleton_method(mSession, "vad_segments",         rb_session_vad_segments,    -1);
+    rb_define_singleton_method(mSession, "align_words",          rb_session_align_words,      4);
     rb_define_singleton_method(mSession, "clear_phoneme_cache",  rb_session_clear_phoneme_cache, 1);
     rb_define_singleton_method(mSession, "set_source_language",  rb_session_set_source_language, 2);
     rb_define_singleton_method(mSession, "set_target_language",  rb_session_set_target_language, 2);
