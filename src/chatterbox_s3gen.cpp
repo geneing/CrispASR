@@ -1163,57 +1163,77 @@ static std::vector<float> hift_vocoder_cpu(
     std::vector<float> stft_data(T_stft * C_stft);
     ggml_backend_tensor_get(stft_out, stft_data.data(), 0, ggml_nbytes(stft_out));
 
-    // iSTFT: split into magnitude (first 9 bins) and phase (last 9 bins)
-    // n_fft = 16, so n_fft/2+1 = 9 frequency bins
+    // iSTFT: split into magnitude (first 9 channels) and phase (last 9 channels)
+    // Python: magnitude = exp(clip(x[:, :9, :], max=100))
+    //         phase = sin(x[:, 9:, :])
+    //         complex = magnitude * (cos(phase) + j * sin(phase))
+    //         wav = torch.istft(complex, n_fft=16, hop_length=4, win_length=16, window=hann)
     int n_freq = istft_nfft / 2 + 1; // 9
-    int n_samples = T_stft * istft_hop;
+    int n_samples = (T_stft - 1) * istft_hop + istft_nfft;
 
     std::vector<float> wav(n_samples, 0.0f);
     std::vector<float> win_sum(n_samples, 0.0f);
 
-    // Hann window for iSTFT
+    // Hann window
     std::vector<float> win(istft_nfft);
     for (int i = 0; i < istft_nfft; i++)
         win[i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * i / (float)istft_nfft));
 
     for (int frame = 0; frame < T_stft; frame++) {
-        // Extract magnitude and phase
-        float mag[9], phase[9];
-        for (int f = 0; f < n_freq && f < C_stft / 2; f++) {
-            mag[f] = std::exp(std::min(stft_data[frame * C_stft + f], 4.6f)); // clip exp
-            phase[f] = std::sin(stft_data[frame * C_stft + n_freq + f]); // sin of phase
+        // stft_data layout: (T_stft, 18) — first 9 = log-magnitude, last 9 = raw phase input
+        // magnitude = exp(clip(raw, max=100))
+        // phase = sin(raw_phase)  — "actually, sin is redundancy" per Python comment
+        float mag[9], ph[9];
+        for (int f = 0; f < n_freq; f++) {
+            float raw_mag = stft_data[frame * C_stft + f];
+            if (raw_mag > 100.0f) raw_mag = 100.0f; // clip
+            mag[f] = std::exp(raw_mag);
+            ph[f] = std::sin(stft_data[frame * C_stft + n_freq + f]);
         }
 
-        // Inverse DFT for this frame
+        // Build complex STFT frame: real = mag * cos(phase), imag = mag * sin(phase)
+        // Then iDFT: x[n] = (1/N) * sum_k (real[k]*cos(2πkn/N) - imag[k]*sin(2πkn/N))
+        // For real signal: use Hermitian symmetry
         int start = frame * istft_hop;
         for (int n = 0; n < istft_nfft && (start + n) < n_samples; n++) {
             float sample = 0.0f;
-            for (int f = 0; f < n_freq; f++) {
-                float real = mag[f] * std::cos(phase[f]);
-                float imag = mag[f] * std::sin(phase[f]);
-                float angle = 2.0f * (float)M_PI * f * n / (float)istft_nfft;
-                sample += real * std::cos(angle) - imag * std::sin(angle);
-            }
-            // Mirror frequencies
+
+            // DC component (f=0)
+            sample += mag[0] * std::cos(ph[0]);
+
+            // Positive frequencies + their conjugate (Hermitian)
             for (int f = 1; f < n_freq - 1; f++) {
-                float real = mag[f] * std::cos(phase[f]);
-                float imag = mag[f] * std::sin(phase[f]);
-                float angle = 2.0f * (float)M_PI * (istft_nfft - f) * n / (float)istft_nfft;
-                sample += real * std::cos(angle) + imag * std::sin(angle);
+                float real_f = mag[f] * std::cos(ph[f]);
+                float imag_f = mag[f] * std::sin(ph[f]);
+                float angle = 2.0f * (float)M_PI * f * n / (float)istft_nfft;
+                // Positive frequency + conjugate = 2 * Re(X[f] * e^{j*angle})
+                sample += 2.0f * (real_f * std::cos(angle) - imag_f * std::sin(angle));
             }
+
+            // Nyquist (f=n_freq-1 = N/2)
+            sample += mag[n_freq - 1] * std::cos(ph[n_freq - 1]) *
+                      std::cos(2.0f * (float)M_PI * (n_freq - 1) * n / (float)istft_nfft);
+
             sample /= (float)istft_nfft;
+
+            // Overlap-add with Hann window
             wav[start + n] += sample * win[n];
             win_sum[start + n] += win[n] * win[n];
         }
     }
 
-    // Normalize by window overlap
+    // Normalize by COLA (constant overlap-add) condition
     for (int i = 0; i < n_samples; i++) {
         if (win_sum[i] > 1e-8f) wav[i] /= win_sum[i];
     }
 
-    // Clamp
+    // Clamp to [-0.99, 0.99]
     for (float& v : wav) v = std::max(-0.99f, std::min(0.99f, v));
+
+    // Trim to expected length
+    int final_len = T_mel * 480;
+    if ((int)wav.size() > final_len) wav.resize(final_len);
+    else if ((int)wav.size() < final_len) wav.resize(final_len, 0.0f);
 
     return wav;
 }
