@@ -755,11 +755,25 @@ int crispasr_run_backend(const whisper_params& params_in) {
         return 0;
     }
 
+    // Auto-punctuation for CTC backends: when the user hasn't set --punc-model
+    // and the backend doesn't natively toggle punctuation, auto-enable
+    // FireRedPunc. This gives CTC backends (fc-ctc, wav2vec2, firered-asr,
+    // omniasr-ctc) punctuated output by default. Users can suppress with
+    // --no-punctuation or --punc-model none.
+    if (params.punc_model.empty() && params.punctuation &&
+        !(backend->capabilities() & CAP_PUNCTUATION_TOGGLE)) {
+        params.punc_model = "auto";
+        if (!params.no_prints)
+            fprintf(stderr, "crispasr: auto-enabling punctuation restoration for backend '%s'\n", backend->name());
+    }
+
     // Optional punctuation restoration post-processor.
     // `--punc-model auto` or `--punc-model firered` → auto-download Q4_K (~50 MB).
     fireredpunc_context* punc_ctx = nullptr;
     {
         std::string punc_path = params.punc_model;
+        if (punc_path == "none" || punc_path == "off")
+            punc_path.clear();
         if (punc_path == "auto" || punc_path == "firered") {
             punc_path = crispasr_cache::ensure_cached_file(
                 "fireredpunc-q4_k.gguf",

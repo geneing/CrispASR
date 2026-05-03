@@ -2126,7 +2126,7 @@ Added `CAP_TIMESTAMPS_CTC` to moonshine, moonshine-streaming, omniasr,
 omniasr-llm, mimo-asr. The `-am` aligner flag now accepts these backends
 (gated by `CAP_TIMESTAMPS_CTC` in `crispasr_run.cpp:292`).
 
-### Phase 5 — Punctuation for CTC backends via auto-punc (LOW)
+### Phase 5 — Punctuation for CTC backends via auto-punc — DONE
 
 CTC backends (fc-ctc, wav2vec2, omniasr-ctc, firered-asr) produce
 lowercase text without punctuation. The `--punc-model auto` flag
@@ -2139,8 +2139,11 @@ backends punctuated output by default, matching user expectations.
 **Risk:** Adds ~50 MB download + ~200 ms latency per segment. Should
 be opt-in initially, maybe promoted to default in a future release.
 
-**Effort:** Small — check backend type in `crispasr_run.cpp`, auto-set
-`params.punc_model = "auto"` for CTC backends when not explicitly set.
+Implemented: `crispasr_run.cpp` auto-sets `punc_model = "auto"` when
+the backend lacks `CAP_PUNCTUATION_TOGGLE` and `--no-punctuation` is
+not set. FireRedPunc (~50 MB) auto-downloads on first use. Users can
+suppress with `--punc-model none` or `--no-punctuation`. Tested on
+fastconformer-ctc: raw CTC output gets capitalization + commas.
 
 ### Phase 6 — Best-of-N for LLM backends (LOW priority)
 
