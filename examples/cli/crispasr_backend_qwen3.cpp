@@ -302,7 +302,8 @@ public:
 
             auto replay = [this](qwen3_asr_context* /*ctx*/, const int32_t* toks, int n, int pl) -> float* {
                 float* emb = qwen3_asr_embed_tokens(ctx_, toks, n);
-                if (!emb) return nullptr;
+                if (!emb)
+                    return nullptr;
                 int nt2 = 0, v2 = 0;
                 float* lg = qwen3_asr_run_llm_kv(ctx_, emb, n, pl, &nt2, &v2);
                 std::free(emb);
@@ -334,16 +335,28 @@ public:
             out_tokens.reserve(gen.size());
             for (size_t i = 0; i < gen.size(); i++) {
                 const int32_t id = gen[i];
-                if (id == eos_id) break;
+                if (id == eos_id)
+                    break;
                 const char* raw_piece = qwen3_asr_token_text(ctx_, id);
-                if (!raw_piece || !*raw_piece) continue;
+                if (!raw_piece || !*raw_piece)
+                    continue;
                 std::string raw = raw_piece;
-                if (raw.size() >= 2 && raw[0] == '<' && raw[1] == '|') continue;
-                if (raw.size() >= 2 && raw[0] == '<' && raw.back() == '>') continue;
-                if (raw.size() >= 5 && raw[0] == '[' && raw[1] == 'P' && raw[2] == 'A' && raw[3] == 'D') continue;
+                if (raw.size() >= 2 && raw[0] == '<' && raw[1] == '|')
+                    continue;
+                if (raw.size() >= 2 && raw[0] == '<' && raw.back() == '>')
+                    continue;
+                if (raw.size() >= 5 && raw[0] == '[' && raw[1] == 'P' && raw[2] == 'A' && raw[3] == 'D')
+                    continue;
                 std::string txt = decode_token(raw);
-                if (raw == "language") { capture_language = true; continue; }
-                if (capture_language) { detected_language = txt; capture_language = false; continue; }
+                if (raw == "language") {
+                    capture_language = true;
+                    continue;
+                }
+                if (capture_language) {
+                    detected_language = txt;
+                    capture_language = false;
+                    continue;
+                }
                 transcript += txt;
                 crispasr_token tk;
                 tk.text = txt;
@@ -353,7 +366,8 @@ public:
 
             crispasr_segment seg;
             size_t start = 0;
-            while (start < transcript.size() && transcript[start] == ' ') start++;
+            while (start < transcript.size() && transcript[start] == ' ')
+                start++;
             seg.text = transcript.substr(start);
             seg.tokens = std::move(out_tokens);
             if (!params.punctuation) {

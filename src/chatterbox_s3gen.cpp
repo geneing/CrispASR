@@ -54,11 +54,16 @@ struct chatterbox_s3gen_context {
     std::vector<uint8_t> compute_meta;
 
     ~chatterbox_s3gen_context() {
-        if (sched) ggml_backend_sched_free(sched);
-        if (ctx_w) ggml_free(ctx_w);
-        if (buf_w) ggml_backend_buffer_free(buf_w);
-        if (backend && backend != backend_cpu) ggml_backend_free(backend);
-        if (backend_cpu) ggml_backend_free(backend_cpu);
+        if (sched)
+            ggml_backend_sched_free(sched);
+        if (ctx_w)
+            ggml_free(ctx_w);
+        if (buf_w)
+            ggml_backend_buffer_free(buf_w);
+        if (backend && backend != backend_cpu)
+            ggml_backend_free(backend);
+        if (backend_cpu)
+            ggml_backend_free(backend_cpu);
     }
 };
 
@@ -74,9 +79,8 @@ static ggml_tensor* TR(chatterbox_s3gen_context* c, const char* name) {
 
 // ── Public API ──────────────────────────────────────────────────
 
-extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(
-    const char* path, int n_threads, int verbosity
-) {
+extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(const char* path, int n_threads,
+                                                                            int verbosity) {
     auto* c = new chatterbox_s3gen_context();
     c->n_threads = n_threads > 0 ? n_threads : 4;
     c->verbosity = verbosity;
@@ -85,14 +89,16 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(
     c->backend_cpu = ggml_backend_cpu_init();
     if (!c->backend_cpu) {
         fprintf(stderr, "s3gen: failed to init CPU backend\n");
-        delete c; return nullptr;
+        delete c;
+        return nullptr;
     }
     c->backend = c->backend_cpu;
 
     // Load weights
     core_gguf::WeightLoad wl;
     if (!core_gguf::load_weights(path, c->backend, "s3gen", wl)) {
-        delete c; return nullptr;
+        delete c;
+        return nullptr;
     }
     c->ctx_w = wl.ctx;
     c->buf_w = wl.buf;
@@ -103,16 +109,16 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(
     }
 
     // Verify critical tensors exist
-    if (!TR(c, "s3.flow.input_embedding.weight") ||
-        !TR(c, "s3.flow.encoder_proj.weight") ||
+    if (!TR(c, "s3.flow.input_embedding.weight") || !TR(c, "s3.flow.encoder_proj.weight") ||
         !TR(c, "s3.flow.spk_embed_affine_layer.weight")) {
         fprintf(stderr, "s3gen: missing critical tensors\n");
-        delete c; return nullptr;
+        delete c;
+        return nullptr;
     }
 
     // Scheduler
     {
-        ggml_backend_t backends[] = { c->backend };
+        ggml_backend_t backends[] = {c->backend};
         c->sched = ggml_backend_sched_new(backends, nullptr, 1, 32768, false, false);
         c->compute_meta.resize(ggml_tensor_overhead() * 32768 + ggml_graph_overhead_custom(32768, false));
     }
@@ -132,12 +138,9 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(
 
 // Build one conformer block as ggml ops.
 // x: (D, T), returns: (D, T)
-static ggml_tensor* build_conformer_block(
-    ggml_context* ctx, ggml_cgraph* gf,
-    chatterbox_s3gen_context* c,
-    ggml_tensor* x, int seq_len, const char* prefix,
-    int n_heads, int head_dim, int D, int ff_dim
-) {
+static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, chatterbox_s3gen_context* c,
+                                          ggml_tensor* x, int seq_len, const char* prefix, int n_heads, int head_dim,
+                                          int D, int ff_dim) {
     const int TT = seq_len; // renamed to avoid shadowing
     char key[64];
     auto W = [&](const char* suffix) -> ggml_tensor* {
@@ -152,19 +155,24 @@ static ggml_tensor* build_conformer_block(
     ggml_tensor* residual = x;
     // LayerNorm
     ggml_tensor* xn = ggml_norm(ctx, x, 1e-5f);
-    if (nmha_w) xn = ggml_mul(ctx, xn, nmha_w);
-    if (nmha_b) xn = ggml_add(ctx, xn, nmha_b);
+    if (nmha_w)
+        xn = ggml_mul(ctx, xn, nmha_w);
+    if (nmha_b)
+        xn = ggml_add(ctx, xn, nmha_b);
 
     // Q/K/V projections
     ggml_tensor* Q = ggml_mul_mat(ctx, W("sa.lq.weight"), xn);
     ggml_tensor* qb = W("sa.lq.bias");
-    if (qb) Q = ggml_add(ctx, Q, qb);
+    if (qb)
+        Q = ggml_add(ctx, Q, qb);
     ggml_tensor* K = ggml_mul_mat(ctx, W("sa.lk.weight"), xn);
     ggml_tensor* kb = W("sa.lk.bias");
-    if (kb) K = ggml_add(ctx, K, kb);
+    if (kb)
+        K = ggml_add(ctx, K, kb);
     ggml_tensor* V = ggml_mul_mat(ctx, W("sa.lv.weight"), xn);
     ggml_tensor* vb = W("sa.lv.bias");
-    if (vb) V = ggml_add(ctx, V, vb);
+    if (vb)
+        V = ggml_add(ctx, V, vb);
 
     // Reshape for multi-head: (D, TT) → (hd, H, TT)
     Q = ggml_reshape_3d(ctx, Q, head_dim, n_heads, TT);
@@ -184,7 +192,8 @@ static ggml_tensor* build_conformer_block(
     // Output projection
     ggml_tensor* attn_out = ggml_mul_mat(ctx, W("sa.lo.weight"), attn);
     ggml_tensor* lo_b = W("sa.lo.bias");
-    if (lo_b) attn_out = ggml_add(ctx, attn_out, lo_b);
+    if (lo_b)
+        attn_out = ggml_add(ctx, attn_out, lo_b);
 
     x = ggml_add(ctx, residual, attn_out);
 
@@ -193,17 +202,21 @@ static ggml_tensor* build_conformer_block(
     ggml_tensor* nff_w = W("nff.weight");
     ggml_tensor* nff_b = W("nff.bias");
     xn = ggml_norm(ctx, x, 1e-5f);
-    if (nff_w) xn = ggml_mul(ctx, xn, nff_w);
-    if (nff_b) xn = ggml_add(ctx, xn, nff_b);
+    if (nff_w)
+        xn = ggml_mul(ctx, xn, nff_w);
+    if (nff_b)
+        xn = ggml_add(ctx, xn, nff_b);
 
     // FFN: w_1 (512→2048) → SiLU → w_2 (2048→512)
     ggml_tensor* ff = ggml_mul_mat(ctx, W("ff.w_1.weight"), xn);
     ggml_tensor* ff_b1 = W("ff.w_1.bias");
-    if (ff_b1) ff = ggml_add(ctx, ff, ff_b1);
+    if (ff_b1)
+        ff = ggml_add(ctx, ff, ff_b1);
     ff = ggml_silu(ctx, ff);
     ff = ggml_mul_mat(ctx, W("ff.w_2.weight"), ff);
     ggml_tensor* ff_b2 = W("ff.w_2.bias");
-    if (ff_b2) ff = ggml_add(ctx, ff, ff_b2);
+    if (ff_b2)
+        ff = ggml_add(ctx, ff, ff_b2);
 
     x = ggml_add(ctx, residual, ff);
     return x;
@@ -211,9 +224,7 @@ static ggml_tensor* build_conformer_block(
 
 // Build the full conformer encoder graph.
 // Returns a ggml_cgraph* with "encoder_out" as the output tensor.
-static ggml_cgraph* build_graph_conformer_encoder(
-    chatterbox_s3gen_context* c, int n_tokens_total
-) {
+static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, int n_tokens_total) {
     const int D = 512;
     const int H = 8;
     const int HD = 64;
@@ -238,7 +249,8 @@ static ggml_cgraph* build_graph_conformer_encoder(
     ggml_tensor* lin_b = T(c, "s3.fe.embed.out.0.bias");
     if (lin_w) {
         x = ggml_mul_mat(ctx0, lin_w, x);
-        if (lin_b) x = ggml_add(ctx0, x, lin_b);
+        if (lin_b)
+            x = ggml_add(ctx0, x, lin_b);
     }
     // LayerNorm (embed.out.1)
     ggml_tensor* ln_w = T(c, "s3.fe.embed.out.1.weight");
@@ -246,7 +258,8 @@ static ggml_cgraph* build_graph_conformer_encoder(
     if (ln_w) {
         x = ggml_norm(ctx0, x, 1e-5f);
         x = ggml_mul(ctx0, x, ln_w);
-        if (ln_b) x = ggml_add(ctx0, x, ln_b);
+        if (ln_b)
+            x = ggml_add(ctx0, x, ln_b);
     }
 
     // Pre-lookahead conv (causal): conv1(k=4, pad_left=3) + LeakyReLU + conv2(k=3, pad_left=2) + residual
@@ -281,14 +294,16 @@ static ggml_cgraph* build_graph_conformer_encoder(
     ggml_tensor* uemb_b = T(c, "s3.fe.uemb.out.0.bias");
     if (uemb_w) {
         x = ggml_mul_mat(ctx0, uemb_w, x);
-        if (uemb_b) x = ggml_add(ctx0, x, uemb_b);
+        if (uemb_b)
+            x = ggml_add(ctx0, x, uemb_b);
     }
     ggml_tensor* uln_w = T(c, "s3.fe.uemb.out.1.weight");
     ggml_tensor* uln_b = T(c, "s3.fe.uemb.out.1.bias");
     if (uln_w) {
         x = ggml_norm(ctx0, x, 1e-5f);
         x = ggml_mul(ctx0, x, uln_w);
-        if (uln_b) x = ggml_add(ctx0, x, uln_b);
+        if (uln_b)
+            x = ggml_add(ctx0, x, uln_b);
     }
 
     // 4 conformer blocks (post-upsample)
@@ -304,14 +319,16 @@ static ggml_cgraph* build_graph_conformer_encoder(
     if (an_w) {
         x = ggml_norm(ctx0, x, 1e-5f);
         x = ggml_mul(ctx0, x, an_w);
-        if (an_b) x = ggml_add(ctx0, x, an_b);
+        if (an_b)
+            x = ggml_add(ctx0, x, an_b);
     }
 
     // Project to 80D: encoder_proj (80, 512)
     ggml_tensor* proj_w = TR(c, "s3.flow.encoder_proj.weight");
     ggml_tensor* proj_b = T(c, "s3.flow.encoder_proj.bias");
     x = ggml_mul_mat(ctx0, proj_w, x);
-    if (proj_b) x = ggml_add(ctx0, x, proj_b);
+    if (proj_b)
+        x = ggml_add(ctx0, x, proj_b);
 
     ggml_set_name(x, "encoder_out");
     ggml_build_forward_expand(gf, x);
@@ -321,17 +338,15 @@ static ggml_cgraph* build_graph_conformer_encoder(
 
 // Run the conformer encoder via ggml graph.
 // Returns (80, T_mel) channel-first mel-space encoder output.
-static std::vector<float> run_conformer_encoder(
-    chatterbox_s3gen_context* c,
-    const int32_t* speech_tokens, int n_tokens,
-    const int32_t* prompt_tokens, int n_prompt
-) {
+static std::vector<float> run_conformer_encoder(chatterbox_s3gen_context* c, const int32_t* speech_tokens, int n_tokens,
+                                                const int32_t* prompt_tokens, int n_prompt) {
     const int total = n_prompt + n_tokens;
     const int T_mel = total * 2; // 2x upsample
 
     // Build token ID array: [prompt | speech]
     std::vector<int32_t> all_tokens(total);
-    if (n_prompt > 0) std::memcpy(all_tokens.data(), prompt_tokens, n_prompt * sizeof(int32_t));
+    if (n_prompt > 0)
+        std::memcpy(all_tokens.data(), prompt_tokens, n_prompt * sizeof(int32_t));
     std::memcpy(all_tokens.data() + n_prompt, speech_tokens, n_tokens * sizeof(int32_t));
 
     // Build and run graph
@@ -342,8 +357,7 @@ static std::vector<float> run_conformer_encoder(
         return {};
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "token_ids"),
-                            all_tokens.data(), 0, total * sizeof(int32_t));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "token_ids"), all_tokens.data(), 0, total * sizeof(int32_t));
 
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "s3gen: conformer compute failed\n");
@@ -398,10 +412,9 @@ static std::vector<float> sinusoidal_embedding(float t_val, int dim) {
 // For each CFM step, we build a ggml graph for the full denoiser forward.
 
 // Helper: causal conv1d — left-pad by (kernel_size - 1), then conv with padding=0
-static ggml_tensor* causal_conv1d(
-    ggml_context* ctx, ggml_tensor* x, // input: (T, C_in) in ggml layout
-    ggml_tensor* weight, // conv weight: (K, C_in, C_out)
-    ggml_tensor* bias    // (C_out) or nullptr
+static ggml_tensor* causal_conv1d(ggml_context* ctx, ggml_tensor* x, // input: (T, C_in) in ggml layout
+                                  ggml_tensor* weight,               // conv weight: (K, C_in, C_out)
+                                  ggml_tensor* bias                  // (C_out) or nullptr
 ) {
     // Causal conv needs left-padding by (K-1).
     // ggml_pad only pads on the right side.
@@ -426,11 +439,8 @@ static ggml_tensor* causal_conv1d(
 }
 
 // Helper: CausalBlock1D — causal_conv(k=3) + LayerNorm(transpose) + Mish
-static ggml_tensor* causal_block1d(
-    ggml_context* ctx, ggml_tensor* x, // (C, T)
-    ggml_tensor* conv_w, ggml_tensor* conv_b,
-    ggml_tensor* ln_w, ggml_tensor* ln_b
-) {
+static ggml_tensor* causal_block1d(ggml_context* ctx, ggml_tensor* x, // (C, T)
+                                   ggml_tensor* conv_w, ggml_tensor* conv_b, ggml_tensor* ln_w, ggml_tensor* ln_b) {
     x = causal_conv1d(ctx, x, conv_w, conv_b);
     // LayerNorm over channel dim: transpose (C, T) → (T, C), norm, transpose back
     // After conv1d: x is (T, C) in ggml layout
@@ -439,8 +449,10 @@ static ggml_tensor* causal_block1d(
     // Transpose to (C, T), norm over C (now ne[0]), transpose back.
     x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (C, T)
     x = ggml_norm(ctx, x, 1e-5f);
-    if (ln_w) x = ggml_mul(ctx, x, ln_w);
-    if (ln_b) x = ggml_add(ctx, x, ln_b);
+    if (ln_w)
+        x = ggml_mul(ctx, x, ln_w);
+    if (ln_b)
+        x = ggml_add(ctx, x, ln_b);
     x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T, C)
     // SiLU ≈ Mish
     x = ggml_silu(ctx, x);
@@ -448,10 +460,8 @@ static ggml_tensor* causal_block1d(
 }
 
 // Helper: CausalResnetBlock1D — block1 + time_mlp + block2 + residual
-static ggml_tensor* causal_resnet_block(
-    ggml_context* ctx, ggml_tensor* x, ggml_tensor* t_emb,
-    chatterbox_s3gen_context* c, const char* prefix, ggml_tensor* mask
-) {
+static ggml_tensor* causal_resnet_block(ggml_context* ctx, ggml_tensor* x, ggml_tensor* t_emb,
+                                        chatterbox_s3gen_context* c, const char* prefix, ggml_tensor* mask) {
     char key[64];
     auto W = [&](const char* suffix) -> ggml_tensor* {
         std::snprintf(key, sizeof(key), "%s.%s", prefix, suffix);
@@ -461,15 +471,15 @@ static ggml_tensor* causal_resnet_block(
     ggml_tensor* residual = x;
 
     // block1: CausalConv1d(k=3) + LayerNorm + Mish
-    x = causal_block1d(ctx, x, W("b1.0.weight"), W("b1.0.bias"),
-                        W("b1.2.weight"), W("b1.2.bias"));
+    x = causal_block1d(ctx, x, W("b1.0.weight"), W("b1.0.bias"), W("b1.2.weight"), W("b1.2.bias"));
     // DISABLED: if (mask) x = ggml_mul(ctx, x, mask);
 
     // Time MLP: linear(1024 → C_out) → add broadcast over T
     // t_emb is (1024,), W is (C_out, 1024) → t_proj is (C_out,)
     ggml_tensor* t_proj = ggml_mul_mat(ctx, W("mlp.1.weight"), t_emb);
     ggml_tensor* t_b = W("mlp.1.bias");
-    if (t_b) t_proj = ggml_add(ctx, t_proj, t_b);
+    if (t_b)
+        t_proj = ggml_add(ctx, t_proj, t_b);
     // x is (T, C_out) after causal_block1d. t_proj is (C_out,).
     // Reshape t_proj to (1, C_out) so it broadcasts over T (ne[0]).
     t_proj = ggml_reshape_2d(ctx, t_proj, 1, (int)t_proj->ne[0]);
@@ -477,8 +487,7 @@ static ggml_tensor* causal_resnet_block(
     x = ggml_add(ctx, x, t_proj);
 
     // block2: CausalConv1d(k=3) + LayerNorm + Mish
-    x = causal_block1d(ctx, x, W("b2.0.weight"), W("b2.0.bias"),
-                        W("b2.2.weight"), W("b2.2.bias"));
+    x = causal_block1d(ctx, x, W("b2.0.weight"), W("b2.0.bias"), W("b2.2.weight"), W("b2.2.bias"));
     // DISABLED: if (mask) x = ggml_mul(ctx, x, mask);
 
     // Residual conv (if dimensions differ)
@@ -486,19 +495,18 @@ static ggml_tensor* causal_resnet_block(
     if (rc_w) {
         ggml_tensor* rc_b = W("rc.bias");
         residual = ggml_conv_1d(ctx, rc_w, residual, 1, 0, 1);
-        if (rc_b) residual = ggml_add(ctx, residual, ggml_reshape_2d(ctx, rc_b, 1, (int)rc_b->ne[0]));
+        if (rc_b)
+            residual = ggml_add(ctx, residual, ggml_reshape_2d(ctx, rc_b, 1, (int)rc_b->ne[0]));
     }
 
     return ggml_add(ctx, x, residual);
 }
 
 // Helper: BasicTransformerBlock — norm1 → self-attn → norm3 → FF(GEGLU)
-static ggml_tensor* basic_transformer_block(
-    ggml_context* ctx, ggml_tensor* x, // (C, T) channels-first
-    chatterbox_s3gen_context* c, const char* prefix,
-    ggml_tensor* attn_mask, // causal mask or nullptr
-    int n_heads, int head_dim
-) {
+static ggml_tensor* basic_transformer_block(ggml_context* ctx, ggml_tensor* x, // (C, T) channels-first
+                                            chatterbox_s3gen_context* c, const char* prefix,
+                                            ggml_tensor* attn_mask, // causal mask or nullptr
+                                            int n_heads, int head_dim) {
     char key[64];
     auto W = [&](const char* suffix) -> ggml_tensor* {
         std::snprintf(key, sizeof(key), "%s.%s", prefix, suffix);
@@ -516,8 +524,10 @@ static ggml_tensor* basic_transformer_block(
     ggml_tensor* xn = ggml_norm(ctx, xt, 1e-5f);
     ggml_tensor* n1w = W("norm1.weight");
     ggml_tensor* n1b = W("norm1.bias");
-    if (n1w) xn = ggml_mul(ctx, xn, n1w);
-    if (n1b) xn = ggml_add(ctx, xn, n1b);
+    if (n1w)
+        xn = ggml_mul(ctx, xn, n1w);
+    if (n1b)
+        xn = ggml_add(ctx, xn, n1b);
 
     // Q/K/V projections (no bias on Q/K/V, bias on output)
     ggml_tensor* Q = ggml_mul_mat(ctx, W("attn1.q.weight"), xn);
@@ -542,7 +552,8 @@ static ggml_tensor* basic_transformer_block(
     // Output projection
     attn = ggml_mul_mat(ctx, W("attn1.o.weight"), attn);
     ggml_tensor* o_b = W("attn1.o.bias");
-    if (o_b) attn = ggml_add(ctx, attn, o_b);
+    if (o_b)
+        attn = ggml_add(ctx, attn, o_b);
 
     xt = ggml_add(ctx, residual, attn);
 
@@ -551,19 +562,23 @@ static ggml_tensor* basic_transformer_block(
     xn = ggml_norm(ctx, xt, 1e-5f);
     ggml_tensor* n3w = W("norm3.weight");
     ggml_tensor* n3b = W("norm3.bias");
-    if (n3w) xn = ggml_mul(ctx, xn, n3w);
-    if (n3b) xn = ggml_add(ctx, xn, n3b);
+    if (n3w)
+        xn = ggml_mul(ctx, xn, n3w);
+    if (n3b)
+        xn = ggml_add(ctx, xn, n3b);
 
     // FF up: Linear(C → 4C) + GELU (not GEGLU — decoder uses act_fn="gelu")
     ggml_tensor* ff_up = ggml_mul_mat(ctx, W("ff.up.weight"), xn);
     ggml_tensor* ff_up_b = W("ff.up.bias");
-    if (ff_up_b) ff_up = ggml_add(ctx, ff_up, ff_up_b);
+    if (ff_up_b)
+        ff_up = ggml_add(ctx, ff_up, ff_up_b);
     ff_up = ggml_gelu(ctx, ff_up);
 
     // FF down: Linear(4C → C)
     ggml_tensor* ff_out = ggml_mul_mat(ctx, W("ff.down.weight"), ff_up);
     ggml_tensor* ff_down_b = W("ff.down.bias");
-    if (ff_down_b) ff_out = ggml_add(ctx, ff_out, ff_down_b);
+    if (ff_down_b)
+        ff_out = ggml_add(ctx, ff_out, ff_down_b);
 
     xt = ggml_add(ctx, residual, ff_out);
 
@@ -575,9 +590,7 @@ static ggml_tensor* basic_transformer_block(
 // x_in: (320, T) = concat[x(80), mu(80), spks(80), cond(80)]
 // t_emb: (1024,) time embedding
 // Returns: (80, T) velocity prediction
-static ggml_cgraph* build_graph_unet1d(
-    chatterbox_s3gen_context* c, int T_mel
-) {
+static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
     ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
@@ -612,7 +625,8 @@ static ggml_cgraph* build_graph_unet1d(
         // Downsample: CausalConv1d(k=3) — halves T
         ggml_tensor* ds_w = T(c, "s3.fd.db.0.2.weight");
         ggml_tensor* ds_b = T(c, "s3.fd.db.0.2.bias");
-        if (ds_w) x = causal_conv1d(ctx0, x, ds_w, ds_b);
+        if (ds_w)
+            x = causal_conv1d(ctx0, x, ds_w, ds_b);
         // Note: the Python code uses Downsample1D which actually halves T
         // For CausalConv1d with stride=1, T stays the same
         // The actual downsample uses mask[:, :, ::2] to halve
@@ -640,8 +654,7 @@ static ggml_cgraph* build_graph_unet1d(
             int T_x = (int)x->ne[0];
             int T_h = (int)hidden->ne[0];
             if (T_x < T_h) {
-                hidden = ggml_view_2d(ctx0, hidden, T_x, (int)hidden->ne[1],
-                                      hidden->nb[1], 0);
+                hidden = ggml_view_2d(ctx0, hidden, T_x, (int)hidden->ne[1], hidden->nb[1], 0);
             }
             x = ggml_concat(ctx0, x, hidden, 1); // concat along channel dim
         }
@@ -657,7 +670,8 @@ static ggml_cgraph* build_graph_unet1d(
         // Upsample: CausalConv1d(k=3)
         ggml_tensor* us_w = T(c, "s3.fd.ub.0.2.weight");
         ggml_tensor* us_b = T(c, "s3.fd.ub.0.2.bias");
-        if (us_w) x = causal_conv1d(ctx0, x, us_w, us_b);
+        if (us_w)
+            x = causal_conv1d(ctx0, x, us_w, us_b);
     }
 
     // ---- Final block + projection ----
@@ -666,19 +680,23 @@ static ggml_cgraph* build_graph_unet1d(
         ggml_tensor* fb_b = T(c, "s3.fd.fb.block.0.bias");
         ggml_tensor* fb_ln_w = T(c, "s3.fd.fb.block.2.weight");
         ggml_tensor* fb_ln_b = T(c, "s3.fd.fb.block.2.bias");
-        if (fb_w) x = causal_block1d(ctx0, x, fb_w, fb_b, fb_ln_w, fb_ln_b);
-        if (mask) x = ggml_mul(ctx0, x, mask);
+        if (fb_w)
+            x = causal_block1d(ctx0, x, fb_w, fb_b, fb_ln_w, fb_ln_b);
+        if (mask)
+            x = ggml_mul(ctx0, x, mask);
 
         // Final projection: Conv1d(256→80, k=1)
         ggml_tensor* fp_w = T(c, "s3.fd.fp.weight");
         ggml_tensor* fp_b = T(c, "s3.fd.fp.bias");
         if (fp_w) {
             x = ggml_conv_1d(ctx0, fp_w, x, 1, 0, 1);
-            if (fp_b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, fp_b, 1, (int)fp_b->ne[0]));
+            if (fp_b)
+                x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, fp_b, 1, (int)fp_b->ne[0]));
         }
     }
 
-    if (mask) x = ggml_mul(ctx0, x, mask);
+    if (mask)
+        x = ggml_mul(ctx0, x, mask);
     ggml_set_name(x, "denoiser_out");
     ggml_build_forward_expand(gf, x);
     ggml_free(ctx0);
@@ -687,15 +705,11 @@ static ggml_cgraph* build_graph_unet1d(
 
 // ── CFM Euler solver with UNet1D denoiser ───────────────────────
 
-static std::vector<float> cfm_euler_solve(
-    chatterbox_s3gen_context* c,
-    const std::vector<float>& mu,       // (80, T) encoder output (channel-first)
-    const std::vector<float>& cond,     // (80, T) conditioning mel (channel-first)
-    const std::vector<float>& spk_emb,  // (80,) projected speaker embedding
-    int T_mel,
-    int n_steps,
-    float cfg_rate
-) {
+static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
+                                          const std::vector<float>& mu,      // (80, T) encoder output (channel-first)
+                                          const std::vector<float>& cond,    // (80, T) conditioning mel (channel-first)
+                                          const std::vector<float>& spk_emb, // (80,) projected speaker embedding
+                                          int T_mel, int n_steps, float cfg_rate) {
     // Generate cosine time schedule
     std::vector<float> t_span(n_steps + 1);
     for (int i = 0; i <= n_steps; i++) {
@@ -709,7 +723,8 @@ static std::vector<float> cfm_euler_solve(
     for (size_t i = 0; i < x.size(); i++) {
         float u1 = (float)((rng = rng * 6364136223846793005ULL + 1) >> 33) / (float)(1ULL << 31);
         float u2 = (float)((rng = rng * 6364136223846793005ULL + 1) >> 33) / (float)(1ULL << 31);
-        if (u1 < 1e-7f) u1 = 1e-7f;
+        if (u1 < 1e-7f)
+            u1 = 1e-7f;
         x[i] = std::sqrt(-2.0f * std::log(u1)) * std::cos(2.0f * (float)M_PI * u2);
     }
 
@@ -729,8 +744,8 @@ static std::vector<float> cfm_euler_solve(
         std::vector<float> unet_input(T_mel * 320);
         for (int t = 0; t < T_mel; t++) {
             for (int ch = 0; ch < 80; ch++) {
-                unet_input[t * 320 + ch]       = x[ch * T_mel + t];
-                unet_input[t * 320 + 80 + ch]  = mu[ch * T_mel + t];
+                unet_input[t * 320 + ch] = x[ch * T_mel + t];
+                unet_input[t * 320 + 80 + ch] = mu[ch * T_mel + t];
                 unet_input[t * 320 + 160 + ch] = spk_emb[ch];
                 unet_input[t * 320 + 240 + ch] = cond[ch * T_mel + t];
             }
@@ -759,14 +774,17 @@ static std::vector<float> cfm_euler_solve(
                 std::vector<float> w1(1024 * 320), b1(1024, 0.0f);
                 std::vector<float> w2(1024 * 1024), b2(1024, 0.0f);
                 ggml_backend_tensor_get(tm1_w, w1.data(), 0, w1.size() * sizeof(float));
-                if (tm1_b) ggml_backend_tensor_get(tm1_b, b1.data(), 0, b1.size() * sizeof(float));
+                if (tm1_b)
+                    ggml_backend_tensor_get(tm1_b, b1.data(), 0, b1.size() * sizeof(float));
                 ggml_backend_tensor_get(tm2_w, w2.data(), 0, w2.size() * sizeof(float));
-                if (tm2_b) ggml_backend_tensor_get(tm2_b, b2.data(), 0, b2.size() * sizeof(float));
+                if (tm2_b)
+                    ggml_backend_tensor_get(tm2_b, b2.data(), 0, b2.size() * sizeof(float));
 
                 std::vector<float> h1(1024);
                 for (int i = 0; i < 1024; i++) {
                     float sum = b1[i];
-                    for (int j = 0; j < 320; j++) sum += w1[i * 320 + j] * t_sin[j];
+                    for (int j = 0; j < 320; j++)
+                        sum += w1[i * 320 + j] * t_sin[j];
                     h1[i] = sum > 0 ? sum : sum * 0.01f; // SiLU approx
                 }
                 // SiLU: x * sigmoid(x)
@@ -777,7 +795,8 @@ static std::vector<float> cfm_euler_solve(
                 t_sin.resize(1024);
                 for (int i = 0; i < 1024; i++) {
                     float sum = b2[i];
-                    for (int j = 0; j < 1024; j++) sum += w2[i * 1024 + j] * h1[j];
+                    for (int j = 0; j < 1024; j++)
+                        sum += w2[i * 1024 + j] * h1[j];
                     t_sin[i] = sum;
                 }
             }
@@ -790,20 +809,19 @@ static std::vector<float> cfm_euler_solve(
                 fprintf(stderr, "s3gen: failed to alloc UNet1D graph\n");
                 return {};
             }
-            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "unet_input"),
-                                    input.data(), 0, input.size() * sizeof(float));
-            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "time_emb"),
-                                    t_sin.data(), 0, t_sin.size() * sizeof(float));
-            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mask"),
-                                    mask_data.data(), 0, mask_data.size() * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "unet_input"), input.data(), 0,
+                                    input.size() * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "time_emb"), t_sin.data(), 0,
+                                    t_sin.size() * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mask"), mask_data.data(), 0,
+                                    mask_data.size() * sizeof(float));
             if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
                 fprintf(stderr, "s3gen: UNet1D compute failed\n");
                 return {};
             }
             ggml_tensor* out = ggml_graph_get_tensor(gf, "denoiser_out");
             if (step == 0 && c->verbosity >= 1) {
-                fprintf(stderr, "s3gen: denoiser out ne=(%d, %d)\n",
-                        (int)out->ne[0], (int)out->ne[1]);
+                fprintf(stderr, "s3gen: denoiser out ne=(%d, %d)\n", (int)out->ne[0], (int)out->ne[1]);
             }
             size_t nb = ggml_nbytes(out);
             std::vector<float> v(nb / sizeof(float));
@@ -813,7 +831,8 @@ static std::vector<float> cfm_euler_solve(
 
         // Run conditioned pass
         std::vector<float> v_cond = run_denoiser(unet_input);
-        if (v_cond.empty()) break;
+        if (v_cond.empty())
+            break;
 
         // Run unconditioned pass for CFG
         std::vector<float> v_uncond;
@@ -846,10 +865,10 @@ static std::vector<float> cfm_euler_solve(
 
         if (c->verbosity >= 2) {
             float rms = 0.0f;
-            for (auto v : x) rms += v * v;
+            for (auto v : x)
+                rms += v * v;
             rms = std::sqrt(rms / x.size());
-            fprintf(stderr, "s3gen: CFM step %d/%d (t=%.3f→%.3f) x_rms=%.4f\n",
-                    step + 1, n_steps, t_val, r_val, rms);
+            fprintf(stderr, "s3gen: CFM step %d/%d (t=%.3f→%.3f) x_rms=%.4f\n", step + 1, n_steps, t_val, r_val, rms);
         }
     }
 
@@ -871,11 +890,9 @@ static std::vector<float> cfm_euler_solve(
 // The full ConvTranspose1d + ResBlock + Snake chain is a follow-up.
 
 // Run F0 predictor: mel (T, 80) → F0 (T,)
-static std::vector<float> run_f0_predictor(
-    chatterbox_s3gen_context* c,
-    const std::vector<float>& mel, // (80, T_mel) channel-first
-    int T_mel
-) {
+static std::vector<float> run_f0_predictor(chatterbox_s3gen_context* c,
+                                           const std::vector<float>& mel, // (80, T_mel) channel-first
+                                           int T_mel) {
     // F0 predictor: 5× Conv1d(80→512, k=3, p=1) + ELU, then Linear(512→1) → abs()
     // Run on CPU since it's small
     const int C = 512;
@@ -894,7 +911,8 @@ static std::vector<float> run_f0_predictor(
         std::snprintf(bn, sizeof(bn), "s3.v.f0.cn.%d.bias", layer * 2);
         ggml_tensor* wt = T(c, wn);
         ggml_tensor* bt = T(c, bn);
-        if (!wt) continue;
+        if (!wt)
+            continue;
 
         int C_in = (layer == 0) ? 80 : C;
         int C_out = C;
@@ -912,7 +930,8 @@ static std::vector<float> run_f0_predictor(
         } else {
             ggml_backend_tensor_get(wt, w_f32.data(), 0, n_elem * sizeof(float));
         }
-        if (bt) ggml_backend_tensor_get(bt, b.data(), 0, C_out * sizeof(float));
+        if (bt)
+            ggml_backend_tensor_get(bt, b.data(), 0, C_out * sizeof(float));
 
         // Conv1d with padding=1 (symmetric): out[t] = sum over k,c_in
         // Input x is (T, C_in), weight is (C_out, C_in, K) in memory
@@ -924,7 +943,8 @@ static std::vector<float> run_f0_predictor(
                 float sum = b[co];
                 for (int k = 0; k < K; k++) {
                     int tt = t + k - 1; // padding=1
-                    if (tt < 0 || tt >= T_mel) continue;
+                    if (tt < 0 || tt >= T_mel)
+                        continue;
                     for (int ci = 0; ci < C_in; ci++) {
                         // w layout: (K, C_in, C_out) → w[k * C_in * C_out + ci * C_out + co]
                         // Actually ggml stores as ne[0]=K, ne[1]=C_in, ne[2]=C_out
@@ -933,7 +953,8 @@ static std::vector<float> run_f0_predictor(
                     }
                 }
                 // ELU activation
-                if (sum < 0) sum = std::exp(sum) - 1.0f;
+                if (sum < 0)
+                    sum = std::exp(sum) - 1.0f;
                 out[t * C_out + co] = sum;
             }
         }
@@ -950,16 +971,19 @@ static std::vector<float> run_f0_predictor(
             std::vector<char> raw(ggml_nbytes(cls_w));
             ggml_backend_tensor_get(cls_w, raw.data(), 0, raw.size());
             const ggml_fp16_t* cw16 = (const ggml_fp16_t*)raw.data();
-            for (int i = 0; i < C; i++) cw_f32[i] = ggml_fp16_to_fp32(cw16[i]);
+            for (int i = 0; i < C; i++)
+                cw_f32[i] = ggml_fp16_to_fp32(cw16[i]);
         } else {
             ggml_backend_tensor_get(cls_w, cw_f32.data(), 0, C * sizeof(float));
         }
         float cb = 0.0f;
-        if (cls_b) ggml_backend_tensor_get(cls_b, &cb, 0, sizeof(float));
+        if (cls_b)
+            ggml_backend_tensor_get(cls_b, &cb, 0, sizeof(float));
 
         for (int t = 0; t < T_mel; t++) {
             float sum = cb;
-            for (int i = 0; i < C; i++) sum += cw_f32[i] * x[t * C + i];
+            for (int i = 0; i < C; i++)
+                sum += cw_f32[i] * x[t * C + i];
             f0[t] = std::abs(sum);
         }
     }
@@ -979,16 +1003,15 @@ static std::vector<float> run_f0_predictor(
 // the intermediate ResBlocks and source fusion. This produces usable
 // (if noisy) audio because the learned conv_pre/post capture the mel→wav mapping.
 
-static std::vector<float> hift_vocoder_cpu(
-    chatterbox_s3gen_context* c,
-    const std::vector<float>& mel, // (80, T_mel) channel-first
-    int T_mel
-) {
+static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
+                                           const std::vector<float>& mel, // (80, T_mel) channel-first
+                                           int T_mel) {
     if (c->verbosity >= 1) {
         float mel_rms = 0, mel_max = 0;
         for (size_t i = 0; i < mel.size(); i++) {
             mel_rms += mel[i] * mel[i];
-            if (std::abs(mel[i]) > mel_max) mel_max = std::abs(mel[i]);
+            if (std::abs(mel[i]) > mel_max)
+                mel_max = std::abs(mel[i]);
         }
         mel_rms = std::sqrt(mel_rms / mel.size());
         fprintf(stderr, "s3gen: vocoder mel T=%d rms=%.3f max=%.3f\n", T_mel, mel_rms, mel_max);
@@ -1015,7 +1038,8 @@ static std::vector<float> hift_vocoder_cpu(
     ggml_tensor* cpre_b = T(c, "s3.v.cpre.bias");
     if (cpre_w) {
         x = ggml_conv_1d(ctx0, cpre_w, x, 1, 3, 1);
-        if (cpre_b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpre_b, 1, (int)cpre_b->ne[0]));
+        if (cpre_b)
+            x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpre_b, 1, (int)cpre_b->ne[0]));
     }
     ggml_set_name(x, "voc_conv_pre_out");
     ggml_set_output(x);
@@ -1063,7 +1087,8 @@ static std::vector<float> hift_vocoder_cpu(
                 x = ggml_view_2d(ctx0, x, T_want, C_out, x->nb[1], p * x->nb[0]);
                 x = ggml_cont(ctx0, x);
             }
-            if (up_b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, up_b, 1, (int)up_b->ne[0]));
+            if (up_b)
+                x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, up_b, 1, (int)up_b->ne[0]));
         }
 
         // Source fusion: source_downs[i](s_stft) → source_resblocks[i] → add
@@ -1078,7 +1103,8 @@ static std::vector<float> hift_vocoder_cpu(
             if (sd_w && s_stft) {
                 // source_downs: Conv1d that downsamples s_stft to match x's time dim
                 ggml_tensor* si = ggml_conv_1d(ctx0, sd_w, s_stft, 1, 0, 1);
-                if (sd_b) si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sd_b, 1, (int)sd_b->ne[0]));
+                if (sd_b)
+                    si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sd_b, 1, (int)sd_b->ne[0]));
                 // source_resblocks: same structure as main ResBlocks but with source-specific weights
                 // Use the same Snake + dilated conv pattern
                 const int srb_kernels[] = {7, 7, 11};
@@ -1105,7 +1131,8 @@ static std::vector<float> hift_vocoder_cpu(
                     ggml_tensor* sc1b = T(c, key2);
                     if (sc1w) {
                         si = ggml_conv_1d(ctx0, sc1w, si, 1, pad2, dil);
-                        if (sc1b) si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sc1b, 1, (int)sc1b->ne[0]));
+                        if (sc1b)
+                            si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sc1b, 1, (int)sc1b->ne[0]));
                     }
                     // Snake2
                     std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.a2.%d.alpha", stage, d);
@@ -1124,7 +1151,8 @@ static std::vector<float> hift_vocoder_cpu(
                     if (sc2w) {
                         int p2 = (k2 - 1) / 2;
                         si = ggml_conv_1d(ctx0, sc2w, si, 1, p2, 1);
-                        if (sc2b) si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sc2b, 1, (int)sc2b->ne[0]));
+                        if (sc2b)
+                            si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sc2b, 1, (int)sc2b->ne[0]));
                     }
                     si = ggml_add(ctx0, si, srb_in);
                     srb_in = si;
@@ -1178,7 +1206,8 @@ static std::vector<float> hift_vocoder_cpu(
                 ggml_tensor* c1b = T(c, key);
                 if (c1w) {
                     x = ggml_conv_1d(ctx0, c1w, x, 1, pad, dil);
-                    if (c1b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, c1b, 1, (int)c1b->ne[0]));
+                    if (c1b)
+                        x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, c1b, 1, (int)c1b->ne[0]));
                 }
 
                 // Snake activation 2: same as activation 1
@@ -1201,7 +1230,8 @@ static std::vector<float> hift_vocoder_cpu(
                 if (c2w) {
                     int pad2 = (k - 1) / 2; // dilation=1, symmetric padding
                     x = ggml_conv_1d(ctx0, c2w, x, 1, pad2, 1);
-                    if (c2b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, c2b, 1, (int)c2b->ne[0]));
+                    if (c2b)
+                        x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, c2b, 1, (int)c2b->ne[0]));
                 }
 
                 // Residual
@@ -1209,8 +1239,10 @@ static std::vector<float> hift_vocoder_cpu(
                 rb_residual = x;
             }
             // Accumulate for averaging
-            if (!rb_sum) rb_sum = x;
-            else rb_sum = ggml_add(ctx0, rb_sum, x);
+            if (!rb_sum)
+                rb_sum = x;
+            else
+                rb_sum = ggml_add(ctx0, rb_sum, x);
         }
         // Average the 3 ResBlock outputs
         x = ggml_scale(ctx0, rb_sum, 1.0f / 3.0f);
@@ -1225,7 +1257,8 @@ static std::vector<float> hift_vocoder_cpu(
     ggml_tensor* cpost_b = T(c, "s3.v.cpost.bias");
     if (cpost_w) {
         x = ggml_conv_1d(ctx0, cpost_w, x, 1, 3, 1);
-        if (cpost_b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpost_b, 1, (int)cpost_b->ne[0]));
+        if (cpost_b)
+            x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpost_b, 1, (int)cpost_b->ne[0]));
     }
 
     // Clamp magnitude to prevent iSTFT overflow (Python clips at 100)
@@ -1247,36 +1280,35 @@ static std::vector<float> hift_vocoder_cpu(
     // Set mel input: ggml tensor ne[0]=T, ne[1]=80 → data stored as
     // data[c * T + t] (channel-first, T is the fast axis).
     // Our mel is already channel-first (80, T) → no conversion needed!
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "voc_mel"),
-                            mel.data(), 0, mel.size() * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "voc_mel"), mel.data(), 0, mel.size() * sizeof(float));
 
     // Generate source STFT: STFT of noise source (since F0≈0, source is noise)
     {
-    std::vector<float> src_stft(T_src * 18, 0.0f);
-    {
-        // Generate noise source
-        float nsf_alpha = 0.1f; // SineGen sine_amp
-        uint64_t rng = 54321;
-        for (int t = 0; t < T_src; t++) {
-            // For unvoiced (F0=0): noise only, amplitude = nsf_alpha/3
-            rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
-            float noise = ((float)(int64_t)(rng >> 33) / (float)(1LL << 30)) - 1.0f;
-            float src = noise * nsf_alpha / 3.0f;
-            // Simple STFT: for frame t, compute real/imag of N/2+1 bins
-            // Since we're operating frame-by-frame with hop=1 here, just use
-            // the instantaneous amplitude as the DC component
-            src_stft[t * 18 + 0] = src;  // real[0] (DC)
-            // Higher frequency bins get lower amplitude
-            for (int f = 1; f < 9; f++) {
+        std::vector<float> src_stft(T_src * 18, 0.0f);
+        {
+            // Generate noise source
+            float nsf_alpha = 0.1f; // SineGen sine_amp
+            uint64_t rng = 54321;
+            for (int t = 0; t < T_src; t++) {
+                // For unvoiced (F0=0): noise only, amplitude = nsf_alpha/3
                 rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
-                float phase = ((float)(rng >> 33) / (float)(1LL << 31)) * 2.0f * (float)M_PI;
-                src_stft[t * 18 + f] = src * std::cos(phase) * 0.5f;     // real[f]
-                src_stft[t * 18 + 9 + f] = src * std::sin(phase) * 0.5f; // imag[f]
+                float noise = ((float)(int64_t)(rng >> 33) / (float)(1LL << 30)) - 1.0f;
+                float src = noise * nsf_alpha / 3.0f;
+                // Simple STFT: for frame t, compute real/imag of N/2+1 bins
+                // Since we're operating frame-by-frame with hop=1 here, just use
+                // the instantaneous amplitude as the DC component
+                src_stft[t * 18 + 0] = src; // real[0] (DC)
+                // Higher frequency bins get lower amplitude
+                for (int f = 1; f < 9; f++) {
+                    rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+                    float phase = ((float)(rng >> 33) / (float)(1LL << 31)) * 2.0f * (float)M_PI;
+                    src_stft[t * 18 + f] = src * std::cos(phase) * 0.5f;     // real[f]
+                    src_stft[t * 18 + 9 + f] = src * std::sin(phase) * 0.5f; // imag[f]
+                }
             }
         }
-    }
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "source_stft"),
-                            src_stft.data(), 0, src_stft.size() * sizeof(float));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "source_stft"), src_stft.data(), 0,
+                                src_stft.size() * sizeof(float));
     }
 
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
@@ -1291,14 +1323,16 @@ static std::vector<float> hift_vocoder_cpu(
         std::vector<float> cpre_data(nb / sizeof(float));
         ggml_backend_tensor_get(cpre_out, cpre_data.data(), 0, nb);
         float rms = 0;
-        for (auto v : cpre_data) rms += v*v;
+        for (auto v : cpre_data)
+            rms += v * v;
         rms = std::sqrt(rms / cpre_data.size());
         int T_cpre = (int)cpre_out->ne[0];
         // Read (t=0, c=0..4): ggml stores as ne[0]=T, ne[1]=C → data[c * T + t]
-        fprintf(stderr, "s3gen: conv_pre ne=(%d,%d) rms=%.3f (t=0,c=0..4)=[%.3f %.3f %.3f %.3f %.3f] (ref: rms=5.50, [0.204 1.674 1.600 3.275 1.361])\n",
-                T_cpre, (int)cpre_out->ne[1], rms,
-                cpre_data[0*T_cpre+0], cpre_data[1*T_cpre+0], cpre_data[2*T_cpre+0],
-                cpre_data[3*T_cpre+0], cpre_data[4*T_cpre+0]);
+        fprintf(stderr,
+                "s3gen: conv_pre ne=(%d,%d) rms=%.3f (t=0,c=0..4)=[%.3f %.3f %.3f %.3f %.3f] (ref: rms=5.50, [0.204 "
+                "1.674 1.600 3.275 1.361])\n",
+                T_cpre, (int)cpre_out->ne[1], rms, cpre_data[0 * T_cpre + 0], cpre_data[1 * T_cpre + 0],
+                cpre_data[2 * T_cpre + 0], cpre_data[3 * T_cpre + 0], cpre_data[4 * T_cpre + 0]);
     }
 
     // Read STFT output
@@ -1317,12 +1351,14 @@ static std::vector<float> hift_vocoder_cpu(
         float stft_rms = 0, stft_max = 0, stft_min = 1e30f;
         for (size_t i = 0; i < stft_data.size(); i++) {
             stft_rms += stft_data[i] * stft_data[i];
-            if (stft_data[i] > stft_max) stft_max = stft_data[i];
-            if (stft_data[i] < stft_min) stft_min = stft_data[i];
+            if (stft_data[i] > stft_max)
+                stft_max = stft_data[i];
+            if (stft_data[i] < stft_min)
+                stft_min = stft_data[i];
         }
         stft_rms = std::sqrt(stft_rms / stft_data.size());
-        fprintf(stderr, "s3gen: STFT values range=[%.3f, %.3f] rms=%.4f (ref: [-1.1, 1.7])\n",
-                stft_min, stft_max, stft_rms);
+        fprintf(stderr, "s3gen: STFT values range=[%.3f, %.3f] rms=%.4f (ref: [-1.1, 1.7])\n", stft_min, stft_max,
+                stft_rms);
         // Show first frame's 18 channels
         fprintf(stderr, "s3gen: STFT frame[0]: ");
         for (int ch = 0; ch < C_stft && ch < 18; ch++)
@@ -1353,7 +1389,8 @@ static std::vector<float> hift_vocoder_cpu(
         float mag[9], ph[9];
         for (int f = 0; f < n_freq; f++) {
             float raw_mag = stft_data[frame * C_stft + f];
-            if (raw_mag > 100.0f) raw_mag = 100.0f; // clip
+            if (raw_mag > 100.0f)
+                raw_mag = 100.0f; // clip
             mag[f] = std::exp(raw_mag);
             ph[f] = std::sin(stft_data[frame * C_stft + n_freq + f]);
         }
@@ -1391,54 +1428,51 @@ static std::vector<float> hift_vocoder_cpu(
 
     // Normalize by COLA (constant overlap-add) condition
     for (int i = 0; i < n_samples; i++) {
-        if (win_sum[i] > 1e-8f) wav[i] /= win_sum[i];
+        if (win_sum[i] > 1e-8f)
+            wav[i] /= win_sum[i];
     }
 
     // Clamp to [-0.99, 0.99]
-    for (float& v : wav) v = std::max(-0.99f, std::min(0.99f, v));
+    for (float& v : wav)
+        v = std::max(-0.99f, std::min(0.99f, v));
 
     // Trim to expected length
     int final_len = T_mel * 480;
-    if ((int)wav.size() > final_len) wav.resize(final_len);
-    else if ((int)wav.size() < final_len) wav.resize(final_len, 0.0f);
+    if ((int)wav.size() > final_len)
+        wav.resize(final_len);
+    else if ((int)wav.size() < final_len)
+        wav.resize(final_len, 0.0f);
 
     return wav;
 }
 
 // ── Full pipeline ───────────────────────────────────────────────
 
-extern "C" float* chatterbox_s3gen_synthesize(
-    struct chatterbox_s3gen_context* ctx,
-    const int32_t* speech_tokens, int n_speech_tokens,
-    const int32_t* prompt_tokens, int n_prompt_tokens,
-    const float* prompt_feat, int prompt_feat_len,
-    const float* spk_embedding,
-    int n_cfm_steps,
-    int* out_n_samples
-) {
+extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* ctx, const int32_t* speech_tokens,
+                                              int n_speech_tokens, const int32_t* prompt_tokens, int n_prompt_tokens,
+                                              const float* prompt_feat, int prompt_feat_len, const float* spk_embedding,
+                                              int n_cfm_steps, int* out_n_samples) {
     if (!ctx || !speech_tokens || n_speech_tokens <= 0 || !out_n_samples)
         return nullptr;
     *out_n_samples = 0;
 
-    if (n_cfm_steps <= 0) n_cfm_steps = 10;
+    if (n_cfm_steps <= 0)
+        n_cfm_steps = 10;
 
     if (ctx->verbosity >= 1) {
-        fprintf(stderr, "s3gen: %d speech tokens + %d prompt tokens, %d CFM steps\n",
-                n_speech_tokens, n_prompt_tokens, n_cfm_steps);
+        fprintf(stderr, "s3gen: %d speech tokens + %d prompt tokens, %d CFM steps\n", n_speech_tokens, n_prompt_tokens,
+                n_cfm_steps);
     }
 
     // 1. Conformer encoder: tokens → (80, T_mel)
-    std::vector<float> h = run_conformer_encoder(
-        ctx, speech_tokens, n_speech_tokens,
-        prompt_tokens, n_prompt_tokens);
+    std::vector<float> h = run_conformer_encoder(ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt_tokens);
 
     int T_mel_total = (n_prompt_tokens + n_speech_tokens) * 2; // 2x upsample
     int T_mel_prompt = n_prompt_tokens * 2;
     int T_mel_gen = n_speech_tokens * 2;
 
     if (ctx->verbosity >= 1) {
-        fprintf(stderr, "s3gen: encoder output T_mel=%d (prompt=%d, gen=%d)\n",
-                T_mel_total, T_mel_prompt, T_mel_gen);
+        fprintf(stderr, "s3gen: encoder output T_mel=%d (prompt=%d, gen=%d)\n", T_mel_total, T_mel_prompt, T_mel_gen);
     }
 
     // 2. Build conditioning: prompt mel + zeros for generation region
@@ -1461,11 +1495,13 @@ extern "C" float* chatterbox_s3gen_synthesize(
         std::vector<float> sw(80 * 192);
         std::vector<float> sb(80, 0.0f);
         ggml_backend_tensor_get(spk_w, sw.data(), 0, sw.size() * sizeof(float));
-        if (spk_b) ggml_backend_tensor_get(spk_b, sb.data(), 0, sb.size() * sizeof(float));
+        if (spk_b)
+            ggml_backend_tensor_get(spk_b, sb.data(), 0, sb.size() * sizeof(float));
 
         // Normalize embedding (L2 norm)
         float norm = 0.0f;
-        for (int i = 0; i < 192; i++) norm += spk_embedding[i] * spk_embedding[i];
+        for (int i = 0; i < 192; i++)
+            norm += spk_embedding[i] * spk_embedding[i];
         norm = std::sqrt(norm + 1e-12f);
 
         for (int i = 0; i < 80; i++) {
@@ -1478,45 +1514,41 @@ extern "C" float* chatterbox_s3gen_synthesize(
     }
 
     // 4. CFM Euler solver: noise → mel
-    std::vector<float> mel = cfm_euler_solve(
-        ctx, h, cond, spk_proj, T_mel_total, n_cfm_steps, 0.7f);
+    std::vector<float> mel = cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, n_cfm_steps, 0.7f);
 
     // 5. Extract generated portion (skip prompt region)
     std::vector<float> gen_mel(80 * T_mel_gen);
     for (int b = 0; b < 80; b++) {
-        std::memcpy(&gen_mel[b * T_mel_gen],
-                     &mel[b * T_mel_total + T_mel_prompt],
-                     T_mel_gen * sizeof(float));
+        std::memcpy(&gen_mel[b * T_mel_gen], &mel[b * T_mel_total + T_mel_prompt], T_mel_gen * sizeof(float));
     }
 
     // 6. Vocoder: mel → waveform
     std::vector<float> wav = hift_vocoder_cpu(ctx, gen_mel, T_mel_gen);
 
     if (ctx->verbosity >= 1) {
-        fprintf(stderr, "s3gen: generated %zu samples (%.2f sec @ 24kHz)\n",
-                wav.size(), (float)wav.size() / 24000.0f);
+        fprintf(stderr, "s3gen: generated %zu samples (%.2f sec @ 24kHz)\n", wav.size(), (float)wav.size() / 24000.0f);
     }
 
     // Copy to malloc'd buffer
     float* out = (float*)malloc(wav.size() * sizeof(float));
-    if (!out) return nullptr;
+    if (!out)
+        return nullptr;
     std::memcpy(out, wav.data(), wav.size() * sizeof(float));
     *out_n_samples = (int)wav.size();
     return out;
 }
 
-extern "C" float* chatterbox_s3gen_vocode(
-    struct chatterbox_s3gen_context* ctx,
-    const float* mel_cf, int T_mel,
-    int* out_n_samples
-) {
-    if (!ctx || !mel_cf || T_mel <= 0 || !out_n_samples) return nullptr;
+extern "C" float* chatterbox_s3gen_vocode(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
+                                          int* out_n_samples) {
+    if (!ctx || !mel_cf || T_mel <= 0 || !out_n_samples)
+        return nullptr;
     *out_n_samples = 0;
 
     std::vector<float> mel(mel_cf, mel_cf + 80 * T_mel);
     std::vector<float> wav = hift_vocoder_cpu(ctx, mel, T_mel);
 
-    if (wav.empty()) return nullptr;
+    if (wav.empty())
+        return nullptr;
     float* out = (float*)malloc(wav.size() * sizeof(float));
     std::memcpy(out, wav.data(), wav.size() * sizeof(float));
     *out_n_samples = (int)wav.size();

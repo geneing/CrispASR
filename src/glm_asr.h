@@ -19,11 +19,11 @@ struct glm_asr_context;
 
 struct glm_asr_context_params {
     int n_threads;
-    int verbosity;     // 0=silent 1=normal 2=verbose
-    bool use_gpu;      // false => force CPU backend
-    float temperature; // 0 = greedy argmax, >0 = softmax sampling
-    int beam_size;     // 1 = greedy decode; >1 = replay-from-prefix beam search
-    bool translate;        // inject "translate to <target_lang>" instruction
+    int verbosity;           // 0=silent 1=normal 2=verbose
+    bool use_gpu;            // false => force CPU backend
+    float temperature;       // 0 = greedy argmax, >0 = softmax sampling
+    int beam_size;           // 1 = greedy decode; >1 = replay-from-prefix beam search
+    bool translate;          // inject "translate to <target_lang>" instruction
     const char* target_lang; // e.g. "English" (NULL = English default)
 };
 

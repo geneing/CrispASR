@@ -202,8 +202,9 @@ static int sample_token(const float* logits, int vocab, float temperature, float
 // ===========================================================================
 
 extern "C" struct glm_asr_context_params glm_asr_context_default_params(void) {
-    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true, /*temperature=*/0.0f, /*beam_size=*/1,
-            /*translate=*/false, /*target_lang=*/nullptr};
+    return {/*n_threads=*/4,      /*verbosity=*/1,        /*use_gpu=*/true,
+            /*temperature=*/0.0f, /*beam_size=*/1,
+            /*translate=*/false,  /*target_lang=*/nullptr};
 }
 
 extern "C" int glm_asr_encoder_frames_from_mel_frames(int T_mel) {

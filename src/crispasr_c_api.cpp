@@ -1722,8 +1722,8 @@ static crispasr_session_result* run_voxtral_family(Ctx* ctx, const VoxtralFamily
 // tuned with its own prompt, wav2vec2 is usually mono-lingual.
 // ---------------------------------------------------------------------------
 // Internal single-pass transcribe (used by best-of-N wrapper below).
-static crispasr_session_result* transcribe_single(crispasr_session* s, const float* pcm,
-                                                   int n_samples, const char* language);
+static crispasr_session_result* transcribe_single(crispasr_session* s, const float* pcm, int n_samples,
+                                                  const char* language);
 
 CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_session* s, const float* pcm,
                                                                     int n_samples, const char* language) {
@@ -1741,7 +1741,8 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
     double best_avg_p = -1.0;
     for (int run = 0; run < n_runs; run++) {
         crispasr_session_result* candidate = transcribe_single(s, pcm, n_samples, language);
-        if (!candidate) continue;
+        if (!candidate)
+            continue;
         // Compute average per-word confidence
         double sum_p = 0.0;
         int n_words = 0;
@@ -1753,7 +1754,8 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         }
         double avg_p = n_words > 0 ? sum_p / n_words : 0.0;
         if (!best || avg_p > best_avg_p) {
-            if (best) delete best;
+            if (best)
+                delete best;
             best = candidate;
             best_avg_p = avg_p;
         } else {
@@ -1763,8 +1765,8 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
     return best;
 }
 
-static crispasr_session_result* transcribe_single(crispasr_session* s, const float* pcm,
-                                                   int n_samples, const char* language) {
+static crispasr_session_result* transcribe_single(crispasr_session* s, const float* pcm, int n_samples,
+                                                  const char* language) {
     const std::string lang = (language && *language) ? language : "en";
     const bool lang_set = (language && *language);
 

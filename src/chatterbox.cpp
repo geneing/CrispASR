@@ -92,13 +92,13 @@ struct cb_t3_model {
     ggml_tensor* output_norm_w = nullptr;
 
     // Heads
-    ggml_tensor* speech_head_w = nullptr;    // (speech_vocab, hidden)
-    ggml_tensor* text_head_w = nullptr;      // (text_vocab, hidden)
+    ggml_tensor* speech_head_w = nullptr; // (speech_vocab, hidden)
+    ggml_tensor* text_head_w = nullptr;   // (text_vocab, hidden)
 
     // Conditioning encoder
-    ggml_tensor* cond_spkr_w = nullptr;      // (hidden, spk_embed_size)
-    ggml_tensor* cond_spkr_b = nullptr;      // (hidden)
-    ggml_tensor* cond_emotion_w = nullptr;   // (hidden, 1)
+    ggml_tensor* cond_spkr_w = nullptr;    // (hidden, spk_embed_size)
+    ggml_tensor* cond_spkr_b = nullptr;    // (hidden)
+    ggml_tensor* cond_emotion_w = nullptr; // (hidden, 1)
 
     // Perceiver
     ggml_tensor* perceiver_query = nullptr;  // (1, n_queries, hidden)
@@ -106,22 +106,22 @@ struct cb_t3_model {
     ggml_tensor* perceiver_norm_b = nullptr; // (hidden)
     ggml_tensor* perceiver_q_w = nullptr;    // (hidden, hidden)
     ggml_tensor* perceiver_q_b = nullptr;
-    ggml_tensor* perceiver_k_w = nullptr;    // (hidden, hidden)
+    ggml_tensor* perceiver_k_w = nullptr; // (hidden, hidden)
     ggml_tensor* perceiver_k_b = nullptr;
-    ggml_tensor* perceiver_v_w = nullptr;    // (hidden, hidden)
+    ggml_tensor* perceiver_v_w = nullptr; // (hidden, hidden)
     ggml_tensor* perceiver_v_b = nullptr;
-    ggml_tensor* perceiver_out_w = nullptr;  // (hidden, hidden)
+    ggml_tensor* perceiver_out_w = nullptr; // (hidden, hidden)
     ggml_tensor* perceiver_out_b = nullptr;
 };
 
 struct cb_ve_model {
     // 3-layer LSTM
-    ggml_tensor* lstm_ih_w[3] = {};  // weight_ih_l{i}: (4*hidden, input)
-    ggml_tensor* lstm_hh_w[3] = {};  // weight_hh_l{i}: (4*hidden, hidden)
-    ggml_tensor* lstm_ih_b[3] = {};  // bias_ih_l{i}: (4*hidden)
-    ggml_tensor* lstm_hh_b[3] = {};  // bias_hh_l{i}: (4*hidden)
-    ggml_tensor* proj_w = nullptr;   // (embed, hidden)
-    ggml_tensor* proj_b = nullptr;   // (embed)
+    ggml_tensor* lstm_ih_w[3] = {}; // weight_ih_l{i}: (4*hidden, input)
+    ggml_tensor* lstm_hh_w[3] = {}; // weight_hh_l{i}: (4*hidden, hidden)
+    ggml_tensor* lstm_ih_b[3] = {}; // bias_ih_l{i}: (4*hidden)
+    ggml_tensor* lstm_hh_b[3] = {}; // bias_hh_l{i}: (4*hidden)
+    ggml_tensor* proj_w = nullptr;  // (embed, hidden)
+    ggml_tensor* proj_b = nullptr;  // (embed)
 };
 
 // Precomputed conditioning from conds.pt
@@ -129,15 +129,15 @@ struct cb_precomputed_conds {
     bool loaded = false;
 
     // T3 conditioning
-    ggml_tensor* speaker_emb = nullptr;           // (1, 256)
-    ggml_tensor* speech_prompt_tokens = nullptr;   // (1, 150)
+    ggml_tensor* speaker_emb = nullptr;          // (1, 256)
+    ggml_tensor* speech_prompt_tokens = nullptr; // (1, 150)
     float emotion_adv = 0.5f;
 
     // S3Gen conditioning
-    ggml_tensor* gen_prompt_token = nullptr;       // (1, N)
+    ggml_tensor* gen_prompt_token = nullptr; // (1, N)
     uint32_t gen_prompt_token_len = 0;
-    ggml_tensor* gen_prompt_feat = nullptr;        // (1, T, 80)
-    ggml_tensor* gen_embedding = nullptr;          // (1, 192)
+    ggml_tensor* gen_prompt_feat = nullptr; // (1, T, 80)
+    ggml_tensor* gen_embedding = nullptr;   // (1, 192)
 };
 
 // Character tokenizer for Chatterbox text input
@@ -174,7 +174,8 @@ static std::string punc_norm(const std::string& text) {
     replace_all(s, " ,", ",");
 
     // Trim trailing spaces
-    while (!s.empty() && s.back() == ' ') s.pop_back();
+    while (!s.empty() && s.back() == ' ')
+        s.pop_back();
 
     // Add period if no sentence ender
     if (!s.empty()) {
@@ -222,16 +223,8 @@ static float rand_uniform(uint64_t& rng) {
     return (float)(xorshift64star(rng) >> 11) / (float)(1ULL << 53);
 }
 
-static int32_t sample_token(
-    const float* logits,
-    int vocab_size,
-    float temperature,
-    float min_p,
-    float top_p,
-    float rep_penalty,
-    const std::vector<int32_t>& prev_tokens,
-    uint64_t& rng
-) {
+static int32_t sample_token(const float* logits, int vocab_size, float temperature, float min_p, float top_p,
+                            float rep_penalty, const std::vector<int32_t>& prev_tokens, uint64_t& rng) {
     std::vector<float> probs(vocab_size);
 
     // Apply repetition penalty
@@ -241,8 +234,10 @@ static int32_t sample_token(
     if (rep_penalty != 1.0f) {
         for (int32_t tok : prev_tokens) {
             if (tok >= 0 && tok < vocab_size) {
-                if (probs[tok] > 0) probs[tok] /= rep_penalty;
-                else probs[tok] *= rep_penalty;
+                if (probs[tok] > 0)
+                    probs[tok] /= rep_penalty;
+                else
+                    probs[tok] *= rep_penalty;
             }
         }
     }
@@ -274,7 +269,8 @@ static int32_t sample_token(
         float max_prob = *std::max_element(probs.begin(), probs.end());
         float threshold = max_prob * min_p;
         for (int i = 0; i < vocab_size; i++) {
-            if (probs[i] < threshold) probs[i] = 0.0f;
+            if (probs[i] < threshold)
+                probs[i] = 0.0f;
         }
     }
 
@@ -282,10 +278,9 @@ static int32_t sample_token(
     if (top_p < 1.0f) {
         // Sort indices by probability descending
         std::vector<int> indices(vocab_size);
-        for (int i = 0; i < vocab_size; i++) indices[i] = i;
-        std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-            return probs[a] > probs[b];
-        });
+        for (int i = 0; i < vocab_size; i++)
+            indices[i] = i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) { return probs[a] > probs[b]; });
         float cumsum = 0.0f;
         for (int idx : indices) {
             cumsum += probs[idx];
@@ -297,7 +292,8 @@ static int32_t sample_token(
 
     // Re-normalize
     sum = 0.0f;
-    for (int i = 0; i < vocab_size; i++) sum += probs[i];
+    for (int i = 0; i < vocab_size; i++)
+        sum += probs[i];
     if (sum <= 0.0f) {
         return (int32_t)(std::max_element(logits, logits + vocab_size) - logits);
     }
@@ -307,7 +303,8 @@ static int32_t sample_token(
     float cumsum = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
         cumsum += probs[i];
-        if (cumsum >= r) return i;
+        if (cumsum >= r)
+            return i;
     }
     return vocab_size - 1;
 }
@@ -357,14 +354,22 @@ struct chatterbox_context {
     uint64_t rng_state = 0xdeadbeefcafebabeULL;
 
     ~chatterbox_context() {
-        if (s3gen_ctx) chatterbox_s3gen_free(s3gen_ctx);
-        if (sched) ggml_backend_sched_free(sched);
-        if (kv_buf) ggml_backend_buffer_free(kv_buf);
-        if (kv_ctx) ggml_free(kv_ctx);
-        if (ctx_w) ggml_free(ctx_w);
-        if (buf_w) ggml_backend_buffer_free(buf_w);
-        if (backend && backend != backend_cpu) ggml_backend_free(backend);
-        if (backend_cpu) ggml_backend_free(backend_cpu);
+        if (s3gen_ctx)
+            chatterbox_s3gen_free(s3gen_ctx);
+        if (sched)
+            ggml_backend_sched_free(sched);
+        if (kv_buf)
+            ggml_backend_buffer_free(kv_buf);
+        if (kv_ctx)
+            ggml_free(kv_ctx);
+        if (ctx_w)
+            ggml_free(ctx_w);
+        if (buf_w)
+            ggml_backend_buffer_free(buf_w);
+        if (backend && backend != backend_cpu)
+            ggml_backend_free(backend);
+        if (backend_cpu)
+            ggml_backend_free(backend_cpu);
     }
 };
 
@@ -448,8 +453,8 @@ static bool bind_t3(chatterbox_context* c) {
     m.perceiver_out_w = core_gguf::try_get(ts, "t3.cond.perceiver.attn.proj_out.weight");
     m.perceiver_out_b = core_gguf::try_get(ts, "t3.cond.perceiver.attn.proj_out.bias");
 
-    if (!m.text_emb_w || !m.speech_emb_w || !m.text_pos_emb_w || !m.speech_pos_emb_w ||
-        !m.output_norm_w || !m.speech_head_w) {
+    if (!m.text_emb_w || !m.speech_emb_w || !m.text_pos_emb_w || !m.speech_pos_emb_w || !m.output_norm_w ||
+        !m.speech_head_w) {
         return false;
     }
 
@@ -458,10 +463,11 @@ static bool bind_t3(chatterbox_context* c) {
     for (uint32_t i = 0; i < c->hp.n_layers; i++) {
         auto& b = m.blocks[i];
         char key[96];
-#define BIND(fld, sub) do { \
-    std::snprintf(key, sizeof(key), "t3.blk.%u." sub ".weight", i); \
-    b.fld = core_gguf::require(ts, key, tag); \
-} while (0)
+#define BIND(fld, sub)                                                                                                 \
+    do {                                                                                                               \
+        std::snprintf(key, sizeof(key), "t3.blk.%u." sub ".weight", i);                                                \
+        b.fld = core_gguf::require(ts, key, tag);                                                                      \
+    } while (0)
         BIND(attn_norm_w, "attn_norm");
         BIND(attn_q_w, "attn_q");
         BIND(attn_k_w, "attn_k");
@@ -472,9 +478,8 @@ static bool bind_t3(chatterbox_context* c) {
         BIND(ffn_up_w, "ffn_up");
         BIND(ffn_down_w, "ffn_down");
 #undef BIND
-        if (!b.attn_norm_w || !b.attn_q_w || !b.attn_k_w || !b.attn_v_w ||
-            !b.attn_output_w || !b.ffn_norm_w || !b.ffn_gate_w ||
-            !b.ffn_up_w || !b.ffn_down_w) {
+        if (!b.attn_norm_w || !b.attn_q_w || !b.attn_k_w || !b.attn_v_w || !b.attn_output_w || !b.ffn_norm_w ||
+            !b.ffn_gate_w || !b.ffn_up_w || !b.ffn_down_w) {
             fprintf(stderr, "chatterbox: missing tensor in T3 layer %u\n", i);
             return false;
         }
@@ -516,11 +521,14 @@ static bool bind_ve(chatterbox_context* c) {
 // ── KV cache allocation ─────────────────────────────────────────
 
 static bool kv_alloc(chatterbox_context* c, int max_ctx) {
-    if (c->kv_ctx && max_ctx <= c->kv_max_ctx) return true;
+    if (c->kv_ctx && max_ctx <= c->kv_max_ctx)
+        return true;
 
     // Free existing
-    if (c->kv_buf) ggml_backend_buffer_free(c->kv_buf);
-    if (c->kv_ctx) ggml_free(c->kv_ctx);
+    if (c->kv_buf)
+        ggml_backend_buffer_free(c->kv_buf);
+    if (c->kv_ctx)
+        ggml_free(c->kv_ctx);
     c->kv_buf = nullptr;
     c->kv_ctx = nullptr;
 
@@ -531,12 +539,10 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
     c->kv_max_ctx = max_ctx;
 
     // KV shape: (head_dim, max_ctx, n_kv_heads, n_layers)
-    struct ggml_init_params ip = {
-        2 * ggml_tensor_overhead(),
-        nullptr, true
-    };
+    struct ggml_init_params ip = {2 * ggml_tensor_overhead(), nullptr, true};
     c->kv_ctx = ggml_init(ip);
-    if (!c->kv_ctx) return false;
+    if (!c->kv_ctx)
+        return false;
 
     c->kv_k = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
     c->kv_v = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
@@ -552,8 +558,8 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
     size_t kb = ggml_nbytes(c->kv_k);
     size_t vb = ggml_nbytes(c->kv_v);
     if (c->params.verbosity >= 1) {
-        fprintf(stderr, "chatterbox: kv cache %d MiB (hd=%d max=%d n_kv=%d nl=%d)\n",
-                (int)((kb + vb) / 1048576), hd, max_ctx, n_kv, nl);
+        fprintf(stderr, "chatterbox: kv cache %d MiB (hd=%d max=%d n_kv=%d nl=%d)\n", (int)((kb + vb) / 1048576), hd,
+                max_ctx, n_kv, nl);
     }
     return true;
 }
@@ -615,13 +621,10 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.attn_norm_w);
 
-        ggml_tensor* attn = core_attn::kv_self_attn(
-            ctx0, gf, x,
-            b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
-            /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr,
-            positions,
-            (T == 1) ? nullptr : causal_mask,
-            c->kv_k, c->kv_v, (int)il, n_past, kvp);
+        ggml_tensor* attn =
+            core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
+                                    /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
+                                    (T == 1) ? nullptr : causal_mask, c->kv_k, c->kv_v, (int)il, n_past, kvp);
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
@@ -654,7 +657,8 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     const int Lk = n_past + n_tokens;
 
     std::vector<int32_t> positions(n_tokens);
-    for (int i = 0; i < n_tokens; i++) positions[i] = n_past + i;
+    for (int i = 0; i < n_tokens; i++)
+        positions[i] = n_past + i;
 
     std::vector<ggml_fp16_t> mask;
     if (n_tokens > 1) {
@@ -673,13 +677,13 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
         fprintf(stderr, "chatterbox: failed to alloc T3 graph\n");
         return nullptr;
     }
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "inputs_embeds"),
-                            embeds, 0, (size_t)D * n_tokens * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"),
-                            positions.data(), 0, positions.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "inputs_embeds"), embeds, 0,
+                            (size_t)D * n_tokens * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
+                            positions.size() * sizeof(int32_t));
     if (n_tokens > 1) {
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"),
-                                mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
+                                mask.size() * sizeof(ggml_fp16_t));
     }
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "chatterbox: T3 compute failed\n");
@@ -693,10 +697,7 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
 
 // Build the conditioning + text + speech_start embedding on CPU.
 // Returns concatenated embeddings (D, cond_len + text_len + 1).
-static std::vector<float> build_prefill_embeds(
-    chatterbox_context* c,
-    const std::vector<int32_t>& text_tokens
-) {
+static std::vector<float> build_prefill_embeds(chatterbox_context* c, const std::vector<int32_t>& text_tokens) {
     const int D = (int)c->hp.hidden_size;
     const auto& m = c->t3;
 
@@ -706,8 +707,7 @@ static std::vector<float> build_prefill_embeds(
     // 1. Speaker embedding projection: spkr_enc(speaker_emb) → (D,)
     // For precomputed conds, speaker_emb is (1, 256)
     std::vector<float> spkr_emb(c->hp.speaker_embed_size);
-    ggml_backend_tensor_get(c->conds.speaker_emb, spkr_emb.data(), 0,
-                            spkr_emb.size() * sizeof(float));
+    ggml_backend_tensor_get(c->conds.speaker_emb, spkr_emb.data(), 0, spkr_emb.size() * sizeof(float));
 
     // Project: W (D, 256) × emb (256,) + bias (D,)
     std::vector<float> spkr_proj(D, 0.0f);
@@ -724,7 +724,8 @@ static std::vector<float> build_prefill_embeds(
         if (m.cond_spkr_b) {
             std::vector<float> bias(D);
             ggml_backend_tensor_get(m.cond_spkr_b, bias.data(), 0, D * sizeof(float));
-            for (int i = 0; i < D; i++) spkr_proj[i] += bias[i];
+            for (int i = 0; i < D; i++)
+                spkr_proj[i] += bias[i];
         }
     }
 
@@ -732,9 +733,7 @@ static std::vector<float> build_prefill_embeds(
     // Output: 32 conditioning tokens of dimension D
     std::vector<float> perceiver_out; // (32 * D) if perceiver is available
     int perceiver_len = 0;
-    if (c->conds.speech_prompt_tokens && m.perceiver_query &&
-        m.perceiver_q_w && m.perceiver_k_w && m.perceiver_v_w) {
-
+    if (c->conds.speech_prompt_tokens && m.perceiver_query && m.perceiver_q_w && m.perceiver_k_w && m.perceiver_v_w) {
         int n_prompt = (int)c->conds.speech_prompt_tokens->ne[0];
         int n_q = (int)c->hp.perceiver_n_queries; // 32
         int n_heads = 4;
@@ -742,22 +741,20 @@ static std::vector<float> build_prefill_embeds(
 
         // Read embedding tables
         std::vector<float> speech_emb_tab(c->hp.speech_vocab_size * D);
-        ggml_backend_tensor_get(m.speech_emb_w, speech_emb_tab.data(), 0,
-                                speech_emb_tab.size() * sizeof(float));
+        ggml_backend_tensor_get(m.speech_emb_w, speech_emb_tab.data(), 0, speech_emb_tab.size() * sizeof(float));
         std::vector<float> speech_pos_tab(c->hp.speech_pos_emb_size * D);
-        ggml_backend_tensor_get(m.speech_pos_emb_w, speech_pos_tab.data(), 0,
-                                speech_pos_tab.size() * sizeof(float));
+        ggml_backend_tensor_get(m.speech_pos_emb_w, speech_pos_tab.data(), 0, speech_pos_tab.size() * sizeof(float));
 
         // Read prompt token IDs
         std::vector<int32_t> prompt_ids(n_prompt);
-        ggml_backend_tensor_get(c->conds.speech_prompt_tokens, prompt_ids.data(), 0,
-                                n_prompt * sizeof(int32_t));
+        ggml_backend_tensor_get(c->conds.speech_prompt_tokens, prompt_ids.data(), 0, n_prompt * sizeof(int32_t));
 
         // Embed prompt: speech_emb(tok) + speech_pos_emb(pos)
         std::vector<float> prompt_emb(n_prompt * D, 0.0f);
         for (int i = 0; i < n_prompt; i++) {
             int tok = prompt_ids[i];
-            if (tok < 0 || tok >= (int)c->hp.speech_vocab_size) tok = 0;
+            if (tok < 0 || tok >= (int)c->hp.speech_vocab_size)
+                tok = 0;
             for (int j = 0; j < D; j++) {
                 prompt_emb[i * D + j] = speech_emb_tab[tok * D + j] + speech_pos_tab[i * D + j];
             }
@@ -772,7 +769,8 @@ static std::vector<float> build_prefill_embeds(
             std::vector<float> w(out_d * in_d);
             std::vector<float> b(out_d, 0.0f);
             ggml_backend_tensor_get(w_t, w.data(), 0, w.size() * sizeof(float));
-            if (b_t) ggml_backend_tensor_get(b_t, b.data(), 0, b.size() * sizeof(float));
+            if (b_t)
+                ggml_backend_tensor_get(b_t, b.data(), 0, b.size() * sizeof(float));
             return std::make_pair(w, b);
         };
 
@@ -783,16 +781,22 @@ static std::vector<float> build_prefill_embeds(
 
         // Read LayerNorm
         std::vector<float> norm_w(D, 1.0f), norm_b(D, 0.0f);
-        if (m.perceiver_norm_w) ggml_backend_tensor_get(m.perceiver_norm_w, norm_w.data(), 0, D * sizeof(float));
-        if (m.perceiver_norm_b) ggml_backend_tensor_get(m.perceiver_norm_b, norm_b.data(), 0, D * sizeof(float));
+        if (m.perceiver_norm_w)
+            ggml_backend_tensor_get(m.perceiver_norm_w, norm_w.data(), 0, D * sizeof(float));
+        if (m.perceiver_norm_b)
+            ggml_backend_tensor_get(m.perceiver_norm_b, norm_b.data(), 0, D * sizeof(float));
 
         // LayerNorm helper (eps=1e-5)
         auto layer_norm = [&](const float* in, float* out, int len) {
             float mean = 0.0f;
-            for (int i = 0; i < len; i++) mean += in[i];
+            for (int i = 0; i < len; i++)
+                mean += in[i];
             mean /= len;
             float var = 0.0f;
-            for (int i = 0; i < len; i++) { float d = in[i] - mean; var += d * d; }
+            for (int i = 0; i < len; i++) {
+                float d = in[i] - mean;
+                var += d * d;
+            }
             var /= len;
             float inv_std = 1.0f / std::sqrt(var + 1e-5f);
             for (int i = 0; i < len; i++) {
@@ -801,8 +805,7 @@ static std::vector<float> build_prefill_embeds(
         };
 
         // Matrix multiply: out[M,N] = W[M,K] × in[K,N] + bias[M]
-        auto matmul_bias = [](const float* W, const float* in, const float* bias,
-                              float* out, int M, int K, int N) {
+        auto matmul_bias = [](const float* W, const float* in, const float* bias, float* out, int M, int K, int N) {
             for (int n = 0; n < N; n++) {
                 for (int m = 0; m < M; m++) {
                     float sum = bias ? bias[m] : 0.0f;
@@ -815,16 +818,16 @@ static std::vector<float> build_prefill_embeds(
         };
 
         // Multi-head attention: Q(n_q, D) × K(n_kv, D)^T → softmax → × V(n_kv, D) → O
-        auto mha = [&](const float* Q_in, int n_q_len,
-                        const float* KV_in, int n_kv_len,
-                        float* out_buf) {
+        auto mha = [&](const float* Q_in, int n_q_len, const float* KV_in, int n_kv_len, float* out_buf) {
             // Project Q, K, V
             std::vector<float> Q_proj(n_q_len * D), K_proj(n_kv_len * D), V_proj(n_kv_len * D);
             std::vector<float> Q_norm(n_q_len * D), KV_norm(n_kv_len * D);
 
             // LayerNorm both inputs
-            for (int i = 0; i < n_q_len; i++) layer_norm(&Q_in[i * D], &Q_norm[i * D], D);
-            for (int i = 0; i < n_kv_len; i++) layer_norm(&KV_in[i * D], &KV_norm[i * D], D);
+            for (int i = 0; i < n_q_len; i++)
+                layer_norm(&Q_in[i * D], &Q_norm[i * D], D);
+            for (int i = 0; i < n_kv_len; i++)
+                layer_norm(&KV_in[i * D], &KV_norm[i * D], D);
 
             matmul_bias(qw.data(), Q_norm.data(), qb.data(), Q_proj.data(), D, D, n_q_len);
             matmul_bias(kw.data(), KV_norm.data(), kb.data(), K_proj.data(), D, D, n_kv_len);
@@ -846,7 +849,8 @@ static std::vector<float> build_prefill_embeds(
                             dot += Q_proj[qi * D + h * hd + d] * K_proj[ki * D + h * hd + d];
                         }
                         scores[ki] = dot * scale;
-                        if (scores[ki] > max_s) max_s = scores[ki];
+                        if (scores[ki] > max_s)
+                            max_s = scores[ki];
                     }
                     // Softmax
                     float sum_exp = 0.0f;
@@ -854,7 +858,8 @@ static std::vector<float> build_prefill_embeds(
                         scores[ki] = std::exp(scores[ki] - max_s);
                         sum_exp += scores[ki];
                     }
-                    for (int ki = 0; ki < n_kv_len; ki++) scores[ki] /= sum_exp;
+                    for (int ki = 0; ki < n_kv_len; ki++)
+                        scores[ki] /= sum_exp;
                     // Attention × V
                     for (int d = 0; d < hd; d++) {
                         float val = 0.0f;
@@ -927,18 +932,16 @@ static std::vector<float> build_prefill_embeds(
     // Place text embeddings: text_emb + text_pos_emb
     {
         std::vector<float> text_emb_table(c->hp.text_vocab_size * D);
-        ggml_backend_tensor_get(m.text_emb_w, text_emb_table.data(), 0,
-                                text_emb_table.size() * sizeof(float));
+        ggml_backend_tensor_get(m.text_emb_w, text_emb_table.data(), 0, text_emb_table.size() * sizeof(float));
         std::vector<float> text_pos_table(c->hp.text_pos_emb_size * D);
-        ggml_backend_tensor_get(m.text_pos_emb_w, text_pos_table.data(), 0,
-                                text_pos_table.size() * sizeof(float));
+        ggml_backend_tensor_get(m.text_pos_emb_w, text_pos_table.data(), 0, text_pos_table.size() * sizeof(float));
 
         for (int i = 0; i < text_len; i++) {
             int tok = text_tokens[i];
-            if (tok < 0 || tok >= (int)c->hp.text_vocab_size) tok = 0;
+            if (tok < 0 || tok >= (int)c->hp.text_vocab_size)
+                tok = 0;
             for (int j = 0; j < D; j++) {
-                embeds[(pos + i) * D + j] =
-                    text_emb_table[tok * D + j] + text_pos_table[i * D + j];
+                embeds[(pos + i) * D + j] = text_emb_table[tok * D + j] + text_pos_table[i * D + j];
             }
         }
         pos += text_len;
@@ -947,16 +950,14 @@ static std::vector<float> build_prefill_embeds(
     // Place speech start embedding: speech_emb(start_token) + speech_pos_emb(0)
     {
         std::vector<float> speech_emb_table(c->hp.speech_vocab_size * D);
-        ggml_backend_tensor_get(m.speech_emb_w, speech_emb_table.data(), 0,
-                                speech_emb_table.size() * sizeof(float));
+        ggml_backend_tensor_get(m.speech_emb_w, speech_emb_table.data(), 0, speech_emb_table.size() * sizeof(float));
         std::vector<float> speech_pos_table(c->hp.speech_pos_emb_size * D);
         ggml_backend_tensor_get(m.speech_pos_emb_w, speech_pos_table.data(), 0,
                                 speech_pos_table.size() * sizeof(float));
 
         int start_tok = (int)c->hp.start_speech_token;
         for (int j = 0; j < D; j++) {
-            embeds[pos * D + j] =
-                speech_emb_table[start_tok * D + j] + speech_pos_table[0 * D + j];
+            embeds[pos * D + j] = speech_emb_table[start_tok * D + j] + speech_pos_table[0 * D + j];
         }
     }
 
@@ -964,21 +965,19 @@ static std::vector<float> build_prefill_embeds(
 }
 
 // Build embedding for a single speech token at a given position.
-static std::vector<float> build_speech_token_embed(
-    chatterbox_context* c,
-    int32_t token_id,
-    int speech_pos // position index for speech_pos_emb
+static std::vector<float> build_speech_token_embed(chatterbox_context* c, int32_t token_id,
+                                                   int speech_pos // position index for speech_pos_emb
 ) {
     const int D = (int)c->hp.hidden_size;
     std::vector<float> embed(D);
 
     // speech_emb(token) + speech_pos_emb(pos)
     std::vector<float> tok_emb(D);
-    ggml_backend_tensor_get(c->t3.speech_emb_w, tok_emb.data(),
-                            (size_t)token_id * D * sizeof(float), D * sizeof(float));
+    ggml_backend_tensor_get(c->t3.speech_emb_w, tok_emb.data(), (size_t)token_id * D * sizeof(float),
+                            D * sizeof(float));
     std::vector<float> pos_emb(D);
-    ggml_backend_tensor_get(c->t3.speech_pos_emb_w, pos_emb.data(),
-                            (size_t)speech_pos * D * sizeof(float), D * sizeof(float));
+    ggml_backend_tensor_get(c->t3.speech_pos_emb_w, pos_emb.data(), (size_t)speech_pos * D * sizeof(float),
+                            D * sizeof(float));
     for (int j = 0; j < D; j++) {
         embed[j] = tok_emb[j] + pos_emb[j];
     }
@@ -1005,10 +1004,8 @@ extern "C" struct chatterbox_context_params chatterbox_context_default_params(vo
     return p;
 }
 
-extern "C" struct chatterbox_context* chatterbox_init_from_file(
-    const char* path_model,
-    struct chatterbox_context_params params
-) {
+extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path_model,
+                                                                struct chatterbox_context_params params) {
     auto* c = new chatterbox_context();
     c->params = params;
     c->n_threads = params.n_threads > 0 ? params.n_threads : 4;
@@ -1016,27 +1013,28 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(
     // Pass 1: metadata
     {
         gguf_context* g = core_gguf::open_metadata(path_model);
-        if (!g) { delete c; return nullptr; }
+        if (!g) {
+            delete c;
+            return nullptr;
+        }
         load_metadata(c, g);
         core_gguf::free_metadata(g);
     }
 
     if (params.verbosity >= 1) {
-        fprintf(stderr,
-            "chatterbox: T3 %uL d=%u h=%u hd=%u ff=%u text_vocab=%u speech_vocab=%u\n",
-            c->hp.n_layers, c->hp.hidden_size, c->hp.n_heads, c->hp.head_dim,
-            c->hp.intermediate_size, c->hp.text_vocab_size, c->hp.speech_vocab_size);
-        fprintf(stderr,
-            "chatterbox: rope_theta=%.0f  tokenizer=%zu tokens  conds_emotion=%.2f\n",
-            (double)c->hp.rope_theta, c->tokenizer.id_to_token.size(),
-            c->conds.emotion_adv);
+        fprintf(stderr, "chatterbox: T3 %uL d=%u h=%u hd=%u ff=%u text_vocab=%u speech_vocab=%u\n", c->hp.n_layers,
+                c->hp.hidden_size, c->hp.n_heads, c->hp.head_dim, c->hp.intermediate_size, c->hp.text_vocab_size,
+                c->hp.speech_vocab_size);
+        fprintf(stderr, "chatterbox: rope_theta=%.0f  tokenizer=%zu tokens  conds_emotion=%.2f\n",
+                (double)c->hp.rope_theta, c->tokenizer.id_to_token.size(), c->conds.emotion_adv);
     }
 
     // Backend
     c->backend_cpu = ggml_backend_cpu_init();
     if (!c->backend_cpu) {
         fprintf(stderr, "chatterbox: failed to init CPU backend\n");
-        delete c; return nullptr;
+        delete c;
+        return nullptr;
     }
     c->backend = c->backend_cpu;
 
@@ -1044,7 +1042,8 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(
     {
         core_gguf::WeightLoad wl;
         if (!core_gguf::load_weights(path_model, c->backend, "chatterbox", wl)) {
-            delete c; return nullptr;
+            delete c;
+            return nullptr;
         }
         c->ctx_w = wl.ctx;
         c->buf_w = wl.buf;
@@ -1054,18 +1053,19 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(
     // Bind tensors
     if (!bind_t3(c)) {
         fprintf(stderr, "chatterbox: failed to bind T3 tensors\n");
-        delete c; return nullptr;
+        delete c;
+        return nullptr;
     }
     bind_ve(c); // optional
 
     if (params.verbosity >= 1) {
         fprintf(stderr, "chatterbox: precomputed conds %s\n",
-            c->conds.loaded ? "loaded" : "NOT loaded (voice cloning required)");
+                c->conds.loaded ? "loaded" : "NOT loaded (voice cloning required)");
     }
 
     // Compute scheduler
     {
-        ggml_backend_t backends[] = { c->backend };
+        ggml_backend_t backends[] = {c->backend};
         c->sched = ggml_backend_sched_new(backends, nullptr, 1, 16384, false, false);
         c->compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
     }
@@ -1074,7 +1074,8 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(
 }
 
 extern "C" int chatterbox_set_s3gen_path(struct chatterbox_context* ctx, const char* path) {
-    if (!ctx || !path) return -1;
+    if (!ctx || !path)
+        return -1;
     ctx->s3gen_path = path;
 
     // Free existing
@@ -1091,12 +1092,9 @@ extern "C" int chatterbox_set_s3gen_path(struct chatterbox_context* ctx, const c
     return 0;
 }
 
-extern "C" int32_t* chatterbox_synthesize_tokens(
-    struct chatterbox_context* ctx,
-    const char* text,
-    int* out_n
-) {
-    if (!ctx || !text || !out_n) return nullptr;
+extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx, const char* text, int* out_n) {
+    if (!ctx || !text || !out_n)
+        return nullptr;
     *out_n = 0;
 
     if (!ctx->conds.loaded) {
@@ -1149,14 +1147,8 @@ extern "C" int32_t* chatterbox_synthesize_tokens(
 
     for (int step = 0; step < max_speech; step++) {
         // Sample next token
-        int32_t tok = sample_token(
-            logits, (int)ctx->hp.speech_vocab_size,
-            ctx->params.temperature,
-            ctx->params.min_p,
-            ctx->params.top_p,
-            ctx->params.repetition_penalty,
-            speech_tokens,
-            ctx->rng_state);
+        int32_t tok = sample_token(logits, (int)ctx->hp.speech_vocab_size, ctx->params.temperature, ctx->params.min_p,
+                                   ctx->params.top_p, ctx->params.repetition_penalty, speech_tokens, ctx->rng_state);
         free(logits);
         logits = nullptr;
 
@@ -1186,7 +1178,8 @@ extern "C" int32_t* chatterbox_synthesize_tokens(
         }
         n_past++;
     }
-    if (logits) free(logits);
+    if (logits)
+        free(logits);
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "chatterbox: AR emitted %zu speech tokens\n", speech_tokens.size());
@@ -1196,7 +1189,8 @@ extern "C" int32_t* chatterbox_synthesize_tokens(
     std::vector<int32_t> valid;
     valid.reserve(speech_tokens.size());
     for (int32_t t : speech_tokens) {
-        if (t >= 0 && t < 6561) valid.push_back(t);
+        if (t >= 0 && t < 6561)
+            valid.push_back(t);
     }
 
     if (valid.empty()) {
@@ -1210,16 +1204,16 @@ extern "C" int32_t* chatterbox_synthesize_tokens(
 }
 
 // Internal: run T3 + S3Gen to get mel, return channel-first (80, T_mel)
-static std::vector<float> synthesize_mel_internal(
-    chatterbox_context* ctx, const char* text, int* out_T_mel
-) {
+static std::vector<float> synthesize_mel_internal(chatterbox_context* ctx, const char* text, int* out_T_mel) {
     *out_T_mel = 0;
-    if (!ctx->s3gen_ctx) return {};
+    if (!ctx->s3gen_ctx)
+        return {};
 
     int n_tokens = 0;
     int32_t* speech_tokens = chatterbox_synthesize_tokens(ctx, text, &n_tokens);
     if (!speech_tokens || n_tokens == 0) {
-        if (speech_tokens) chatterbox_tokens_free(speech_tokens);
+        if (speech_tokens)
+            chatterbox_tokens_free(speech_tokens);
         return {};
     }
 
@@ -1255,39 +1249,30 @@ static std::vector<float> synthesize_mel_internal(
     // we'll use the existing synthesize and ignore the PCM, re-running encoder+CFM.
     // TODO: refactor to avoid double computation
     int n_samples = 0;
-    float* pcm = chatterbox_s3gen_synthesize(
-        ctx->s3gen_ctx,
-        speech_tokens, n_tokens,
-        prompt_tokens, n_prompt,
-        prompt_feat, prompt_feat_len,
-        spk_emb, ctx->params.cfm_steps, &n_samples);
+    float* pcm = chatterbox_s3gen_synthesize(ctx->s3gen_ctx, speech_tokens, n_tokens, prompt_tokens, n_prompt,
+                                             prompt_feat, prompt_feat_len, spk_emb, ctx->params.cfm_steps, &n_samples);
 
     chatterbox_tokens_free(speech_tokens);
-    if (pcm) chatterbox_s3gen_pcm_free(pcm);
+    if (pcm)
+        chatterbox_s3gen_pcm_free(pcm);
 
     // For now, return empty — the proper implementation needs S3Gen
     // to expose the mel before vocoding.
     return {};
 }
 
-extern "C" float* chatterbox_synthesize_mel(
-    struct chatterbox_context* ctx,
-    const char* text,
-    int* out_T_mel
-) {
-    if (!ctx || !text || !out_T_mel) return nullptr;
+extern "C" float* chatterbox_synthesize_mel(struct chatterbox_context* ctx, const char* text, int* out_T_mel) {
+    if (!ctx || !text || !out_T_mel)
+        return nullptr;
     *out_T_mel = 0;
     // TODO: implement properly by having S3Gen return mel
     fprintf(stderr, "chatterbox: synthesize_mel not yet fully implemented\n");
     return nullptr;
 }
 
-extern "C" float* chatterbox_synthesize(
-    struct chatterbox_context* ctx,
-    const char* text,
-    int* out_n_samples
-) {
-    if (!ctx || !text || !out_n_samples) return nullptr;
+extern "C" float* chatterbox_synthesize(struct chatterbox_context* ctx, const char* text, int* out_n_samples) {
+    if (!ctx || !text || !out_n_samples)
+        return nullptr;
     *out_n_samples = 0;
 
     if (!ctx->s3gen_ctx) {
@@ -1300,7 +1285,8 @@ extern "C" float* chatterbox_synthesize(
     int32_t* speech_tokens = chatterbox_synthesize_tokens(ctx, text, &n_tokens);
     if (!speech_tokens || n_tokens == 0) {
         fprintf(stderr, "chatterbox: T3 produced no speech tokens\n");
-        if (speech_tokens) chatterbox_tokens_free(speech_tokens);
+        if (speech_tokens)
+            chatterbox_tokens_free(speech_tokens);
         return nullptr;
     }
 
@@ -1323,56 +1309,49 @@ extern "C" float* chatterbox_synthesize(
     if (ctx->conds.gen_prompt_token) {
         n_prompt = (int)ctx->conds.gen_prompt_token->ne[0];
         pt_buf.resize(n_prompt);
-        ggml_backend_tensor_get(ctx->conds.gen_prompt_token, pt_buf.data(), 0,
-                                n_prompt * sizeof(int32_t));
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_token, pt_buf.data(), 0, n_prompt * sizeof(int32_t));
         prompt_tokens = pt_buf.data();
     }
     if (ctx->conds.gen_prompt_feat) {
         prompt_feat_len = (int)ctx->conds.gen_prompt_feat->ne[1]; // (1, T, 80)
         pf_buf.resize(prompt_feat_len * 80);
-        ggml_backend_tensor_get(ctx->conds.gen_prompt_feat, pf_buf.data(), 0,
-                                pf_buf.size() * sizeof(float));
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_feat, pf_buf.data(), 0, pf_buf.size() * sizeof(float));
         prompt_feat = pf_buf.data();
     }
     if (ctx->conds.gen_embedding) {
         se_buf.resize(192);
-        ggml_backend_tensor_get(ctx->conds.gen_embedding, se_buf.data(), 0,
-                                192 * sizeof(float));
+        ggml_backend_tensor_get(ctx->conds.gen_embedding, se_buf.data(), 0, 192 * sizeof(float));
         spk_emb = se_buf.data();
     }
 
-    float* pcm = chatterbox_s3gen_synthesize(
-        ctx->s3gen_ctx,
-        speech_tokens, n_tokens,
-        prompt_tokens, n_prompt,
-        prompt_feat, prompt_feat_len,
-        spk_emb,
-        ctx->params.cfm_steps,
-        out_n_samples);
+    float* pcm =
+        chatterbox_s3gen_synthesize(ctx->s3gen_ctx, speech_tokens, n_tokens, prompt_tokens, n_prompt, prompt_feat,
+                                    prompt_feat_len, spk_emb, ctx->params.cfm_steps, out_n_samples);
 
     chatterbox_tokens_free(speech_tokens);
     return pcm;
 }
 
-extern "C" int chatterbox_set_voice_from_wav(
-    struct chatterbox_context* ctx,
-    const char* wav_path
-) {
-    (void)ctx; (void)wav_path;
+extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, const char* wav_path) {
+    (void)ctx;
+    (void)wav_path;
     fprintf(stderr, "chatterbox: voice cloning from WAV not yet implemented\n");
     return -1;
 }
 
 extern "C" void chatterbox_set_exaggeration(struct chatterbox_context* ctx, float exaggeration) {
-    if (ctx) ctx->conds.emotion_adv = exaggeration;
+    if (ctx)
+        ctx->conds.emotion_adv = exaggeration;
 }
 
 extern "C" void chatterbox_set_cfg_weight(struct chatterbox_context* ctx, float cfg_weight) {
-    if (ctx) ctx->params.cfg_weight = cfg_weight;
+    if (ctx)
+        ctx->params.cfg_weight = cfg_weight;
 }
 
 extern "C" void chatterbox_set_cfm_steps(struct chatterbox_context* ctx, int steps) {
-    if (ctx) ctx->params.cfm_steps = (steps > 0 && steps <= 100) ? steps : 10;
+    if (ctx)
+        ctx->params.cfm_steps = (steps > 0 && steps <= 100) ? steps : 10;
 }
 
 extern "C" void chatterbox_tokens_free(int32_t* tokens) {
@@ -1388,5 +1367,6 @@ extern "C" void chatterbox_free(struct chatterbox_context* ctx) {
 }
 
 extern "C" void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_threads) {
-    if (ctx) ctx->n_threads = n_threads > 0 ? n_threads : 4;
+    if (ctx)
+        ctx->n_threads = n_threads > 0 ? n_threads : 4;
 }

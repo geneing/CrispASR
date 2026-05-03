@@ -2136,12 +2136,10 @@ static char* gemma4_e2b_transcribe_impl(struct gemma4_e2b_context* ctx, const fl
             continue;
         if (tid >= 0 && tid < (int)m.vocab.size()) {
             const std::string& piece = m.vocab[tid];
-            for (size_t ci = 0; ci < piece.size(); ) {
+            for (size_t ci = 0; ci < piece.size();) {
                 // Replace SentencePiece ▁ (U+2581, 3-byte UTF-8: E2 96 81) with space
-                if (ci + 2 < piece.size() &&
-                    (unsigned char)piece[ci] == 0xE2 &&
-                    (unsigned char)piece[ci+1] == 0x96 &&
-                    (unsigned char)piece[ci+2] == 0x81) {
+                if (ci + 2 < piece.size() && (unsigned char)piece[ci] == 0xE2 && (unsigned char)piece[ci + 1] == 0x96 &&
+                    (unsigned char)piece[ci + 2] == 0x81) {
                     result += ' ';
                     ci += 3;
                 } else {

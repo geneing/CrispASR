@@ -293,9 +293,11 @@ public:
             }
             free(all_embeds);
 
-            auto replay = [this](granite_speech_context* /*ctx*/, const int32_t* toks, int n, int prompt_len) -> float* {
+            auto replay = [this](granite_speech_context* /*ctx*/, const int32_t* toks, int n,
+                                 int prompt_len) -> float* {
                 float* emb = granite_speech_embed_tokens(ctx_, toks, n);
-                if (!emb) return nullptr;
+                if (!emb)
+                    return nullptr;
                 int v = 0;
                 float* lg = granite_speech_run_llm_kv(ctx_, emb, n, prompt_len, nullptr, &v);
                 std::free(emb);
@@ -329,12 +331,14 @@ public:
 
             char* text = granite_speech_decode_tokens(ctx_, text_ids.data(), (int)text_ids.size());
             std::string transcript = text ? text : "";
-            if (text) free(text);
+            if (text)
+                free(text);
 
             crispasr_segment seg;
             // Strip leading space
             size_t start = 0;
-            while (start < transcript.size() && transcript[start] == ' ') start++;
+            while (start < transcript.size() && transcript[start] == ' ')
+                start++;
             seg.text = transcript.substr(start);
             if (!params.punctuation) {
                 crispasr_strip_ascii_punctuation(seg.text);
