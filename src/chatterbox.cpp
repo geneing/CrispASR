@@ -1209,6 +1209,79 @@ extern "C" int32_t* chatterbox_synthesize_tokens(
     return out;
 }
 
+// Internal: run T3 + S3Gen to get mel, return channel-first (80, T_mel)
+static std::vector<float> synthesize_mel_internal(
+    chatterbox_context* ctx, const char* text, int* out_T_mel
+) {
+    *out_T_mel = 0;
+    if (!ctx->s3gen_ctx) return {};
+
+    int n_tokens = 0;
+    int32_t* speech_tokens = chatterbox_synthesize_tokens(ctx, text, &n_tokens);
+    if (!speech_tokens || n_tokens == 0) {
+        if (speech_tokens) chatterbox_tokens_free(speech_tokens);
+        return {};
+    }
+
+    // Get precomputed conditioning
+    std::vector<int32_t> pt_buf;
+    std::vector<float> pf_buf, se_buf;
+    const int32_t* prompt_tokens = nullptr;
+    int n_prompt = 0;
+    const float* prompt_feat = nullptr;
+    int prompt_feat_len = 0;
+    const float* spk_emb = nullptr;
+
+    if (ctx->conds.gen_prompt_token) {
+        n_prompt = (int)ctx->conds.gen_prompt_token->ne[0];
+        pt_buf.resize(n_prompt);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_token, pt_buf.data(), 0, n_prompt * sizeof(int32_t));
+        prompt_tokens = pt_buf.data();
+    }
+    if (ctx->conds.gen_prompt_feat) {
+        prompt_feat_len = (int)ctx->conds.gen_prompt_feat->ne[1];
+        pf_buf.resize(prompt_feat_len * 80);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_feat, pf_buf.data(), 0, pf_buf.size() * sizeof(float));
+        prompt_feat = pf_buf.data();
+    }
+    if (ctx->conds.gen_embedding) {
+        se_buf.resize(192);
+        ggml_backend_tensor_get(ctx->conds.gen_embedding, se_buf.data(), 0, 192 * sizeof(float));
+        spk_emb = se_buf.data();
+    }
+
+    // Run S3Gen to get mel (this calls the encoder + CFM denoiser)
+    // We need to refactor s3gen to return mel instead of PCM, but for now
+    // we'll use the existing synthesize and ignore the PCM, re-running encoder+CFM.
+    // TODO: refactor to avoid double computation
+    int n_samples = 0;
+    float* pcm = chatterbox_s3gen_synthesize(
+        ctx->s3gen_ctx,
+        speech_tokens, n_tokens,
+        prompt_tokens, n_prompt,
+        prompt_feat, prompt_feat_len,
+        spk_emb, ctx->params.cfm_steps, &n_samples);
+
+    chatterbox_tokens_free(speech_tokens);
+    if (pcm) chatterbox_s3gen_pcm_free(pcm);
+
+    // For now, return empty — the proper implementation needs S3Gen
+    // to expose the mel before vocoding.
+    return {};
+}
+
+extern "C" float* chatterbox_synthesize_mel(
+    struct chatterbox_context* ctx,
+    const char* text,
+    int* out_T_mel
+) {
+    if (!ctx || !text || !out_T_mel) return nullptr;
+    *out_T_mel = 0;
+    // TODO: implement properly by having S3Gen return mel
+    fprintf(stderr, "chatterbox: synthesize_mel not yet fully implemented\n");
+    return nullptr;
+}
+
 extern "C" float* chatterbox_synthesize(
     struct chatterbox_context* ctx,
     const char* text,

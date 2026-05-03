@@ -63,6 +63,14 @@ float* chatterbox_synthesize(
     const char* text,
     int* out_n_samples);
 
+// Run T3 + S3Gen stages: text → mel spectrogram (80 channels).
+// Returns channel-first float array (80 * T_mel), caller frees with free().
+// *out_T_mel is set to the number of mel frames.
+float* chatterbox_synthesize_mel(
+    struct chatterbox_context* ctx,
+    const char* text,
+    int* out_T_mel);
+
 // Run only the T3 stage: text → speech tokens. Caller frees with
 // chatterbox_tokens_free. *out_n is set to token count.
 int32_t* chatterbox_synthesize_tokens(
