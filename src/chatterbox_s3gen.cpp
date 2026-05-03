@@ -1056,12 +1056,14 @@ static std::vector<float> hift_vocoder_cpu(
         // Skipped for now — source signal (SineGen) not implemented
         // TODO: add source_downs + source_resblocks path
 
-        // ResBlocks: 3 per stage, each with 3 dilated conv pairs + Snake
-        // ResBlock indices: stage 0 → rb.0-2, stage 1 → rb.3-5, stage 2 → rb.6-8
-        // ResBlock kernel sizes: [3, 7, 11] (from resblock_kernel_sizes param)
+        // ResBlocks: 3 per stage, each run INDEPENDENTLY on the same input,
+        // then outputs averaged: x = (rb0(x) + rb1(x) + rb2(x)) / 3
         const int rb_kernels[] = {3, 7, 11};
         const int rb_dilations[][3] = {{1, 3, 5}, {1, 3, 5}, {1, 3, 5}};
+        ggml_tensor* rb_sum = nullptr;
+        ggml_tensor* rb_input = x; // save input for each independent ResBlock
         for (int rb = 0; rb < 3; rb++) {
+            x = rb_input; // reset to same input for each ResBlock
             int rb_idx = stage * 3 + rb;
             // ResBlock: for each of 3 dilated passes: snake1 → conv1(dilated) → snake2 → conv2 → residual
             ggml_tensor* rb_residual = x;
@@ -1122,7 +1124,12 @@ static std::vector<float> hift_vocoder_cpu(
                 x = ggml_add(ctx0, x, rb_residual);
                 rb_residual = x;
             }
+            // Accumulate for averaging
+            if (!rb_sum) rb_sum = x;
+            else rb_sum = ggml_add(ctx0, rb_sum, x);
         }
+        // Average the 3 ResBlock outputs
+        x = ggml_scale(ctx0, rb_sum, 1.0f / 3.0f);
     }
 
     // Reflection pad (1, 0) — skip for now
@@ -1136,6 +1143,9 @@ static std::vector<float> hift_vocoder_cpu(
         x = ggml_conv_1d(ctx0, cpost_w, x, 1, 3, 1);
         if (cpost_b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpost_b, 1, (int)cpost_b->ne[0]));
     }
+
+    // Clamp to prevent iSTFT overflow from unbounded ResBlock output
+    x = ggml_clamp(ctx0, x, -5.0f, 5.0f);
 
     ggml_set_name(x, "voc_stft");
     ggml_build_forward_expand(gf, x);
