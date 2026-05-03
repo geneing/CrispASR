@@ -148,7 +148,7 @@ See [`qwen3-asr-todo.md`](https://github.com/CrispStrobe/CrispASR/blob/main/qwen
 ## How this was made
 
 1. The HF safetensors model was converted to GGUF F16 by [`models/convert-qwen3-asr-to-gguf.py`](https://github.com/CrispStrobe/CrispASR/blob/main/models/convert-qwen3-asr-to-gguf.py). All 612 tensors map cleanly. The mel filterbank (from `WhisperFeatureExtractor.mel_filters`) and Hann window are baked into the GGUF as `audio.mel_filters` / `audio.mel_window`.
-2. Quantised variants are produced by `cohere-quantize` (the same llama.cpp-style quantiser used for the other GGUF releases in this family).
+2. Quantised variants are produced by `crispasr-quantize` (the same llama.cpp-style quantiser used for the other GGUF releases in this family).
 3. Inference is implemented in [`src/qwen3_asr.{h,cpp}`](https://github.com/CrispStrobe/CrispASR/blob/main/src/qwen3_asr.cpp): the encoder and the LLM each run as one ggml graph, with a persistent F32 KV cache `(head_dim, max_ctx, n_kv_heads, n_layers)` shared between prefill and per-token decode steps.
 
 ## Reference implementation

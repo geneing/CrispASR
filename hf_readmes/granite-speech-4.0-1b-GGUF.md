@@ -91,7 +91,7 @@ python models/convert-granite-speech-to-gguf.py \
     --output granite-speech-1b.gguf
 
 # Quantize (only LLM weights are quantized; encoder/projector stay F32)
-./build/bin/cohere-quantize granite-speech-1b.gguf granite-speech-1b-q4_k.gguf q4_k
+./build/bin/crispasr-quantize granite-speech-1b.gguf granite-speech-1b-q4_k.gguf q4_k
 ```
 
 ## Output

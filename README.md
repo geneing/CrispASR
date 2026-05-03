@@ -1628,6 +1628,22 @@ CrispASR includes a unified GGUF re-quantization tool, `crispasr-quantize`, that
 
 It is a model-agnostic tool that iterates through the GGUF tensor list and re-quantizes eligible 2D weight matrices while preserving metadata and non-quantizable tensors (norms, positional embeddings, biases) in their original types.
 
+### Building
+
+`crispasr-quantize` is built automatically as part of the normal CMake build:
+
+```bash
+git clone https://github.com/CrispStrobe/CrispASR.git
+cd CrispASR
+cmake -B build
+cmake --build build -j$(nproc)
+
+# The binary is now at:
+ls build/bin/crispasr-quantize
+```
+
+> **Note:** The pre-built `bin/cohere-quantize` binary that some HuggingFace model cards reference is a legacy artifact from an earlier naming scheme. It may fail on older glibc systems (requires glibc 2.38+). Building from source as shown above avoids this and works on any system with a C++17 compiler.
+
 ### Usage
 
 ```bash

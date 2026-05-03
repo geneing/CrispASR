@@ -52,7 +52,7 @@ Parakeet TDT 0.6B v3 is NVIDIA's 600 M-parameter multilingual ASR model:
 - **6.34 % avg WER** on the HuggingFace Open ASR Leaderboard
 - **CC-BY-4.0** licence (friendlier than most ASR models)
 
-This repo provides four quantisations, all converted from the same `.nemo` checkpoint via the streaming `convert-parakeet-to-gguf.py` script and quantised with `cohere-quantize`.
+This repo provides four quantisations, all converted from the same `.nemo` checkpoint via the streaming `convert-parakeet-to-gguf.py` script and quantised with `crispasr-quantize`.
 
 ## Files
 
@@ -122,7 +122,7 @@ The mel filterbank and Hann window are baked directly into the GGUF (`preprocess
 ## How this was made
 
 1. The `.nemo` checkpoint was unpacked, NeMo state-dict keys were remapped to ggml-friendly names, and weights were written to GGUF F16 (matmul tensors) + F32 (norms / biases / mel filterbank). A synthetic zero `conv.dw.bias` is added per encoder layer so the runtime BN-fold pass has somewhere to write the absorbed bias shift.
-2. Quantised variants are produced by `cohere-quantize` (the same llama.cpp-style quantiser used for the Cohere Transcribe GGUFs).
+2. Quantised variants are produced by `crispasr-quantize` (the same llama.cpp-style quantiser used for the other GGUF releases).
 3. Inference is implemented in `src/parakeet.{h,cpp}`: the FastConformer encoder runs as a single ggml graph (BN folded out), the LSTM predictor and joint head run as manual F32 CPU loops, and the TDT greedy decode loop alternates "advance encoder frame" / "emit token + advance predictor" using the duration head's argmax.
 
 ## Supported languages

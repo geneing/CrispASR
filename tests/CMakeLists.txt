@@ -191,6 +191,10 @@ target_include_directories(test-registry PRIVATE
 target_link_libraries(test-registry PRIVATE
     Catch2::Catch2WithMain
 )
+if(WIN32)
+    # crispasr_cache.cpp uses WinHTTP for model downloads
+    target_link_libraries(test-registry PRIVATE winhttp)
+endif()
 catch_discover_tests(test-registry
     TEST_SPEC "[unit]"
     PROPERTIES LABELS "unit"

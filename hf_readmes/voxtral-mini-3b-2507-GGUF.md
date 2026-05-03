@@ -150,7 +150,7 @@ The 0.87 min cosine sim on the encoder is from the bf16 reference precision (7-b
 ## How this was made
 
 1. HF safetensors converted to GGUF F16 by [`models/convert-voxtral-to-gguf.py`](https://github.com/CrispStrobe/CrispASR/blob/main/models/convert-voxtral-to-gguf.py). All 765 tensors (762 model + mel_filters + mel_window + Tekken vocab blob) map cleanly.
-2. Quantised variants produced by [`cohere-quantize`](https://github.com/CrispStrobe/CrispASR/blob/main/examples/cohere-main/cohere-quantize.cpp) with the Q4_0 fallback for 1280-wide audio encoder tensors (1280 % 256 ≠ 0 for Q4_K, same situation as Qwen3-ASR).
+2. Quantised variants produced by [`crispasr-quantize`](https://github.com/CrispStrobe/CrispASR/blob/main/examples/cohere-main/crispasr-quantize.cpp) with the Q4_0 fallback for 1280-wide audio encoder tensors (1280 % 256 ≠ 0 for Q4_K, same situation as Qwen3-ASR).
 3. Inference implemented in [`src/voxtral.{h,cpp}`](https://github.com/CrispStrobe/CrispASR/blob/main/src/voxtral.cpp) (~1300 LOC): encoder and LLM each run as one ggml graph, with a persistent F16 KV cache `(head_dim, max_ctx, n_kv_heads, n_layers)` shared between prefill and per-token decode steps. Flash attention (`ggml_flash_attn_ext`) used on both prefill (F16 causal mask) and decode (no mask) paths.
 
 ## Related

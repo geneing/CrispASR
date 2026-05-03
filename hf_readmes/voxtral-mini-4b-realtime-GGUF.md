@@ -112,7 +112,7 @@ python models/convert-voxtral4b-to-gguf.py \
     --output voxtral-mini-4b-realtime.gguf
 
 # Then quantize
-./build/bin/cohere-quantize voxtral-mini-4b-realtime.gguf \
+./build/bin/crispasr-quantize voxtral-mini-4b-realtime.gguf \
     voxtral-mini-4b-realtime-q4_k.gguf q4_k
 ```
 

@@ -236,7 +236,7 @@ Same coverage as Canary-1B-v2 and Parakeet-TDT-0.6B-v3, since this is the same G
 2. **Convert** with [`models/convert-canary-ctc-to-gguf.py`](https://github.com/CrispStrobe/CrispASR/blob/parakeet/models/convert-canary-ctc-to-gguf.py): extract just the auxiliary checkpoint (not the main canary), remap NeMo state-dict keys (`encoder.layers.{i}.feed_forward1.linear1.weight` → `encoder.layers.{i}.ff1.linear1.weight`, etc.), squeeze the trailing kernel-1 dim on the CTC weight to make it a plain 2D linear, and write 712 tensors as F16 + F32.
 3. **C++ runtime** in [`src/canary_ctc.{h,cpp}`](https://github.com/CrispStrobe/CrispASR/blob/parakeet/src/canary_ctc.cpp): mmap the GGUF, fold BN into the depthwise conv at load time, build the encoder graph (identical to parakeet's), add a final `mul_mat` with the CTC head, return per-frame logits.
 4. **Subword Viterbi** in the same file: greedy longest-prefix tokenisation against the vocab, build the CTC-expanded label sequence, run the standard CTC Viterbi DP, traceback to per-token frames.
-5. **Quantise** with `cohere-quantize` (the same llama.cpp-style quantiser used for the other GGUFs in this fork). Q4_K alignment is byte-identical to F16 on the verification clip.
+5. **Quantise** with `crispasr-quantize` (the same llama.cpp-style quantiser used for the other GGUFs in this family). Q4_K alignment is byte-identical to F16 on the verification clip.
 
 ## Related
 

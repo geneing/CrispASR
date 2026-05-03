@@ -137,7 +137,7 @@ The mel filterbank and Hann window are baked into the GGUF (`preprocessor.fb` an
 1. **Inspect** the `.nemo` tarball: 1510 tensors total — encoder (1294), `transf_decoder` (214), `log_softmax` head (2), preprocessor (2). Skipped the auxiliary `timestamps_asr_model_weights.ckpt` which is the separate Parakeet CTC model used by NeMo Forced Aligner for segment-level timestamps.
 2. **Convert** with [`models/convert-canary-to-gguf.py`](https://github.com/CrispStrobe/CrispASR/blob/parakeet/models/convert-canary-to-gguf.py): remap NeMo state-dict keys (`transf_decoder._embedding.token_embedding` → `decoder.embed`, `first_sub_layer.query_net` → `sa_q`, etc.) and write 1478 tensors as F16 (matmul) + F32 (norms / biases / mel filterbank). 1.97 GB GGUF.
 3. **C++ runtime** in [`src/canary.{h,cpp}`](https://github.com/CrispStrobe/CrispASR/blob/parakeet/src/canary.cpp): mmap the GGUF, fold BN into the depthwise conv at load time, build the encoder graph (32-layer FastConformer with biases), build the decoder graph per step (with self-attention KV cache + pre-computed cross-K/V), greedy decode with task-token prompt, detokenise via SentencePiece.
-4. **Quantise** with [`cohere-quantize`](https://github.com/CrispStrobe/CrispASR/blob/parakeet/examples/cohere-main/cohere-quantize.cpp): same llama.cpp-style quantiser used for the cohere and parakeet GGUFs in this fork.
+4. **Quantise** with [`crispasr-quantize`](https://github.com/CrispStrobe/CrispASR/blob/parakeet/examples/cohere-main/crispasr-quantize.cpp): same llama.cpp-style quantiser used for the other GGUFs in this family.
 
 ## Comparison with Parakeet TDT 0.6B v3
 

@@ -577,6 +577,18 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# chatterbox — ResembleAI/chatterbox (MIT, 520M Llama AR + CFM + HiFTNet)
+# ---------------------------------------------------------------------------
+add_library(chatterbox STATIC chatterbox.h chatterbox.cpp)
+set_target_properties(chatterbox PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(chatterbox PUBLIC .)
+target_compile_features   (chatterbox PUBLIC cxx_std_17)
+target_link_libraries     (chatterbox PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(chatterbox PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # omniasr — Facebook OmniASR-CTC (wav2vec2-style, 1600+ languages)
 # ---------------------------------------------------------------------------
 add_library(omniasr STATIC omniasr.h omniasr.cpp)
@@ -874,6 +886,9 @@ if (TARGET qwen3_tts)
 endif()
 if (TARGET orpheus)
     target_link_libraries(crispasr PUBLIC orpheus)
+endif()
+if (TARGET chatterbox)
+    target_link_libraries(crispasr PUBLIC chatterbox)
 endif()
 if (TARGET kokoro)
     target_link_libraries(crispasr PUBLIC kokoro)
