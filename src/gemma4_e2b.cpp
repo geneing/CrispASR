@@ -1676,7 +1676,9 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
     if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend) {
         backends[n_be++] = ctx->backend_cpu;
     }
-    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
+    // graph_size must be >= the largest graph's n_nodes + n_leafs.
+    // The audio encoder graph uses up to 32768 nodes (line ~950).
+    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 40960, false, false);
 
     // Allocate compute meta buffer for graph building (8 MB)
     ctx->compute_meta.resize(8 * 1024 * 1024);
@@ -2132,8 +2134,22 @@ static char* gemma4_e2b_transcribe_impl(struct gemma4_e2b_context* ctx, const fl
             continue;
         if (tid == ctx->start_of_turn_id || tid == ctx->end_of_turn_id)
             continue;
-        if (tid >= 0 && tid < (int)m.vocab.size())
-            result += m.vocab[tid];
+        if (tid >= 0 && tid < (int)m.vocab.size()) {
+            const std::string& piece = m.vocab[tid];
+            for (size_t ci = 0; ci < piece.size(); ) {
+                // Replace SentencePiece ▁ (U+2581, 3-byte UTF-8: E2 96 81) with space
+                if (ci + 2 < piece.size() &&
+                    (unsigned char)piece[ci] == 0xE2 &&
+                    (unsigned char)piece[ci+1] == 0x96 &&
+                    (unsigned char)piece[ci+2] == 0x81) {
+                    result += ' ';
+                    ci += 3;
+                } else {
+                    result += piece[ci];
+                    ci++;
+                }
+            }
+        }
         if (capture_probs) {
             out_token_ids->push_back(tid);
             out_token_probs->push_back(i < dec.probs.size() ? dec.probs[i] : 0.0f);
