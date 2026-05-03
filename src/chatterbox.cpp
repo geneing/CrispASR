@@ -569,8 +569,10 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
     size_t vb = ggml_nbytes(c->kv_v);
 
     // Also allocate CFG unconditioned KV cache (same size)
-    if (c->kv_cfg_buf) ggml_backend_buffer_free(c->kv_cfg_buf);
-    if (c->kv_cfg_ctx) ggml_free(c->kv_cfg_ctx);
+    if (c->kv_cfg_buf)
+        ggml_backend_buffer_free(c->kv_cfg_buf);
+    if (c->kv_cfg_ctx)
+        ggml_free(c->kv_cfg_ctx);
     struct ggml_init_params ip2 = {2 * ggml_tensor_overhead(), nullptr, true};
     c->kv_cfg_ctx = ggml_init(ip2);
     if (c->kv_cfg_ctx) {
@@ -590,11 +592,13 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
 
 // Llama-520M transformer: inputs_embeds (D, T) → speech logits (speech_vocab,)
 // Uses core_attn::kv_self_attn for each layer, matching orpheus pattern.
-static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_tokens,
-                                      ggml_tensor* use_kv_k = nullptr, ggml_tensor* use_kv_v = nullptr) {
+static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_tokens, ggml_tensor* use_kv_k = nullptr,
+                                      ggml_tensor* use_kv_v = nullptr) {
     // Use provided KV tensors or default to c->kv_k/kv_v
-    if (!use_kv_k) use_kv_k = c->kv_k;
-    if (!use_kv_v) use_kv_v = c->kv_v;
+    if (!use_kv_k)
+        use_kv_k = c->kv_k;
+    if (!use_kv_v)
+        use_kv_v = c->kv_v;
     const auto& hp = c->hp;
     const int D = (int)hp.hidden_size;
     const int n_q = (int)hp.n_heads;
@@ -1167,7 +1171,7 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
         uncond_embeds = prefill_embeds; // copy
         const int D = ctx->hp.hidden_size;
         int text_start = prefill_len - (int)text_tokens.size() - 1; // cond_len
-        int text_end = prefill_len - 1; // before speech_start
+        int text_end = prefill_len - 1;                             // before speech_start
         // Zero out text region
         for (int i = text_start; i < text_end; i++) {
             std::memset(&uncond_embeds[i * D], 0, D * sizeof(float));
@@ -1185,8 +1189,7 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
     float* logits_uncond = nullptr;
     int n_past_cfg = 0;
     if (use_cfg) {
-        logits_uncond = run_t3_kv(ctx, uncond_embeds.data(), prefill_len, n_past_cfg,
-                                   ctx->kv_k_cfg, ctx->kv_v_cfg);
+        logits_uncond = run_t3_kv(ctx, uncond_embeds.data(), prefill_len, n_past_cfg, ctx->kv_k_cfg, ctx->kv_v_cfg);
         n_past_cfg += prefill_len;
     }
     n_past += prefill_len;
@@ -1209,11 +1212,14 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
         }
 
         // Sample next token
-        int32_t tok = sample_token(blended.data(), V, ctx->params.temperature, ctx->params.min_p,
-                                   ctx->params.top_p, ctx->params.repetition_penalty, speech_tokens, ctx->rng_state);
+        int32_t tok = sample_token(blended.data(), V, ctx->params.temperature, ctx->params.min_p, ctx->params.top_p,
+                                   ctx->params.repetition_penalty, speech_tokens, ctx->rng_state);
         free(logits);
         logits = nullptr;
-        if (logits_uncond) { free(logits_uncond); logits_uncond = nullptr; }
+        if (logits_uncond) {
+            free(logits_uncond);
+            logits_uncond = nullptr;
+        }
 
         if (ctx->params.verbosity >= 2 && step < 16) {
             fprintf(stderr, "chatterbox[ar]: step=%d tok=%d\n", step, tok);
@@ -1243,13 +1249,14 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
 
         // Unconditioned forward step for CFG
         if (use_cfg) {
-            logits_uncond = run_t3_kv(ctx, tok_embed.data(), 1, n_past_cfg,
-                                       ctx->kv_k_cfg, ctx->kv_v_cfg);
+            logits_uncond = run_t3_kv(ctx, tok_embed.data(), 1, n_past_cfg, ctx->kv_k_cfg, ctx->kv_v_cfg);
             n_past_cfg++;
         }
     }
-    if (logits) free(logits);
-    if (logits_uncond) free(logits_uncond);
+    if (logits)
+        free(logits);
+    if (logits_uncond)
+        free(logits_uncond);
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "chatterbox: AR emitted %zu speech tokens\n", speech_tokens.size());
