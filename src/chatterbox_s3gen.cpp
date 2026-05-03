@@ -1163,6 +1163,24 @@ static std::vector<float> hift_vocoder_cpu(
     std::vector<float> stft_data(T_stft * C_stft);
     ggml_backend_tensor_get(stft_out, stft_data.data(), 0, ggml_nbytes(stft_out));
 
+    // Diagnostic: check STFT output statistics
+    if (c->verbosity >= 1) {
+        float stft_rms = 0, stft_max = 0, stft_min = 1e30f;
+        for (size_t i = 0; i < stft_data.size(); i++) {
+            stft_rms += stft_data[i] * stft_data[i];
+            if (stft_data[i] > stft_max) stft_max = stft_data[i];
+            if (stft_data[i] < stft_min) stft_min = stft_data[i];
+        }
+        stft_rms = std::sqrt(stft_rms / stft_data.size());
+        fprintf(stderr, "s3gen: STFT values range=[%.3f, %.3f] rms=%.4f (ref: [-1.1, 1.7])\n",
+                stft_min, stft_max, stft_rms);
+        // Show first frame's 18 channels
+        fprintf(stderr, "s3gen: STFT frame[0]: ");
+        for (int ch = 0; ch < C_stft && ch < 18; ch++)
+            fprintf(stderr, "%.3f ", stft_data[ch]);
+        fprintf(stderr, "\n");
+    }
+
     // iSTFT: split into magnitude (first 9 channels) and phase (last 9 channels)
     // Python: magnitude = exp(clip(x[:, :9, :], max=100))
     //         phase = sin(x[:, 9:, :])
