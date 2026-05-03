@@ -2591,3 +2591,80 @@ the LEARNINGS rule "never stash/relocate unrelated changes; the
 working tree is shared by parallel agents" — and adds the corollary
 that `git stash` from a parallel agent IS a recovery vector when the
 working tree gets reset under you.
+
+### 72. PLAN #63 Feature matrix parity — 9-phase capability expansion (May 2026)
+
+**Scope.** Deep audit of the feature matrix (`crispasr --list-backends`
+vs README vs actual code) revealed many backends had implemented
+features without declaring the corresponding CAP_ flags, and several
+cross-cutting improvements were low-hanging fruit. Nine phases executed
+in a single session.
+
+**Phase 1 — Beam search for LLM backends.** Wired `core_beam_decode::run_with_probs`
+(replay-from-prefix strategy) into granite (all variants) and qwen3 CLI
+backend adapters. When `-bs N` (N>1) is passed, the beam search replaces
+the greedy decode loop. Greedy and best-of-N paths unchanged.
+
+Files: `crispasr_backend_granite.cpp`, `crispasr_backend_qwen3.cpp`.
+
+Skipped voxtral4b (per-step audio-injection incompatible with replay),
+canary/cohere (opaque library decode calls, no beam_size parameter).
+
+**Phase 2 — Auto-download gaps.** Added `CAP_AUTO_DOWNLOAD` to omniasr
+(registry entry existed but flag missing). Added mimo-asr to model
+registry (`cstr/mimo-asr-GGUF`) with `CAP_AUTO_DOWNLOAD + CAP_TOKEN_CONFIDENCE`.
+
+**Phase 3 — Flash attention declarations.** All 6 backends (glm-asr,
+kyutai-stt, firered-asr, moonshine, omniasr, omniasr-llm) already call
+`ggml_flash_attn_ext` in their source — just needed `CAP_FLASH_ATTN`
+declared in CLI adapters. No attention implementation changes.
+
+**Phase 4 — CTC timestamps for aligner.** Added `CAP_TIMESTAMPS_CTC` to
+moonshine, moonshine-streaming, omniasr, omniasr-llm, mimo-asr. The
+`-am` CTC aligner flag is gated by this cap in `crispasr_run.cpp:292`.
+
+**Phase 5 — Auto-punctuation for CTC backends.** Backends without
+`CAP_PUNCTUATION_TOGGLE` now auto-enable `--punc-model auto` (FireRedPunc,
+~50 MB, auto-downloaded). Affects fc-ctc, wav2vec2, firered-asr, omniasr-ctc.
+Users suppress with `--no-punctuation` or `--punc-model none/off`.
+Tested: fastconformer-ctc on JFK now emits capitalized, punctuated text.
+
+File: `crispasr_run.cpp` (10 lines added before punc_ctx setup).
+
+**Phase 6 — Best-of-N.** No code changes needed — works on GPU, CPU too
+slow for large models. Documentation only.
+
+**Phase 7 — Cap declaration fixes.** Re-audit found the initial automated
+report was wrong: firered-asr, moonshine, kyutai-stt, omniasr all already
+had correct capability declarations. Only omniasr (missing auto-dl) and
+mimo-asr (capabilities=0) needed fixes.
+
+**Phase 8 — Vibevoice CLI adapter.** Re-audit found
+`crispasr_backend_vibevoice.cpp` already exists (160 lines, 16k→24k
+resample, ASR + TTS). Initial report was incorrect.
+
+**Phase 9 — Translation.** Investigated cohere (no translate token in
+vocab, transcription-only model) and glm-asr (translate flag + prompt
+injection infrastructure wired, but GLM-ASR-Nano doesn't respond to
+translation instructions). `CAP_TRANSLATE` not declared for either.
+
+Files: `glm_asr.h` (translate + target_lang fields), `glm_asr.cpp`
+(prompt injection), `crispasr_backend_glm_asr.cpp` (param forwarding).
+
+**Net capability gains across all phases:**
+
+| Capability | Backends gained |
+|---|---|
+| Beam search (`-bs N`) | +granite, +granite-4.1, +granite-4.1-plus, +qwen3 |
+| Flash attention | +glm-asr, +kyutai-stt, +firered-asr, +moonshine, +omniasr, +omniasr-llm |
+| CTC timestamps (`-am`) | +moonshine, +moonshine-streaming, +omniasr, +omniasr-llm, +mimo-asr |
+| Auto-download (`-m auto`) | +omniasr, +mimo-asr |
+| Auto-punctuation | +fc-ctc, +wav2vec2, +firered-asr, +omniasr-ctc (opt-in default) |
+| Token confidence | +mimo-asr |
+
+**README feature matrix** updated after each phase to stay in sync with
+`--list-backends` output. Matrix now covers 21 ASR backends × 18 features.
+
+**Test results** (`test-all-backends.py --profile=feature`): 51 PASS,
+0 FAIL, 3 SKIP (stream needs shared lib build). All 18 backends pass
+transcribe smoke.

@@ -7586,3 +7586,38 @@ References: `tools/format.sh`, `.github/workflows/lint.yml:62`
 MUST be v18" section, README.md "Adding a new backend" heads-up.
 Commits `7ab5dab` (the 80-violation reformat) + `5711931` (the
 follow-up cppcheck fix once v18-format stopped masking it).
+
+## Capability declarations diverge from implementation (May 2026)
+
+**Symptom.** `--list-backends` showed many backends with fewer
+capabilities than the code actually implements. Example: glm-asr,
+kyutai-stt, firered-asr, moonshine, omniasr all call
+`ggml_flash_attn_ext` but didn't declare `CAP_FLASH_ATTN`. omniasr
+had a model registry entry for auto-download but didn't declare
+`CAP_AUTO_DOWNLOAD`. mimo-asr's `capabilities()` returned literal 0.
+
+**Root cause.** Capability flags are manually maintained in each
+`crispasr_backend_*.cpp` file. When a feature is added to the
+underlying library (e.g. flash attention in `src/glm_asr.cpp`),
+the adapter's `capabilities()` doesn't auto-update. There's no
+compile-time or CI check that verifies cap declarations match
+implemented features.
+
+**Fix pattern.** Audit `--list-backends` output against the source
+code periodically. The `test-all-backends.py --profile=feature`
+script exercises advertised capabilities; running it catches false
+positives (cap declared but not working). False negatives (feature
+works but cap not declared) require manual source audit.
+
+**Generalisable rule.** Any hand-maintained bitmask of capabilities
+will drift from the implementation. The effort of a periodic audit
+(~1 hour) is much lower than building an auto-detection framework.
+Accept the drift and schedule the audit.
+
+**Automated agent audits are unreliable for this task.** Two
+separate automated audits produced incorrect claims: that several
+backends had missing capability declarations (they didn't), that
+`crispasr_backend_vibevoice.cpp` didn't exist (it did), and that
+backends returned `capabilities() = 0` (they didn't — the agent
+was reading the wrong source file). Always verify agent findings
+against the actual source before acting on them.

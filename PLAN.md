@@ -38,11 +38,11 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | phase 1 + 1.5 + 2 + 3 + 4 SHIPPED (incremental encoder, bit-exact-batch, 240ms chunks, fused QKV LLM, combined-chunk flush, speculative prefill, **live captions during speech**, **decoder thread**) |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
 | **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
-| **MEDIUM** | [#63 Feature matrix parity](#63-feature-matrix-parity) | Phased | Beam search for LLM backends, auto-download gaps, flash attention audit, CTC aligner for all |
+| **DONE** | [#63 Feature matrix parity](#63-feature-matrix-parity) | Phased | All 9 phases complete → HISTORY §72 |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
 | **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | License unclear |
 
-**Recently completed** (full write-ups in HISTORY.md): #5 reference backends → §63, #16 Shaw RPE → §55, #51 MiMo-V2.5-ASR runtime → §56, #51b step-decode KV cache reuse → §60, #53 narrow core helper extractions → §63, #54 granite-speech-4.1 plus/nar → §61, #55 granite-family DRY refactor → §54, #56 Kokoro phonemizer-step diff harness + cache_clear ABI → §63, #60d Fused QKV mimo-asr Q4_K → §64.
+**Recently completed** (full write-ups in HISTORY.md): #5 reference backends → §63, #16 Shaw RPE → §55, #51 MiMo-V2.5-ASR runtime → §56, #51b step-decode KV cache reuse → §60, #53 narrow core helper extractions → §63, #54 granite-speech-4.1 plus/nar → §61, #55 granite-family DRY refactor → §54, #56 Kokoro phonemizer-step diff harness + cache_clear ABI → §63, #60d Fused QKV mimo-asr Q4_K → §64, **#63 Feature matrix parity → §72** (beam search granite/qwen3, flash attn 6 backends, CTC timestamps 5 backends, auto-punc CTC, auto-download omniasr/mimo, glm-asr translate infra).
 
 ---
 
