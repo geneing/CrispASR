@@ -36,6 +36,15 @@ float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* ctx, const i
 float* chatterbox_s3gen_vocode(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
                                int* out_n_samples);
 
+// Run vocoder and dump per-stage intermediate outputs.
+// stage_names: array of C strings (e.g. "voc_conv_pre", "voc_ups_0", ...),
+// stage_data: caller-allocated array of float* (set to malloc'd buffers on return),
+// stage_sizes: caller-allocated array filled with element counts.
+// Returns PCM like chatterbox_s3gen_vocode. Caller frees stage_data[i] with free().
+float* chatterbox_s3gen_vocode_dump(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
+                                    int* out_n_samples, const char** stage_names, float** stage_data,
+                                    int* stage_sizes, int n_stages);
+
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);
 

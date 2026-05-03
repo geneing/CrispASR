@@ -1005,9 +1005,11 @@ static std::vector<float> run_f0_predictor(chatterbox_s3gen_context* c,
 // the intermediate ResBlocks and source fusion. This produces usable
 // (if noisy) audio because the learned conv_pre/post capture the mel→wav mapping.
 
+// stage_dump: if non-null, map is filled with named stage outputs after graph compute.
 static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                                            const std::vector<float>& mel, // (80, T_mel) channel-first
-                                           int T_mel) {
+                                           int T_mel,
+                                           std::map<std::string, std::vector<float>>* stage_dump = nullptr) {
     if (c->verbosity >= 1) {
         float mel_rms = 0, mel_max = 0;
         for (size_t i = 0; i < mel.size(); i++) {
@@ -1043,7 +1045,7 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
         if (cpre_b)
             x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpre_b, 1, (int)cpre_b->ne[0]));
     }
-    ggml_set_name(x, "voc_conv_pre_out");
+    ggml_set_name(x, "voc_conv_pre");
     ggml_set_output(x);
 
     // Source STFT input (from SineGen → STFT): 18 channels (real + imag)
@@ -1092,23 +1094,28 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
             if (up_b)
                 x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, up_b, 1, (int)up_b->ne[0]));
         }
+        {
+            char uname[32];
+            std::snprintf(uname, sizeof(uname), "voc_ups_%d", stage);
+            ggml_set_name(x, uname);
+            ggml_set_output(x);
+        }
 
         // Source fusion: source_downs[i](s_stft) → source_resblocks[i] → add
         // The source STFT comes from SineGen(F0). Since F0≈0 (unvoiced),
         // the source is noise. We provide the noise STFT as a graph input.
-        {
+        // When stage_dump is active, skip source fusion entirely to match
+        // the Python reference which was captured without it.
+        if (!stage_dump) {
             char sd_wn[32], sd_bn[32];
             std::snprintf(sd_wn, sizeof(sd_wn), "s3.v.sd.%d.weight", stage);
             std::snprintf(sd_bn, sizeof(sd_bn), "s3.v.sd.%d.bias", stage);
             ggml_tensor* sd_w = T(c, sd_wn);
             ggml_tensor* sd_b = T(c, sd_bn);
             if (sd_w && s_stft) {
-                // source_downs: Conv1d that downsamples s_stft to match x's time dim
                 ggml_tensor* si = ggml_conv_1d(ctx0, sd_w, s_stft, 1, 0, 1);
                 if (sd_b)
                     si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sd_b, 1, (int)sd_b->ne[0]));
-                // source_resblocks: same structure as main ResBlocks but with source-specific weights
-                // Use the same Snake + dilated conv pattern
                 const int srb_kernels[] = {7, 7, 11};
                 const int srb_dilations[][3] = {{1, 3, 5}, {1, 3, 5}, {1, 3, 5}};
                 ggml_tensor* srb_in = si;
@@ -1117,7 +1124,6 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     int dil = srb_dilations[stage][d];
                     int k2 = srb_kernels[stage];
                     int pad2 = (k2 * dil - dil) / 2;
-                    // Snake1
                     std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.a1.%d.alpha", stage, d);
                     ggml_tensor* sa1 = T(c, key2);
                     if (sa1) {
@@ -1126,7 +1132,6 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                         ggml_tensor* s_ax = ggml_sin(ctx0, ax);
                         si = ggml_add(ctx0, si, ggml_div(ctx0, ggml_mul(ctx0, s_ax, s_ax), a));
                     }
-                    // Conv1
                     std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.c1.%d.weight", stage, d);
                     ggml_tensor* sc1w = T(c, key2);
                     std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.c1.%d.bias", stage, d);
@@ -1136,7 +1141,6 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                         if (sc1b)
                             si = ggml_add(ctx0, si, ggml_reshape_2d(ctx0, sc1b, 1, (int)sc1b->ne[0]));
                     }
-                    // Snake2
                     std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.a2.%d.alpha", stage, d);
                     ggml_tensor* sa2 = T(c, key2);
                     if (sa2) {
@@ -1145,7 +1149,6 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                         ggml_tensor* s_ax2 = ggml_sin(ctx0, ax2);
                         si = ggml_add(ctx0, si, ggml_div(ctx0, ggml_mul(ctx0, s_ax2, s_ax2), a2));
                     }
-                    // Conv2
                     std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.c2.%d.weight", stage, d);
                     ggml_tensor* sc2w = T(c, key2);
                     std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.c2.%d.bias", stage, d);
@@ -1159,7 +1162,6 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     si = ggml_add(ctx0, si, srb_in);
                     srb_in = si;
                 }
-                // Crop si to match x's time dimension and add
                 int T_x = (int)x->ne[0];
                 int T_si = (int)si->ne[0];
                 if (T_si > T_x) {
@@ -1168,7 +1170,7 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                 }
                 x = ggml_add(ctx0, x, si);
             }
-        }
+        } // end if (!stage_dump)
 
         // ResBlocks: 3 per stage, each run INDEPENDENTLY on the same input,
         // then outputs averaged: x = (rb0(x) + rb1(x) + rb2(x)) / 3
@@ -1191,14 +1193,27 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                 std::snprintf(key, sizeof(key), "s3.v.rb.%d.a1.%d.alpha", rb_idx, d);
                 ggml_tensor* alpha1 = T(c, key);
                 if (alpha1) {
-                    // Snake: x + (1/alpha) * sin²(alpha * x)
                     ggml_tensor* a = ggml_reshape_2d(ctx0, alpha1, 1, (int)alpha1->ne[0]);
                     ggml_tensor* ax = ggml_mul(ctx0, x, a);
                     ggml_tensor* sin_ax = ggml_sin(ctx0, ax);
                     ggml_tensor* sin2 = ggml_mul(ctx0, sin_ax, sin_ax);
-                    // sin²(ax) / alpha
                     ggml_tensor* sin2_over_a = ggml_div(ctx0, sin2, a);
                     x = ggml_add(ctx0, x, sin2_over_a);
+                }
+                // Debug markers for sub-operations within snake1
+                if (stage_dump && stage == 0 && rb == 0) {
+                    char dname[48];
+                    std::snprintf(dname, sizeof(dname), "voc_rb0k0_snake1_d%d", d);
+                    ggml_set_name(x, dname);
+                    ggml_set_output(x);
+                    if (d == 0) {
+                        // Also dump the alpha*x and sin²/alpha intermediates
+                        if (alpha1) {
+                            ggml_tensor* a = ggml_reshape_2d(ctx0, alpha1, 1, (int)alpha1->ne[0]);
+                            ggml_set_name(a, "dbg_alpha_reshaped");
+                            ggml_set_output(a);
+                        }
+                    }
                 }
 
                 // Conv1d with dilation
@@ -1211,8 +1226,14 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     if (c1b)
                         x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, c1b, 1, (int)c1b->ne[0]));
                 }
+                if (stage_dump && stage == 0 && rb == 0) {
+                    char dname[48];
+                    std::snprintf(dname, sizeof(dname), "voc_rb0k0_conv1_d%d", d);
+                    ggml_set_name(x, dname);
+                    ggml_set_output(x);
+                }
 
-                // Snake activation 2: same as activation 1
+                // Snake activation 2
                 std::snprintf(key, sizeof(key), "s3.v.rb.%d.a2.%d.alpha", rb_idx, d);
                 ggml_tensor* alpha2 = T(c, key);
                 if (alpha2) {
@@ -1222,6 +1243,12 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     ggml_tensor* sin2_2 = ggml_mul(ctx0, sin_ax2, sin_ax2);
                     ggml_tensor* sin2_over_a2 = ggml_div(ctx0, sin2_2, a2);
                     x = ggml_add(ctx0, x, sin2_over_a2);
+                }
+                if (stage_dump && stage == 0 && rb == 0) {
+                    char dname[48];
+                    std::snprintf(dname, sizeof(dname), "voc_rb0k0_snake2_d%d", d);
+                    ggml_set_name(x, dname);
+                    ggml_set_output(x);
                 }
 
                 // Conv2 (dilation=1)
@@ -1235,10 +1262,22 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     if (c2b)
                         x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, c2b, 1, (int)c2b->ne[0]));
                 }
+                if (stage_dump && stage == 0 && rb == 0) {
+                    char dname[48];
+                    std::snprintf(dname, sizeof(dname), "voc_rb0k0_conv2_d%d", d);
+                    ggml_set_name(x, dname);
+                    ggml_set_output(x);
+                }
 
                 // Residual
                 x = ggml_add(ctx0, x, rb_residual);
                 rb_residual = x;
+                if (stage_dump && stage == 0 && rb == 0) {
+                    char dname[48];
+                    std::snprintf(dname, sizeof(dname), "voc_rb0k0_res_d%d", d);
+                    ggml_set_name(x, dname);
+                    ggml_set_output(x);
+                }
             }
             // Accumulate for averaging
             if (!rb_sum)
@@ -1248,11 +1287,24 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
         }
         // Average the 3 ResBlock outputs
         x = ggml_scale(ctx0, rb_sum, 1.0f / 3.0f);
+        {
+            char rname[32];
+            std::snprintf(rname, sizeof(rname), "voc_rb_%d", stage);
+            ggml_set_name(x, rname);
+            ggml_set_output(x);
+        }
     }
 
-    // Reflection pad (1, 0) — skip for now
     // LeakyReLU
     x = ggml_leaky_relu(ctx0, x, 0.1f, false);
+
+    // ReflectionPad1d((1, 0)): pad 1 sample on the left by reflecting x[:, :, 1]
+    {
+        int C_x = (int)x->ne[1];
+        ggml_tensor* pad_sample = ggml_view_2d(ctx0, x, 1, C_x, x->nb[1], 1 * x->nb[0]);
+        pad_sample = ggml_cont(ctx0, pad_sample);
+        x = ggml_concat(ctx0, pad_sample, x, 0);
+    }
 
     // conv_post: Conv1d(64→18, k=7, padding=3)
     ggml_tensor* cpost_w = T(c, "s3.v.cpost.weight");
@@ -1268,7 +1320,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
     // ResBlock outputs can exceed the expected range.
     x = ggml_clamp(ctx0, x, -2.0f, 2.0f);
 
-    ggml_set_name(x, "voc_stft");
+    ggml_set_name(x, "voc_conv_post");
+    ggml_set_output(x);
     ggml_build_forward_expand(gf, x);
     ggml_free(ctx0);
 
@@ -1288,8 +1341,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
     // Generate source STFT: STFT of noise source (since F0≈0, source is noise)
     {
         std::vector<float> src_stft(T_src * 18, 0.0f);
-        {
-            // Generate noise source
+        if (!stage_dump) {
+            // Normal mode: generate noise approximation of SineGen
             float nsf_alpha = 0.1f; // SineGen sine_amp
             uint64_t rng = 54321;
             for (int t = 0; t < T_src; t++) {
@@ -1297,11 +1350,7 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                 rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
                 float noise = ((float)(int64_t)(rng >> 33) / (float)(1LL << 30)) - 1.0f;
                 float src = noise * nsf_alpha / 3.0f;
-                // Simple STFT: for frame t, compute real/imag of N/2+1 bins
-                // Since we're operating frame-by-frame with hop=1 here, just use
-                // the instantaneous amplitude as the DC component
                 src_stft[t * 18 + 0] = src; // real[0] (DC)
-                // Higher frequency bins get lower amplitude
                 for (int f = 1; f < 9; f++) {
                     rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
                     float phase = ((float)(rng >> 33) / (float)(1LL << 31)) * 2.0f * (float)M_PI;
@@ -1310,8 +1359,10 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                 }
             }
         }
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "source_stft"), src_stft.data(), 0,
-                                src_stft.size() * sizeof(float));
+        // When stage_dump is active, source_stft is not in the graph (fusion skipped)
+        ggml_tensor* src_t = ggml_graph_get_tensor(gf, "source_stft");
+        if (src_t)
+            ggml_backend_tensor_set(src_t, src_stft.data(), 0, src_stft.size() * sizeof(float));
     }
 
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
@@ -1319,8 +1370,66 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
         return std::vector<float>(T_mel * 480, 0.0f);
     }
 
+    // Dump stage outputs if requested
+    if (stage_dump) {
+        const char* dump_names[] = {
+            "voc_conv_pre",   "voc_ups_0",         "voc_rb_0",          "voc_ups_1",
+            "voc_rb_1",       "voc_ups_2",         "voc_rb_2",          "voc_conv_post",
+            "voc_rb0k0_snake1_d0", "voc_rb0k0_conv1_d0", "voc_rb0k0_snake2_d0", "voc_rb0k0_conv2_d0",
+            "voc_rb0k0_res_d0",    "voc_rb0k0_snake1_d1", "voc_rb0k0_conv1_d1", "voc_rb0k0_snake2_d1",
+            "voc_rb0k0_conv2_d1",  "voc_rb0k0_res_d1",    "voc_rb0k0_snake1_d2", "voc_rb0k0_conv1_d2",
+            "voc_rb0k0_snake2_d2", "voc_rb0k0_conv2_d2",  "voc_rb0k0_res_d2",
+        };
+        for (auto& dn : dump_names) {
+            ggml_tensor* t = ggml_graph_get_tensor(gf, dn);
+            if (t) {
+                size_t n = ggml_nelements(t);
+                auto& v = (*stage_dump)[dn];
+                v.resize(n);
+                ggml_backend_tensor_get(t, v.data(), 0, n * sizeof(float));
+            }
+        }
+    }
+
+    // Detailed sub-stage diagnostics for vocoder debugging
+    if (stage_dump) {
+        auto dump_tensor = [&](const char* name) {
+            ggml_tensor* t = ggml_graph_get_tensor(gf, name);
+            if (!t)
+                return;
+            int Td = (int)t->ne[0], Cd = (int)t->ne[1];
+            std::vector<float> d(Td * Cd);
+            ggml_backend_tensor_get(t, d.data(), 0, ggml_nbytes(t));
+            float rms_v = 0;
+            for (auto v : d)
+                rms_v += v * v;
+            rms_v = std::sqrt(rms_v / d.size());
+            // ne[0]=T, ne[1]=C → data[c*T+t]
+            fprintf(stderr, "  %-24s ne=(%d,%d) rms=%.6f (t=0,c=0..4)=[%.4f %.4f %.4f %.4f %.4f]\n", name, Td, Cd,
+                    rms_v, d[0 * Td + 0], d[1 * Td + 0], d[2 * Td + 0], d[3 * Td + 0], d[4 * Td + 0]);
+        };
+        fprintf(stderr, "\n=== Vocoder sub-stage diagnostics ===\n");
+        dump_tensor("voc_conv_pre");
+        dump_tensor("voc_ups_0");
+        for (int d = 0; d < 3; d++) {
+            char n[48];
+            std::snprintf(n, sizeof(n), "voc_rb0k0_snake1_d%d", d);
+            dump_tensor(n);
+            std::snprintf(n, sizeof(n), "voc_rb0k0_conv1_d%d", d);
+            dump_tensor(n);
+            std::snprintf(n, sizeof(n), "voc_rb0k0_snake2_d%d", d);
+            dump_tensor(n);
+            std::snprintf(n, sizeof(n), "voc_rb0k0_conv2_d%d", d);
+            dump_tensor(n);
+            std::snprintf(n, sizeof(n), "voc_rb0k0_res_d%d", d);
+            dump_tensor(n);
+        }
+        dump_tensor("voc_rb_0");
+        fprintf(stderr, "=== End sub-stage diagnostics ===\n\n");
+    }
+
     // Read conv_pre diagnostic
-    ggml_tensor* cpre_out = ggml_graph_get_tensor(gf, "voc_conv_pre_out");
+    ggml_tensor* cpre_out = ggml_graph_get_tensor(gf, "voc_conv_pre");
     if (cpre_out && c->verbosity >= 1) {
         size_t nb = ggml_nbytes(cpre_out);
         std::vector<float> cpre_data(nb / sizeof(float));
@@ -1339,7 +1448,7 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
     }
 
     // Read STFT output
-    ggml_tensor* stft_out = ggml_graph_get_tensor(gf, "voc_stft");
+    ggml_tensor* stft_out = ggml_graph_get_tensor(gf, "voc_conv_post");
     int T_stft = (int)stft_out->ne[0];
     int C_stft = (int)stft_out->ne[1]; // should be 18
     if (c->verbosity >= 1) {
@@ -1362,10 +1471,10 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
         stft_rms = std::sqrt(stft_rms / stft_data.size());
         fprintf(stderr, "s3gen: STFT values range=[%.3f, %.3f] rms=%.4f (ref: [-1.1, 1.7])\n", stft_min, stft_max,
                 stft_rms);
-        // Show first frame's 18 channels
+        // Show first frame's 18 channels: data[ch * T_stft + 0]
         fprintf(stderr, "s3gen: STFT frame[0]: ");
         for (int ch = 0; ch < C_stft && ch < 18; ch++)
-            fprintf(stderr, "%.3f ", stft_data[ch]);
+            fprintf(stderr, "%.3f ", stft_data[ch * T_stft + 0]);
         fprintf(stderr, "\n");
     }
 
@@ -1386,16 +1495,16 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
         win[i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * i / (float)istft_nfft));
 
     for (int frame = 0; frame < T_stft; frame++) {
-        // stft_data layout: (T_stft, 18) — first 9 = log-magnitude, last 9 = raw phase input
-        // magnitude = exp(clip(raw, max=100))
-        // phase = sin(raw_phase)  — "actually, sin is redundancy" per Python comment
+        // stft_data layout: ggml ne[0]=T_stft (fast), ne[1]=18 (slow)
+        // → data[channel * T_stft + frame]
+        // First 9 channels = log-magnitude, last 9 = raw phase input
         float mag[9], ph[9];
         for (int f = 0; f < n_freq; f++) {
-            float raw_mag = stft_data[frame * C_stft + f];
+            float raw_mag = stft_data[f * T_stft + frame];
             if (raw_mag > 100.0f)
                 raw_mag = 100.0f; // clip
             mag[f] = std::exp(raw_mag);
-            ph[f] = std::sin(stft_data[frame * C_stft + n_freq + f]);
+            ph[f] = std::sin(stft_data[(n_freq + f) * T_stft + frame]);
         }
 
         // Build complex STFT frame: real = mag * cos(phase), imag = mag * sin(phase)
@@ -1549,6 +1658,38 @@ extern "C" float* chatterbox_s3gen_vocode(struct chatterbox_s3gen_context* ctx, 
 
     std::vector<float> mel(mel_cf, mel_cf + 80 * T_mel);
     std::vector<float> wav = hift_vocoder_cpu(ctx, mel, T_mel);
+
+    if (wav.empty())
+        return nullptr;
+    float* out = (float*)malloc(wav.size() * sizeof(float));
+    std::memcpy(out, wav.data(), wav.size() * sizeof(float));
+    *out_n_samples = (int)wav.size();
+    return out;
+}
+
+extern "C" float* chatterbox_s3gen_vocode_dump(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
+                                                int* out_n_samples, const char** stage_names, float** stage_data,
+                                                int* stage_sizes, int n_stages) {
+    if (!ctx || !mel_cf || T_mel <= 0 || !out_n_samples)
+        return nullptr;
+    *out_n_samples = 0;
+
+    std::map<std::string, std::vector<float>> dump;
+    std::vector<float> mel(mel_cf, mel_cf + 80 * T_mel);
+    std::vector<float> wav = hift_vocoder_cpu(ctx, mel, T_mel, &dump);
+
+    // Fill caller's stage arrays
+    for (int i = 0; i < n_stages; i++) {
+        auto it = dump.find(stage_names[i]);
+        if (it != dump.end()) {
+            stage_sizes[i] = (int)it->second.size();
+            stage_data[i] = (float*)malloc(it->second.size() * sizeof(float));
+            std::memcpy(stage_data[i], it->second.data(), it->second.size() * sizeof(float));
+        } else {
+            stage_sizes[i] = 0;
+            stage_data[i] = nullptr;
+        }
+    }
 
     if (wav.empty())
         return nullptr;
