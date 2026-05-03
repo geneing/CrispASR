@@ -845,6 +845,9 @@ struct crispasr_session {
     // verbatim. Empty means "transcribe normally" — the historical
     // default.
     std::string ask;
+    // Best-of-N: run N independent decodes and keep the lowest-perplexity
+    // one. Only effective when temperature > 0. Default 1 (no resampling).
+    int best_of = 1;
 
     // Exactly one of these pointers is non-null based on `backend`.
     whisper_context* whisper_ctx = nullptr;
@@ -1714,11 +1717,50 @@ static crispasr_session_result* run_voxtral_family(Ctx* ctx, const VoxtralFamily
 // the hint silently — parakeet/qwen3 auto-detect, granite is instruction-
 // tuned with its own prompt, wav2vec2 is usually mono-lingual.
 // ---------------------------------------------------------------------------
+// Internal single-pass transcribe (used by best-of-N wrapper below).
+static crispasr_session_result* transcribe_single(crispasr_session* s, const float* pcm,
+                                                   int n_samples, const char* language);
+
 CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_session* s, const float* pcm,
                                                                     int n_samples, const char* language) {
     if (!s || !pcm || n_samples <= 0)
         return nullptr;
 
+    // Best-of-N: run N independent transcriptions and keep the one with the
+    // highest average per-token confidence. Whisper handles best_of internally
+    // via greedy.best_of, so we only loop externally for non-whisper backends.
+    const int n_runs = (s->best_of > 1 && s->backend != "whisper") ? s->best_of : 1;
+    if (n_runs <= 1)
+        return transcribe_single(s, pcm, n_samples, language);
+
+    crispasr_session_result* best = nullptr;
+    double best_avg_p = -1.0;
+    for (int run = 0; run < n_runs; run++) {
+        crispasr_session_result* candidate = transcribe_single(s, pcm, n_samples, language);
+        if (!candidate) continue;
+        // Compute average per-word confidence
+        double sum_p = 0.0;
+        int n_words = 0;
+        for (auto& seg : candidate->segments) {
+            for (auto& w : seg.words) {
+                sum_p += w.p;
+                n_words++;
+            }
+        }
+        double avg_p = n_words > 0 ? sum_p / n_words : 0.0;
+        if (!best || avg_p > best_avg_p) {
+            if (best) delete best;
+            best = candidate;
+            best_avg_p = avg_p;
+        } else {
+            delete candidate;
+        }
+    }
+    return best;
+}
+
+static crispasr_session_result* transcribe_single(crispasr_session* s, const float* pcm,
+                                                   int n_samples, const char* language) {
     const std::string lang = (language && *language) ? language : "en";
     const bool lang_set = (language && *language);
 
@@ -1732,6 +1774,9 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
         wparams.print_timestamps = false;
         wparams.print_special = false;
         wparams.n_threads = s->n_threads;
+        // Best-of-N for whisper greedy sampling.
+        if (s->best_of > 1)
+            wparams.greedy.best_of = s->best_of;
         // Per-call language hint wins; sticky source_language is the
         // fallback (PLAN #59 unblock).
         if (lang_set)
@@ -3752,6 +3797,13 @@ CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temper
     }
 #endif
     return touched > 0 ? 0 : -2;
+}
+
+CA_EXPORT int crispasr_session_set_best_of(crispasr_session* s, int n) {
+    if (!s)
+        return -1;
+    s->best_of = n > 0 ? n : 1;
+    return 0;
 }
 
 // Auto-detect spoken language on raw 16 kHz mono PCM. Wraps the
