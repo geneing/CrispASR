@@ -103,3 +103,4 @@ ref/
 # Qwen3-TTS reference samples (large WAV files, not source-controlled)
 samples/qwen3_tts/
 .local/
+SESSION_HANDOVER.md
