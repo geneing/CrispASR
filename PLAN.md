@@ -2174,12 +2174,14 @@ Re-audit found `crispasr_backend_vibevoice.cpp` already exists with
 full ASR + TTS support (160 lines, 16k→24k resample, voice loading).
 Initial agent report was incorrect.
 
-### Phase 9 — Translation for backends that support it (MEDIUM)
+### Phase 9 — Translation for backends that support it — INVESTIGATED
 
-| Backend | Model supports | CrispASR status |
-|---|---|---|
-| cohere | 13-language transcription | No CAP_TRANSLATE, no --translate handling |
-| glm-asr | LLM decoder, could translate via prompt | Not wired |
+| Backend | Result |
+|---|---|
+| cohere | No translate token in vocab — model is transcription-only, not feasible |
+| glm-asr | Code wired (translate flag + prompt injection), but GLM-ASR-Nano doesn't respond to translation instructions — model wasn't trained for it. Infrastructure ready for translation-capable GLM variants. |
+
+No `CAP_TRANSLATE` declared for either — models can't actually translate.
 
 ### Summary — expected matrix after all phases
 

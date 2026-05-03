@@ -23,6 +23,8 @@ struct glm_asr_context_params {
     bool use_gpu;      // false => force CPU backend
     float temperature; // 0 = greedy argmax, >0 = softmax sampling
     int beam_size;     // 1 = greedy decode; >1 = replay-from-prefix beam search
+    bool translate;        // inject "translate to <target_lang>" instruction
+    const char* target_lang; // e.g. "English" (NULL = English default)
 };
 
 struct glm_asr_context_params glm_asr_context_default_params(void);

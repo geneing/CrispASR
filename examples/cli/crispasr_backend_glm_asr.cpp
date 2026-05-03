@@ -28,6 +28,10 @@ public:
         cp.use_gpu = crispasr_backend_should_use_gpu(params);
         cp.temperature = params.temperature;
         cp.beam_size = params.beam_size > 0 ? params.beam_size : 1;
+        cp.translate = params.translate;
+        if (!params.target_lang.empty())
+            tgt_lang_ = params.target_lang;
+        cp.target_lang = tgt_lang_.empty() ? nullptr : tgt_lang_.c_str();
         ctx_ = glm_asr_init_from_file(params.model.c_str(), cp);
         return ctx_ != nullptr;
     }
@@ -150,6 +154,7 @@ public:
 
 private:
     glm_asr_context* ctx_ = nullptr;
+    std::string tgt_lang_;
 };
 
 std::unique_ptr<CrispasrBackend> crispasr_make_glm_asr_backend() {

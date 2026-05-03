@@ -202,7 +202,8 @@ static int sample_token(const float* logits, int vocab, float temperature, float
 // ===========================================================================
 
 extern "C" struct glm_asr_context_params glm_asr_context_default_params(void) {
-    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true, /*temperature=*/0.0f, /*beam_size=*/1};
+    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true, /*temperature=*/0.0f, /*beam_size=*/1,
+            /*translate=*/false, /*target_lang=*/nullptr};
 }
 
 extern "C" int glm_asr_encoder_frames_from_mel_frames(int T_mel) {
@@ -540,9 +541,19 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
     ids.push_back(59262);     // <|end_of_audio|>
     ids.push_back(59253);     // <|user|>
 
-    // Tokenize the instruction — for now hardcode the token IDs for
-    // "Please transcribe this audio into text"
-    // TODO: proper tokenization
+    // Tokenize instruction: translate or transcribe
+    if (ctx->params.translate) {
+        const char* tgt = ctx->params.target_lang ? ctx->params.target_lang : "English";
+        char instr[256];
+        snprintf(instr, sizeof(instr), "\nPlease translate the speech to %s.\n", tgt);
+        int n_instr = 0;
+        int32_t* instr_ids = glm_asr_tokenize(ctx, instr, &n_instr);
+        if (instr_ids && n_instr > 0) {
+            for (int i = 0; i < n_instr; i++)
+                ids.push_back(instr_ids[i]);
+            free(instr_ids);
+        }
+    }
     ids.push_back(59254); // <|assistant|>
 
     // 4. Embed tokens
