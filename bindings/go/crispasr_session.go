@@ -71,6 +71,23 @@ const char*  crispasr_punc_process(void* ctx, const char* text);
 void         crispasr_punc_free_text(const char* text);
 void         crispasr_punc_free(void* ctx);
 
+// --- Alignment (PLAN #59) ---
+typedef struct crispasr_align_result crispasr_align_result;
+crispasr_align_result* crispasr_align_words_abi(const char* aligner_model, const char* transcript,
+                                                 const float* samples, int n_samples, long long t_offset_cs,
+                                                 int n_threads);
+int          crispasr_align_result_n_words(crispasr_align_result* r);
+const char*  crispasr_align_result_word_text(crispasr_align_result* r, int i);
+long long    crispasr_align_result_word_t0(crispasr_align_result* r, int i);
+long long    crispasr_align_result_word_t1(crispasr_align_result* r, int i);
+void         crispasr_align_result_free(crispasr_align_result* r);
+
+// --- Standalone LID (PLAN #59) ---
+int crispasr_detect_language_pcm(const float* samples, int n_samples, int method,
+                                  const char* model_path, int n_threads, int use_gpu,
+                                  int gpu_device, int flash_attn,
+                                  char* out_lang, int out_lang_cap, float* out_prob);
+
 // --- Registry + cache (PLAN #59) ---
 int crispasr_registry_lookup_abi(const char* backend, char* out_filename, int filename_cap,
                                  char* out_url, int url_cap, char* out_size, int size_cap);
@@ -523,6 +540,69 @@ func extractResult(r *C.crispasr_session_result) *TranscribeResult {
 		}
 	}
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// Forced alignment — word-level timestamps from transcript + audio
+// ---------------------------------------------------------------------------
+
+// AlignedWord holds one word from forced alignment.
+type AlignedWord struct {
+	Text string
+	T0   int64 // centiseconds
+	T1   int64
+}
+
+// AlignWords runs CTC forced alignment on a transcript + audio pair.
+// alignerModel is the path to a CTC aligner GGUF (e.g. canary-ctc-aligner.gguf).
+func AlignWords(alignerModel, transcript string, pcm []float32, tOffsetCs int64, nThreads int) ([]AlignedWord, error) {
+	cm := C.CString(alignerModel)
+	defer C.free(unsafe.Pointer(cm))
+	ct := C.CString(transcript)
+	defer C.free(unsafe.Pointer(ct))
+	pcmPtr := (*C.float)(nil)
+	if len(pcm) > 0 {
+		pcmPtr = (*C.float)(unsafe.Pointer(&pcm[0]))
+	}
+	r := C.crispasr_align_words_abi(cm, ct, pcmPtr, C.int(len(pcm)), C.longlong(tOffsetCs), C.int(nThreads))
+	if r == nil {
+		return nil, errors.New("alignment failed")
+	}
+	defer C.crispasr_align_result_free(r)
+	n := int(C.crispasr_align_result_n_words(r))
+	words := make([]AlignedWord, n)
+	for i := 0; i < n; i++ {
+		words[i] = AlignedWord{
+			Text: C.GoString(C.crispasr_align_result_word_text(r, C.int(i))),
+			T0:   int64(C.crispasr_align_result_word_t0(r, C.int(i))),
+			T1:   int64(C.crispasr_align_result_word_t1(r, C.int(i))),
+		}
+	}
+	return words, nil
+}
+
+// ---------------------------------------------------------------------------
+// Standalone language detection (not session-bound)
+// ---------------------------------------------------------------------------
+
+// DetectLanguagePCM detects the spoken language from raw 16 kHz mono PCM.
+// method: 0=Whisper, 1=Silero, 2=Firered, 3=Ecapa.
+// modelPath can be empty for auto-download of the default model.
+func DetectLanguagePCM(pcm []float32, method int, modelPath string, nThreads int) (string, float32, error) {
+	pcmPtr := (*C.float)(nil)
+	if len(pcm) > 0 {
+		pcmPtr = (*C.float)(unsafe.Pointer(&pcm[0]))
+	}
+	cm := C.CString(modelPath)
+	defer C.free(unsafe.Pointer(cm))
+	var outLang [16]C.char
+	var outProb C.float
+	rc := C.crispasr_detect_language_pcm(pcmPtr, C.int(len(pcm)), C.int(method), cm,
+		C.int(nThreads), 0, 0, 0, &outLang[0], C.int(len(outLang)), &outProb)
+	if rc != 0 {
+		return "", 0, errors.New("language detection failed")
+	}
+	return C.GoString(&outLang[0]), float32(outProb), nil
 }
 
 // ---------------------------------------------------------------------------
