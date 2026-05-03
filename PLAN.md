@@ -3,11 +3,13 @@
 Pending roadmap items. Each is self-contained with files, approach, and
 effort estimate. Completed items have been moved to `HISTORY.md`.
 
-**Current state (April 2026, v0.5.4):** 21 ASR backends + TTS, unified CLI,
+**Current state (May 2026, v0.5.5):** 21 ASR backends + TTS, unified CLI,
 OpenAI-compatible server, shared `src/core/` library, FireRedPunc
 post-processor, C-ABI + Python/Rust/Dart wrappers, CI on 6 platforms.
 All backends support `-m auto --auto-download`. Three new ggml ops
 (`conv_1d_cf`, `conv_1d_dw_cf`, `conv_1d_group`). ggml bumped to 0.10.0.
+Feature matrix expanded to 21 backends (README). test-all-backends.py
+passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 
 ---
 
@@ -27,6 +29,7 @@ All backends support `-m auto --auto-download`. Three new ggml ops
 | **LOW** | [#7 voxtral4b streaming](#7-native-voxtral4b-streaming) | High | phase 1 + 1.5 + 2 + 3 + 4 SHIPPED (incremental encoder, bit-exact-batch, 240ms chunks, fused QKV LLM, combined-chunk flush, speculative prefill, **live captions during speech**, **decoder thread**) |
 | **LOW** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | |
 | **LOW** | [#11 WebSocket server](#11-websocket-streaming-server) | High | |
+| **MEDIUM** | [#63 Feature matrix parity](#63-feature-matrix-parity) | Phased | Beam search for LLM backends, auto-download gaps, flash attention audit, CTC aligner for all |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
 | **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | License unclear |
 
@@ -2031,3 +2034,137 @@ releases (the new `ci.yml` / `release.yml` are the actual gates).
 Either delete or repair when convenient — pending audit on whether
 any build-matrix combination there isn't covered by the new
 `ci.yml` matrix.
+
+---
+
+## 63. Feature matrix parity
+
+**Motivation:** Feature matrix audit (May 2026) revealed many backends
+have capabilities the infrastructure already supports but that aren't
+wired up. The `core_greedy_decode` / `core_beam_decode` / flash-attn
+infrastructure is shared — hooking new backends into existing machinery
+is often a small patch per backend.
+
+**Audit baseline:** `crispasr --list-backends` output + `test-all-backends.py
+--profile=feature` run (51 PASS, 0 FAIL after registry cleanup).
+
+### Phase 1 — Beam search for LLM backends (HIGH impact)
+
+Currently: whisper, voxtral, glm-asr, kyutai-stt, firered, moonshine,
+omniasr, omniasr-llm have beam search. Missing from **canary, cohere,
+granite (all variants), voxtral4b, qwen3** — all autoregressive decoders
+that use `core_greedy_decode`.
+
+**Approach:** Each backend's transcribe function calls `core_greedy_decode::run`
+or `core_greedy_decode::run_with_probs`. Swap in `core_beam_decode::run`
+when `params.beam_size > 1`. The function signatures are near-identical
+(both take embed+llm callbacks, decode_config). Per-backend patch is
+~20 lines: add `#include "core_beam_decode.h"`, read `params.beam_size`,
+branch to `core_beam_decode::run`.
+
+**Files per backend:**
+- `src/crispasr_c_api.cpp` — canary, cohere, granite, qwen3 transcribe paths
+- `examples/cli/crispasr_backend_voxtral4b.cpp` — voxtral4b CLI path
+- `src/{canary,cohere,granite_speech,qwen3_asr}.cpp` — if beam needs
+  library-level wiring (most don't — the session API already forwards
+  beam_size)
+
+**Effort:** Small per backend (~30 min each), 5 backends = ~half day.
+
+**Cap update:** Set `CAP_BEAM_SEARCH` in each backend's `capabilities()`
+return value in `crispasr_backend_*.cpp`.
+
+### Phase 2 — Auto-download gaps (SMALL)
+
+| Backend | HF repo exists | Missing from registry |
+|---|---|---|
+| omniasr (CTC) | cstr/omniASR-CTC-1B-v2-GGUF | no auto-dl flag |
+| omniasr-llm | cstr/omniasr-llm-300m-v2-GGUF | no auto-dl flag |
+| gemma4-e2b | (needs upload) | no model, no auto-dl |
+| mimo-asr | cstr/mimo-asr-GGUF | no auto-dl flag |
+
+**Approach:** Add `model_url` + `model_filename` to each backend's
+registry entry in `src/crispasr_model_registry.cpp`. Then set
+`CAP_AUTO_DOWNLOAD` in `capabilities()`.
+
+**Effort:** Trivial, ~1 hour for all four.
+
+### Phase 3 — Flash attention audit (MEDIUM)
+
+Backends claiming flash attention in `--list-backends`:
+whisper, parakeet, canary, cohere, granite, voxtral, voxtral4b, qwen3,
+vibevoice, qwen3-tts, orpheus.
+
+Backends that **should** have flash attention (use standard ggml
+self-attention with Q/K/V matmuls) but don't declare it:
+glm-asr, kyutai-stt, firered-asr, moonshine, omniasr, omniasr-llm.
+
+**Approach:** Each backend allocates ggml graphs for self-attention.
+Flash attention is a ggml-level optimization (`GGML_OP_FLASH_ATTN_EXT`)
+that replaces the Q×K^T → softmax → ×V chain. Requirements:
+1. Q/K/V must be contiguous tensors with standard layout
+2. `ggml_flash_attn_ext` must be called instead of the manual chain
+3. Causal mask must be passed correctly
+
+For each backend: check if the attention implementation uses manual
+matmul chains or already calls `ggml_flash_attn_ext`. If manual,
+refactor to use `ggml_flash_attn_ext` behind a `flash_attn` flag.
+
+**Effort:** Medium — ~2 hours per backend for the refactor + validation.
+glm-asr and kyutai-stt are the highest-priority targets (largest models,
+most benefit from flash attn memory savings).
+
+### Phase 4 — Word timestamps via CTC aligner for all backends (SMALL)
+
+The `-am` (alignment model) flag works with any backend that produces
+text output. Currently documented for: granite, voxtral, voxtral4b,
+qwen3, fc-ctc, wav2vec2, glm-asr, firered, moonshine, omniasr.
+
+**Missing documentation/testing for:** moonshine-streaming, omniasr-llm,
+vibevoice, mimo-asr, gemma4-e2b.
+
+**Approach:** These backends already produce text. The aligner runs
+independently on (text, audio) pairs. Just needs:
+1. Test with `-am canary-ctc-aligner.gguf` on each backend's output
+2. Add `-am` to the feature matrix if it works
+3. Update test-all-backends.py capabilities
+
+**Effort:** Trivial validation, ~1 hour.
+
+### Phase 5 — Punctuation for CTC backends via auto-punc (LOW)
+
+CTC backends (fc-ctc, wav2vec2, omniasr-ctc, firered-asr) produce
+lowercase text without punctuation. The `--punc-model auto` flag
+auto-downloads FireRedPunc (~50 MB) and restores punctuation.
+
+**Idea:** Make `--punc-model auto` the default when a CTC backend is
+detected and `--no-punctuation` is not set. This would give all CTC
+backends punctuated output by default, matching user expectations.
+
+**Risk:** Adds ~50 MB download + ~200 ms latency per segment. Should
+be opt-in initially, maybe promoted to default in a future release.
+
+**Effort:** Small — check backend type in `crispasr_run.cpp`, auto-set
+`params.punc_model = "auto"` for CTC backends when not explicitly set.
+
+### Phase 6 — Best-of-N for LLM backends (LOW priority)
+
+Best-of-N (`-bo N`) runs N independent decodes at temperature > 0 and
+picks the highest-scoring result. Currently times out on CPU for large
+models (omniasr-llm 300s, glm-asr 300s, kyutai-stt 90s).
+
+**Not a code issue** — the feature works, it's just too slow on CPU
+with Q4_K models > 500 MB. On GPU or with smaller models it completes.
+No code changes needed; just document the GPU requirement.
+
+**Effort:** None (documentation only).
+
+### Summary — expected matrix after all phases
+
+| Feature gained | Backends affected |
+|---|---|
+| Beam search | +canary, +cohere, +granite, +voxtral4b, +qwen3 |
+| Auto-download | +omniasr, +omniasr-llm, +mimo-asr |
+| Flash attention | +glm-asr, +kyutai-stt, +firered, +moonshine, +omniasr |
+| Word timestamps (-am) | +moonshine-streaming, +omniasr-llm, +vibevoice, +mimo-asr |
+| Auto-punctuation | +fc-ctc, +wav2vec2, +omniasr-ctc, +firered (opt-in) |
