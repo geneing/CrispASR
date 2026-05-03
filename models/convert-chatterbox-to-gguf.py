@@ -220,7 +220,9 @@ def choose_dtype(name: str, shape: list, t: torch.Tensor):
     keep_f32 = (
         'emb.weight' in name or 'pos_emb.weight' in name or
         'cond.' in name or 'conds.' in name or
-        'perceiver.' in name or 've.' in name
+        'perceiver.' in name or 've.' in name or
+        'input_embedding' in name or 'embed_affine' in name or
+        'encoder_proj' in name or 'embed.out' in name
     )
     if keep_f32:
         return to_f32(t), GGMLQuantizationType.F32
@@ -269,11 +271,93 @@ def map_t3_name(hf_name: str) -> str | None:
 
 def map_s3gen_name(hf_name: str) -> str | None:
     """Map S3Gen HF tensor name → GGUF tensor name.
-    We keep the hierarchical structure but add an 's3gen.' prefix."""
+    Abbreviate deep paths to stay under the 64-byte GGUF name limit."""
     if hf_name.endswith('.num_batches_tracked'):
         return None
 
-    return "s3gen." + hf_name
+    n = hf_name
+    # Abbreviate the deep decoder paths
+    n = n.replace("flow.decoder.estimator.", "fd.")
+    n = n.replace("down_blocks", "db")
+    n = n.replace("mid_blocks", "mb")
+    n = n.replace("up_blocks", "ub")
+    n = n.replace("final_block", "fb")
+    n = n.replace("final_proj", "fp")
+    n = n.replace("time_embeddings", "te")
+    n = n.replace("time_mlp", "tm")
+    n = n.replace("time_embed_mixer", "tmx")
+    n = n.replace("block1.block", "b1")
+    n = n.replace("block2.block", "b2")
+    n = n.replace("res_conv", "rc")
+    n = n.replace("transformer_blocks", "tb")  # not used in current arch
+    n = n.replace("attn1.to_out.0", "attn1.o")
+    n = n.replace("attn1.to_", "attn1.")
+    n = n.replace("ff.net.0.proj", "ff.up")
+    n = n.replace("ff.net.2", "ff.down")
+    # Abbreviate speaker encoder paths
+    n = n.replace("speaker_encoder.", "se.")
+    n = n.replace("xvector.", "xv.")
+    n = n.replace("nonlinear.", "nl.")
+    n = n.replace("batchnorm", "bn")
+    n = n.replace("cam_layer.", "cam.")
+    n = n.replace("linear_local", "ll")
+    n = n.replace("linear1", "l1")
+    n = n.replace("linear2", "l2")
+    # Abbreviate conformer encoder paths
+    n = n.replace("flow.encoder.", "fe.")
+    n = n.replace("self_attn.", "sa.")
+    n = n.replace("feed_forward.", "ff.")
+    n = n.replace("pre_lookahead_layer.", "pla.")
+    n = n.replace("up_encoders", "ue")
+    n = n.replace("encoders", "enc")
+    n = n.replace("up_embed", "uemb")
+    n = n.replace("up_layer", "ul")
+    n = n.replace("after_norm", "an")
+    n = n.replace("norm_mha", "nmha")
+    n = n.replace("norm_ff", "nff")
+    n = n.replace("linear_out", "lo")
+    n = n.replace("linear_pos", "lp")
+    n = n.replace("linear_q", "lq")
+    n = n.replace("linear_k", "lk")
+    n = n.replace("linear_v", "lv")
+    n = n.replace("pos_bias_u", "pbu")
+    n = n.replace("pos_bias_v", "pbv")
+    # Abbreviate vocoder paths
+    n = n.replace("mel2wav.", "v.")
+    n = n.replace("conv_pre", "cpre")
+    n = n.replace("conv_post", "cpost")
+    n = n.replace("source_downs", "sd")
+    n = n.replace("source_resblocks", "srb")
+    n = n.replace("resblocks", "rb")
+    n = n.replace("activations1", "a1")
+    n = n.replace("activations2", "a2")
+    n = n.replace("convs1", "c1")
+    n = n.replace("convs2", "c2")
+    n = n.replace("condnet", "cn")
+    n = n.replace("f0_predictor.", "f0.")
+    n = n.replace("m_source.", "ms.")
+    n = n.replace("l_sin_gen.", "sg.")
+    n = n.replace("l_linear", "ll")
+    n = n.replace("l_tanh", "lt")
+    n = n.replace("classifier", "cls")
+    # S3Tokenizer paths
+    n = n.replace("tokenizer.", "tok.")
+    n = n.replace("quantizer.", "quant.")
+    n = n.replace("_codebook.", "cb.")
+    n = n.replace("encoder.blocks", "enc.b")
+    n = n.replace("fsmn_block", "fsmn")
+    n = n.replace("project_down", "pd")
+    n = n.replace("project_up", "pu")
+    # Common
+    n = n.replace("parametrizations.weight.", "pw.")
+
+    name = "s3." + n
+    if len(name) >= 64:
+        # Last resort: hash the overflow
+        import hashlib
+        h = hashlib.md5(hf_name.encode()).hexdigest()[:8]
+        name = f"s3.h.{h}"
+    return name
 
 
 # ── VE tensor name remapping ──────────────────────────────────────

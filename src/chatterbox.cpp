@@ -12,6 +12,7 @@
 //   - Stub hooks for S3Gen + vocoder (separate file later)
 
 #include "chatterbox.h"
+#include "chatterbox_s3gen.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/attention.h"
@@ -348,14 +349,15 @@ struct chatterbox_context {
     ggml_tensor* kv_v = nullptr;
     int kv_max_ctx = 0;
 
-    // S3Gen context (lazy-loaded)
+    // S3Gen context (lazy-loaded from set_s3gen_path)
     std::string s3gen_path;
-    // TODO: s3gen model struct + weights
+    chatterbox_s3gen_context* s3gen_ctx = nullptr;
 
     // RNG
     uint64_t rng_state = 0xdeadbeefcafebabeULL;
 
     ~chatterbox_context() {
+        if (s3gen_ctx) chatterbox_s3gen_free(s3gen_ctx);
         if (sched) ggml_backend_sched_free(sched);
         if (kv_buf) ggml_backend_buffer_free(kv_buf);
         if (kv_ctx) ggml_free(kv_ctx);
@@ -912,9 +914,17 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(
 extern "C" int chatterbox_set_s3gen_path(struct chatterbox_context* ctx, const char* path) {
     if (!ctx || !path) return -1;
     ctx->s3gen_path = path;
-    // TODO: load S3Gen weights
-    if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "chatterbox: S3Gen path set to %s (loading deferred)\n", path);
+
+    // Free existing
+    if (ctx->s3gen_ctx) {
+        chatterbox_s3gen_free(ctx->s3gen_ctx);
+        ctx->s3gen_ctx = nullptr;
+    }
+
+    ctx->s3gen_ctx = chatterbox_s3gen_init_from_file(path, ctx->n_threads, ctx->params.verbosity);
+    if (!ctx->s3gen_ctx) {
+        fprintf(stderr, "chatterbox: failed to load S3Gen from %s\n", path);
+        return -1;
     }
     return 0;
 }
@@ -1045,6 +1055,11 @@ extern "C" float* chatterbox_synthesize(
     if (!ctx || !text || !out_n_samples) return nullptr;
     *out_n_samples = 0;
 
+    if (!ctx->s3gen_ctx) {
+        fprintf(stderr, "chatterbox: S3Gen not loaded. Call chatterbox_set_s3gen_path first.\n");
+        return nullptr;
+    }
+
     // Step 1: T3 → speech tokens
     int n_tokens = 0;
     int32_t* speech_tokens = chatterbox_synthesize_tokens(ctx, text, &n_tokens);
@@ -1054,12 +1069,54 @@ extern "C" float* chatterbox_synthesize(
         return nullptr;
     }
 
-    // Step 2: S3Gen → mel spectrogram (TODO)
-    // Step 3: HiFTGenerator → waveform (TODO)
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "chatterbox: T3 → %d speech tokens, running S3Gen...\n", n_tokens);
+    }
 
-    fprintf(stderr, "chatterbox: S3Gen + vocoder not yet implemented\n");
+    // Step 2+3: S3Gen → mel → waveform
+    // Get precomputed conditioning tensors
+    const int32_t* prompt_tokens = nullptr;
+    int n_prompt = 0;
+    const float* prompt_feat = nullptr;
+    int prompt_feat_len = 0;
+    const float* spk_emb = nullptr;
+
+    std::vector<int32_t> pt_buf;
+    std::vector<float> pf_buf;
+    std::vector<float> se_buf;
+
+    if (ctx->conds.gen_prompt_token) {
+        n_prompt = (int)ctx->conds.gen_prompt_token->ne[0];
+        pt_buf.resize(n_prompt);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_token, pt_buf.data(), 0,
+                                n_prompt * sizeof(int32_t));
+        prompt_tokens = pt_buf.data();
+    }
+    if (ctx->conds.gen_prompt_feat) {
+        prompt_feat_len = (int)ctx->conds.gen_prompt_feat->ne[1]; // (1, T, 80)
+        pf_buf.resize(prompt_feat_len * 80);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_feat, pf_buf.data(), 0,
+                                pf_buf.size() * sizeof(float));
+        prompt_feat = pf_buf.data();
+    }
+    if (ctx->conds.gen_embedding) {
+        se_buf.resize(192);
+        ggml_backend_tensor_get(ctx->conds.gen_embedding, se_buf.data(), 0,
+                                192 * sizeof(float));
+        spk_emb = se_buf.data();
+    }
+
+    float* pcm = chatterbox_s3gen_synthesize(
+        ctx->s3gen_ctx,
+        speech_tokens, n_tokens,
+        prompt_tokens, n_prompt,
+        prompt_feat, prompt_feat_len,
+        spk_emb,
+        ctx->params.cfm_steps,
+        out_n_samples);
+
     chatterbox_tokens_free(speech_tokens);
-    return nullptr;
+    return pcm;
 }
 
 extern "C" int chatterbox_set_voice_from_wav(
