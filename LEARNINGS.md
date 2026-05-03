@@ -2800,15 +2800,15 @@ Key: this is fairseq2-based (not HuggingFace), so tensor names differ
 from standard wav2vec2. The converter shortens names to fit 64-char GGUF
 limit. CNN strides stored as array in GGUF metadata.
 
-The CTC blank = pad_id = 1 (SentencePiece <pad>).
+The CTC blank = pad_id = 1 (SentencePiece `<pad>`).
 
 ### OmniASR-CTC: three critical findings
 
 1. **Input normalization required**: wav2vec2 models expect `layer_norm(waveform)`
    — zero mean, unit variance. Without this, the model outputs mostly blanks.
 
-2. **CTC blank = token 0 (<s>)**: In fairseq2, the BOS token serves as CTC blank.
-   NOT token 1 (<pad>) which is the HuggingFace convention.
+2. **CTC blank = token 0 (`<s>`)**: In fairseq2, the BOS token serves as CTC blank.
+   NOT token 1 (`<pad>`) which is the HuggingFace convention.
    The official code just removes consecutive duplicates + skip_special_tokens.
 
 3. **Pos conv padding**: fairseq2 uses `padding = K // 2` (=64 for K=128),
