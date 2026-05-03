@@ -675,6 +675,7 @@ jobs:
         with:
           name: ggml_cpu_${{ matrix.arch }}.dll
           path: build/bin/${{ matrix.build }}/ggml-cpu.dll
+          if-no-files-found: warn
 
       - name: Pack bin artifacts
         shell: pwsh

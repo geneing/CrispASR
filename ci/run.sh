@@ -372,7 +372,9 @@ done
 test $ret -eq 0 && gg_run ctest debug
 test $ret -eq 0 && gg_run ctest release
 
-test $ret -eq 0 && gg_run bench
+# Benchmarks are informational — don't fail the CI on benchmark errors
+# (SIGILL on low-perf runners with heterogeneous CPU features, OOM, etc.)
+gg_run bench || true
 
 cat $OUT/README.md
 

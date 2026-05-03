@@ -147,6 +147,15 @@ add_library(crispasr
             )
 add_library(whisper ALIAS crispasr)
 
+# miniaudio.h on Apple includes <AVFoundation/AVFoundation.h> which
+# contains ObjC syntax (@class, @protocol). When compiling as pure
+# C++ this fails on visionOS/tvOS/iOS xcframework builds. Setting the
+# source language to OBJCXX lets clang accept the ObjC headers.
+if(APPLE)
+    set_source_files_properties(crispasr_audio.cpp crispasr_mic.cpp
+        PROPERTIES LANGUAGE OBJCXX)
+endif()
+
 set_target_properties(crispasr PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION ${SOVERSION}
