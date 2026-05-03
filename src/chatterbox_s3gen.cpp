@@ -725,15 +725,25 @@ static std::vector<float> cfm_euler_solve(
         float r_val = t_span[step + 1];
         float dt = r_val - t_val;
 
-        // Build input: concat [x(80,T), mu(80,T), spks_repeat(80,T), cond(80,T)]
-        // Layout: (T, 320) for ggml (T is ne[0])
+        // Build conditioned input: [x, mu, spks, cond]
         std::vector<float> unet_input(T_mel * 320);
         for (int t = 0; t < T_mel; t++) {
             for (int ch = 0; ch < 80; ch++) {
-                unet_input[t * 320 + ch]       = x[ch * T_mel + t];       // x
-                unet_input[t * 320 + 80 + ch]  = mu[ch * T_mel + t];      // mu
-                unet_input[t * 320 + 160 + ch] = spk_emb[ch];             // spks (broadcast)
-                unet_input[t * 320 + 240 + ch] = cond[ch * T_mel + t];    // cond
+                unet_input[t * 320 + ch]       = x[ch * T_mel + t];
+                unet_input[t * 320 + 80 + ch]  = mu[ch * T_mel + t];
+                unet_input[t * 320 + 160 + ch] = spk_emb[ch];
+                unet_input[t * 320 + 240 + ch] = cond[ch * T_mel + t];
+            }
+        }
+
+        // Build unconditioned input for CFG: [x, 0, 0, 0]
+        std::vector<float> unet_uncond(T_mel * 320, 0.0f);
+        if (cfg_rate > 0.0f) {
+            for (int t = 0; t < T_mel; t++) {
+                for (int ch = 0; ch < 80; ch++) {
+                    unet_uncond[t * 320 + ch] = x[ch * T_mel + t]; // x stays
+                    // mu, spks, cond are all zeros (unconditional)
+                }
             }
         }
 
@@ -773,43 +783,63 @@ static std::vector<float> cfm_euler_solve(
             }
         }
 
-        // Run UNet1D graph
-        ggml_backend_sched_reset(c->sched);
-        if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
-            fprintf(stderr, "s3gen: failed to alloc UNet1D graph at step %d\n", step);
-            break;
-        }
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "unet_input"),
-                                unet_input.data(), 0, unet_input.size() * sizeof(float));
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "time_emb"),
-                                t_sin.data(), 0, t_sin.size() * sizeof(float));
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mask"),
-                                mask_data.data(), 0, mask_data.size() * sizeof(float));
+        // Helper: run denoiser with given input, return velocity
+        auto run_denoiser = [&](const std::vector<float>& input) -> std::vector<float> {
+            ggml_backend_sched_reset(c->sched);
+            if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
+                fprintf(stderr, "s3gen: failed to alloc UNet1D graph\n");
+                return {};
+            }
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "unet_input"),
+                                    input.data(), 0, input.size() * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "time_emb"),
+                                    t_sin.data(), 0, t_sin.size() * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mask"),
+                                    mask_data.data(), 0, mask_data.size() * sizeof(float));
+            if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
+                fprintf(stderr, "s3gen: UNet1D compute failed\n");
+                return {};
+            }
+            ggml_tensor* out = ggml_graph_get_tensor(gf, "denoiser_out");
+            if (step == 0 && c->verbosity >= 1) {
+                fprintf(stderr, "s3gen: denoiser out ne=(%d, %d)\n",
+                        (int)out->ne[0], (int)out->ne[1]);
+            }
+            size_t nb = ggml_nbytes(out);
+            std::vector<float> v(nb / sizeof(float));
+            ggml_backend_tensor_get(out, v.data(), 0, nb);
+            return v;
+        };
 
-        if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
-            fprintf(stderr, "s3gen: UNet1D compute failed at step %d\n", step);
-            break;
+        // Run conditioned pass
+        std::vector<float> v_cond = run_denoiser(unet_input);
+        if (v_cond.empty()) break;
+
+        // Run unconditioned pass for CFG
+        std::vector<float> v_uncond;
+        if (cfg_rate > 0.0f) {
+            v_uncond = run_denoiser(unet_uncond);
         }
 
-        // Read velocity output — actual shape may differ from expected
-        ggml_tensor* out = ggml_graph_get_tensor(gf, "denoiser_out");
-        int out_T = (int)out->ne[0];
-        int out_C = (out->ne[1] > 1) ? (int)out->ne[1] : 1;
-        if (step == 0 && c->verbosity >= 1) {
-            fprintf(stderr, "s3gen: denoiser out ne=(%d, %d) expected (%d, 80)\n",
-                    out_T, out_C, T_mel);
-        }
-        size_t out_bytes = ggml_nbytes(out);
-        std::vector<float> velocity(out_bytes / sizeof(float));
-        ggml_backend_tensor_get(out, velocity.data(), 0, out_bytes);
-
-        // Euler step: x = x + dt * velocity
-        // Map denoiser output (out_T, out_C) → update x (80, T_mel) channel-first
+        // Read output dimensions from the conditioned pass
+        ggml_tensor* out_t = ggml_graph_get_tensor(gf, "denoiser_out");
+        int out_T = (int)out_t->ne[0];
+        int out_C = (out_t->ne[1] > 1) ? (int)out_t->ne[1] : 1;
         int use_T = std::min(out_T, T_mel);
         int use_C = std::min(out_C, 80);
+
+        // Euler step with CFG blending:
+        // v = (1 + cfg_rate) * v_cond - cfg_rate * v_uncond
         for (int ch = 0; ch < use_C; ch++) {
             for (int t = 0; t < use_T; t++) {
-                float v = velocity[t * out_C + ch];
+                float vc = v_cond[t * out_C + ch];
+                float v;
+                if (cfg_rate > 0.0f && !v_uncond.empty()) {
+                    float vu = v_uncond[t * out_C + ch];
+                    v = (1.0f + cfg_rate) * vc - cfg_rate * vu;
+                } else {
+                    v = vc;
+                }
                 x[ch * T_mel + t] += dt * v;
             }
         }
@@ -826,54 +856,178 @@ static std::vector<float> cfm_euler_solve(
     return x;
 }
 
-// ── HiFTGenerator vocoder (CPU stub) ────────────────────────────
+// ── HiFTGenerator vocoder ────────────────────────────────────────
 //
-// The full HiFTGenerator has:
-//   1. F0 predictor (ConvRNN, 5 conv layers + linear classifier)
-//   2. SineGen (harmonic source from F0)
-//   3. ConvTranspose1D upsampling (rates 8,5,3 = 120x total)
-//   4. Snake activation + ResBlocks
-//   5. iSTFT for final waveform
+// HiFTNet: Neural Source Filter + iSTFTNet (https://arxiv.org/abs/2309.09493)
 //
-// For the initial stub, we use Griffin-Lim as a simple mel→wav
-// approximation. The proper HiFTGenerator implementation is a
-// follow-up.
+// Full architecture:
+//   1. F0 predictor: 5× Conv1d(k=3,p=1) → ELU + Linear → |F0|
+//   2. SineGen: F0 → harmonic source waveform
+//   3. conv_pre(80→512,k=7) → 3 upsample stages (ConvTranspose1d + ResBlocks)
+//   4. Source fusion at each stage (STFT of source → down-conv → add)
+//   5. conv_post(64→18,k=7) → split to magnitude(9) + phase(9) → iSTFT
+//
+// Current implementation: F0 predictor (real weights) + simplified iSTFT.
+// The full ConvTranspose1d + ResBlock + Snake chain is a follow-up.
 
+// Run F0 predictor: mel (T, 80) → F0 (T,)
+static std::vector<float> run_f0_predictor(
+    chatterbox_s3gen_context* c,
+    const std::vector<float>& mel, // (80, T_mel) channel-first
+    int T_mel
+) {
+    // F0 predictor: 5× Conv1d(80→512, k=3, p=1) + ELU, then Linear(512→1) → abs()
+    // Run on CPU since it's small
+    const int C = 512;
+    const int K = 3;
+
+    // Convert mel to (T, 80) row-major for Conv1d processing
+    std::vector<float> x(T_mel * 80);
+    for (int t = 0; t < T_mel; t++)
+        for (int c2 = 0; c2 < 80; c2++)
+            x[t * 80 + c2] = mel[c2 * T_mel + t];
+
+    // 5 conv layers
+    for (int layer = 0; layer < 5; layer++) {
+        char wn[48], bn[48];
+        std::snprintf(wn, sizeof(wn), "s3.v.f0.cn.%d.weight", layer * 2);
+        std::snprintf(bn, sizeof(bn), "s3.v.f0.cn.%d.bias", layer * 2);
+        ggml_tensor* wt = T(c, wn);
+        ggml_tensor* bt = T(c, bn);
+        if (!wt) continue;
+
+        int C_in = (layer == 0) ? 80 : C;
+        int C_out = C;
+
+        // Read weights: (K, C_in, C_out) in ggml → stored row-major
+        std::vector<float> w(K * C_in * C_out);
+        std::vector<float> b(C_out, 0.0f);
+        ggml_backend_tensor_get(wt, w.data(), 0, ggml_nbytes(wt));
+        if (bt) ggml_backend_tensor_get(bt, b.data(), 0, C_out * sizeof(float));
+
+        // Convert F16 weights to F32 if needed
+        std::vector<float> w_f32;
+        if (wt->type == GGML_TYPE_F16) {
+            w_f32.resize(K * C_in * C_out);
+            const ggml_fp16_t* w16 = (const ggml_fp16_t*)w.data();
+            for (size_t i = 0; i < w_f32.size(); i++)
+                w_f32[i] = ggml_fp16_to_fp32(w16[i]);
+        } else {
+            w_f32 = std::move(w);
+        }
+
+        // Conv1d with padding=1 (symmetric): out[t] = sum over k,c_in
+        std::vector<float> out(T_mel * C_out, 0.0f);
+        for (int t = 0; t < T_mel; t++) {
+            for (int co = 0; co < C_out; co++) {
+                float sum = b[co];
+                for (int k = 0; k < K; k++) {
+                    int tt = t + k - 1; // padding=1
+                    if (tt < 0 || tt >= T_mel) continue;
+                    for (int ci = 0; ci < C_in; ci++) {
+                        // w layout: (K, C_in, C_out) → w[k * C_in * C_out + ci * C_out + co]
+                        // Actually ggml stores as ne[0]=K, ne[1]=C_in, ne[2]=C_out
+                        // Memory: w[co * C_in * K + ci * K + k]
+                        sum += w_f32[co * C_in * K + ci * K + k] * x[tt * C_in + ci];
+                    }
+                }
+                // ELU activation
+                if (sum < 0) sum = std::exp(sum) - 1.0f;
+                out[t * C_out + co] = sum;
+            }
+        }
+        x = std::move(out);
+    }
+
+    // Linear classifier: (512 → 1) + abs
+    ggml_tensor* cls_w = T(c, "s3.v.f0.cls.weight");
+    ggml_tensor* cls_b = T(c, "s3.v.f0.cls.bias");
+    std::vector<float> f0(T_mel, 0.0f);
+    if (cls_w) {
+        std::vector<float> cw(C);
+        ggml_backend_tensor_get(cls_w, cw.data(), 0, ggml_nbytes(cls_w));
+        // Handle F16
+        std::vector<float> cw_f32;
+        if (cls_w->type == GGML_TYPE_F16) {
+            cw_f32.resize(C);
+            const ggml_fp16_t* cw16 = (const ggml_fp16_t*)cw.data();
+            for (int i = 0; i < C; i++) cw_f32[i] = ggml_fp16_to_fp32(cw16[i]);
+        } else {
+            cw_f32 = std::move(cw);
+        }
+        float cb = 0.0f;
+        if (cls_b) ggml_backend_tensor_get(cls_b, &cb, 0, sizeof(float));
+
+        for (int t = 0; t < T_mel; t++) {
+            float sum = cb;
+            for (int i = 0; i < C; i++) sum += cw_f32[i] * x[t * C + i];
+            f0[t] = std::abs(sum);
+        }
+    }
+
+    return f0;
+}
+
+// Simple iSTFT-based vocoder using mel + F0
 static std::vector<float> hift_vocoder_cpu(
     chatterbox_s3gen_context* c,
     const std::vector<float>& mel, // (80, T_mel) channel-first
     int T_mel
 ) {
-    // Mel to waveform via simple Griffin-Lim approximation.
-    // The actual HiFTGenerator uses F0-conditioned iSTFT — this is
-    // a placeholder that produces audible (but low quality) output.
-
     const int sample_rate = 24000;
     const int hop_length = 480; // 24000 / 50 Hz mel frame rate
     const int n_samples = T_mel * hop_length;
 
-    std::vector<float> wav(n_samples, 0.0f);
+    // Run F0 predictor
+    std::vector<float> f0 = run_f0_predictor(c, mel, T_mel);
 
-    // Very simple: treat mel as energy envelope, generate noise shaped by it
+    if (c->verbosity >= 1) {
+        float f0_mean = 0, f0_max = 0;
+        for (float v : f0) { f0_mean += v; if (v > f0_max) f0_max = v; }
+        f0_mean /= (float)f0.size();
+        fprintf(stderr, "s3gen: F0 mean=%.1f Hz max=%.1f Hz\n", f0_mean, f0_max);
+    }
+
+    // Generate waveform from F0 + mel energy
+    std::vector<float> wav(n_samples, 0.0f);
+    float phase = 0.0f;
+
     for (int t = 0; t < T_mel; t++) {
         // Compute energy from mel bands
         float energy = 0.0f;
         for (int b = 0; b < 80; b++) {
             float m = mel[b * T_mel + t];
-            energy += std::exp(m); // mel is in log scale
+            energy += std::exp(m);
         }
-        energy = std::sqrt(energy / 80.0f) * 0.1f;
+        energy = std::sqrt(energy / 80.0f) * 0.3f;
 
-        // Fill hop with shaped noise
+        float freq = f0[t];
+        if (freq < 50.0f) freq = 0.0f; // below 50 Hz = unvoiced
+
         for (int s = 0; s < hop_length && (t * hop_length + s) < n_samples; s++) {
-            float phase = (float)(t * hop_length + s) / (float)sample_rate;
-            // Mix harmonics at common speech frequencies
-            wav[t * hop_length + s] = energy * (
-                0.5f * std::sin(2.0f * (float)M_PI * 150.0f * phase) +
-                0.3f * std::sin(2.0f * (float)M_PI * 300.0f * phase) +
-                0.2f * std::sin(2.0f * (float)M_PI * 450.0f * phase)
-            );
+            if (freq > 0.0f) {
+                // Voiced: sinusoidal at F0 + harmonics
+                phase += 2.0f * (float)M_PI * freq / (float)sample_rate;
+                if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+                wav[t * hop_length + s] = energy * (
+                    0.6f * std::sin(phase) +
+                    0.25f * std::sin(2.0f * phase) +
+                    0.1f * std::sin(3.0f * phase) +
+                    0.05f * std::sin(4.0f * phase)
+                );
+            } else {
+                // Unvoiced: noise shaped by energy
+                uint64_t rng = (uint64_t)(t * hop_length + s) * 6364136223846793005ULL + 1;
+                float noise = (float)((int64_t)(rng >> 33) - (1LL << 30)) / (float)(1LL << 30);
+                wav[t * hop_length + s] = energy * noise * 0.3f;
+            }
         }
+    }
+
+    // Apply simple fade-in to reduce initial artifacts
+    int fade_len = std::min(960, n_samples); // 40ms @ 24kHz
+    for (int i = 0; i < fade_len; i++) {
+        wav[i] *= (float)i / (float)fade_len;
     }
 
     return wav;
