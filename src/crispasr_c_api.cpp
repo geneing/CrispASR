@@ -926,9 +926,9 @@ struct crispasr_session_seg {
     int64_t t1 = 0;
     struct word {
         std::string text;
-        int64_t t0;
-        int64_t t1;
-        float p;
+        int64_t t0 = 0; // centiseconds absolute
+        int64_t t1 = 0;
+        float p = 1.0f;
     };
     std::vector<word> words;
 };
