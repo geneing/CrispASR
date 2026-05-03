@@ -199,6 +199,11 @@ REGISTRY: tuple[Backend, ...] = (
             timeout_s=300, approx_size_mb=1900,
             capabilities=("transcribe", "json-output", "temperature")),
 
+    Backend("gemma4-e2b", "Gemma4 E2B IT",       "gemma4-e2b-it-q4_k.gguf",
+            "cstr/gemma4-e2b-it-GGUF", "gemma4-e2b-it-q4_k.gguf",
+            timeout_s=300, approx_size_mb=2500,
+            capabilities=("transcribe",)),
+
     # ---- TTS backends (tts-roundtrip capability) ----
     Backend("kokoro",     "Kokoro 82M (TTS)",    "kokoro-82m-q8_0.gguf",
             "cstr/kokoro-82m-GGUF", "kokoro-82m-q8_0.gguf",
