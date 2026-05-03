@@ -1244,13 +1244,11 @@ static std::vector<float> hift_vocoder_cpu(
         return std::vector<float>(T_mel * 480, 0.0f);
     }
 
-    // Set mel input (convert from channel-first to ggml (T, C))
-    std::vector<float> mel_tf(T_mel * 80);
-    for (int t = 0; t < T_mel; t++)
-        for (int b = 0; b < 80; b++)
-            mel_tf[t * 80 + b] = mel[b * T_mel + t];
+    // Set mel input: ggml tensor ne[0]=T, ne[1]=80 → data stored as
+    // data[c * T + t] (channel-first, T is the fast axis).
+    // Our mel is already channel-first (80, T) → no conversion needed!
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "voc_mel"),
-                            mel_tf.data(), 0, mel_tf.size() * sizeof(float));
+                            mel.data(), 0, mel.size() * sizeof(float));
 
     // Generate source STFT: STFT of noise source (since F0≈0, source is noise)
     {

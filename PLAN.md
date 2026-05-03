@@ -919,6 +919,34 @@ models become checkpoint-only adds.
 - **oddadmix/lahgtna-chatterbox-v1** (MIT) — Arabic t3 patch.
   Drop-in once base lands.
 
+#### Phase 3 implementation status (May 2026)
+
+Full C++ pipeline running end-to-end with real weights:
+
+| Component | Files | Tensors | Status |
+|---|---|---|---|
+| GGUF converter | `models/convert-chatterbox-to-gguf.py` | — | ✅ T3 1.1GB + S3Gen 574MB |
+| T3 Llama AR (30L) | `src/chatterbox.{h,cpp}` | 292 | ✅ KV-cached, perceiver, character tokenizer |
+| Perceiver resampler | (in chatterbox.cpp) | 12 | ✅ Cross+self attention, 32 conditioning tokens |
+| Conformer encoder (6+4) | `src/chatterbox_s3gen.cpp` | ~200 | ✅ ggml graph, simplified attention (no rel-pos) |
+| UNet1D denoiser (14 blocks) | (in chatterbox_s3gen.cpp) | 910 | ✅ Causal conv + BasicTransformer + CFG |
+| HiFTGenerator vocoder | (in chatterbox_s3gen.cpp) | 328 | ⚠️ conv_pre → 3× ConvTranspose1d + 9 ResBlocks (Snake) + source fusion + iSTFT |
+| Reference backend | `tools/reference_backends/chatterbox.py` | — | ✅ Dumps 7 stages to GGUF |
+
+ASR roundtrip validation:
+- Python vocoder on Python mel → parakeet: **"Hello world."** ✅
+- C++ vocoder on Python mel → parakeet: **"Oh."** (first word recognition)
+- iSTFT verified bit-exact against torch.istft (RMS 0.0595 vs 0.0594)
+- GGUF weights verified matching Python to 5-6 significant figures
+- conv_pre RMS: C++ 5.72 vs Python 5.50 (4% drift, accumulates through ResBlocks)
+
+Remaining for production quality:
+1. **Fix conv_pre divergence** — ggml_conv_1d produces different values from PyTorch Conv1d on same weights+input. Manual computation matches Python, so the issue is in how the mel tensor is set or how im2col processes it. Investigating.
+2. **Conformer relative position attention** — pos_bias_u/v + linear_pos (encoder quality)
+3. **Pre-lookahead conv + upsample conv** in conformer
+4. **C API integration** — register in crispasr_c_api.cpp, CLI adapter
+5. **Voice cloning** — VoiceEncoder LSTM + S3Tokenizer + CAMPPlus
+
 The CFM solver landed here is **also** the gating piece for Phase 4
 CosyVoice 3 (license permitting) and partially for Fish-Speech S2
 (blocked on license anyway). Ship it once, three families light up.
@@ -981,7 +1009,7 @@ adding a codec head + sampling path. Cheaper than a full new backend.
 | 2 | lex-au Orpheus-3B-DE-Q8 | llama3.2 (HF tags Apache-2.0; underlying Llama-3.2-FT) | **DONE — registry alias `lex-au-orpheus-de` added pointing at the existing `lex-au/Orpheus-3b-German-FT-Q8_0.gguf` (3.52 GB). Factory dispatch wired. SNAC companion shared with the base orpheus row.** | XS |
 | 2 | gwen-tts-0.6B | MIT | queued — needs weight inspection first | S–M |
 | 2 | tada-3b-ml | llama3.2 | queued | M |
-| 3 | Chatterbox base | MIT | **in progress** — T3 AR forward done (GGUF converter, model loads, speech token generation verified), S3Gen CFM + HiFT vocoder pending | L |
+| 3 | Chatterbox base | MIT | **in progress** — full pipeline running end-to-end: T3→S3Gen→HiFT→WAV. Vocoder produces word-recognizable audio ("Oh." from ref mel). conv_pre 4% RMS drift accumulates through ResBlocks → reduced spectral contrast. See Phase 3 status below. | L |
 | 3 | Kartoffelbox_Turbo DE | CC-BY-4.0 (gated) | blocked on Chatterbox base | XS |
 | 3 | lahgtna-chatterbox-v1 AR | MIT | blocked on Chatterbox base | XS |
 | 4 | Voxtral-TTS (Mistral upstream) | CC-BY-NC 4.0 | **BLOCKED — license inherits from voice-ref training data; moved to Deferred. See Phase 4 prose.** | — |
