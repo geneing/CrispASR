@@ -3,9 +3,9 @@
 Pending roadmap items. Each is self-contained with files, approach, and
 effort estimate. Completed items have been moved to `HISTORY.md`.
 
-**Current state (May 2026, v0.5.5):** 21 ASR backends + TTS, unified CLI,
-OpenAI-compatible server, shared `src/core/` library, FireRedPunc
-post-processor, C-ABI + Python/Rust/Dart wrappers, CI on 6 platforms.
+**Current state (May 2026, v0.5.5):** 20 ASR + 3 TTS backends (+ Chatterbox T3 in progress), unified CLI,
+OpenAI-compatible server + WebSocket streaming, shared `src/core/` library, FireRedPunc
+post-processor, C-ABI + Go/Java/Ruby/JS/Python bindings, CI on 6 platforms.
 All backends support `-m auto --auto-download`. Three new ggml ops
 (`conv_1d_cf`, `conv_1d_dw_cf`, `conv_1d_group`). ggml bumped to 0.10.0.
 Feature matrix expanded to 21 backends (README). test-all-backends.py
@@ -27,7 +27,7 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | Priority | Item | Effort | Status |
 |---|---|---|---|
 | **MEDIUM** | [#52 Qwen3-TTS](#52-qwen3-tts) — perf pass | Medium | talker + code_predictor + codec + ECAPA + codec_encoder all done; only step-4 perf pass open (~137 ms/frame → real-time) |
-| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phases 1-2 DONE; Phase 3 (Chatterbox CFM solver) is the gating piece — new arch type, ~1500 LOC, multi-session; T3 Llama AR reusable from orpheus, S3Gen denoiser + ODE integrator + HiFT vocoder are new |
+| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phases 1-2 DONE; Phase 3 in progress — T3 Llama AR forward done (converter + 520M model loads, KV-cached AR decode generates speech tokens), S3Gen CFM denoiser + HiFT vocoder still pending |
 | **MEDIUM** | [#51c MiMo-V2.5-ASR F16 step decode](#51c-f16-step-decode) | Small | F16 step-decode validation blocked behind ≥32 GB box (see PLAN #51c); base runtime + Q4_K shipped → HISTORY §56 |
 | **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
 | **MEDIUM** | [#58 MOSS-Audio-4B-Instruct](#58-moss-audio-4b-instruct) | Large | first audio-understanding (not just ASR) backend; introduces DeepStack cross-layer feature injection |
@@ -981,7 +981,7 @@ adding a codec head + sampling path. Cheaper than a full new backend.
 | 2 | lex-au Orpheus-3B-DE-Q8 | llama3.2 (HF tags Apache-2.0; underlying Llama-3.2-FT) | **DONE — registry alias `lex-au-orpheus-de` added pointing at the existing `lex-au/Orpheus-3b-German-FT-Q8_0.gguf` (3.52 GB). Factory dispatch wired. SNAC companion shared with the base orpheus row.** | XS |
 | 2 | gwen-tts-0.6B | MIT | queued — needs weight inspection first | S–M |
 | 2 | tada-3b-ml | llama3.2 | queued | M |
-| 3 | Chatterbox base | MIT | queued — CFM solver gating | L |
+| 3 | Chatterbox base | MIT | **in progress** — T3 AR forward done (GGUF converter, model loads, speech token generation verified), S3Gen CFM + HiFT vocoder pending | L |
 | 3 | Kartoffelbox_Turbo DE | CC-BY-4.0 (gated) | blocked on Chatterbox base | XS |
 | 3 | lahgtna-chatterbox-v1 AR | MIT | blocked on Chatterbox base | XS |
 | 4 | Voxtral-TTS (Mistral upstream) | CC-BY-NC 4.0 | **BLOCKED — license inherits from voice-ref training data; moved to Deferred. See Phase 4 prose.** | — |
