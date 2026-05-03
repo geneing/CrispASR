@@ -1226,8 +1226,9 @@ static std::vector<float> hift_vocoder_cpu(
         if (cpost_b) x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpost_b, 1, (int)cpost_b->ne[0]));
     }
 
-    // Clamp to prevent iSTFT overflow from unbounded ResBlock output
-    x = ggml_clamp(ctx0, x, -5.0f, 5.0f);
+    // Clamp magnitude to prevent iSTFT overflow (Python clips at 100)
+    // but also clamp phase for stability
+    x = ggml_clamp(ctx0, x, -10.0f, 10.0f);
 
     ggml_set_name(x, "voc_stft");
     ggml_build_forward_expand(gf, x);
