@@ -267,6 +267,12 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
             x = ggml_add(ctx0, x, ln_b);
     }
 
+    // Scale by sqrt(D) — matches EspnetRelPositionalEncoding.xscale
+    x = ggml_scale(ctx0, x, std::sqrt((float)D));
+
+    ggml_set_name(x, "dump_after_embed");
+    ggml_set_output(x);
+
     // Pre-lookahead conv (causal): conv1(k=4, pad_left=3) + LeakyReLU + conv2(k=3, pad_left=2) + residual
     {
         ggml_tensor* pla_c1_w = T(c, "s3.fe.pla.conv1.weight");
@@ -286,6 +292,8 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
             }
             if (pla_c1_b)
                 x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, pla_c1_b, 1, (int)pla_c1_b->ne[0]));
+            ggml_set_name(x, "dump_pla_conv1");
+            ggml_set_output(x);
             x = ggml_leaky_relu(ctx0, x, 0.1f, false);
             // Conv2(k=3, causal pad=2 on left)
             x = ggml_conv_1d(ctx0, pla_c2_w, x, 1, 2, 1);
@@ -302,11 +310,19 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
         }
     }
 
+    // Mark PLA output for dump — also mark pre-PLA embed
+    ggml_set_name(x, "dump_after_pla");
+    ggml_set_output(x);
+
     // 6 conformer blocks (pre-upsample)
     for (int i = 0; i < 6; i++) {
         char prefix[32];
         std::snprintf(prefix, sizeof(prefix), "s3.fe.enc.%d", i);
         x = build_conformer_block(ctx0, gf, c, x, Tin, prefix, H, HD, D, FF);
+        char dname[32];
+        std::snprintf(dname, sizeof(dname), "dump_enc_%d", i);
+        ggml_set_name(x, dname);
+        ggml_set_output(x);
     }
 
     // Upsample 2x: interpolate → pad → conv
@@ -398,6 +414,35 @@ static std::vector<float> run_conformer_encoder(chatterbox_s3gen_context* c, con
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "s3gen: conformer compute failed\n");
         return {};
+    }
+
+    // Dump per-layer RMS if CRISPASR_S3GEN_DUMP=1
+    {
+        const char* dump_env = std::getenv("CRISPASR_S3GEN_DUMP");
+        if (dump_env && dump_env[0] == '1') {
+            auto dump_rms = [&](const char* name) {
+                ggml_tensor* t = ggml_graph_get_tensor(gf, name);
+                if (!t)
+                    return;
+                size_t n = ggml_nelements(t);
+                std::vector<float> d(n);
+                ggml_backend_tensor_get(t, d.data(), 0, n * sizeof(float));
+                float rms = 0;
+                for (auto v : d)
+                    rms += v * v;
+                rms = std::sqrt(rms / n);
+                fprintf(stderr, "s3gen[enc]: %-16s ne=(%lld,%lld) rms=%.6f\n", name, (long long)t->ne[0],
+                        (long long)t->ne[1], rms);
+            };
+            dump_rms("dump_after_embed");
+            dump_rms("dump_pla_conv1");
+            dump_rms("dump_after_pla");
+            for (int i = 0; i < 6; i++) {
+                char dn[32];
+                std::snprintf(dn, sizeof(dn), "dump_enc_%d", i);
+                dump_rms(dn);
+            }
+        }
     }
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "encoder_out");
