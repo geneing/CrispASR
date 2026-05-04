@@ -2518,3 +2518,120 @@ docs/cli.md                              — document the new flag(s)
 - Per-tensor mmap-from-disk inference (`memory-mapped weights` with
   cold-loaded tensors): that's a separate, larger feature — track as
   its own item if it ever becomes a priority.
+
+---
+
+## 70. Streaming TTS via chunked VAE decode (latency win, vibevoice / qwen3-tts)
+
+**Effort:** Medium-large.
+
+**Background.** Issue #52 surfaced a chunked-VAE patch from
+[`geneing`](https://github.com/CrispStrobe/CrispASR/issues/52#issuecomment-4366745018)
+that re-runs the σ-VAE decoder on small chunks of the latent stream
+instead of one big graph. Their measurement showed a speed regression
+because re-running the ggml graph N times pays per-call setup
+(`sched_reset` + `sched_alloc_graph` + the kernel-launch ramp-up) on
+every chunk. So that patch isn't useful for the Intel-Arc Vulkan
+workgroup-limit bug it was filed against — that's already fixed by
+the CPU fallback in `31795a7` / `VIBEVOICE_VAE_BACKEND=cpu`.
+
+**But chunking is the right shape for a latency feature, not a
+throughput one.** If we ever want streaming TTS — the listener
+starts hearing audio before AR completes — we'll need chunked VAE
+*plus* the rest of the pipeline. A `--stream` mode for `--tts` would
+look like: emit a 24 kHz PCM chunk every K AR steps, written to
+stdout / streamed over HTTP, while the AR loop continues. Time-to-
+first-byte drops from "full TTS wall-clock" to "K AR steps + one
+chunked-VAE pass."
+
+This is **not the same project as the Intel-Vulkan workgroup fix.**
+We'd want a chunked VAE that's well-engineered for latency rather
+than borrowed from a workgroup-limit workaround.
+
+### Three pieces required
+
+1. **Persistent VAE compute-graph reused across chunks.** The
+   per-call `sched_reset` + `sched_alloc_graph` overhead is what
+   killed geneing's prototype's speed. Pattern to mirror is
+   qwen3-tts's `O15` graph reuse (see `src/qwen3_tts.cpp:1037`):
+   build the graph once at `Lk = max_chunk_latents`, pin the
+   tensor topology, reuse the cached gallocr plan across all
+   chunk decode calls. Net cost is one `set_rows`-style
+   "where to write this chunk's output" op per call, not a full
+   rebuild.
+
+2. **Causal padding on the σ-VAE conv stack.** The σ-VAE
+   transposed-conv stack has receptive field that crosses chunk
+   boundaries — naive chunking will produce phase artefacts at
+   the boundaries. Causal padding (left-pad each chunk with the
+   previous chunk's tail context, drop the first L padding samples
+   from the output) makes the chunk decode equivalent to the full
+   decode at chunk boundaries. Reference: kokoro and voxtral4b
+   already use causal-conv1d padding for streaming-encoder paths;
+   the σ-VAE side has a different topology but the math is the
+   same.
+
+3. **Chunked transfer in the HTTP TTS endpoint.** Once #58's
+   `POST /v1/audio/speech` lands (vkrmch's PR), wire chunked-
+   transfer-encoded audio output for clients with `Accept:
+   audio/wav; chunked` (or a `stream=true` request field). cpp-
+   httplib has chunked-transfer support out of the box. Without
+   this piece the latency win can't reach the network — server
+   would compute chunks fast but still wait until the last chunk
+   to flush.
+
+### Backends in scope
+
+- **vibevoice TTS** (σ-VAE decoder) — primary target, the patch
+  origin. Largest latency win because vibevoice is positioned as
+  the realtime TTS backend.
+- **qwen3-tts codec decode** — different architecture (12 Hz codec
+  vocoder, not a σ-VAE) but the same chunked-decode-with-graph-
+  reuse pattern applies. Already has graph reuse via `O15`; would
+  extend that to chunked output.
+- **kokoro iSTFTNet generator** — different shape again
+  (deterministic vocoder, not a diffusion VAE). Chunking is
+  cleaner here because the generator is straight-line; harder
+  because the iSTFT inverse window has the same boundary
+  artefact problem.
+
+Skip out-of-scope: orpheus uses the SNAC codec which already
+emits 24 kHz PCM in a single forward pass — chunking has no
+latency win there.
+
+### Approach
+
+Pre-work: revisit geneing's
+[chunked_vibevoice.patch](https://github.com/user-attachments/files/27326191/chunked_vibevoice.patch)
+as a starting point — it nailed the chunking decomposition;
+where it gave up was on the per-call overhead. Land the graph-
+reuse fix first (mostly mechanical), benchmark to confirm the
+regression is gone, then layer in the causal-padding and HTTP
+chunked transfer.
+
+### Files touched
+
+- `src/vibevoice.cpp` (and `vibevoice_tts.cpp`) — chunked decode
+  path with graph reuse + causal padding
+- `examples/cli/crispasr_backend_vibevoice.cpp` — `--stream`
+  output path: write each chunk's PCM to `stdout` as they
+  complete, instead of buffering and writing one WAV at end
+- `examples/cli/cli.cpp` — surface `--tts-stream` flag
+- `examples/server/server.cpp` — chunked-transfer wiring for
+  `/v1/audio/speech` (depends on #58 landing first)
+- `docs/tts.md` — document the new flag + the streaming env
+  var(s)
+- `LEARNINGS.md` — document the per-call ggml graph overhead
+  trap and the graph-reuse cure (geneing's patch is the
+  cautionary tale)
+
+### Out of scope for v1
+
+- Multi-chunk look-ahead (lower latency at cost of slightly worse
+  boundary behaviour) — a single look-ahead chunk is already a
+  meaningful tuning knob; tuning past that adds complexity that
+  isn't justified until we measure how good the v1 latency is.
+- Non-vibevoice / non-qwen3-tts backends — kokoro / orpheus
+  chunking is its own work item if anyone needs it.
+- Any changes to AR decoding itself — the AR loop stays
+  unchanged; only the post-AR codec / VAE side is chunked.
