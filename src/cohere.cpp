@@ -796,6 +796,7 @@ static ggml_tensor* ct_get_tensor_fmt(cohere_model& model, const char* fmt, int 
 // Model loading
 // ---------------------------------------------------------------------------
 
+#include "core/attention.h"
 #include "core/gguf_loader.h"
 
 #ifndef M_PI
@@ -1618,11 +1619,19 @@ struct cohere_context* cohere_init_from_file(const char* path_model, struct cohe
             .no_alloc = true,
         };
         ctx->kv_ctx = ggml_init(kv_params);
+        // KV dtype stays F16 here — cohere's decoder writes via ggml_cpy()
+        // into a strided view of the cache, which is incompatible with
+        // quant types. Migration to core_attn::kv_self_attn would unlock
+        // CRISPASR_KV_QUANT_K/_V; until then only the on-CPU spill knob
+        // is wired.
         ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hp.dec_head_dim, hp.dec_max_ctx, hp.dec_n_heads,
                                        hp.dec_n_layers);
         ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hp.dec_head_dim, hp.dec_max_ctx, hp.dec_n_heads,
                                        hp.dec_n_layers);
-        ctx->kv_buf = ggml_backend_alloc_buffer(ctx->ggml_backend, ggml_nbytes(ctx->kv_k) + ggml_nbytes(ctx->kv_v));
+        // PLAN #69b: optional KV-on-CPU spill for VRAM-tight users.
+        ggml_backend_t kv_backend =
+            core_attn::kv_backend_from_env(ctx->ggml_backend, ctx->ggml_backend_cpu, "cohere");
+        ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, ggml_nbytes(ctx->kv_k) + ggml_nbytes(ctx->kv_v));
         ggml_backend_buffer_t kv_buf = ctx->kv_buf;
         char* base = (char*)ggml_backend_buffer_get_base(kv_buf);
         ggml_backend_tensor_alloc(kv_buf, ctx->kv_k, (void*)(base));

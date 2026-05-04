@@ -739,10 +739,18 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
     if (!c->kv_ctx)
         return false;
 
-    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
-    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
+    // PLAN #60e + #69e: per-half KV dtype. CRISPASR_KV_QUANT sets both,
+    // CRISPASR_KV_QUANT_{K,V} override per half. Default f16/f16.
+    // Chatterbox uses core_attn::kv_self_attn for the cache write/read,
+    // so quant types are safe (the helper switches to ggml_set_rows for
+    // quant writes and ggml_cast(F32) for quant reads).
+    const auto kv_pair = core_attn::kv_dtype_pair_from_env("chatterbox");
+    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, kv_pair.k, hd, max_ctx, n_kv, nl);
+    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, kv_pair.v, hd, max_ctx, n_kv, nl);
 
-    c->kv_buf = ggml_backend_alloc_ctx_tensors(c->kv_ctx, c->backend);
+    // PLAN #69b: optional KV-on-CPU spill for VRAM-tight users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(c->backend, c->backend_cpu, "chatterbox");
+    c->kv_buf = ggml_backend_alloc_ctx_tensors(c->kv_ctx, kv_backend);
     if (!c->kv_buf) {
         fprintf(stderr, "chatterbox: failed to allocate KV cache\n");
         ggml_free(c->kv_ctx);
@@ -753,7 +761,8 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
     size_t kb = ggml_nbytes(c->kv_k);
     size_t vb = ggml_nbytes(c->kv_v);
 
-    // Also allocate CFG unconditioned KV cache (same size)
+    // Also allocate CFG unconditioned KV cache (same K/V split as the
+    // primary cache — they're attended in lockstep).
     if (c->kv_cfg_buf)
         ggml_backend_buffer_free(c->kv_cfg_buf);
     if (c->kv_cfg_ctx)
@@ -761,14 +770,15 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
     struct ggml_init_params ip2 = {2 * ggml_tensor_overhead(), nullptr, true};
     c->kv_cfg_ctx = ggml_init(ip2);
     if (c->kv_cfg_ctx) {
-        c->kv_k_cfg = ggml_new_tensor_4d(c->kv_cfg_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
-        c->kv_v_cfg = ggml_new_tensor_4d(c->kv_cfg_ctx, GGML_TYPE_F16, hd, max_ctx, n_kv, nl);
-        c->kv_cfg_buf = ggml_backend_alloc_ctx_tensors(c->kv_cfg_ctx, c->backend);
+        c->kv_k_cfg = ggml_new_tensor_4d(c->kv_cfg_ctx, kv_pair.k, hd, max_ctx, n_kv, nl);
+        c->kv_v_cfg = ggml_new_tensor_4d(c->kv_cfg_ctx, kv_pair.v, hd, max_ctx, n_kv, nl);
+        c->kv_cfg_buf = ggml_backend_alloc_ctx_tensors(c->kv_cfg_ctx, kv_backend);
     }
 
     if (c->params.verbosity >= 1) {
-        fprintf(stderr, "chatterbox: kv cache %d MiB (hd=%d max=%d n_kv=%d nl=%d) + CFG\n",
-                (int)((kb + vb) * 2 / 1048576), hd, max_ctx, n_kv, nl);
+        fprintf(stderr, "chatterbox: kv cache %d MiB k=%s v=%s (on %s, hd=%d max=%d n_kv=%d nl=%d) + CFG\n",
+                (int)((kb + vb) * 2 / 1048576), ggml_type_name(kv_pair.k), ggml_type_name(kv_pair.v),
+                kv_backend == c->backend_cpu ? "cpu" : "gpu", hd, max_ctx, n_kv, nl);
     }
     return true;
 }

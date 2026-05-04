@@ -15,6 +15,7 @@
 
 #include "kyutai_stt.h"
 
+#include "core/attention.h"
 #include "core/beam_decode.h"
 #include "core/gguf_loader.h"
 
@@ -561,10 +562,17 @@ static bool kv_cache_init(kyutai_stt_context* ctx, int max_ctx) {
     if (!ctx->kv_ctx)
         return false;
 
+    // KV dtype stays F16 here — kyutai_stt's attention path writes via
+    // ggml_cpy() into a strided view of the cache, which is incompatible
+    // with quant types. Migration to core_attn::kv_self_attn would unlock
+    // CRISPASR_KV_QUANT_K/_V; until then only the on-CPU spill knob is
+    // wired.
     ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hp.head_dim, max_ctx, hp.num_heads, hp.num_layers);
     ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hp.head_dim, max_ctx, hp.num_heads, hp.num_layers);
 
-    ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, ctx->backend);
+    // PLAN #69b: optional KV-on-CPU spill for VRAM-tight users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "kyutai_stt");
+    ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, kv_backend);
     if (!ctx->kv_buf) {
         ggml_free(ctx->kv_ctx);
         ctx->kv_ctx = nullptr;

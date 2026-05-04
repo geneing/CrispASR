@@ -32,6 +32,7 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#include "core/attention.h"
 #include "core/fastconformer.h"
 
 #ifndef M_PI
@@ -600,12 +601,19 @@ static void canary_alloc_kv(canary_context* ctx) {
     };
     ctx->kv_ctx = ggml_init(p);
 
+    // KV dtype stays F16 here — canary's attention path writes via
+    // ggml_cpy() into a strided view of the cache, which is incompatible
+    // with quant types (need contiguous dst). Migration to
+    // core_attn::kv_self_attn would unlock CRISPASR_KV_QUANT_K/_V; until
+    // then only the on-CPU spill knob is wired.
     ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, head_dim, max_ctx, n_heads, n_layers);
     ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, head_dim, max_ctx, n_heads, n_layers);
     ggml_set_name(ctx->kv_k, "kv_k");
     ggml_set_name(ctx->kv_v, "kv_v");
 
-    ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, ctx->backend);
+    // PLAN #69b: optional KV-on-CPU spill for VRAM-tight users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "canary");
+    ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, kv_backend);
 }
 
 // Build the cross-K/V tensors from encoder output. Called once per slice.
