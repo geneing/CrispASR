@@ -2769,3 +2769,181 @@ exposed the gap between "claim" and "behaviour": most failures were
 runners under-invoking, but two backends actually shipped with
 mis-declared caps. The audit script alone could not detect those
 because both directions of drift looked clean.
+
+## ~~72. gemma4_e2b / mimo_asr: GPU residency for Q4_K weights~~ — SHIPPED 2026-05-04
+
+Both backends currently load all weights to `ctx->backend_cpu` even
+when `use_gpu=true`:
+
+```cpp
+// src/mimo_asr.cpp:322-328
+ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+...
+// Load weights to CPU (Q4_K SIMD path; mirror gemma4_e2b)
+load_weights(path_model, ctx->backend_cpu, "mimo_asr", wl);
+
+// src/gemma4_e2b.cpp:1460-1466 — same pattern
+```
+
+`ggml_backend_sched` then routes matmuls to the backend the weights
+live on (CPU). Net effect: with `use_gpu=true` the GPU is essentially
+unused on these two backends.
+
+**Why it's like this**: the backends were first written when ggml's
+Metal/CUDA Q4_K dequantize-and-matmul kernels were immature, so CPU
+SIMD (ARM NEON / AVX2-512) Q4_K beat the GPU path on small models.
+Today (May 2026) the GPU Q4_K kernels are mature.
+
+**Why it matters now**: these two are not small —
+- mimo_asr: 1.4B params (Q4_K ~800 MiB)
+- gemma4_e2b: ~5B effective via MatFormer (Q4_K ~2.8 GiB)
+
+Running these on CPU when the user has a GPU is the biggest single
+perf miss in the tree. Especially on Linux/CUDA where dGPU bandwidth
+dominates Q4_K matmul.
+
+### Approach
+
+1. **Bench first** before changing default. Run JFK at `use_gpu=true`
+   with weights on CPU vs GPU on the available platforms (Apple
+   Silicon Metal, ideally also Linux CUDA, ideally also AMD ROCm).
+2. **Change** to `load_weights(path, ctx->backend, "...")` — one line
+   per file. The compute backend `ctx->backend` is already what the
+   user picked via `use_gpu=true`.
+3. **If a platform regresses** (Apple Silicon unified memory could
+   still be tied), gate by env (`CRISPASR_FORCE_CPU_WEIGHTS=1`) or by
+   model size, but only after measuring. No premature complexity.
+4. **Stacks with #69a layer offload** — once weights are on GPU by
+   default, users who hit VRAM walls can still use
+   `CRISPASR_N_GPU_LAYERS=N` to spill some layers to CPU. That gives
+   them a knob; the current CPU-only default gives them nothing.
+
+### Files touched
+
+- `src/mimo_asr.cpp` line 328 — `backend_cpu` → `backend`
+- `src/gemma4_e2b.cpp` line 1466 — same
+- Possibly `docs/cli.md` if we add a fallback env knob
+
+### Effort
+
+Implementation: 5 LOC. Validation: depends on platform access — JFK
+on Apple Silicon Metal is fast (60s per backend), CUDA needs a Linux
+host. Estimate: half-day per platform.
+
+### Out of scope
+
+- mimo_asr / gemma4_e2b have other CPU-pinned data paths (mel
+  compute, tokenizer, sampling) that are unaffected. This is just
+  about model weight residency for matmul.
+- This doesn't fix the model-doesn't-fit-in-VRAM case. That's #69a
+  layer offload, which is independent.
+
+### Status (2026-05-04)
+
+Shipped. One-line change per backend (`backend_cpu` → `backend` in
+the `load_weights` call). Validated on Apple Silicon Metal:
+
+```
+mimo-asr  Q4_K  CPU-resident:  27.13 s  (0.4x realtime)
+mimo-asr  Q4_K  GPU-resident:  21.18 s  (0.5x realtime)   — 22 % faster
+gemma4-e2b Q4_K CPU-resident:   8.52 s  (1.3x realtime)
+gemma4-e2b Q4_K GPU-resident:   3.95 s  (2.8x realtime)   — 2.2x faster
+```
+
+Cold-load wall time also dropped substantially — gemma4_e2b
+2:02 → 0:57 — because the GPU path takes `buffer_from_host_ptr`
+mmap-zero-copy on Apple Silicon, which the CPU-only path can't
+use the same way.
+
+Transcripts on JFK are correct in both configurations
+(minor non-determinism in punctuation from CPU/GPU float-op
+order is expected — WER=0%).
+
+Linux/CUDA validation deferred (no CUDA host immediately
+accessible). The GPU-Q4_K math is even more favourable on dGPUs
+since they dominate CPU on matmul throughput; expect at least
+the same 22%–220% range. If a platform regresses, add a
+`CRISPASR_FORCE_CPU_WEIGHTS=1` escape hatch — none seen yet on
+Apple Silicon, so deferred.
+
+## 73. Migrate canary / cohere / kyutai_stt attention to `kv_self_attn`
+
+Tier-2 K/V split (#69e) shipped KV-on-CPU spill (#69b) on canary,
+cohere, kyutai_stt but NOT asymmetric K/V quant — because their
+attention paths write to the cache via:
+
+```cpp
+ggml_tensor* k_dst = ggml_view_4d(ctx, kv_k, ..., offset);  // strided view
+ggml_cpy(ctx, K_perm, k_dst);                                // F16-only
+```
+
+For F16 / F32 caches this works (element-wise copy doesn't care about
+strides). For Q8_0 / Q4_0 it doesn't — quant types pack values in
+fixed blocks (32 elements with shared scale), and you can't write
+half a block. `ggml_cpy` to a strided quant view fails.
+
+`core_attn::kv_self_attn` already handles this — it switches to
+`ggml_set_rows(K_perm, indices)` for quant types, which writes whole
+rows at runtime-supplied indices.
+
+### Performance angle
+
+The migration alone does NOT speed up F16 (same ops, same kernel
+costs). The speedup comes from what it *unlocks*:
+
+- **Q4_0 V on long-context decoders** quarters KV memory bandwidth,
+  which is the dominant cost in step-by-step decode. The kyutai-stt
+  smoke test we just ran (28.6s → 49.4s with KV_ON_CPU) shows
+  exactly this: the moshi-style stepwise decode is KV-bandwidth-bound,
+  and KV_ON_CPU's GPU↔CPU transfer cost dominates per-step latency.
+  With Q4_0 V the transfer would be quartered — that 49s could come
+  back close to the GPU-resident baseline.
+- **Long-context VRAM relief**. Q4_0 KV at 4096 ctx × 16 KV heads ×
+  64 head_dim drops from F16=128 MiB to Q4_0=24 MiB per layer × N
+  layers — adds up to GiB of saved VRAM on a 30-layer model.
+
+### Approach
+
+Per backend (canary, cohere, kyutai_stt):
+
+1. **Read the existing attention path** — find the `K_perm =
+   ggml_permute(K)` + `ggml_cpy(K_perm, k_dst)` pair.
+2. **Replace the cache-write block** with a call to
+   `core_attn::kv_self_attn(...)`. The helper takes the
+   pre-projection `x` and `q_w/k_w/v_w/o_w`, so the projection step
+   moves into the helper too.
+3. **Validate F16 bit-identical** on JFK before flipping anything
+   else. Once F16 matches, enable Q8_0 K, then Q8_0/Q4_0 asymmetric.
+
+### Caveats
+
+- canary/cohere/kyutai have backend-specific quirks the helper may
+  not cover (cohere has rotary on K but not V; kyutai-stt has
+  causal-cross-attn between text+audio streams). Read each carefully
+  before assuming the helper is a drop-in.
+- The encoder paths in canary/cohere are NOT KV-cached — only the
+  decoder. Don't migrate the encoder.
+- kyutai-stt's stepwise-decode pattern means each step reuses the
+  cache differently than batch-decode backends; the helper's
+  `kv_indices` parameter is what handles this, but verify.
+
+### Effort
+
+Per backend, estimate ~50-80 LOC of careful refactoring +
+validation. ~1 day per backend if no surprises. Higher value on
+kyutai-stt (longest decode, biggest KV-bandwidth bottleneck).
+
+### Files touched
+
+- `src/canary.cpp` — replace lines ~760-805 with kv_self_attn call
+- `src/cohere.cpp` — replace lines ~1280-1320
+- `src/kyutai_stt.cpp` — replace lines ~895-950 (note stepwise pattern)
+- `src/core/attention.h` — possibly extend kv_self_attn if a backend
+  needs a feature it doesn't already support (e.g. rotary on K only)
+
+### Out of scope
+
+- The core_attn migration doesn't unlock layer-residency offload
+  (#69a) for these backends; that's the separate "different tensor
+  naming scheme" issue (canary/cohere don't have `blk.` prefix; their
+  cross-attention layout differs).

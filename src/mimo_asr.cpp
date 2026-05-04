@@ -323,9 +323,13 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
     if (!ctx->backend)
         ctx->backend = ctx->backend_cpu;
 
-    // Load weights to CPU (Q4_K SIMD path; mirror gemma4_e2b)
+    // PLAN #72: load weights onto the user-picked backend (GPU when
+    // use_gpu=true). Was hardcoded to backend_cpu under the old
+    // assumption that Q4_K CPU SIMD beat the Metal/CUDA path. Today's
+    // GPU Q4_K kernels are mature and dominate CPU on big-enough
+    // models — mimo_asr at 1.4B params is comfortably big enough.
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(path_model, ctx->backend_cpu, "mimo_asr", wl)) {
+    if (!core_gguf::load_weights(path_model, ctx->backend, "mimo_asr", wl)) {
         fprintf(stderr, "mimo_asr: failed to load weights from '%s'\n", path_model);
         delete ctx;
         return nullptr;

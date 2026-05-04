@@ -1463,7 +1463,11 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
 
     // Load to CPU (same pattern as firered — allows native Q4_K SIMD for decoder)
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(path_model, ctx->backend_cpu, "gemma4_e2b", wl)) {
+    // PLAN #72: load weights onto the user-picked backend (GPU when
+    // use_gpu=true). Was hardcoded to backend_cpu under the old
+    // assumption that Q4_K CPU SIMD beat the Metal/CUDA path; today's
+    // GPU Q4_K kernels are mature.
+    if (!core_gguf::load_weights(path_model, ctx->backend, "gemma4_e2b", wl)) {
         fprintf(stderr, "gemma4_e2b: failed to load weights from '%s'\n", path_model);
         delete ctx;
         return nullptr;
