@@ -257,22 +257,34 @@ static void load_metadata(t5_translate_context* c, gguf_context* g) {
 
 // ── Bind tensors ─────────────────────────────────────────────────
 
+// Try two naming conventions: ours and llama.cpp's
+static ggml_tensor* T2(t5_translate_context* c, const char* n1, const char* n2) {
+    auto* t = T(c, n1);
+    return t ? t : T(c, n2);
+}
+
 static bool bind_model(t5_translate_context* c) {
     auto& m = c->model;
     const auto& hp = m.hp;
 
-    m.shared_embed = TR(c, "shared.embed.weight");
-    if (!m.shared_embed)
+    // Shared embedding: our name or llama.cpp name
+    m.shared_embed = T2(c, "shared.embed.weight", "token_embd.weight");
+    if (!m.shared_embed) {
+        fprintf(stderr, "t5: required tensor 'shared.embed.weight' / 'token_embd.weight' not found\n");
         return false;
-
-    if (!hp.tie_word_embeddings) {
-        m.lm_head = TR(c, "lm_head.weight");
-        if (!m.lm_head)
-            return false;
     }
 
-    m.enc_final_rms = TR(c, "enc.final_rms.weight");
-    m.dec_final_rms = TR(c, "dec.final_rms.weight");
+    if (!hp.tie_word_embeddings) {
+        m.lm_head = T2(c, "lm_head.weight", "output.weight");
+        if (!m.lm_head) {
+            fprintf(stderr, "t5: required tensor 'lm_head.weight' / 'output.weight' not found\n");
+            return false;
+        }
+    }
+
+    m.enc_final_rms = T2(c, "enc.final_rms.weight", "enc.output_norm.weight");
+    m.dec_final_rms = T2(c, "dec.final_rms.weight", "dec.output_norm.weight");
+    // Rel bias: ours stores globally, llama.cpp stores in blk.0
     m.enc_rel_bias = T(c, "enc.rel_bias.weight");
     m.dec_rel_bias = T(c, "dec.rel_bias.weight");
 
@@ -280,45 +292,58 @@ static bool bind_model(t5_translate_context* c) {
     m.enc_layers.resize(hp.enc_n_layers);
     for (int i = 0; i < hp.enc_n_layers; i++) {
         auto& l = m.enc_layers[i];
-        char buf[128];
-        auto w = [&](const char* s) -> ggml_tensor* {
-            snprintf(buf, sizeof(buf), "enc.blk.%d.%s", i, s);
-            return T(c, buf);
+        char buf1[128], buf2[128];
+        auto w = [&](const char* ours, const char* llama) -> ggml_tensor* {
+            snprintf(buf1, sizeof(buf1), "enc.blk.%d.%s", i, ours);
+            snprintf(buf2, sizeof(buf2), "enc.blk.%d.%s", i, llama);
+            return T2(c, buf1, buf2);
         };
-        l.attn_q = w("attn_q.weight");
-        l.attn_k = w("attn_k.weight");
-        l.attn_v = w("attn_v.weight");
-        l.attn_o = w("attn_o.weight");
-        l.attn_rms = w("attn_rms.weight");
-        l.ffn_gate = w("ffn_gate.weight");
-        l.ffn_up = w("ffn_up.weight");
-        l.ffn_down = w("ffn_down.weight");
-        l.ffn_rms = w("ffn_rms.weight");
+        l.attn_q = w("attn_q.weight", "attn_q.weight");
+        l.attn_k = w("attn_k.weight", "attn_k.weight");
+        l.attn_v = w("attn_v.weight", "attn_v.weight");
+        l.attn_o = w("attn_o.weight", "attn_o.weight");
+        l.attn_rms = w("attn_rms.weight", "attn_norm.weight");
+        l.ffn_gate = w("ffn_gate.weight", "ffn_gate.weight");
+        l.ffn_up = w("ffn_up.weight", "ffn_up.weight");
+        l.ffn_down = w("ffn_down.weight", "ffn_down.weight");
+        l.ffn_rms = w("ffn_rms.weight", "ffn_norm.weight");
+        // llama.cpp stores rel_bias in blk.0
+        if (i == 0 && !m.enc_rel_bias) {
+            m.enc_rel_bias = w("attn_rel_b.weight", "attn_rel_b.weight");
+        }
+    }
+    if (!m.enc_final_rms) {
+        fprintf(stderr, "t5: enc.final_rms / enc.output_norm not found\n");
+        return false;
     }
 
     // Decoder layers
     m.dec_layers.resize(hp.dec_n_layers);
     for (int i = 0; i < hp.dec_n_layers; i++) {
         auto& l = m.dec_layers[i];
-        char buf[128];
-        auto w = [&](const char* s) -> ggml_tensor* {
-            snprintf(buf, sizeof(buf), "dec.blk.%d.%s", i, s);
-            return T(c, buf);
+        char buf1[128], buf2[128];
+        auto w = [&](const char* ours, const char* llama) -> ggml_tensor* {
+            snprintf(buf1, sizeof(buf1), "dec.blk.%d.%s", i, ours);
+            snprintf(buf2, sizeof(buf2), "dec.blk.%d.%s", i, llama);
+            return T2(c, buf1, buf2);
         };
-        l.attn_q = w("attn_q.weight");
-        l.attn_k = w("attn_k.weight");
-        l.attn_v = w("attn_v.weight");
-        l.attn_o = w("attn_o.weight");
-        l.attn_rms = w("attn_rms.weight");
-        l.cross_q = w("cross_q.weight");
-        l.cross_k = w("cross_k.weight");
-        l.cross_v = w("cross_v.weight");
-        l.cross_o = w("cross_o.weight");
-        l.cross_rms = w("cross_rms.weight");
-        l.ffn_gate = w("ffn_gate.weight");
-        l.ffn_up = w("ffn_up.weight");
-        l.ffn_down = w("ffn_down.weight");
-        l.ffn_rms = w("ffn_rms.weight");
+        l.attn_q = w("attn_q.weight", "attn_q.weight");
+        l.attn_k = w("attn_k.weight", "attn_k.weight");
+        l.attn_v = w("attn_v.weight", "attn_v.weight");
+        l.attn_o = w("attn_o.weight", "attn_o.weight");
+        l.attn_rms = w("attn_rms.weight", "attn_norm.weight");
+        l.cross_q = w("cross_q.weight", "cross_attn_q.weight");
+        l.cross_k = w("cross_k.weight", "cross_attn_k.weight");
+        l.cross_v = w("cross_v.weight", "cross_attn_v.weight");
+        l.cross_o = w("cross_o.weight", "cross_attn_o.weight");
+        l.cross_rms = w("cross_rms.weight", "cross_attn_norm.weight");
+        l.ffn_gate = w("ffn_gate.weight", "ffn_gate.weight");
+        l.ffn_up = w("ffn_up.weight", "ffn_up.weight");
+        l.ffn_down = w("ffn_down.weight", "ffn_down.weight");
+        l.ffn_rms = w("ffn_rms.weight", "ffn_norm.weight");
+        if (i == 0 && !m.dec_rel_bias) {
+            m.dec_rel_bias = w("attn_rel_b.weight", "attn_rel_b.weight");
+        }
     }
 
     return true;
@@ -464,7 +489,6 @@ static ggml_cgraph* build_encoder_graph(t5_translate_context* c, int T) {
     const int D = hp.d_model;
     const int nh = hp.n_heads;
     const int hd = hp.d_kv;
-    const float attn_scale = 1.0f; // T5 does NOT scale by 1/sqrt(d_k) — the scale is in the rel_bias
 
     ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);
@@ -474,39 +498,56 @@ static ggml_cgraph* build_encoder_graph(t5_translate_context* c, int T) {
     ggml_set_name(inp, "enc_tokens");
     ggml_set_input(inp);
 
-    // Relative position bias input (precomputed on CPU, F16 for flash_attn_ext)
-    ggml_tensor* rel_bias_inp = ggml_new_tensor_3d(ctx0, GGML_TYPE_F16, T, T, nh);
-    ggml_set_name(rel_bias_inp, "enc_rel_bias");
-    ggml_set_input(rel_bias_inp);
+    // Position bucket indices (precomputed on CPU): (T_q, T_k) i32
+    ggml_tensor* pos_bucket = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, T, T);
+    ggml_set_name(pos_bucket, "enc_pos_bucket");
+    ggml_set_input(pos_bucket);
 
-    // Embedding (no positional — T5 uses relative position bias instead)
+    // Compute position bias in-graph: get_rows from bias table, then reshape+permute
+    // bias table: (n_heads, num_buckets) → get_rows with flattened bucket indices
+    ggml_tensor* pos_bucket_1d = ggml_reshape_1d(ctx0, pos_bucket, T * T);
+    ggml_tensor* pos_bias = ggml_get_rows(ctx0, m.enc_rel_bias, pos_bucket_1d);
+    // pos_bias: (n_heads, T*T) → reshape to (n_heads, T_k, T_q) → permute to (T_k, T_q, n_heads)
+    pos_bias = ggml_reshape_3d(ctx0, pos_bias, nh, T, T);
+    pos_bias = ggml_cont(ctx0, ggml_permute(ctx0, pos_bias, 2, 0, 1, 3)); // (T_k, T_q, nh)
+
+    // Embedding (no positional — T5 uses relative position bias)
     ggml_tensor* cur = ggml_get_rows(ctx0, m.shared_embed, inp);
 
     for (int il = 0; il < hp.enc_n_layers; il++) {
         const auto& l = m.enc_layers[il];
         ggml_tensor* residual = cur;
 
-        // Pre-attention RMSNorm
         cur = t5_rms_norm(ctx0, cur, l.attn_rms, hp.layer_norm_eps);
 
-        // Self-attention Q, K, V (no bias in T5)
-        ggml_tensor* Q = ggml_mul_mat(ctx0, l.attn_q, cur);
+        // Self-attention: manual QK + bias + softmax + V (no flash_attn — bias not supported)
+        ggml_tensor* Q = ggml_mul_mat(ctx0, l.attn_q, cur); // (nh*hd, T)
         ggml_tensor* K = ggml_mul_mat(ctx0, l.attn_k, cur);
         ggml_tensor* V = ggml_mul_mat(ctx0, l.attn_v, cur);
 
-        // Reshape + permute to (hd, T, nh)
-        Q = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q, hd, nh, T), 0, 2, 1, 3));
-        K = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, K, hd, nh, T), 0, 2, 1, 3));
-        V = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, V, hd, nh, T), 0, 2, 1, 3));
+        // Reshape to (hd, nh, T) then permute to (hd, T, nh)
+        Q = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q, hd, nh, T), 0, 2, 1, 3);
+        K = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K, hd, nh, T), 0, 2, 1, 3);
+        V = ggml_permute(ctx0, ggml_reshape_3d(ctx0, V, hd, nh, T), 0, 2, 1, 3);
 
-        // Attention: Q @ K^T + rel_bias, then softmax, then @ V
-        // For T5, the attention is NOT scaled by 1/sqrt(d_k).
-        // rel_bias_inp is (T_k, T_q, n_heads) — use as mask for flash_attn_ext
-        ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, rel_bias_inp, attn_scale, 0.0f, 0.0f);
-        // attn shape: (d_kv, T, n_heads) → reshape to (d_kv*n_heads, T) = (n_heads*d_kv, T)
-        cur = ggml_reshape_2d(ctx0, attn, nh * hd, T);
+        // KQ = K^T @ Q → (T_k, T_q, nh) — ggml_mul_mat contracts ne[0]
+        ggml_tensor* kq = ggml_mul_mat(ctx0, K, Q); // (T, T, nh)
+        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
 
-        // Output projection: (d_model, n_heads*d_kv) @ (n_heads*d_kv, T) → (d_model, T)
+        // Add position bias (no causal mask for encoder — bidirectional)
+        kq = ggml_add(ctx0, kq, pos_bias);
+
+        // Softmax (scale=1.0 for T5, no causal mask)
+        kq = ggml_soft_max(ctx0, kq);
+
+        // V @ softmax(KQ) → (hd, T_q, nh)
+        ggml_tensor* v_t = ggml_cont(ctx0, ggml_transpose(ctx0, V)); // (T, hd, nh)
+        ggml_tensor* kqv = ggml_mul_mat(ctx0, v_t, kq);              // (hd, T, nh)
+
+        // Permute back and reshape: (hd, nh, T) → (nh*hd, T)
+        cur = ggml_cont(ctx0, ggml_permute(ctx0, kqv, 0, 2, 1, 3));
+        cur = ggml_reshape_2d(ctx0, cur, nh * hd, T);
+
         cur = ggml_mul_mat(ctx0, l.attn_o, cur);
         cur = ggml_add(ctx0, cur, residual);
 
@@ -514,17 +555,13 @@ static ggml_cgraph* build_encoder_graph(t5_translate_context* c, int T) {
         residual = cur;
         cur = t5_rms_norm(ctx0, cur, l.ffn_rms, hp.layer_norm_eps);
 
-        // Gated-GELU: gelu(gate(x)) * up(x) → down
-        ggml_tensor* gate = ggml_mul_mat(ctx0, l.ffn_gate, cur);
-        gate = ggml_gelu(ctx0, gate);
+        ggml_tensor* gate = ggml_gelu(ctx0, ggml_mul_mat(ctx0, l.ffn_gate, cur));
         ggml_tensor* up = ggml_mul_mat(ctx0, l.ffn_up, cur);
-        cur = ggml_mul(ctx0, gate, up);
-        cur = ggml_mul_mat(ctx0, l.ffn_down, cur);
+        cur = ggml_mul_mat(ctx0, l.ffn_down, ggml_mul(ctx0, gate, up));
 
         cur = ggml_add(ctx0, cur, residual);
     }
 
-    // Final RMSNorm
     cur = t5_rms_norm(ctx0, cur, m.enc_final_rms, hp.layer_norm_eps);
 
     ggml_set_name(cur, "enc_out");
@@ -598,7 +635,6 @@ static ggml_cgraph* build_decoder_graph(t5_translate_context* c, int n_tokens, i
     const int D = hp.d_model;
     const int nh = hp.n_heads;
     const int hd = hp.d_kv;
-    const float attn_scale = 1.0f;
     const int Lk = offset + n_tokens;
 
     ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
@@ -609,30 +645,42 @@ static ggml_cgraph* build_decoder_graph(t5_translate_context* c, int n_tokens, i
     ggml_set_name(inp, "dec_tokens");
     ggml_set_input(inp);
 
-    // Causal rel-bias mask (precomputed on CPU, F16 for flash_attn_ext, includes causal masking)
-    ggml_tensor* dec_mask = ggml_new_tensor_3d(ctx0, GGML_TYPE_F16, Lk, n_tokens, nh);
-    ggml_set_name(dec_mask, "dec_mask");
-    ggml_set_input(dec_mask);
+    // Position bucket indices for self-attention: (Lk, n_tokens) i32
+    ggml_tensor* pos_bucket = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, Lk, n_tokens);
+    ggml_set_name(pos_bucket, "dec_pos_bucket");
+    ggml_set_input(pos_bucket);
 
-    // Embedding (no pos emb in T5)
+    // Causal mask: (Lk, n_tokens) F32
+    ggml_tensor* causal_mask = nullptr;
+    if (n_tokens > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, Lk, n_tokens);
+        ggml_set_name(causal_mask, "causal_mask");
+        ggml_set_input(causal_mask);
+    }
+
+    // Position bias in-graph
+    ggml_tensor* pos_bucket_1d = ggml_reshape_1d(ctx0, pos_bucket, (int64_t)Lk * n_tokens);
+    ggml_tensor* dec_pos_bias = ggml_get_rows(ctx0, m.dec_rel_bias, pos_bucket_1d);
+    dec_pos_bias = ggml_reshape_3d(ctx0, dec_pos_bias, nh, Lk, n_tokens);
+    dec_pos_bias = ggml_cont(ctx0, ggml_permute(ctx0, dec_pos_bias, 2, 0, 1, 3)); // (Lk, n_tokens, nh)
+
+    // Embedding
     ggml_tensor* cur = ggml_get_rows(ctx0, m.shared_embed, inp);
 
     for (int il = 0; il < hp.dec_n_layers; il++) {
         const auto& l = m.dec_layers[il];
         ggml_tensor* residual = cur;
 
-        // ---- Self-attention ----
+        // ---- Self-attention (manual, with rel-pos bias) ----
         cur = t5_rms_norm(ctx0, cur, l.attn_rms, hp.layer_norm_eps);
 
         ggml_tensor* Q = ggml_mul_mat(ctx0, l.attn_q, cur);
         ggml_tensor* K = ggml_mul_mat(ctx0, l.attn_k, cur);
         ggml_tensor* V = ggml_mul_mat(ctx0, l.attn_v, cur);
 
-        Q = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q, hd, nh, n_tokens), 0, 2, 1, 3));
-        ggml_tensor* K_new =
-            ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, K, hd, nh, n_tokens), 0, 2, 1, 3));
-        ggml_tensor* V_new =
-            ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, V, hd, nh, n_tokens), 0, 2, 1, 3));
+        Q = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q, hd, nh, n_tokens), 0, 2, 1, 3);
+        ggml_tensor* K_new = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K, hd, nh, n_tokens), 0, 2, 1, 3);
+        ggml_tensor* V_new = ggml_permute(ctx0, ggml_reshape_3d(ctx0, V, hd, nh, n_tokens), 0, 2, 1, 3);
 
         // Write to KV cache
         ggml_tensor* k_view =
@@ -644,27 +692,49 @@ static ggml_cgraph* build_decoder_graph(t5_translate_context* c, int n_tokens, i
         ggml_build_forward_expand(gf, ggml_cpy(ctx0, K_new, k_view));
         ggml_build_forward_expand(gf, ggml_cpy(ctx0, V_new, v_view));
 
-        ggml_tensor* Kfull = ggml_cont(
-            ctx0, ggml_view_3d(ctx0, c->kv_k, hd, Lk, nh, c->kv_k->nb[1], c->kv_k->nb[2], (size_t)il * c->kv_k->nb[3]));
-        ggml_tensor* Vfull = ggml_cont(
-            ctx0, ggml_view_3d(ctx0, c->kv_v, hd, Lk, nh, c->kv_v->nb[1], c->kv_v->nb[2], (size_t)il * c->kv_v->nb[3]));
+        // Read full KV history and cast from F16 to F32
+        ggml_tensor* Kfull = ggml_cast(
+            ctx0, ggml_view_3d(ctx0, c->kv_k, hd, Lk, nh, c->kv_k->nb[1], c->kv_k->nb[2], (size_t)il * c->kv_k->nb[3]),
+            GGML_TYPE_F32);
+        ggml_tensor* Vfull = ggml_cast(
+            ctx0, ggml_view_3d(ctx0, c->kv_v, hd, Lk, nh, c->kv_v->nb[1], c->kv_v->nb[2], (size_t)il * c->kv_v->nb[3]),
+            GGML_TYPE_F32);
 
-        // Flash attn with causal + rel-bias mask
-        ggml_tensor* sa_out = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, dec_mask, attn_scale, 0.0f, 0.0f);
-        cur = ggml_reshape_2d(ctx0, sa_out, nh * hd, n_tokens);
+        // Manual attention: KQ + pos_bias + causal_mask → softmax → V
+        ggml_tensor* kq = ggml_mul_mat(ctx0, Kfull, Q); // (Lk, n_tokens, nh)
+        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        kq = ggml_add(ctx0, kq, dec_pos_bias);
+        if (causal_mask)
+            kq = ggml_add(ctx0, kq, causal_mask); // broadcast across heads
+        kq = ggml_soft_max(ctx0, kq);
+
+        ggml_tensor* v_t = ggml_cont(ctx0, ggml_transpose(ctx0, Vfull));
+        ggml_tensor* kqv = ggml_mul_mat(ctx0, v_t, kq); // (hd, n_tokens, nh)
+
+        cur = ggml_cont(ctx0, ggml_permute(ctx0, kqv, 0, 2, 1, 3));
+        cur = ggml_reshape_2d(ctx0, cur, nh * hd, n_tokens);
         cur = ggml_mul_mat(ctx0, l.attn_o, cur);
         cur = ggml_add(ctx0, cur, residual);
 
-        // ---- Cross-attention ----
+        // ---- Cross-attention (no position bias, no causal mask) ----
         residual = cur;
         cur = t5_rms_norm(ctx0, cur, l.cross_rms, hp.layer_norm_eps);
 
         ggml_tensor* CQ = ggml_mul_mat(ctx0, l.cross_q, cur);
-        CQ = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, CQ, hd, nh, n_tokens), 0, 2, 1, 3));
+        CQ = ggml_permute(ctx0, ggml_reshape_3d(ctx0, CQ, hd, nh, n_tokens), 0, 2, 1, 3);
 
-        ggml_tensor* ca_out =
-            ggml_flash_attn_ext(ctx0, CQ, c->cross_kv_k[il], c->cross_kv_v[il], nullptr, attn_scale, 0.0f, 0.0f);
-        cur = ggml_reshape_2d(ctx0, ca_out, nh * hd, n_tokens);
+        ggml_tensor* CK = c->cross_kv_k[il];
+        ggml_tensor* CV = c->cross_kv_v[il];
+
+        ggml_tensor* ca_kq = ggml_mul_mat(ctx0, CK, CQ);
+        ggml_mul_mat_set_prec(ca_kq, GGML_PREC_F32);
+        ca_kq = ggml_soft_max(ctx0, ca_kq);
+
+        ggml_tensor* cv_t = ggml_cont(ctx0, ggml_transpose(ctx0, CV));
+        ggml_tensor* ca_kqv = ggml_mul_mat(ctx0, cv_t, ca_kq);
+
+        cur = ggml_cont(ctx0, ggml_permute(ctx0, ca_kqv, 0, 2, 1, 3));
+        cur = ggml_reshape_2d(ctx0, cur, nh * hd, n_tokens);
         cur = ggml_mul_mat(ctx0, l.cross_o, cur);
         cur = ggml_add(ctx0, cur, residual);
 
@@ -679,14 +749,11 @@ static ggml_cgraph* build_decoder_graph(t5_translate_context* c, int n_tokens, i
         cur = ggml_add(ctx0, cur, residual);
     }
 
-    // Final RMSNorm
     cur = t5_rms_norm(ctx0, cur, m.dec_final_rms, hp.layer_norm_eps);
 
-    // Take last token
     if (n_tokens > 1)
         cur = ggml_view_2d(ctx0, cur, D, 1, cur->nb[1], (size_t)(n_tokens - 1) * cur->nb[1]);
 
-    // LM head
     ggml_tensor* head = hp.tie_word_embeddings ? m.shared_embed : m.lm_head;
     cur = ggml_mul_mat(ctx0, head, cur);
 
@@ -710,15 +777,14 @@ static std::vector<float> run_encoder(t5_translate_context* c, const std::vector
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_tokens"), token_ids.data(), 0, T * sizeof(int32_t));
 
-    // Compute encoder relative position bias
-    auto rel_bias = compute_rel_pos_bias(c->model.enc_rel_bias, T, T, true, hp.rel_attn_num_buckets,
-                                         hp.rel_attn_max_dist, hp.n_heads);
-    // Convert F32 → F16 for flash_attn_ext mask
-    std::vector<ggml_fp16_t> rel_bias_f16(rel_bias.size());
-    for (size_t i = 0; i < rel_bias.size(); i++)
-        rel_bias_f16[i] = ggml_fp32_to_fp16(rel_bias[i]);
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_rel_bias"), rel_bias_f16.data(), 0,
-                            rel_bias_f16.size() * sizeof(ggml_fp16_t));
+    // Compute position bucket indices for encoder (bidirectional)
+    std::vector<int32_t> buckets(T * T);
+    for (int q = 0; q < T; q++)
+        for (int k = 0; k < T; k++)
+            buckets[q * T + k] =
+                t5_relative_position_bucket(k - q, true, hp.rel_attn_num_buckets, hp.rel_attn_max_dist);
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_pos_bucket"), buckets.data(), 0,
+                            buckets.size() * sizeof(int32_t));
 
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS)
         return {};
@@ -741,24 +807,23 @@ static std::vector<float> run_decoder_step(t5_translate_context* c, const int* t
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dec_tokens"), tokens, 0, n_tokens * sizeof(int32_t));
 
-    // Compute decoder causal relative position bias + causal mask
-    auto rel_bias = compute_rel_pos_bias(c->model.dec_rel_bias, n_tokens, Lk, false, hp.rel_attn_num_buckets,
-                                         hp.rel_attn_max_dist, hp.n_heads);
-    // Apply causal mask: set future positions to -inf
-    const int nh = hp.n_heads;
-    for (int h = 0; h < nh; h++) {
-        for (int q = 0; q < n_tokens; q++) {
-            for (int k = offset + q + 1; k < Lk; k++) {
-                rel_bias[h * n_tokens * Lk + q * Lk + k] = -INFINITY;
-            }
-        }
+    // Compute position bucket indices for decoder (causal / unidirectional)
+    std::vector<int32_t> buckets((size_t)n_tokens * Lk);
+    for (int q = 0; q < n_tokens; q++)
+        for (int k = 0; k < Lk; k++)
+            buckets[q * Lk + k] =
+                t5_relative_position_bucket(k - (offset + q), false, hp.rel_attn_num_buckets, hp.rel_attn_max_dist);
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dec_pos_bucket"), buckets.data(), 0,
+                            buckets.size() * sizeof(int32_t));
+
+    // Causal mask: 0 for visible, -inf for future
+    if (n_tokens > 1) {
+        std::vector<float> mask((size_t)n_tokens * Lk, 0.0f);
+        for (int q = 0; q < n_tokens; q++)
+            for (int k = offset + q + 1; k < Lk; k++)
+                mask[q * Lk + k] = -INFINITY;
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0, mask.size() * sizeof(float));
     }
-    // Convert F32 → F16 for flash_attn_ext mask
-    std::vector<ggml_fp16_t> mask_f16(rel_bias.size());
-    for (size_t i = 0; i < rel_bias.size(); i++)
-        mask_f16[i] = ggml_fp32_to_fp16(rel_bias[i]);
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dec_mask"), mask_f16.data(), 0,
-                            mask_f16.size() * sizeof(ggml_fp16_t));
 
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS)
         return {};
