@@ -1,6 +1,6 @@
 # CrispASR
 
-**One C++ binary, twenty-four ASR backends + three TTS engines, zero Python dependencies.**
+**One C++ binary, twenty-four ASR backends + five TTS engines, zero Python dependencies.**
 
 CrispASR started as a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and extends that base into a **unified speech engine** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR *and* TTS architectures. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file. See [Text-to-Speech](#text-to-speech-tts) for the TTS side.
 
@@ -32,7 +32,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 - [Feature matrix](#feature-matrix)
 - [Install & build](#install--build) — quick install (full guide in [docs/install.md](docs/install.md))
 - [Quick start — ASR](#quick-start)
-- [**Text-to-Speech (TTS)**](docs/tts.md) — Kokoro, Qwen3-TTS, VibeVoice, Orpheus
+- [**Text-to-Speech (TTS)**](docs/tts.md) — Kokoro, Qwen3-TTS, VibeVoice, Orpheus, Chatterbox
 - [Streaming & live transcription](docs/streaming.md)
 - [Server mode (HTTP API)](docs/server.md)
 - [CLI reference](docs/cli.md) — flags, VAD, CTC alignment, output formats, auto-download, audio formats
@@ -50,7 +50,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 ## Supported backends
 
 CrispASR ships **24 ASR backends** for transcription/translation and
-**three TTS engines** for synthesis. Pick at the CLI with `--backend NAME`,
+**five TTS engines** for synthesis. Pick at the CLI with `--backend NAME`,
 or omit it to let the binary auto-detect from the GGUF metadata. Jump
 to the [TTS table](#text-to-speech-models) for the synthesis side.
 
@@ -99,6 +99,7 @@ quick-start commands and engine selection guidance.
 | **qwen3-tts** | [`Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF), [`Qwen3-TTS-12Hz-1.7B-Base`](https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF), [`Qwen3-TTS-12Hz-1.7B-VoiceDesign`](https://huggingface.co/cstr/qwen3-tts-1.7b-voicedesign-GGUF) | Qwen3 talker LM + 12 Hz RVQ speech tokenizer; baked voice pack GGUF or runtime WAV + `--ref-text`. Pick `--backend qwen3-tts-1.7b-base` for the larger talker, or `--backend qwen3-tts-1.7b-voicedesign` to describe the voice in natural language via `--instruct`. | multilingual, per base model | Apache-2.0 |
 | **kokoro** | [`hexgrad/Kokoro-82M`](https://huggingface.co/hexgrad/Kokoro-82M) + [`dida-80b/kokoro-german-hui-multispeaker-base`](https://huggingface.co/dida-80b/kokoro-german-hui-multispeaker-base) (German backbone) + [`kikiri-tts/kikiri-german-{victoria,martin}`](https://huggingface.co/kikiri-tts) (German voicepacks) | StyleTTS2 / iSTFTNet (BERT + ProsodyPredictor + iSTFTNet decoder, 82M params); per-voice GGUF; in-process libespeak-ng phonemizer with LRU cache; auto-routing for `-l de` swaps in the German-trained backbone + cascading voice fallback | en, es, fr, hi, it, ja, pt, zh native + de via Option 2b (PLAN §56) + others through espeak-ng with French/German voice fallback | Apache-2.0 (model + German backbone + kikiri voicepacks); HUI corpus CC0 |
 | **orpheus** | [`Orpheus-3B-FT`](https://huggingface.co/cstr/orpheus-3b-base-GGUF) + [`SNAC 24 kHz`](https://huggingface.co/cstr/snac-24khz-GGUF) | Llama-3.2-3B-Instruct talker (28L, 3072 d) + SNAC RVQ codec (3 codebooks × 4096 @ 24 kHz); 8 baked English speakers (`tara`/`leah`/`leo`/...). Pick the speaker with `--voice <name>` and pass `--temperature 0.6` (engine_class.py default — greedy loops). Drop-in DE checkpoint variants shipped: `--backend kartoffel-orpheus-de-natural` ([`cstr/kartoffel-orpheus-3b-german-natural-GGUF`](https://huggingface.co/cstr/kartoffel-orpheus-3b-german-natural-GGUF), 19 speakers, ASR-roundtrip word-exact via parakeet-v3 -l de), `--backend kartoffel-orpheus-de-synthetic` ([`cstr/kartoffel-orpheus-3b-german-synthetic-GGUF`](https://huggingface.co/cstr/kartoffel-orpheus-3b-german-synthetic-GGUF), 4 speakers + 12 emotions + 5 outbursts via `{Speaker} - {Emotion}: {text}` syntax), `--backend lex-au-orpheus-de` (`lex-au/Orpheus-3b-German-FT-Q8_0.gguf`). | en (canopylabs); de (Kartoffel_Orpheus + lex-au) | llama3.2 community ("Built with Llama") for talker; MIT for SNAC |
+| **chatterbox** | [`chatterbox-turbo`](https://huggingface.co/cstr/chatterbox-turbo-GGUF) + [`chatterbox`](https://huggingface.co/cstr/chatterbox-GGUF) + [`kartoffelbox-turbo`](https://huggingface.co/cstr/kartoffelbox-turbo-GGUF) | Two-GGUF pipeline: GPT-2 T3 AR model (24L, 1024D, BPE tokenizer) → UpsampleConformerEncoder (10 blocks, rel-pos attn) → meanflow CFM denoiser (2 Euler steps) → HiFTGenerator vocoder (F0 + SineGen + iSTFT → 24 kHz). Turbo is 2-step meanflow-distilled (vs 10-step cosine for base). German fine-tune via `--backend kartoffelbox` ([`SebastianBodza/Kartoffelbox_Turbo`](https://huggingface.co/SebastianBodza/Kartoffelbox_Turbo)). S3Gen GGUF auto-discovered next to T3 or passed via `--codec-model`. | en (ResembleAI); de (Kartoffelbox); ar (lahgtna) | MIT |
 
 ### Post-processing models
 
@@ -400,7 +401,8 @@ CrispASR has three feature areas that warrant their own docs pages:
   `--mic`, `--live`, sliding-window chunking, per-token confidence.
 - **[Text-to-Speech (TTS)](docs/tts.md)** — Kokoro (multilingual,
   smallest), Qwen3-TTS (highest fidelity, voice cloning), VibeVoice
-  (lowest-latency streaming), Orpheus (3 B Llama + SNAC). Voice packs,
+  (lowest-latency streaming), Orpheus (3 B Llama + SNAC), Chatterbox
+  (flow-matching + HiFT vocoder, German via Kartoffelbox). Voice packs,
   language routing, and qwen3-tts environment switches.
 - **[Server mode (HTTP API)](docs/server.md)** — persistent model,
   OpenAI-compatible `/v1/audio/transcriptions`, API keys, Docker

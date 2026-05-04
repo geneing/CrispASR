@@ -1,6 +1,6 @@
 # Text-to-Speech (TTS)
 
-CrispASR ships **four open-weights TTS engines** behind the same
+CrispASR ships **five open-weights TTS engines** behind the same
 `crispasr` binary, each with a distinct voice / quality / footprint
 trade-off:
 
@@ -10,8 +10,9 @@ trade-off:
 | **`qwen3-tts`** | Highest fidelity / strongest cloning. Speech-LLM (talker + code predictor + 12 Hz codec). | Yes (WAV + ref-text or baked voice GGUF) | ~1.3 GB via `-m auto` |
 | **`vibevoice-tts`** | Lowest-latency streaming TTS, designed for realtime. | Preset voice packs (and a 1.5 B-base WAV cloning path) | ~636 MB via `-m auto` |
 | **`orpheus`** | Llama-3.2-3B talker + SNAC 24 kHz codec. 8 baked English speakers; expressive output. Greedy loops — pass `--temperature 0.6`. | Preset names via `--voice tara/leah/...` | ~3.5 GB via `-m auto` (talker Q8 + 26 MB SNAC) |
+| **`chatterbox`** | Flow-matching TTS. GPT-2 AR + conformer encoder + HiFT vocoder. German via Kartoffelbox. | Pre-computed voice conditioning (baked in GGUF) | ~1.6 GB (T3 + S3Gen F16) |
 
-All four write 24 kHz mono WAV via `--tts-output`.
+All five write 24 kHz mono WAV via `--tts-output`.
 
 ## Kokoro — multilingual, smallest
 
@@ -196,6 +197,46 @@ bin so traurig.`), or `--backend lex-au-orpheus-de` for lex-au's
 German Q8_0 mirror. All three reuse the same orpheus runtime + SNAC
 codec.
 
+## Chatterbox — flow-matching TTS
+
+Two-GGUF pipeline: GPT-2 T3 AR model generates speech tokens, then
+S3Gen (conformer encoder + meanflow CFM denoiser + HiFT vocoder)
+converts them to 24 kHz audio. Auto-discovers the S3Gen GGUF next to
+the T3, or pass `--codec-model` explicitly.
+
+```bash
+# Chatterbox-Turbo (English, 2-step meanflow)
+./build/bin/crispasr \
+    -m /path/to/chatterbox-turbo-t3-f16.gguf \
+    --codec-model /path/to/chatterbox-turbo-s3gen-f16.gguf \
+    --tts "Hello, how are you today?" \
+    --tts-output hello.wav
+
+# Kartoffelbox-Turbo (German fine-tune)
+./build/bin/crispasr \
+    -m /path/to/kartoffelbox-turbo-t3-f16.gguf \
+    --codec-model /path/to/chatterbox-turbo-s3gen-f16.gguf \
+    --tts "Hallo, wie geht es Ihnen?" \
+    --tts-output hallo.wav
+
+# Base Chatterbox (10-step cosine CFM, Llama T3)
+./build/bin/crispasr \
+    -m /path/to/chatterbox-t3-f16.gguf \
+    --codec-model /path/to/chatterbox-s3gen-f16.gguf \
+    --tts "Hello world." \
+    --tts-output hello.wav
+```
+
+Quantized variants (Q8_0, Q4_K) are supported — the quantizer skips
+vocoder, F0 predictor, and embedding tensors automatically. See
+`crispasr-quantize` in [docs/quantize.md](quantize.md).
+
+| Variant | T3 | S3Gen | Total |
+|---|---:|---:|---:|
+| Turbo F16 | 964 MB | 628 MB | 1,592 MB |
+| Turbo Q8_0 | 629 MB | 350 MB | 979 MB |
+| Turbo Q4_K | 457 MB | 245 MB | 702 MB |
+
 ## TTS GGUF downloads
 
 [`cstr/vibevoice-realtime-0.5b-GGUF`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF) ·
@@ -207,4 +248,8 @@ codec.
 [`cstr/orpheus-3b-base-GGUF`](https://huggingface.co/cstr/orpheus-3b-base-GGUF) ·
 [`cstr/kartoffel-orpheus-3b-german-natural-GGUF`](https://huggingface.co/cstr/kartoffel-orpheus-3b-german-natural-GGUF) ·
 [`cstr/kartoffel-orpheus-3b-german-synthetic-GGUF`](https://huggingface.co/cstr/kartoffel-orpheus-3b-german-synthetic-GGUF) ·
-[`cstr/snac-24khz-GGUF`](https://huggingface.co/cstr/snac-24khz-GGUF)
+[`cstr/snac-24khz-GGUF`](https://huggingface.co/cstr/snac-24khz-GGUF) ·
+[`cstr/chatterbox-turbo-GGUF`](https://huggingface.co/cstr/chatterbox-turbo-GGUF) ·
+[`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) ·
+[`cstr/kartoffelbox-turbo-GGUF`](https://huggingface.co/cstr/kartoffelbox-turbo-GGUF) ·
+[`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF)
