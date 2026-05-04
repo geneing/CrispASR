@@ -166,7 +166,7 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
         xn = ggml_add(ctx, xn, nmha_b);
 
     // Mark pre-attention norm for first block dump
-    if (std::strstr(prefix, ".0") && !std::strstr(prefix, "10")) {
+    if (std::strcmp(prefix + std::strlen(prefix) - 2, ".0") == 0 && std::strstr(prefix, "enc.")) {
         ggml_set_name(xn, "dump_enc0_pre_attn_norm");
         ggml_set_output(xn);
     }
@@ -318,7 +318,9 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
     }
 
     // Mark raw attention output (before output proj)
-    if (std::strstr(prefix, ".0") && !std::strstr(prefix, "10")) {
+    // Use ggml_scale(1.0) as identity op to create a graph node we can read
+    if (std::strcmp(prefix + std::strlen(prefix) - 2, ".0") == 0 && std::strstr(prefix, "enc.")) {
+        attn = ggml_scale(ctx, attn, 1.0f); // identity — creates a readable node
         ggml_set_name(attn, "dump_enc0_raw_attn");
         ggml_set_output(attn);
     }
@@ -329,7 +331,7 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
     if (lo_b)
         attn_out = ggml_add(ctx, attn_out, lo_b);
 
-    if (std::strstr(prefix, ".0") && !std::strstr(prefix, "10")) {
+    if (std::strcmp(prefix + std::strlen(prefix) - 2, ".0") == 0 && std::strstr(prefix, "enc.")) {
         ggml_set_name(attn_out, "dump_enc0_attn_out");
         ggml_set_output(attn_out);
     }
