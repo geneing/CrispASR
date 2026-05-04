@@ -601,11 +601,17 @@ static void canary_alloc_kv(canary_context* ctx) {
     };
     ctx->kv_ctx = ggml_init(p);
 
-    // KV dtype stays F16 here — canary's attention path writes via
-    // ggml_cpy() into a strided view of the cache, which is incompatible
-    // with quant types (need contiguous dst). Migration to
-    // core_attn::kv_self_attn would unlock CRISPASR_KV_QUANT_K/_V; until
-    // then only the on-CPU spill knob is wired.
+    // KV dtype stays F16 here. The PLAN #73 cache-write helper
+    // migration (line ~775 in build_graph_decoder) made the WRITE
+    // side quant-compatible, but the cache READ path
+    // (ggml_view → ggml_cont → ggml_mul_mat) hits
+    // `!ggml_is_transposed(a)` when V is quant — `ggml_cont` of
+    // a permuted quant tensor doesn't fully materialise the new
+    // strides, so the downstream mul_mat assertion fires. Migrating
+    // the read path (e.g. via ggml_cast(F32) before the permute, or
+    // restructuring to use ggml_flash_attn_ext like kyutai_stt
+    // already does) would unblock CRISPASR_KV_QUANT_K/_V on canary.
+    // Tracked in PLAN #73 follow-ups.
     ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, head_dim, max_ctx, n_heads, n_layers);
     ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, head_dim, max_ctx, n_heads, n_layers);
     ggml_set_name(ctx->kv_k, "kv_k");
@@ -771,22 +777,18 @@ static ggml_cgraph* canary_build_graph_decoder(canary_context* ctx, int n_tokens
         ggml_tensor* Kcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_k_w, cur), dl.sa_k_b);
         ggml_tensor* Vcur = ggml_add(ctx0, ggml_mul_mat(ctx0, dl.sa_v_w, cur), dl.sa_v_b);
 
-        // Store K, V into cache slot at [il, offset .. offset+n_tokens]
+        // PLAN #73: cache write via core_attn helper. F16/F32 caches go
+        // the legacy ggml_cpy(view) path (bit-identical to before);
+        // Q8_0/Q4_0 caches go ggml_set_rows(position). The `position`
+        // tensor is already populated with [offset, offset+1, …,
+        // offset+n_tokens-1] for the embedding-table lookup, so it
+        // doubles as the row-index input.
         {
-            ggml_tensor* k_view =
-                ggml_view_4d(ctx0, ctx->kv_k, head_dim, n_tokens, n_heads, 1, ctx->kv_k->nb[1], ctx->kv_k->nb[2],
-                             ctx->kv_k->nb[3], il * ctx->kv_k->nb[3] + offset * ctx->kv_k->nb[1]);
-            ggml_tensor* v_view =
-                ggml_view_4d(ctx0, ctx->kv_v, head_dim, n_tokens, n_heads, 1, ctx->kv_v->nb[1], ctx->kv_v->nb[2],
-                             ctx->kv_v->nb[3], il * ctx->kv_v->nb[3] + offset * ctx->kv_v->nb[1]);
-
             ggml_tensor* K_perm =
                 ggml_permute(ctx0, ggml_reshape_3d(ctx0, Kcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
             ggml_tensor* V_perm =
                 ggml_permute(ctx0, ggml_reshape_3d(ctx0, Vcur, head_dim, n_heads, n_tokens), 0, 2, 1, 3);
-
-            ggml_build_forward_expand(gf, ggml_cpy(ctx0, K_perm, k_view));
-            ggml_build_forward_expand(gf, ggml_cpy(ctx0, V_perm, v_view));
+            core_attn::kv_cache_write(ctx0, gf, K_perm, V_perm, ctx->kv_k, ctx->kv_v, il, offset, n_tokens, position);
         }
 
         // Q/K/V attention

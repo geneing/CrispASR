@@ -2959,21 +2959,45 @@ write path. Migration was a clean 12-line replacement of the inline
 identically (legacy strided-view path); Q8_0/Q8_0 and Q8_0/Q4_0
 now work end-to-end, validated on JFK.
 
-**canary, cohere — STILL OPEN.** Both write multi-token slices to
-the cache (prefill batch of size N, then 1-token decode steps). The
-helper handles this — pass `T = n_tokens` and an indices tensor of
-length `n_tokens` containing `[offset, offset+1, …, offset+n_tokens-1)`.
-The complication: neither backend currently builds such a tensor as
-a graph input. Adding it is straightforward (~20 LOC per backend +
-host-side population of the indices buffer per call), but should be
-done with care:
+**canary write path — DONE 2026-05-04.** Already had a `position` I32
+graph input populated with `[offset, offset+1, …, offset+n_tokens-1]`
+for the embedding-table lookup, so it doubled as the row-index input
+for the new quant write path. F16 fast path preserved; helper
+migration verified on JFK at 16.7x realtime, correct transcript.
 
-- canary's `offset` lives in the host integer state outside the
-  graph; the indices tensor needs to be a `ggml_set_input` populated
-  per call.
-- cohere has the same pattern (decoder offset + n_tokens variable).
-- Validation: F16 bit-identical first (legacy fast path is preserved
-  in the helper), then Q8_0 K, then Q8_0/Q4_0 asymmetric.
+**canary quant K/V (read path) — STILL OPEN.** Enabling
+`CRISPASR_KV_QUANT_K=q8_0` (or `_V=q4_0`) on canary crashes in the
+cache *read* pipeline:
+
+```cpp
+ggml_tensor* V_full = ggml_view_3d(ctx0, ctx->kv_v, ...);
+ggml_tensor* V_trans = ggml_cont(ctx0, ggml_permute(V_full, 1, 0, 2, 3));
+ggml_tensor* sa_out = ggml_mul_mat(ctx0, V_trans, KQ);  // GGML_ASSERT(!ggml_is_transposed(a))
+```
+
+`ggml_cont` of a permuted quant tensor doesn't materialise the new
+strides — it just flips the strides flag, leaving the tensor marked
+transposed. The downstream `mul_mat` rejects it. F16 doesn't trip
+this because element-wise re-strided cont works for F16.
+
+Two routes to fix:
+
+1. **Dequant on read** — insert `ggml_cast(view, F32)` before the
+   permute. Loses the per-step KV-read bandwidth saving (the
+   biggest perf win of quant V on long context), but the memory
+   savings + cache-write bandwidth saving still apply. Smallest
+   diff. ~3 LOC per occurrence.
+2. **Migrate to `ggml_flash_attn_ext`** like kyutai_stt — that
+   function natively handles quant K/V without the
+   permute+cont+mul_mat chain. Much bigger diff but unlocks the
+   full perf benefit. ~50 LOC plus careful F16 bit-equivalence
+   validation.
+
+Option 1 is the right next step — ship the memory savings, defer
+the bandwidth-saving migration to a separate work item.
+
+**cohere — STILL OPEN.** Same pattern as canary's read path
+(view → permute(1,0,2,3) → cont → mul_mat). Same fix paths apply.
 
 ### New helper (shipped)
 
