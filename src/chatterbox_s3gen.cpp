@@ -268,8 +268,39 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
     }
 
     // Pre-lookahead conv (causal): conv1(k=4, pad_left=3) + LeakyReLU + conv2(k=3, pad_left=2) + residual
-    // Skip for now — the causal convs need special handling in ggml
-    // TODO: implement pre-lookahead conv
+    {
+        ggml_tensor* pla_c1_w = T(c, "s3.fe.pla.conv1.weight");
+        ggml_tensor* pla_c1_b = T(c, "s3.fe.pla.conv1.bias");
+        ggml_tensor* pla_c2_w = T(c, "s3.fe.pla.conv2.weight");
+        ggml_tensor* pla_c2_b = T(c, "s3.fe.pla.conv2.bias");
+        if (pla_c1_w && pla_c2_w) {
+            ggml_tensor* residual = x;
+            // x is (D=512, Tin) from embedding. Conv1d expects (T, C_in) → transpose.
+            x = ggml_cont(ctx0, ggml_transpose(ctx0, x)); // now (Tin, D=512)
+            // Conv1d(k=4, causal pad=3 on left): pad 3 on both sides, crop right
+            x = ggml_conv_1d(ctx0, pla_c1_w, x, 1, 3, 1);
+            // Crop to causal: take first Tin time steps
+            if ((int)x->ne[0] > Tin) {
+                x = ggml_view_2d(ctx0, x, Tin, (int)x->ne[1], x->nb[1], 0);
+                x = ggml_cont(ctx0, x);
+            }
+            if (pla_c1_b)
+                x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, pla_c1_b, 1, (int)pla_c1_b->ne[0]));
+            x = ggml_leaky_relu(ctx0, x, 0.1f, false);
+            // Conv2(k=3, causal pad=2 on left)
+            x = ggml_conv_1d(ctx0, pla_c2_w, x, 1, 2, 1);
+            if ((int)x->ne[0] > Tin) {
+                x = ggml_view_2d(ctx0, x, Tin, (int)x->ne[1], x->nb[1], 0);
+                x = ggml_cont(ctx0, x);
+            }
+            if (pla_c2_b)
+                x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, pla_c2_b, 1, (int)pla_c2_b->ne[0]));
+            // Transpose back to (D, Tin) to match residual layout
+            x = ggml_cont(ctx0, ggml_transpose(ctx0, x)); // (D, Tin)
+            // Residual
+            x = ggml_add(ctx0, x, residual);
+        }
+    }
 
     // 6 conformer blocks (pre-upsample)
     for (int i = 0; i < 6; i++) {
@@ -714,7 +745,8 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
                                           const std::vector<float>& mu,      // (80, T) encoder output (channel-first)
                                           const std::vector<float>& cond,    // (80, T) conditioning mel (channel-first)
                                           const std::vector<float>& spk_emb, // (80,) projected speaker embedding
-                                          int T_mel, int n_steps, float cfg_rate, bool meanflow = false) {
+                                          int T_mel, int n_steps, float cfg_rate, bool meanflow = false,
+                                          bool dump_stages = false) {
     // Generate time schedule
     std::vector<float> t_span(n_steps + 1);
     for (int i = 0; i <= n_steps; i++) {
@@ -897,12 +929,25 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
             }
         }
 
-        if (c->verbosity >= 2) {
+        if (c->verbosity >= 2 || dump_stages) {
             float rms = 0.0f;
             for (auto v : x)
                 rms += v * v;
             rms = std::sqrt(rms / x.size());
             fprintf(stderr, "s3gen: CFM step %d/%d (t=%.3f→%.3f) x_rms=%.4f\n", step + 1, n_steps, t_val, r_val, rms);
+        }
+        if (dump_stages) {
+            // Print first 5 values at (t=0, ch=0..4) for diff comparison
+            fprintf(stderr, "s3gen[dump]: cfm_step_%d (t=0,ch=0..4): ", step);
+            for (int ch = 0; ch < 5; ch++)
+                fprintf(stderr, "%.6f ", x[ch * T_mel + 0]);
+            fprintf(stderr, "\n");
+            // Also velocity rms
+            float v_rms = 0;
+            for (auto v : v_cond)
+                v_rms += v * v;
+            v_rms = std::sqrt(v_rms / v_cond.size());
+            fprintf(stderr, "s3gen[dump]: velocity_rms=%.4f\n", v_rms);
         }
     }
 
@@ -1683,6 +1728,10 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
                 n_cfm_steps);
     }
 
+    // Check for stage dump mode (per-stage intermediate comparison)
+    const char* dump_env = std::getenv("CRISPASR_S3GEN_DUMP");
+    bool dump_stages = dump_env && dump_env[0] == '1';
+
     // 1. Conformer encoder: tokens → (80, T_mel)
     std::vector<float> h = run_conformer_encoder(ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt_tokens);
 
@@ -1692,6 +1741,21 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "s3gen: encoder output T_mel=%d (prompt=%d, gen=%d)\n", T_mel_total, T_mel_prompt, T_mel_gen);
+    }
+
+    if (dump_stages) {
+        // Dump encoder output for diff comparison
+        // h is (80, T_mel_total) channel-first: data[ch * T + t]
+        float enc_rms = 0;
+        for (auto v : h)
+            enc_rms += v * v;
+        enc_rms = std::sqrt(enc_rms / h.size());
+        fprintf(stderr, "s3gen[dump]: encoder_out (%d, %d) rms=%.4f\n", 80, T_mel_total, enc_rms);
+        // Print first few values: (t=0, ch=0..4)
+        fprintf(stderr, "s3gen[dump]: encoder_out (t=0,ch=0..4): ");
+        for (int ch = 0; ch < 5; ch++)
+            fprintf(stderr, "%.4f ", h[ch * T_mel_total + 0]);
+        fprintf(stderr, "\n");
     }
 
     // 2. Build conditioning: prompt mel + zeros for generation region
@@ -1732,6 +1796,17 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
         }
     }
 
+    if (dump_stages) {
+        fprintf(stderr, "s3gen[dump]: spk_proj first 5: [%.6f %.6f %.6f %.6f %.6f]\n", spk_proj[0], spk_proj[1],
+                spk_proj[2], spk_proj[3], spk_proj[4]);
+        // Dump conditioning mel rms
+        float cond_rms = 0;
+        for (auto v : cond)
+            cond_rms += v * v;
+        cond_rms = std::sqrt(cond_rms / cond.size());
+        fprintf(stderr, "s3gen[dump]: cond rms=%.4f\n", cond_rms);
+    }
+
     // Diagnostic: compare encoder and spk_proj with Python reference
     if (ctx->verbosity >= 2) {
         float enc_rms = 0;
@@ -1757,12 +1832,25 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
     if (ctx->verbosity >= 1 && is_meanflow) {
         fprintf(stderr, "s3gen: meanflow mode (%d steps, linear schedule, no CFG)\n", actual_steps);
     }
-    std::vector<float> mel = cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, actual_steps, cfg, is_meanflow);
+    std::vector<float> mel =
+        cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, actual_steps, cfg, is_meanflow, dump_stages);
 
     // 5. Extract generated portion (skip prompt region)
     std::vector<float> gen_mel(80 * T_mel_gen);
     for (int b = 0; b < 80; b++) {
         std::memcpy(&gen_mel[b * T_mel_gen], &mel[b * T_mel_total + T_mel_prompt], T_mel_gen * sizeof(float));
+    }
+
+    if (dump_stages) {
+        float gen_rms = 0;
+        for (auto v : gen_mel)
+            gen_rms += v * v;
+        gen_rms = std::sqrt(gen_rms / gen_mel.size());
+        fprintf(stderr, "s3gen[dump]: gen_mel (%d, %d) rms=%.4f\n", 80, T_mel_gen, gen_rms);
+        fprintf(stderr, "s3gen[dump]: gen_mel (t=0,ch=0..4): ");
+        for (int ch = 0; ch < 5; ch++)
+            fprintf(stderr, "%.4f ", gen_mel[ch * T_mel_gen + 0]);
+        fprintf(stderr, "\n");
     }
 
     // 6. Vocoder: mel → waveform

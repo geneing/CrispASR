@@ -67,6 +67,11 @@ float* chatterbox_synthesize_mel(struct chatterbox_context* ctx, const char* tex
 // chatterbox_tokens_free. *out_n is set to token count.
 int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx, const char* text, int* out_n);
 
+// Synthesise from pre-generated speech tokens (bypasses T3, runs S3Gen+vocoder).
+// Uses precomputed conditioning from conds.pt. Caller frees with chatterbox_pcm_free.
+float* chatterbox_synthesize_from_tokens(struct chatterbox_context* ctx, const int32_t* speech_tokens,
+                                         int n_speech_tokens, int* out_n_samples);
+
 // Set voice from a reference WAV path for voice cloning.
 // Requires VE (in T3 GGUF) + S3Tokenizer + CAMPPlus (in S3Gen GGUF).
 // Returns 0 on success.

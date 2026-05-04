@@ -1974,6 +1974,45 @@ extern "C" float* chatterbox_synthesize(struct chatterbox_context* ctx, const ch
     return pcm;
 }
 
+extern "C" float* chatterbox_synthesize_from_tokens(struct chatterbox_context* ctx, const int32_t* speech_tokens,
+                                                    int n_speech_tokens, int* out_n_samples) {
+    if (!ctx || !speech_tokens || n_speech_tokens <= 0 || !out_n_samples)
+        return nullptr;
+    *out_n_samples = 0;
+    if (!ctx->s3gen_ctx) {
+        fprintf(stderr, "chatterbox: S3Gen not loaded.\n");
+        return nullptr;
+    }
+    // Extract conds (same code as chatterbox_synthesize)
+    const int32_t* prompt_tokens = nullptr;
+    int n_prompt = 0;
+    const float* prompt_feat = nullptr;
+    int prompt_feat_len = 0;
+    const float* spk_emb = nullptr;
+    std::vector<int32_t> pt_buf;
+    std::vector<float> pf_buf;
+    std::vector<float> se_buf;
+    if (ctx->conds.gen_prompt_token) {
+        n_prompt = (int)ctx->conds.gen_prompt_token->ne[0];
+        pt_buf.resize(n_prompt);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_token, pt_buf.data(), 0, n_prompt * sizeof(int32_t));
+        prompt_tokens = pt_buf.data();
+    }
+    if (ctx->conds.gen_prompt_feat) {
+        prompt_feat_len = (int)ctx->conds.gen_prompt_feat->ne[1];
+        pf_buf.resize(prompt_feat_len * 80);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_feat, pf_buf.data(), 0, pf_buf.size() * sizeof(float));
+        prompt_feat = pf_buf.data();
+    }
+    if (ctx->conds.gen_embedding) {
+        se_buf.resize(192);
+        ggml_backend_tensor_get(ctx->conds.gen_embedding, se_buf.data(), 0, 192 * sizeof(float));
+        spk_emb = se_buf.data();
+    }
+    return chatterbox_s3gen_synthesize(ctx->s3gen_ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt,
+                                       prompt_feat, prompt_feat_len, spk_emb, ctx->params.cfm_steps, out_n_samples);
+}
+
 extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, const char* wav_path) {
     (void)ctx;
     (void)wav_path;
