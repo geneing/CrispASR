@@ -67,7 +67,7 @@ all consume the same symbols.
 |---|---|
 | `cli.cpp` | crispasr entry point, extended with `--backend` dispatch branch. |
 | `crispasr_backend.{h,cpp}` | `CrispasrBackend` abstract class, capability bitmask, factory, GGUF auto-detect. |
-| `crispasr_backend_{parakeet,canary,cohere,granite,voxtral,voxtral4b,qwen3,fastconformer_ctc,wav2vec2,glm_asr,kyutai_stt,firered_asr,moonshine,omniasr,vibevoice}.cpp` | Per-backend thin wrapper over each model's C API. |
+| `crispasr_backend_{parakeet,canary,cohere,granite,granite_nle,voxtral,voxtral4b,qwen3,fastconformer_ctc,wav2vec2,glm_asr,kyutai_stt,firered_asr,moonshine,moonshine_streaming,omniasr,gemma4_e2b,mimo_asr,vibevoice,qwen3_tts,orpheus,kokoro,chatterbox}.cpp` | Per-backend thin wrapper over each model's C API. ASR backends emit `crispasr_segment`s; TTS backends (`vibevoice`, `qwen3_tts`, `orpheus`, `kokoro`, `chatterbox`) implement `synthesize(text)` instead and write 24 kHz mono WAV via `--tts-output`. |
 | `crispasr_output.{h,cpp}` | TXT / SRT / VTT / CSV / JSON / LRC writers on `crispasr_segment`. |
 | `crispasr_vad_cli.{h,cpp}` | Delegates to `src/crispasr_vad`; adds auto-download for the Silero GGUF. |
 | `crispasr_lid_cli.{h,cpp}` | Delegates to `src/crispasr_lid`; adds auto-download + sherpa-ONNX subprocess fallback. |
@@ -163,7 +163,13 @@ regression test against `samples/jfk.wav`:
 | moonshine | Conv + 6L enc-dec | ✔ | ✔ | ✔ | CPU | (vendored) |
 | moonshine-streaming | Sliding-window enc + dec | ✔ | ✔ | ✔ | CPU | (vendored) |
 | omniasr | wav2vec2 enc + CTC / LLM | ✔ | ✔ | CTC: — / LLM: ✔ | CPU | gguf_loader, kv_self_attn, swiglu |
-| vibevoice | σ-VAE + Qwen2 7 B | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader |
+| gemma4-e2b | Conformer enc + Gemma4 LLM | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
+| mimo-asr | wav2vec2 enc + Qwen2 LM | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
+| vibevoice | σ-VAE + Qwen2 (ASR) / TTS LM (synth) | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader |
+| kokoro | StyleTTS2 BERT + ProsodyPredictor + iSTFTNet | ✔ | — | — | CPU | gguf_loader, fft, ffn |
+| qwen3-tts | Qwen3 talker + 12 Hz codec + code-predictor | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
+| orpheus | Llama-3.2 talker + SNAC RVQ codec | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
+| chatterbox | T3 (Llama / GPT-2) + S3Gen (Conformer + UNet1D CFM + HiFTGen) | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu, fft |
 
 ### Architecture families
 
@@ -173,12 +179,27 @@ regression test against `samples/jfk.wav`:
   moonshine-streaming): cross-attention KV cache, autoregressive
   text decoder.
 - **Audio-LLM** (granite, voxtral, voxtral4b, qwen3, glm-asr,
-  omniasr-LLM, vibevoice): audio features injected into LLM
-  embedding space, KV-cached autoregressive decoding.
+  omniasr-LLM, gemma4-e2b, mimo-asr, vibevoice): audio features
+  injected into LLM embedding space, KV-cached autoregressive
+  decoding.
 - **Transducer** (parakeet): LSTM predictor + joint network,
   frame-synchronous TDT decoding.
 - **Codec + LM** (kyutai-stt): neural audio codec (RVQ) →
   token-based LM.
+- **TTS — codec / vocoder pipeline**:
+  - **Discrete-token codec + vocoder** (qwen3-tts, orpheus): talker
+    LM emits codec tokens; a separate decoder GGUF (12 Hz codec /
+    SNAC RVQ) renders the audio. Two-GGUF runtime.
+  - **Flow-matching mel + iSTFT vocoder** (chatterbox / chatterbox-
+    turbo / kartoffelbox-turbo / lahgtna-chatterbox): T3 emits speech
+    tokens; S3Gen runs an UpsampleConformerEncoder + UNet1D CFM
+    (10-step Euler for base / 2-step meanflow for turbo) producing a
+    mel-spectrogram, then HiFTGenerator (conv chains + Snake +
+    iSTFT) renders 24 kHz audio. Two-GGUF runtime.
+  - **Realtime σ-VAE** (vibevoice in TTS mode): 4L base LM + 20L TTS
+    LM + DPM-Solver++ + σ-VAE decoder.
+  - **StyleTTS2 / iSTFTNet** (kokoro): BERT + ProsodyPredictor
+    + iSTFTNet decoder, single-shot (no AR).
 
 ### Optimization opportunities
 

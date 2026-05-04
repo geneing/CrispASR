@@ -252,6 +252,31 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/orpheus-3b-base-GGUF", "orpheus-3b-0.1-ft-q8_0.gguf",
             timeout_s=600, approx_size_mb=3500,
             capabilities=("tts-roundtrip", "temperature")),
+    # chatterbox family: T3 (text->speech tokens) + S3Gen (tokens->24 kHz
+    # waveform via CFM + HiFTGenerator). Two-GGUF runtime, registry pulls
+    # both via the companion field. The runtime carries a known ~30 %
+    # rel-pos magnitude gap in the C++ Conformer encoder vs Python ref;
+    # tts-roundtrip is left in the capabilities tuple so the smoke tier
+    # exercises load + synth, but ASR-roundtrip word-match is not
+    # expected to pass at the `full` tier until the parity gap closes
+    # (the test runner's tts-roundtrip tier picks up backend tuples but
+    # `--tts-roundtrip=full` is opt-in).
+    Backend("chatterbox", "Chatterbox (TTS)",     "chatterbox-t3-q8_0.gguf",
+            "cstr/chatterbox-GGUF", "chatterbox-t3-q8_0.gguf",
+            timeout_s=600, approx_size_mb=900,
+            capabilities=("tts-roundtrip", "temperature")),
+    Backend("chatterbox-turbo", "Chatterbox-Turbo (TTS)", "chatterbox-turbo-t3-f16.gguf",
+            "cstr/chatterbox-turbo-GGUF", "chatterbox-turbo-t3-f16.gguf",
+            timeout_s=600, approx_size_mb=1600,
+            capabilities=("tts-roundtrip", "temperature")),
+    Backend("kartoffelbox-turbo", "Kartoffelbox-Turbo (TTS, DE)", "kartoffelbox-turbo-t3-q8_0.gguf",
+            "cstr/kartoffelbox-turbo-GGUF", "kartoffelbox-turbo-t3-q8_0.gguf",
+            timeout_s=600, approx_size_mb=1280,
+            capabilities=("tts-roundtrip", "temperature")),
+    Backend("lahgtna-chatterbox", "Lahgtna Chatterbox v1 (TTS, AR)", "chatterbox-t3-f16.gguf",
+            "cstr/lahgtna-chatterbox-v1-GGUF", "chatterbox-t3-f16.gguf",
+            timeout_s=600, approx_size_mb=1400,
+            capabilities=("tts-roundtrip", "temperature")),
 )
 
 
