@@ -267,10 +267,22 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
         }
 
         // scores = (matrix_ac + matrix_bd) / sqrt(d_k)
-        // scores = (matrix_ac + matrix_bd) / sqrt(d_k)
         float scale = 1.0f / std::sqrt((float)head_dim);
         ggml_tensor* scores = ggml_add(ctx, matrix_ac, matrix_bd);
         scores = ggml_scale(ctx, scores, scale);
+
+        // Dump score statistics for enc.0
+        if (std::strcmp(prefix + std::strlen(prefix) - 2, ".0") == 0 && std::strstr(prefix, "enc.")) {
+            ggml_tensor* ac_dump = ggml_scale(ctx, matrix_ac, 1.0f);
+            ggml_set_name(ac_dump, "dump_enc0_matrix_ac");
+            ggml_set_output(ac_dump);
+            ggml_tensor* bd_dump = ggml_scale(ctx, matrix_bd, 1.0f);
+            ggml_set_name(bd_dump, "dump_enc0_matrix_bd");
+            ggml_set_output(bd_dump);
+            ggml_tensor* sc_dump = ggml_scale(ctx, scores, 1.0f);
+            ggml_set_name(sc_dump, "dump_enc0_scores_pre_softmax");
+            ggml_set_output(sc_dump);
+        }
 
         // Softmax over ne[0] (key dim)
         scores = ggml_soft_max(ctx, scores); // (TT, TT, H)
@@ -612,6 +624,9 @@ static std::vector<float> run_conformer_encoder(chatterbox_s3gen_context* c, con
             dump_rms("dump_pla_conv1");
             dump_rms("dump_after_pla");
             dump_rms("dump_enc0_pre_attn_norm");
+            dump_rms("dump_enc0_matrix_ac");
+            dump_rms("dump_enc0_matrix_bd");
+            dump_rms("dump_enc0_scores_pre_softmax");
             dump_rms("dump_enc0_raw_attn");
             dump_rms("dump_enc0_attn_out");
             for (int i = 0; i < 6; i++) {
