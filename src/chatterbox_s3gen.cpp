@@ -714,12 +714,16 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
                                           const std::vector<float>& mu,      // (80, T) encoder output (channel-first)
                                           const std::vector<float>& cond,    // (80, T) conditioning mel (channel-first)
                                           const std::vector<float>& spk_emb, // (80,) projected speaker embedding
-                                          int T_mel, int n_steps, float cfg_rate) {
-    // Generate cosine time schedule
+                                          int T_mel, int n_steps, float cfg_rate, bool meanflow = false) {
+    // Generate time schedule
     std::vector<float> t_span(n_steps + 1);
     for (int i = 0; i <= n_steps; i++) {
         float t = (float)i / (float)n_steps;
-        t_span[i] = 1.0f - std::cos(t * 0.5f * (float)M_PI);
+        if (!meanflow) {
+            t_span[i] = 1.0f - std::cos(t * 0.5f * (float)M_PI); // cosine schedule
+        } else {
+            t_span[i] = t; // linear schedule for meanflow
+        }
     }
 
     // Start from noise
@@ -769,40 +773,63 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
         }
 
         // Time embedding: sinusoidal(320) → MLP(320→1024→1024)
+        // For meanflow: also compute r embedding and mix via time_embed_mixer
         std::vector<float> t_sin = sinusoidal_embedding(t_val, 320);
-        // MLP on CPU (small, 4 tensors)
-        {
+        // Helper: run time MLP (shared for t and r)
+        auto time_mlp = [&](std::vector<float>& emb) {
             ggml_tensor* tm1_w = T(c, "s3.fd.tm.linear_1.weight");
             ggml_tensor* tm1_b = T(c, "s3.fd.tm.linear_1.bias");
             ggml_tensor* tm2_w = T(c, "s3.fd.tm.linear_2.weight");
             ggml_tensor* tm2_b = T(c, "s3.fd.tm.linear_2.bias");
-            if (tm1_w && tm2_w) {
-                std::vector<float> w1(1024 * 320), b1(1024, 0.0f);
-                std::vector<float> w2(1024 * 1024), b2(1024, 0.0f);
-                ggml_backend_tensor_get(tm1_w, w1.data(), 0, w1.size() * sizeof(float));
-                if (tm1_b)
-                    ggml_backend_tensor_get(tm1_b, b1.data(), 0, b1.size() * sizeof(float));
-                ggml_backend_tensor_get(tm2_w, w2.data(), 0, w2.size() * sizeof(float));
-                if (tm2_b)
-                    ggml_backend_tensor_get(tm2_b, b2.data(), 0, b2.size() * sizeof(float));
+            if (!tm1_w || !tm2_w)
+                return;
+            std::vector<float> w1(1024 * 320), b1(1024, 0.0f);
+            std::vector<float> w2(1024 * 1024), b2(1024, 0.0f);
+            ggml_backend_tensor_get(tm1_w, w1.data(), 0, w1.size() * sizeof(float));
+            if (tm1_b)
+                ggml_backend_tensor_get(tm1_b, b1.data(), 0, b1.size() * sizeof(float));
+            ggml_backend_tensor_get(tm2_w, w2.data(), 0, w2.size() * sizeof(float));
+            if (tm2_b)
+                ggml_backend_tensor_get(tm2_b, b2.data(), 0, b2.size() * sizeof(float));
+            std::vector<float> h1(1024);
+            for (int i = 0; i < 1024; i++) {
+                float sum = b1[i];
+                for (int j = 0; j < 320; j++)
+                    sum += w1[i * 320 + j] * emb[j];
+                h1[i] = sum;
+            }
+            // SiLU: x * sigmoid(x)
+            for (int i = 0; i < 1024; i++) {
+                float sig = 1.0f / (1.0f + std::exp(-h1[i]));
+                h1[i] = h1[i] * sig;
+            }
+            emb.resize(1024);
+            for (int i = 0; i < 1024; i++) {
+                float sum = b2[i];
+                for (int j = 0; j < 1024; j++)
+                    sum += w2[i * 1024 + j] * h1[j];
+                emb[i] = sum;
+            }
+        };
+        time_mlp(t_sin); // t_sin is now (1024,) t embedding
 
-                std::vector<float> h1(1024);
+        if (meanflow) {
+            // Meanflow: compute r embedding, concat with t, mix
+            std::vector<float> r_emb = sinusoidal_embedding(r_val, 320);
+            time_mlp(r_emb); // r_emb is now (1024,) r embedding
+            // Concat [t_emb, r_emb] → (2048,)
+            std::vector<float> concat(2048);
+            std::memcpy(concat.data(), t_sin.data(), 1024 * sizeof(float));
+            std::memcpy(concat.data() + 1024, r_emb.data(), 1024 * sizeof(float));
+            // time_embed_mixer: linear(2048 → 1024)
+            ggml_tensor* tmx_w = T(c, "s3.fd.tmx.weight");
+            if (tmx_w) {
+                std::vector<float> w(1024 * 2048);
+                ggml_backend_tensor_get(tmx_w, w.data(), 0, w.size() * sizeof(float));
                 for (int i = 0; i < 1024; i++) {
-                    float sum = b1[i];
-                    for (int j = 0; j < 320; j++)
-                        sum += w1[i * 320 + j] * t_sin[j];
-                    h1[i] = sum > 0 ? sum : sum * 0.01f; // SiLU approx
-                }
-                // SiLU: x * sigmoid(x)
-                for (int i = 0; i < 1024; i++) {
-                    float sig = 1.0f / (1.0f + std::exp(-h1[i]));
-                    h1[i] = h1[i] * sig;
-                }
-                t_sin.resize(1024);
-                for (int i = 0; i < 1024; i++) {
-                    float sum = b2[i];
-                    for (int j = 0; j < 1024; j++)
-                        sum += w2[i * 1024 + j] * h1[j];
+                    float sum = 0.0f;
+                    for (int j = 0; j < 2048; j++)
+                        sum += w[i * 2048 + j] * concat[j];
                     t_sin[i] = sum;
                 }
             }
@@ -840,9 +867,9 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
         if (v_cond.empty())
             break;
 
-        // Run unconditioned pass for CFG
+        // Run unconditioned pass for CFG (skip for meanflow — distilled, no CFG)
         std::vector<float> v_uncond;
-        if (cfg_rate > 0.0f) {
+        if (cfg_rate > 0.0f && !meanflow) {
             v_uncond = run_denoiser(unet_uncond);
         }
 
@@ -1706,7 +1733,13 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
     }
 
     // 4. CFM Euler solver: noise → mel
-    std::vector<float> mel = cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, n_cfm_steps, 0.7f);
+    // Detect meanflow: time_embed_mixer weight exists only in meanflow models
+    bool is_meanflow = (T(ctx, "s3.fd.tmx.weight") != nullptr);
+    float cfg = is_meanflow ? 0.0f : 0.7f; // meanflow = no CFG (distilled)
+    if (ctx->verbosity >= 1 && is_meanflow) {
+        fprintf(stderr, "s3gen: meanflow mode (linear schedule, no CFG)\n");
+    }
+    std::vector<float> mel = cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, n_cfm_steps, cfg, is_meanflow);
 
     // 5. Extract generated portion (skip prompt region)
     std::vector<float> gen_mel(80 * T_mel_gen);
