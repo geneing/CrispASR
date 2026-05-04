@@ -425,7 +425,7 @@ Same per-backend coverage as `KV_QUANT` (voxtral, voxtral4b,
 omniasr, qwen3_asr, granite_speech, orpheus, glm_asr, gemma4_e2b,
 mimo_asr, qwen3_tts).
 
-### `CRISPASR_N_GPU_LAYERS=N` — layer-residency offload (voxtral4b)
+### `CRISPASR_N_GPU_LAYERS=N` — layer-residency offload
 
 llama.cpp `--n-gpu-layers` parity. Default `-1` keeps legacy
 single-backend behaviour (everything on GPU, or CPU if `-ng`).
@@ -451,10 +451,14 @@ voxtral4b: weight residency: gpu=1585 MiB (571 tensors), cpu=821 MiB (143 tensor
 voxtral4b: layer offload: gpu=[0,13), cpu=[13,26) (CRISPASR_N_GPU_LAYERS=13)
 ```
 
-Coverage: voxtral4b only as of 2026-05-04. The plumbing
-(`core_gguf::load_weights_split` in `src/core/gguf_loader.h`)
-generalises to other LLM-decode backends; each is a small
-mechanical port — open issues if your target backend needs it.
+Coverage (10 LLM-decode backends): voxtral, voxtral4b, qwen3_asr,
+granite_speech, glm_asr, orpheus, omniasr-llm, gemma4_e2b, mimo_asr,
+vibevoice. Vibevoice is dual-mode — ASR-only files split the
+28-layer `lm.layers.<N>.*` path; TTS-enabled files (`tts_n_layers > 0`)
+split the dominant 20-layer `tts_lm.layers.<N>.*` path while the
+4-layer base LM stays on GPU. Encoder-decoder ASR (canary, cohere,
+kyutai-stt) is not yet covered — cross-attention layout has no
+`<prefix><N>.*` block-tagged tensors and needs a bespoke predicate.
 
 **Stacks with `KV_ON_CPU` and `KV_QUANT_K/_V`** — set all three for
 the most aggressive memory footprint reduction. `KV_QUANT` is
