@@ -33,8 +33,8 @@ and where the gaps are. Last refresh: **2026-05-04** (after PLAN §79 —
 
 | backend | KV_QUANT | KV_QUANT_K/_V | KV_ON_CPU | N_GPU_LAYERS | notes |
 |---|:-:|:-:|:-:|:-:|---|
-| canary (1B) | ✓ | ✓ | ✓ | · | flash_attn_ext shipped, no cast tax |
-| cohere (2B) | ✓ | ✓ | ✓ | · | flash_attn_ext shipped, no cast tax |
+| canary (1B) | ✓ | ✓ | ✓ | · | flash_attn_ext default, -17 % on JFK with q8_0/q4_0 |
+| cohere (2B) | ✓ | ✓ | ✓ | · | flash_attn_ext available; +11 % regression vs cast-on-read on JFK with q8_0/q4_0 — long-form rerun needed before promoting (see PLAN) |
 | kyutai-stt (1B) | ✓ | ✓ | ✓ | · | flash_attn_ext native, quant-safe |
 | firered-asr (900M) | — | — | — | — | inline AED, no exposed transformer KV |
 | moonshine-tiny / streaming | — | — | — | — | tiny decoder, no exposed KV |
@@ -83,6 +83,13 @@ and where the gaps are. Last refresh: **2026-05-04** (after PLAN §79 —
    dGPU should be even more favourable; deferred until a CUDA host
    is available. If a platform regresses, gate via env
    (`CRISPASR_FORCE_CPU_WEIGHTS=1`).
+5. **Cohere flash_attn_ext regresses on short audio.** JFK (~11 s)
+   with q8_0 K / q4_0 V is +11 % slower under flash than under the
+   cast-on-read fallback (canary on the same workload is -17 %, so
+   the kernel works — cohere's cache layout or head dim flips the
+   crossover). Need a multi-minute clip to confirm flash pulls ahead
+   on long-form before promoting it to the recommended path; until
+   then short-form users on cohere should treat flash as opt-in.
 
 ### Stacking the four knobs
 

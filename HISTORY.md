@@ -3060,6 +3060,32 @@ work alongside layer offload.
 
 Open after this: encoder-decoder #69a (canary/cohere/kyutai-stt) is
 its own design problem (cross-attention layout, no `<prefix><N>.*`
-block-tagged tensors). #73 read-path optimization for canary/cohere
-still deferred without long-context perf evidence. Linux/CUDA
-validation of #72 still hardware-blocked.
+block-tagged tensors). Linux/CUDA validation of #72 still
+hardware-blocked.
+
+### §79c — canary/cohere flash_attn_ext bench (2026-05-04)
+
+Commit 193a736 migrated canary + cohere self-attention from the
+`ggml_cast(F32) → permute → mul_mat` cast-on-read path to a single
+`ggml_flash_attn_ext` call — the read-path optimization the §79
+"open follow-ups" section flagged. Bench numbers on JFK (~11 s) on
+Apple M1 Metal:
+
+| backend | F16 cast | F16 flash | Q8_0/Q4_0 cast | Q8_0/Q4_0 flash |
+|---------|---------:|----------:|---------------:|----------------:|
+| canary  | 0.55 s   | 0.53 s    | 0.77 s         | 0.64 s (-17 %)  |
+| cohere  | 0.82 s   | 0.83 s    | 0.80 s         | 0.89 s (+11 %)  |
+
+F16 is a tie on both — the cast wasn't the bottleneck at F16. On
+quant K/V canary gets the expected -17 % (dequant + permute is
+the dominant cost), but cohere *regresses* by +11 %. Likely cause:
+cohere's larger model dim / different head config flips the
+crossover point — flash kernel overhead exceeds saved bandwidth at
+this cache length.
+
+Action: PERFORMANCE.md cohere row note softened from "no cast tax"
+to "+11 % regression vs cast-on-read on JFK"; PLAN entry added for
+multi-minute clip rerun. flash_attn_ext stays the default in code
+(canary wins, cohere short-form regression is small) but
+PERFORMANCE.md and PLAN now reflect the data instead of the prior
+"flash drops the cast tax universally" claim.
