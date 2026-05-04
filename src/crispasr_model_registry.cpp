@@ -211,6 +211,49 @@ constexpr Entry k_registry[] = {
      "~3.5 GB",
      "snac-24khz.gguf",
      "https://huggingface.co/cstr/snac-24khz-GGUF/resolve/main/snac-24khz.gguf"},
+    // Chatterbox family — ResembleAI MIT TTS. Two-GGUF runtime:
+    //   primary  = T3 (text → speech tokens) — also carries baked conds
+    //   companion = S3Gen (tokens → 24 kHz waveform via CFM + HiFTGenerator)
+    // The runtime is exposed only through the C ABI today
+    // (`chatterbox_init_from_file` + `chatterbox_load_s3gen`); the
+    // crispasr CLI adapter is still pending — see PLAN. Auto-download
+    // via `-m auto --backend chatterbox` populates both files into the
+    // cache so the C-API caller can resolve them.
+    {"chatterbox", "chatterbox-t3-q8_0.gguf",
+     "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-t3-q8_0.gguf",
+     "~880 MB",
+     "chatterbox-s3gen-q8_0.gguf",
+     "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-s3gen-q8_0.gguf"},
+    // Chatterbox-Turbo: distilled GPT-2 T3 (24L) + 2-step meanflow S3Gen.
+    // Different architecture from base — runtime keys off
+    // `chatterbox.t3.arch` ("kartoffelbox" branch handles GPT-2 T3 for
+    // both Turbo and the German Kartoffelbox fine-tune). Only F16
+    // published upstream.
+    {"chatterbox-turbo", "chatterbox-turbo-t3-f16.gguf",
+     "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-t3-f16.gguf",
+     "~1.6 GB",
+     "chatterbox-turbo-s3gen-f16.gguf",
+     "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-s3gen-f16.gguf"},
+    // Kartoffelbox-Turbo: SebastianBodza's German fine-tune of
+    // chatterbox-turbo. Same GPT-2 T3 arch as Turbo; reuses the
+    // chatterbox-turbo S3Gen verbatim (companion points at the Turbo
+    // repo on purpose — saves a redundant 627 MB upload). T3 shipped at
+    // F16/Q8_0/Q4_K; Q8_0 is the recommended deployment quant.
+    {"kartoffelbox-turbo", "kartoffelbox-turbo-t3-q8_0.gguf",
+     "https://huggingface.co/cstr/kartoffelbox-turbo-GGUF/resolve/main/kartoffelbox-turbo-t3-q8_0.gguf",
+     "~1.25 GB",
+     "chatterbox-turbo-s3gen-f16.gguf",
+     "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-s3gen-f16.gguf"},
+    // Lahgtna-chatterbox-v1: oddadmix's Arabic T3 fine-tune of base
+    // ResembleAI/chatterbox. Shares the base Llama T3 architecture
+    // (default converter path, no `--variant`); reuses the base S3Gen
+    // verbatim (companion points at cstr/chatterbox-GGUF). T3 shipped
+    // at F16 only.
+    {"lahgtna-chatterbox", "chatterbox-t3-f16.gguf",
+     "https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF/resolve/main/chatterbox-t3-f16.gguf",
+     "~1.4 GB",
+     "chatterbox-s3gen-q8_0.gguf",
+     "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-s3gen-q8_0.gguf"},
     // Kokoro-82M: official baseline + English default voice. The German
     // backbone + German default voice ride along via k_extras (see below)
     // so users running `-m auto --backend kokoro` get a working multilingual
