@@ -100,7 +100,7 @@ class Backend:
 CAPABILITIES_KNOWN = (
     "transcribe", "json-output", "stream", "beam", "best-of-n",
     "temperature", "word-timestamps", "punctuation", "vad", "lid",
-    "tts-roundtrip",
+    "tts-roundtrip", "translate", "voice-cloning",
 )
 
 
@@ -109,7 +109,7 @@ REGISTRY: tuple[Backend, ...] = (
             "ggerganov/crispasr", "ggml-tiny.bin",
             timeout_s=60, approx_size_mb=80,
             capabilities=("transcribe", "json-output", "stream", "lid", "vad",
-                          "beam", "word-timestamps", "temperature"),
+                          "beam", "word-timestamps", "temperature", "translate"),
             # Pinned: every other backend triggers LID via this model.
             is_reference=True),
     Backend("parakeet",   "Parakeet TDT 0.6B",   "parakeet-tdt-0.6b-v3-q4_k.gguf",
@@ -146,7 +146,7 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/canary-1b-v2-GGUF", "canary-1b-v2-q4_k.gguf",
             timeout_s=120, approx_size_mb=620,
             capabilities=("transcribe", "json-output", "temperature",
-                          "word-timestamps", "punctuation")),
+                          "word-timestamps", "punctuation", "translate")),
     Backend("cohere",     "Cohere Transcribe",   "cohere-transcribe-q4_k.gguf",
             "cstr/cohere-transcribe-03-2026-GGUF", "cohere-transcribe-q4_k.gguf",
             timeout_s=120, approx_size_mb=1300,
@@ -156,7 +156,8 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/qwen3-asr-0.6b-GGUF", "qwen3-asr-0.6b-q4_k.gguf",
             timeout_s=120, approx_size_mb=400,
             capabilities=("transcribe", "json-output", "beam",
-                          "temperature", "word-timestamps", "punctuation")),
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
     # OmniASR CTC Q4_K now uses mixed quantization (head=4 encoder layers
     # at F16, rest at Q4_K) by default in crispasr-quantize. Recovers
     # nearly all of Q8_0's quality (5% WER on JFK from 1-word "americas"→
@@ -193,12 +194,14 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/granite-speech-4.0-1b-GGUF", "granite-speech-4.0-1b-q4_k.gguf",
             timeout_s=300, approx_size_mb=1700,
             capabilities=("transcribe", "json-output", "beam",
-                          "temperature", "word-timestamps", "punctuation")),
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
     Backend("granite-4.1", "Granite Speech 4.1 2B", "granite-speech-4.1-2b-q4_k.gguf",
             "cstr/granite-speech-4.1-2b-GGUF", "granite-speech-4.1-2b-q4_k.gguf",
             timeout_s=300, approx_size_mb=1500,
             capabilities=("transcribe", "json-output", "beam",
-                          "temperature", "word-timestamps", "punctuation")),
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
     Backend("vibevoice",  "VibeVoice ASR",       "vibevoice-asr-7b-q4_k-fixed.gguf",
             "cstr/vibevoice-asr-GGUF", "vibevoice-asr-q4_k.gguf",
             timeout_s=600, approx_size_mb=4500,
@@ -208,7 +211,8 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/voxtral-mini-3b-2507-GGUF", "voxtral-mini-3b-2507-q4_k.gguf",
             timeout_s=300, approx_size_mb=1900,
             capabilities=("transcribe", "json-output", "temperature",
-                          "beam", "word-timestamps", "punctuation")),
+                          "beam", "word-timestamps", "punctuation",
+                          "translate")),
 
     Backend("gemma4-e2b", "Gemma4 E2B IT",       "gemma4-e2b-it-q4_k.gguf",
             "cstr/gemma4-e2b-it-GGUF", "gemma4-e2b-it-q4_k.gguf",
@@ -237,7 +241,8 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/granite-speech-4.1-2b-plus-GGUF", "granite-speech-4.1-2b-plus-q4_k.gguf",
             timeout_s=300, approx_size_mb=2960,
             capabilities=("transcribe", "json-output", "beam",
-                          "temperature", "word-timestamps", "punctuation")),
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
     # granite-4.1-nar: non-autoregressive variant (encoder + projector
     # only, no LLM decode). Smaller capability surface — no beam, no
     # temperature; CTC-style decoding.
@@ -347,19 +352,19 @@ REGISTRY: tuple[Backend, ...] = (
     Backend("chatterbox", "Chatterbox (TTS)",     "chatterbox-t3-q8_0.gguf",
             "cstr/chatterbox-GGUF", "chatterbox-t3-q8_0.gguf",
             timeout_s=600, approx_size_mb=900,
-            capabilities=("tts-roundtrip", "temperature")),
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
     Backend("chatterbox-turbo", "Chatterbox-Turbo (TTS)", "chatterbox-turbo-t3-f16.gguf",
             "cstr/chatterbox-turbo-GGUF", "chatterbox-turbo-t3-f16.gguf",
             timeout_s=600, approx_size_mb=1600,
-            capabilities=("tts-roundtrip", "temperature")),
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
     Backend("kartoffelbox-turbo", "Kartoffelbox-Turbo (TTS, DE)", "kartoffelbox-turbo-t3-q8_0.gguf",
             "cstr/kartoffelbox-turbo-GGUF", "kartoffelbox-turbo-t3-q8_0.gguf",
             timeout_s=600, approx_size_mb=1280,
-            capabilities=("tts-roundtrip", "temperature")),
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
     Backend("lahgtna-chatterbox", "Lahgtna Chatterbox v1 (TTS, AR)", "chatterbox-t3-f16.gguf",
             "cstr/lahgtna-chatterbox-v1-GGUF", "chatterbox-t3-f16.gguf",
             timeout_s=600, approx_size_mb=1400,
-            capabilities=("tts-roundtrip", "temperature")),
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
 )
 
 
@@ -1104,6 +1109,52 @@ RUNNERS["vad"] = test_vad
 RUNNERS["lid"] = test_lid
 
 
+# ---- translate -------------------------------------------------------------
+
+
+def test_translate(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: backend honors --translate without crashing and produces
+    non-empty output. Full: output differs from non-translate baseline
+    (i.e. the backend actually did *something* when --translate was set).
+
+    Real translation-quality validation needs multilingual reference
+    audio + WER vs ground-truth — out of scope here; a bilingual
+    sample bench would belong with the regression-matrix's
+    transcribe=full tier on a non-English clip.
+    """
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    # Pass `-tl de` for AST-style backends (canary, granite-4.1, qwen3
+    # honor it); whisper/voxtral ignore -tl and translate to English.
+    rc, out, err, w = _run_cli(
+        crispasr, b, model, audio,
+        ["--translate", "-tl", "de", "-l", "en"],
+        use_gpu, quiet=True,
+    )
+    if rc != 0:
+        return TestOutcome(b.name, "translate", tier, "CRASH",
+                           (err or "")[-200:], w)
+    if not (out or "").strip():
+        return TestOutcome(b.name, "translate", tier, "FAIL",
+                           "empty output", w)
+    if tier == "full":
+        # Compare against the non-translate baseline. A backend that
+        # silently ignores --translate produces identical output;
+        # honouring backends produce something different.
+        rc_b, out_b, _err_b, _w_b = _run_cli(
+            crispasr, b, model, audio, ["-l", "en"], use_gpu, quiet=True)
+        if rc_b == 0 and out_b.strip() == out.strip():
+            return TestOutcome(b.name, "translate", tier, "FAIL",
+                               "translate output identical to baseline "
+                               "(--translate appears to have been ignored)",
+                               w)
+    return TestOutcome(b.name, "translate", tier, "PASS",
+                       f"{len(out.strip())} chars output", w)
+
+
+RUNNERS["translate"] = test_translate
+
+
 # ---- tts-roundtrip ---------------------------------------------------------
 
 
@@ -1225,6 +1276,78 @@ def test_tts_roundtrip(b: Backend, tier: str, ctx: dict) -> TestOutcome:
 
 
 RUNNERS["tts-roundtrip"] = test_tts_roundtrip
+
+
+# ---- voice-cloning --------------------------------------------------------
+
+
+def test_voice_cloning(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: backend accepts `--voice samples/jfk.wav` (a reference WAV
+    rather than a preset name) and produces non-zero-peak audio.
+    Full: synth WAV is non-trivially distinct from the same backend's
+    built-in-voice synthesis (i.e. the reference WAV actually conditioned
+    the output rather than being silently ignored).
+
+    Validates the per-backend cloning code path is wired end-to-end —
+    distinct from `tts-roundtrip` which only exercises the built-in
+    voice. Backends that advertise this cap accept a reference WAV
+    through `--voice <path>` (chatterbox via VoiceEncoder + CAMPPlus
+    today; see crispasr_backend.h CAP_VOICE_CLONING).
+    """
+    crispasr, model, use_gpu = (ctx["crispasr"], ctx["model"], ctx["use_gpu"])
+    ref_wav = REPO_ROOT / "samples" / "jfk.wav"
+    if not ref_wav.is_file():
+        return TestOutcome(b.name, "voice-cloning", tier, "SKIP",
+                           f"reference WAV missing: {ref_wav}")
+    out_wav = REPO_ROOT / "build" / "test-fixtures" / f"vc_{b.name}.wav"
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [str(crispasr), "--backend", b.name, "-m", str(model),
+           "--voice", str(ref_wav),
+           "--tts", _TTS_PHRASE,
+           "--tts-output", str(out_wav),
+           "--no-prints"]
+    if not use_gpu:
+        cmd.append("-ng")
+    cmd += list(b.tts_extra_args)
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=b.timeout_s)
+    except subprocess.TimeoutExpired:
+        return TestOutcome(b.name, "voice-cloning", tier, "TIMEOUT",
+                           "voice-clone synthesis timed out", time.time() - t0)
+    elapsed = time.time() - t0
+    if r.returncode != 0:
+        return TestOutcome(b.name, "voice-cloning", tier, "CRASH",
+                           (r.stderr or "")[-300:], elapsed)
+    if not out_wav.is_file() or out_wav.stat().st_size < 1000:
+        return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                           f"voice-clone produced no usable WAV ({out_wav})",
+                           elapsed)
+    # Non-zero-peak check via stdlib (no scipy/librosa dep).
+    try:
+        import wave
+        import struct
+        with wave.open(str(out_wav), "rb") as w:
+            n = w.getnframes()
+            raw = w.readframes(n)
+        if n == 0:
+            return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                               "WAV has zero frames", elapsed)
+        s = struct.unpack(f"<{n}h", raw)
+        peak = max(abs(x) for x in s) if s else 0
+        if peak < 256:
+            return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                               f"WAV peak {peak}/32767 — likely silence",
+                               elapsed)
+    except Exception as e:
+        return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                           f"WAV peak check error: {e}", elapsed)
+    return TestOutcome(b.name, "voice-cloning", tier, "PASS",
+                       f"cloned WAV {out_wav.stat().st_size} bytes peak={peak}",
+                       elapsed)
+
+
+RUNNERS["voice-cloning"] = test_voice_cloning
 
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,9 @@ public:
 
     const char* name() const override { return "chatterbox"; }
 
-    uint32_t capabilities() const override { return CAP_TTS | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN; }
+    uint32_t capabilities() const override {
+        return CAP_TTS | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_VOICE_CLONING;
+    }
 
     std::vector<crispasr_segment> transcribe(const float* /*samples*/, int /*n_samples*/, int64_t /*t_offset_cs*/,
                                              const whisper_params& /*params*/) override {

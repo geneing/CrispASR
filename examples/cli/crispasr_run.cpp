@@ -641,6 +641,37 @@ int crispasr_run_backend(const whisper_params& params_in) {
         }
     }
 
+    // PLAN #74a — chatterbox-family auto-route by --language. Pure
+    // English variants ("chatterbox" / "chatterbox-turbo" / aliases)
+    // get swapped to the language-matching sibling when the user passes
+    // `-l de` (kartoffelbox-turbo) or `-l ar` (lahgtna-chatterbox), but
+    // only when -m auto is in effect — if the user passed an explicit
+    // model path they've already picked the variant. Mirrors the kokoro
+    // `-l de` German-backbone routing convention. No-op when the user
+    // already named a language-specific chatterbox variant.
+    if (model_is_auto && !params.language.empty() && params.language != "auto") {
+        auto is_en_chatterbox = [](const std::string& n) {
+            return n == "chatterbox" || n == "chatterbox-tts" || n == "chatterbox-base" ||
+                   n == "chatterbox-turbo" || n == "chatterbox_turbo";
+        };
+        if (is_en_chatterbox(backend_name)) {
+            std::string routed;
+            if (params.language == "de") {
+                routed = "kartoffelbox-turbo";
+            } else if (params.language == "ar") {
+                routed = "lahgtna-chatterbox";
+            }
+            if (!routed.empty()) {
+                if (!params.no_prints) {
+                    fprintf(stderr, "crispasr: -l %s with --backend %s — auto-routing to %s\n",
+                            params.language.c_str(), backend_name.c_str(), routed.c_str());
+                }
+                backend_name = routed;
+                params.backend = routed;
+            }
+        }
+    }
+
     // Resolve "-m auto" via the model registry + curl/wget download.
     const std::string resolved = crispasr_resolve_model_cli(params.model, backend_name, params.no_prints,
                                                             params.cache_dir, params.auto_download);

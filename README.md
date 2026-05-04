@@ -116,6 +116,10 @@ All runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **v
 
 Run `crispasr --list-backends` to see it live. Each backend declares capabilities at runtime; if you ask for a feature the selected backend does not support, CrispASR prints a warning and silently ignores the flag.
 
+**Sortable / filterable view:** [`docs/feature-matrix.html`](docs/feature-matrix.html) — click any column header to sort, type to filter rows, click cap pills to require a capability. Generated from `crispasr --list-backends-json` (single source of truth — drift impossible). Regenerate via `python tools/gen-feature-matrix.py`. A Markdown twin lives at [`docs/feature-matrix.md`](docs/feature-matrix.md).
+
+The static table below is a curated subset focusing on the ASR backends and the cross-cutting features that matter for ASR pipelines. The full 39-backend × 18-cap surface is in the generated views.
+
 <!-- Generated from `crispasr --list-backends` + cross-cutting features. -->
 
 | Feature | whisper | parakeet | canary | cohere | granite | granite&#8209;4.1 | voxtral | voxtral4b | qwen3 | fc&#8209;ctc | wav2vec2 | glm&#8209;asr | kyutai&#8209;stt | firered | moonshine | moon&#8209;stream | omniasr | omniasr&#8209;llm | vibevoice | gemma4&#8209;e2b | mimo&#8209;asr |
