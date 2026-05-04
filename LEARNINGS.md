@@ -2241,3 +2241,60 @@ resblock convolutions correctly. The Snake activation `x + sin²(αx)/α`
 via `ggml_mul → ggml_sin → ggml_mul → ggml_div → ggml_add` matches
 PyTorch to 6 significant figures. The 3-independent-resblock-then-average
 pattern works. The bugs were downstream of the ggml graph, not in it.
+
+## GitHub Actions workflow triggers — `master` → `main` rename gotcha (May 2026)
+
+After renaming the default branch from `master` to `main`, audit
+**every** workflow's trigger config for stale `branches: master`
+references. A workflow gated on a non-existent branch never fires
+on push events. GitHub Actions does not warn — the workflow file
+is valid, runs are just never created. Three CrispASR workflows
+(`bindings-ruby.yml`, `build.yml`, `examples-wasm.yml`) had this
+misconfig for months post-rename. The full per-OS build matrix
+(iOS / macOS / Windows MSVC / Windows MSYS2 / Linux Vulkan /
+Android NDK) was therefore not validating any push to `main` —
+only running on PRs (different trigger) and on tag pushes
+(release-only).
+
+### Why it took so long to notice
+
+- PRs always triggered the workflows (different trigger config),
+  so PR review felt fine.
+- Tags (`tags: 'v*'`) still triggered, so v0.5.x releases ran the
+  matrix — but only at release time, not per-merge.
+- `gh run list --workflow=build.yml` shows runs starting on PR
+  opens and at tag pushes, looking superficially complete. The
+  missing signal — "no run on commit X to main" — only becomes
+  apparent if you specifically query for it.
+
+### How a pre-existing failure surfaces as a "PR failure"
+
+When `Bindings Tests (Ruby)` finally ran on a PR (#57,
+`feat/codec-gpu-env`), it failed at the `cmake-targets` step. The
+natural reading is "the PR broke something." The actual cause: that
+PR was the first PR in months to fire a workflow that had been
+silently dead on main. The breakage was in main, not the PR. We
+proved this by fixing the trigger and pushing the trigger fix
+itself to main — the resulting clean-main run reproduced the
+identical `Makefile:171: Error 2`.
+
+### Audit recipe
+
+```bash
+for f in .github/workflows/*.yml; do
+    echo "== $(basename "$f") =="
+    grep -A1 "branches:" "$f" | head -3
+done | grep -B1 master
+```
+
+Anything that prints `master` after a `branches:` line is a stale
+trigger. Fix `master` → `main` (or list both: `branches: [main, master]`).
+
+### Incident-response value
+
+Land the trigger fix in a single small commit (`b553546` for us).
+That gives a clean before/after demarcation: every run before this
+commit on main is suspect for "did it actually run?", and every
+run after this commit is the new ground truth. Push the trigger
+fix on its own — its own push fires the corrected workflow on the
+new SHA, so any accumulated breakage surfaces on the same commit.
