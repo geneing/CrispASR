@@ -118,7 +118,10 @@ def read_declared(binary: Path) -> dict[str, set[str]]:
 # Backend("name", "label", "model.gguf", ..., capabilities=("a", "b", ...))
 # We only need name + capabilities tuple.
 BACKEND_RE = re.compile(
-    r'Backend\(\s*"(?P<name>[a-z0-9_-]+)".*?capabilities\s*=\s*\((?P<caps>[^)]*)\)',
+    # Allow `.` in backend names so granite-4.1, qwen3-tts-1.7b, etc.
+    # are captured. Earlier version used [a-z0-9_-] which silently
+    # skipped any dotted name.
+    r'Backend\(\s*"(?P<name>[a-z0-9_.-]+)".*?capabilities\s*=\s*\((?P<caps>[^)]*)\)',
     re.DOTALL,
 )
 
