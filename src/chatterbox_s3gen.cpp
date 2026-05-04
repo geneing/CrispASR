@@ -210,6 +210,14 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
         p = ggml_reshape_3d(ctx, p, head_dim, n_heads, T_pos);
         p = ggml_cont(ctx, ggml_permute(ctx, p, 0, 2, 1, 3)); // (hd, T_pos, H)
 
+        // Dump linear_pos output for enc.0
+        if (std::strcmp(prefix + std::strlen(prefix) - 2, ".0") == 0 && std::strstr(prefix, "enc.")) {
+            ggml_tensor* p_dump = ggml_scale(ctx, p, 1.0f);
+            ggml_set_name(p_dump, "dump_enc0_linear_pos_out");
+            ggml_set_output(p_dump);
+            ggml_build_forward_expand(gf, p_dump);
+        }
+
         // pos_bias_u/v: (H, hd) → reshape to (hd, 1, H) for broadcast add to q
         ggml_tensor* pbu = ggml_cont(ctx, ggml_transpose(ctx, pos_bias_u)); // (hd, H)
         pbu = ggml_reshape_3d(ctx, pbu, head_dim, 1, n_heads);              // (hd, 1, H)
@@ -227,7 +235,17 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
         ggml_tensor* matrix_ac = ggml_mul_mat(ctx, k_t, q_u); // (TT, TT, H)
 
         // matrix_bd = q_with_bias_v @ p^T
-        ggml_tensor* matrix_bd = ggml_mul_mat(ctx, p, q_v); // (T_pos, TT, H)
+        ggml_tensor* matrix_bd_raw = ggml_mul_mat(ctx, p, q_v); // (T_pos, TT, H)
+
+        // Dump pre-shift matrix_bd
+        if (std::strcmp(prefix + std::strlen(prefix) - 2, ".0") == 0 && std::strstr(prefix, "enc.")) {
+            ggml_tensor* bd_raw_dump = ggml_scale(ctx, matrix_bd_raw, 1.0f);
+            ggml_set_name(bd_raw_dump, "dump_enc0_bd_pre_shift");
+            ggml_set_output(bd_raw_dump);
+            ggml_build_forward_expand(gf, bd_raw_dump);
+        }
+
+        ggml_tensor* matrix_bd = matrix_bd_raw;
 
         // Transformer-XL rel_shift: (2T-1, T, H) → (T, T, H)
         // matrix_bd: ne[0]=2T-1 (positions), ne[1]=T (queries), ne[2]=H (heads)
@@ -276,12 +294,15 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
             ggml_tensor* ac_dump = ggml_scale(ctx, matrix_ac, 1.0f);
             ggml_set_name(ac_dump, "dump_enc0_matrix_ac");
             ggml_set_output(ac_dump);
+            ggml_build_forward_expand(gf, ac_dump);
             ggml_tensor* bd_dump = ggml_scale(ctx, matrix_bd, 1.0f);
             ggml_set_name(bd_dump, "dump_enc0_matrix_bd");
             ggml_set_output(bd_dump);
+            ggml_build_forward_expand(gf, bd_dump);
             ggml_tensor* sc_dump = ggml_scale(ctx, scores, 1.0f);
             ggml_set_name(sc_dump, "dump_enc0_scores_pre_softmax");
             ggml_set_output(sc_dump);
+            ggml_build_forward_expand(gf, sc_dump);
         }
 
         // Softmax over ne[0] (key dim)
@@ -431,11 +452,12 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
             ggml_tensor* residual = x;
             // x is (D=512, Tin) from embedding. Conv1d expects (T, C_in) → transpose.
             x = ggml_cont(ctx0, ggml_transpose(ctx0, x)); // now (Tin, D=512)
-            // Conv1d(k=4, causal pad=3 on left): pad 3 on both sides, crop right
+
+            // Conv1d(k=4, causal pad_left=3): use symmetric pad=3, crop LAST Tin elements
             x = ggml_conv_1d(ctx0, pla_c1_w, x, 1, 3, 1);
-            // Crop to causal: take first Tin time steps
             if ((int)x->ne[0] > Tin) {
-                x = ggml_view_2d(ctx0, x, Tin, (int)x->ne[1], x->nb[1], 0);
+                int excess = (int)x->ne[0] - Tin;
+                x = ggml_view_2d(ctx0, x, Tin, (int)x->ne[1], x->nb[1], (size_t)excess * x->nb[0]);
                 x = ggml_cont(ctx0, x);
             }
             if (pla_c1_b)
@@ -443,10 +465,12 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
             ggml_set_name(x, "dump_pla_conv1");
             ggml_set_output(x);
             x = ggml_leaky_relu(ctx0, x, 0.1f, false);
-            // Conv2(k=3, causal pad=2 on left)
+
+            // Conv2(k=3, causal pad_left=2): same approach
             x = ggml_conv_1d(ctx0, pla_c2_w, x, 1, 2, 1);
             if ((int)x->ne[0] > Tin) {
-                x = ggml_view_2d(ctx0, x, Tin, (int)x->ne[1], x->nb[1], 0);
+                int excess = (int)x->ne[0] - Tin;
+                x = ggml_view_2d(ctx0, x, Tin, (int)x->ne[1], x->nb[1], (size_t)excess * x->nb[0]);
                 x = ggml_cont(ctx0, x);
             }
             if (pla_c2_b)
@@ -624,6 +648,8 @@ static std::vector<float> run_conformer_encoder(chatterbox_s3gen_context* c, con
             dump_rms("dump_pla_conv1");
             dump_rms("dump_after_pla");
             dump_rms("dump_enc0_pre_attn_norm");
+            dump_rms("dump_enc0_linear_pos_out");
+            dump_rms("dump_enc0_bd_pre_shift");
             dump_rms("dump_enc0_matrix_ac");
             dump_rms("dump_enc0_matrix_bd");
             dump_rms("dump_enc0_scores_pre_softmax");
