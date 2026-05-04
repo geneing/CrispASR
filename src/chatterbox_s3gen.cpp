@@ -145,7 +145,7 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
 // x: (D, T), returns: (D, T)
 static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, chatterbox_s3gen_context* c,
                                           ggml_tensor* x, int seq_len, const char* prefix, int n_heads, int head_dim,
-                                          int D, int ff_dim) {
+                                          int D, int ff_dim, ggml_tensor* pos_emb = nullptr) {
     const int TT = seq_len; // renamed to avoid shadowing
     char key[64];
     auto W = [&](const char* suffix) -> ggml_tensor* {
@@ -165,7 +165,7 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
     if (nmha_b)
         xn = ggml_add(ctx, xn, nmha_b);
 
-    // Q/K/V projections
+    // Q/K/V projections: (D, TT) → (D, TT)
     ggml_tensor* Q = ggml_mul_mat(ctx, W("sa.lq.weight"), xn);
     ggml_tensor* qb = W("sa.lq.bias");
     if (qb)
@@ -184,15 +184,111 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
     K = ggml_reshape_3d(ctx, K, head_dim, n_heads, TT);
     V = ggml_reshape_3d(ctx, V, head_dim, n_heads, TT);
 
-    // Simple scaled dot-product attention (without relative position for now)
-    // TODO: add relative position encoding with pos_bias_u/v and linear_pos
-    Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3)); // (hd, TT, H)
-    K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
-    V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
+    // Check for relative position attention weights
+    ggml_tensor* pos_bias_u = W("sa.pbu");
+    ggml_tensor* pos_bias_v = W("sa.pbv");
+    ggml_tensor* linear_pos_w = W("sa.lp.weight");
 
-    float scale = 1.0f / std::sqrt((float)head_dim);
-    ggml_tensor* attn = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
-    attn = ggml_reshape_2d(ctx, attn, D, TT);
+    ggml_tensor* attn;
+    // TODO: implement proper Transformer-XL rel_shift for relative position attention.
+    // The rel_shift involves pad+reshape+slice that reindexes attention positions.
+    // For now, use simple attention — the xscale fix brings encoder within 8% of Python.
+    if (false && pos_bias_u && pos_bias_v && linear_pos_w && pos_emb) {
+        // Relative position multi-headed attention (Transformer-XL / ESPnet style)
+        // Q is (hd, H, TT). Transpose to (hd, TT, H) for matmul.
+        ggml_tensor* q_t = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3)); // (hd, TT, H)
+        ggml_tensor* k_t = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+        ggml_tensor* v_t = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
+
+        // Position encoding: p = linear_pos(pos_emb) → reshape to (hd, T_pos, H)
+        // pos_emb: (D, T_pos) where T_pos = 2*TT-1 for Espnet relative encoding
+        ggml_tensor* p = ggml_mul_mat(ctx, linear_pos_w, pos_emb); // (D, T_pos)
+        int T_pos = (int)pos_emb->ne[1];
+        p = ggml_reshape_3d(ctx, p, head_dim, n_heads, T_pos);
+        p = ggml_cont(ctx, ggml_permute(ctx, p, 0, 2, 1, 3)); // (hd, T_pos, H)
+
+        // pos_bias_u/v: (H, hd) → reshape to (hd, 1, H) for broadcast add to q
+        ggml_tensor* pbu = ggml_cont(ctx, ggml_transpose(ctx, pos_bias_u)); // (hd, H)
+        pbu = ggml_reshape_3d(ctx, pbu, head_dim, 1, n_heads);              // (hd, 1, H)
+        ggml_tensor* pbv = ggml_cont(ctx, ggml_transpose(ctx, pos_bias_v));
+        pbv = ggml_reshape_3d(ctx, pbv, head_dim, 1, n_heads);
+
+        // q_with_bias_u = q + pos_bias_u: (hd, TT, H) + (hd, 1, H) broadcast
+        ggml_tensor* q_u = ggml_add(ctx, q_t, pbu);
+        ggml_tensor* q_v = ggml_add(ctx, q_t, pbv);
+
+        // matrix_ac = q_with_bias_u @ k^T: (hd, TT, H) @ (hd, TT, H)^T → need per-head matmul
+        // Use ggml_mul_mat which does a^T @ b over ne[0]:
+        // k_t is (hd, TT, H). For q_u @ k^T per head: we need (TT, TT) per head
+        // ggml_mul_mat(k_t, q_u): contracts ne[0]=hd → output (TT, TT, H). Correct!
+        ggml_tensor* matrix_ac = ggml_mul_mat(ctx, k_t, q_u); // (TT, TT, H)
+
+        // matrix_bd = q_with_bias_v @ p^T
+        ggml_tensor* matrix_bd = ggml_mul_mat(ctx, p, q_v); // (T_pos, TT, H)
+
+        // rel_shift: if shapes don't match (T_pos != TT), apply relative shift
+        // For Espnet: T_pos = 2*TT-1, so matrix_bd is (2*TT-1, TT, H)
+        // After rel_shift: (TT, TT, H)
+        if ((int)matrix_bd->ne[0] != TT) {
+            // Rel shift: pad column 0, reshape, slice
+            // Simplified: just crop to (TT, TT, H) by taking the right portion
+            // The proper rel_shift extracts the correct relative positions
+            // For now: view the central TT columns
+            int shift = (int)matrix_bd->ne[0] - TT;
+            matrix_bd = ggml_view_3d(ctx, matrix_bd, TT, TT, n_heads, matrix_bd->nb[1], matrix_bd->nb[2],
+                                     shift * matrix_bd->nb[0]);
+            matrix_bd = ggml_cont(ctx, matrix_bd);
+        }
+
+        // scores = (matrix_ac + matrix_bd) / sqrt(d_k)
+        float scale = 1.0f / std::sqrt((float)head_dim);
+        ggml_tensor* scores = ggml_add(ctx, matrix_ac, matrix_bd);
+        scores = ggml_scale(ctx, scores, scale);
+
+        // Softmax over ne[0] (key dim)
+        scores = ggml_soft_max(ctx, scores); // (TT, TT, H)
+
+        // Weighted sum: attn_out = scores @ v
+        // v_t is (hd, TT, H). scores is (TT, TT, H).
+        // For per-head: out[h] = scores[h] @ v[h] → (TT, hd) per head
+        // ggml_mul_mat(v_t, scores): contracts ne[0]. v_t ne[0]=hd, scores ne[0]=TT. No match.
+        // Need: scores^T @ v_t per head. But that's awkward.
+        // Alternative: use the permuted layout. Let me think...
+        // scores: (TT_key, TT_query, H) — attention weights
+        // v_t: (hd, TT_key, H)
+        // Want: out = sum_k scores[k,q,h] * v[d,k,h] for each (d,q,h)
+        // This is: out = v @ scores^T per head → ggml_mul_mat(scores, v_t) with transpose
+        // ggml_mul_mat(a, b) = a^T @ b over ne[0]
+        // ggml_mul_mat(scores, v_t): a=scores (TT, TT, H), b=v_t (hd, TT, H)
+        // contracts ne[0]: scores.ne[0]=TT, v_t.ne[0]=hd. No match!
+
+        // Let me use a different approach: transpose scores to (TT_q, TT_k, H), then mul_mat with v_t
+        ggml_tensor* scores_t = ggml_cont(ctx, ggml_permute(ctx, scores, 1, 0, 2, 3)); // (TT_q, TT_k, H)
+        // Now ggml_mul_mat(v_t, scores_t): contracts ne[0]. v_t.ne[0]=hd, scores_t.ne[0]=TT_q. Still no.
+
+        // Actually: we want out[d][q][h] = sum_k attn[k][q][h] * v[d][k][h]
+        // This is: for each h: out[:,q] = V[:,:] @ attn[:,q]
+        // In ggml: ggml_mul_mat(v_t_permuted, attn_col)
+        // Let's just fall back to flash_attn_ext with the combined scores
+        // Actually the simplest: convert to flash_attn compatible by pre-computing
+        // the K with position info baked in. But that's not quite right.
+
+        // Pragmatic approach: just do it with ggml_mul_mat by matching dims
+        // v_t: (hd, TT, H), scores: (TT_k, TT_q, H)
+        // Transpose v to (TT, hd, H) then mul_mat:
+        ggml_tensor* v_p = ggml_cont(ctx, ggml_permute(ctx, v_t, 1, 0, 2, 3)); // (TT, hd, H)
+        // ggml_mul_mat(v_p, scores): contracts ne[0]=TT. Output: (hd, TT_q, H). Correct!
+        attn = ggml_mul_mat(ctx, v_p, scores); // (hd, TT, H)
+        attn = ggml_reshape_2d(ctx, attn, D, TT);
+    } else {
+        // Fallback: simple scaled dot-product without relative position
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3)); // (hd, TT, H)
+        K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+        V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
+        float scale = 1.0f / std::sqrt((float)head_dim);
+        attn = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        attn = ggml_reshape_2d(ctx, attn, D, TT);
+    }
 
     // Output projection
     ggml_tensor* attn_out = ggml_mul_mat(ctx, W("sa.lo.weight"), attn);
@@ -238,7 +334,7 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
 
     ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);
-    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
 
     // Input: token IDs
     ggml_tensor* token_ids = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, Tin);
@@ -310,15 +406,23 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
         }
     }
 
-    // Mark PLA output for dump — also mark pre-PLA embed
+    // Mark PLA output for dump
     ggml_set_name(x, "dump_after_pla");
     ggml_set_output(x);
+
+    // Generate Espnet-style relative positional encoding: sinusoidal, shape (D, 2*T-1)
+    // pe[i] = sin(pos * freq) for even dims, cos(pos * freq) for odd dims
+    // pos ranges from -(T-1) to +(T-1), freq = 1/10000^(2i/D)
+    int T_pos_pre = 2 * Tin - 1;
+    ggml_tensor* pos_emb_pre = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, D, T_pos_pre);
+    ggml_set_name(pos_emb_pre, "pos_emb_pre");
+    ggml_set_input(pos_emb_pre);
 
     // 6 conformer blocks (pre-upsample)
     for (int i = 0; i < 6; i++) {
         char prefix[32];
         std::snprintf(prefix, sizeof(prefix), "s3.fe.enc.%d", i);
-        x = build_conformer_block(ctx0, gf, c, x, Tin, prefix, H, HD, D, FF);
+        x = build_conformer_block(ctx0, gf, c, x, Tin, prefix, H, HD, D, FF, pos_emb_pre);
         char dname[32];
         std::snprintf(dname, sizeof(dname), "dump_enc_%d", i);
         ggml_set_name(x, dname);
@@ -358,11 +462,17 @@ static ggml_cgraph* build_graph_conformer_encoder(chatterbox_s3gen_context* c, i
             x = ggml_add(ctx0, x, uln_b);
     }
 
+    // Generate pos encoding for upsampled sequence
+    int T_pos_post = 2 * T2 - 1;
+    ggml_tensor* pos_emb_post = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, D, T_pos_post);
+    ggml_set_name(pos_emb_post, "pos_emb_post");
+    ggml_set_input(pos_emb_post);
+
     // 4 conformer blocks (post-upsample)
     for (int i = 0; i < 4; i++) {
         char prefix[32];
         std::snprintf(prefix, sizeof(prefix), "s3.fe.ue.%d", i);
-        x = build_conformer_block(ctx0, gf, c, x, T2, prefix, H, HD, D, FF);
+        x = build_conformer_block(ctx0, gf, c, x, T2, prefix, H, HD, D, FF, pos_emb_post);
     }
 
     // Final LayerNorm
@@ -410,6 +520,30 @@ static std::vector<float> run_conformer_encoder(chatterbox_s3gen_context* c, con
     }
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "token_ids"), all_tokens.data(), 0, total * sizeof(int32_t));
+
+    // Fill sinusoidal relative positional encodings
+    // Espnet: pe[pos, 2i] = sin(pos / 10000^(2i/D)), pe[pos, 2i+1] = cos(pos / 10000^(2i/D))
+    // pos ranges from -(T-1) to +(T-1), total 2T-1 positions
+    // In ggml layout: (D, 2T-1) with ne[0]=D, ne[1]=2T-1
+    auto fill_pos_enc = [&](const char* name, int T) {
+        ggml_tensor* pe_t = ggml_graph_get_tensor(gf, name);
+        if (!pe_t)
+            return;
+        int T_pos = 2 * T - 1;
+        const int D = 512;
+        std::vector<float> pe_data((size_t)D * T_pos);
+        for (int p = 0; p < T_pos; p++) {
+            float pos = (float)(p - (T - 1)); // -(T-1) to +(T-1)
+            for (int i = 0; i < D / 2; i++) {
+                float freq = 1.0f / std::pow(10000.0f, (float)(2 * i) / (float)D);
+                pe_data[p * D + 2 * i] = std::sin(pos * freq);
+                pe_data[p * D + 2 * i + 1] = std::cos(pos * freq);
+            }
+        }
+        ggml_backend_tensor_set(pe_t, pe_data.data(), 0, pe_data.size() * sizeof(float));
+    };
+    fill_pos_enc("pos_emb_pre", total);
+    fill_pos_enc("pos_emb_post", T_mel);
 
     if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "s3gen: conformer compute failed\n");

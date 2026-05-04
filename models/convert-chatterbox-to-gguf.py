@@ -246,7 +246,8 @@ def choose_dtype(name: str, shape: list, t: torch.Tensor):
         # Keep time MLP weights as F32 since they're read on CPU
         'time_mlp' in name or 'time_emb' in name or
         'tm.linear' in name or 'tmx.' in name or
-        'pla.' in name or  # pre-lookahead conv (read on CPU for bias add compat)
+        'pla.' in name or  # pre-lookahead conv
+        'sa.lp' in name or 'sa.pb' in name or  # relative position attention weights
 
         # Keep vocoder conv weights as F32 for precision
         'cpre' in name or 'cpost' in name or
