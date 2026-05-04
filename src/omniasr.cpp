@@ -523,7 +523,9 @@ static bool omniasr_alloc_kv_cache(omniasr_context* ctx, int max_ctx) {
 
     size_t kbytes = ggml_nbytes(ctx->kv_k);
     size_t vbytes = ggml_nbytes(ctx->kv_v);
-    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kbytes + vbytes + 64);
+    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "omniasr");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kbytes + vbytes + 64);
     if (!ctx->kv_buf) {
         fprintf(stderr, "omniasr-llm: failed to allocate KV cache (%zu MB)\n", (kbytes + vbytes) / (1024 * 1024));
         return false;

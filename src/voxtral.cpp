@@ -1060,7 +1060,9 @@ extern "C" bool voxtral_kv_init(voxtral_context* ctx, int max_ctx) {
     ggml_set_name(ctx->kv_k, "kv_k");
     ggml_set_name(ctx->kv_v, "kv_v");
     size_t kb = ggml_nbytes(ctx->kv_k), vb = ggml_nbytes(ctx->kv_v);
-    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kb + vb);
+    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "voxtral");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kb + vb);
     if (!ctx->kv_buf) {
         fprintf(stderr, "voxtral: kv alloc failed\n");
         return false;
@@ -1071,8 +1073,8 @@ extern "C" bool voxtral_kv_init(voxtral_context* ctx, int max_ctx) {
     ctx->kv_max_ctx = max_ctx;
     ctx->kv_n_used = 0;
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "voxtral: kv cache %d MiB (hd=%d max=%d n_kv=%d nl=%d)\n", (int)((kb + vb) / 1048576), hd,
-                max_ctx, n_kv, nl);
+        fprintf(stderr, "voxtral: kv cache %d MiB (on %s, hd=%d max=%d n_kv=%d nl=%d)\n", (int)((kb + vb) / 1048576),
+                kv_backend == ctx->backend_cpu ? "cpu" : "gpu", hd, max_ctx, n_kv, nl);
     return true;
 }
 

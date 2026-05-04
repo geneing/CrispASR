@@ -392,6 +392,37 @@ Same per-backend coverage as the table above — the asymmetric
 plumbing was added to every backend that honored `CRISPASR_KV_QUANT`
 (voxtral, voxtral4b, omniasr, qwen3_asr, granite_speech, orpheus).
 
+### `CRISPASR_KV_ON_CPU=1` — spill KV cache to system RAM
+
+For users with very long context where even `KV_QUANT=q4_0` won't
+fit in VRAM. Allocates the KV cache on the CPU backend instead of
+the GPU backend, even when model weights are active on GPU.
+
+```bash
+# Long-context fallback when VRAM is exhausted
+CRISPASR_KV_ON_CPU=1 ./build/bin/crispasr --backend voxtral4b -m auto -f long-audio.wav
+
+# Stacks with KV_QUANT_K/_V — minimum-memory KV path
+CRISPASR_KV_ON_CPU=1 CRISPASR_KV_QUANT_K=q8_0 CRISPASR_KV_QUANT_V=q4_0 \
+  ./build/bin/crispasr --backend voxtral4b -m auto -f long-audio.wav
+```
+
+**Try `KV_QUANT` first.** The expensive part isn't the alloc —
+every attention step copies the KV slice GPU↔CPU↔GPU. The
+PCIe / unified-memory traffic is typically slower than just running
+with quantised KV in VRAM. Reach for `KV_ON_CPU` only when
+quantisation alone can't fit the context.
+
+The verbose log line shows `(on cpu)` vs `(on gpu)` so you can
+confirm where the cache landed:
+
+```
+voxtral4b: kv cache 169 MiB k=q8_0 v=q4_0 (on cpu, ...)
+```
+
+Same per-backend coverage as `KV_QUANT` (voxtral, voxtral4b,
+omniasr, qwen3_asr, granite_speech, orpheus).
+
 ### `CRISPASR_GGUF_MMAP=1` — zero-copy weight load
 
 Map the GGUF file directly into the model's backend buffer instead

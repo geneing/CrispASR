@@ -1287,15 +1287,17 @@ extern "C" bool voxtral4b_kv_init(voxtral4b_context* ctx, int max_ctx) {
     const size_t k_size = ggml_nbytes(ctx->kv_k);
     const size_t v_size = ggml_nbytes(ctx->kv_v);
 
-    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, k_size + v_size);
+    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "voxtral4b");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, k_size + v_size);
     char* base = (char*)ggml_backend_buffer_get_base(ctx->kv_buf);
     ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base);
     ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_v, base + ggml_nbytes(ctx->kv_k));
 
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "voxtral4b: kv cache %.0f MiB k=%s v=%s (head_dim=%d max_ctx=%d n_kv=%d n_layers=%d)\n",
-                (k_size + v_size) / 1048576.0, ggml_type_name(kv_pair.k), ggml_type_name(kv_pair.v), hd, max_ctx, n_kv,
-                nl);
+        fprintf(stderr, "voxtral4b: kv cache %.0f MiB k=%s v=%s (on %s, head_dim=%d max_ctx=%d n_kv=%d n_layers=%d)\n",
+                (k_size + v_size) / 1048576.0, ggml_type_name(kv_pair.k), ggml_type_name(kv_pair.v),
+                kv_backend == ctx->backend_cpu ? "cpu" : "gpu", hd, max_ctx, n_kv, nl);
     return true;
 }
 

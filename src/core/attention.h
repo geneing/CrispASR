@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "ggml-backend.h"
 #include "ggml.h"
 
 #include <cstddef>
@@ -100,6 +101,29 @@ inline kv_dtype_pair kv_dtype_pair_from_env(const char* backend_tag) {
     const ggml_type k = kv_dtype_parse(std::getenv("CRISPASR_KV_QUANT_K"), backend_tag, "CRISPASR_KV_QUANT_K", both);
     const ggml_type v = kv_dtype_parse(std::getenv("CRISPASR_KV_QUANT_V"), backend_tag, "CRISPASR_KV_QUANT_V", both);
     return {k, v};
+}
+
+// PLAN #69b — pick the backend on which to allocate the KV cache.
+// Default: same backend as the model weights (`gpu_backend`). When
+// `CRISPASR_KV_ON_CPU=1` is set, allocate on `cpu_backend` instead so
+// users with very long context + tight VRAM can spill the cache to
+// system RAM. The cost is per-step GPU↔CPU copy of the KV slice, which
+// is typically slower than just running with `CRISPASR_KV_QUANT=q4_0`
+// to fit KV in VRAM — try KV_QUANT first.
+//
+// `backend_tag` is the prefix on the warning line. Returns gpu_backend
+// when neither offload is requested, cpu_backend when it is.
+inline ggml_backend_t kv_backend_from_env(ggml_backend_t gpu_backend, ggml_backend_t cpu_backend,
+                                          const char* backend_tag) {
+    const char* s = std::getenv("CRISPASR_KV_ON_CPU");
+    if (!s || !*s || std::strcmp(s, "0") == 0)
+        return gpu_backend;
+    if (!cpu_backend) {
+        std::fprintf(stderr, "%s: CRISPASR_KV_ON_CPU=%s requested but no CPU backend available, falling back to GPU\n",
+                     backend_tag, s);
+        return gpu_backend;
+    }
+    return cpu_backend;
 }
 
 // Parameters that differ from call to call. Everything here is a plain

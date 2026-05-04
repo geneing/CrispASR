@@ -2368,25 +2368,34 @@ Skip: ASR-only encoders (parakeet, canary, cohere, fc-ctc, wav2vec2,
 firered-asr, moonshine) — encoder graphs aren't layered the same way
 and the VRAM footprint isn't a problem.
 
-### 69b. KV-only CPU offload (`CRISPASR_KV_ON_CPU=1`)
+### ~~69b. KV-only CPU offload (`CRISPASR_KV_ON_CPU=1`)~~ — SHIPPED 2026-05-04
 
-Allocate `ctx->kv_buf` on `ctx->backend_cpu` instead of `ctx->backend`
-even when GPU weights are active. Implementation: change one line
-per backend's `kv_init`:
+Allocates `ctx->kv_buf` on `ctx->backend_cpu` instead of `ctx->backend`
+even when GPU weights are active. Useful for users with very long
+context where even Q4_0 KV won't fit in VRAM. Implementation pattern:
 
 ```cpp
-ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, k_size + v_size);
-// →
-ggml_backend_t kv_backend = env_bool("CRISPASR_KV_ON_CPU")
-                              ? ctx->backend_cpu : ctx->backend;
+ggml_backend_t kv_backend = core_attn::kv_backend_from_env(
+    ctx->backend, ctx->backend_cpu, "<backend_tag>");
 ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, k_size + v_size);
 ```
 
-The expensive part isn't the alloc — it's that every attention step
-copies the KV slice GPU↔CPU↔GPU. Typically slower than just using
-`KV_QUANT=q4_0` to fit KV in VRAM. Land it for users who legitimately
-need it (very long context, very small VRAM headroom) but document
-that `KV_QUANT` should be tried first.
+The helper falls back to `gpu_backend` when `CRISPASR_KV_ON_CPU` is
+unset or `0`, and warns if CPU offload is requested but no CPU
+backend is available. Verbose log identifies whether the KV cache is
+on `cpu` or `gpu`.
+
+The expensive part isn't the alloc — every attention step copies the
+KV slice GPU↔CPU↔GPU. Typically slower than just using `KV_QUANT=q4_0`
+to fit KV in VRAM. Documented in `docs/cli.md` Memory footprint as
+"try KV_QUANT first."
+
+Stacks cleanly with #69e — verified `CRISPASR_KV_ON_CPU=1
+CRISPASR_KV_QUANT_K=q8_0 CRISPASR_KV_QUANT_V=q4_0` on voxtral4b
+produces 169 MiB on CPU with the correct transcript.
+
+Same 6 LLM-decode backends as #69e: voxtral, voxtral4b, omniasr,
+qwen3_asr, granite_speech, orpheus.
 
 ### ~~69e. Asymmetric K-vs-V cache quantization (llama.cpp parity)~~ — SHIPPED 2026-05-04
 
@@ -2475,14 +2484,19 @@ parity table.
 ### Approach (do these in order)
 
 1. Land `CRISPASR_N_GPU_LAYERS` for voxtral4b (the requesting user's
-   target). Validate against #60's reproducer.
-2. Land `CRISPASR_KV_ON_CPU` for voxtral4b — same backend, ~5 LOC.
-3. ~~Land `CRISPASR_KV_QUANT_K` / `_V` (#69e)~~ — DONE 2026-05-04,
-   shipped across all 6 LLM-decode backends in one go (voxtral,
-   voxtral4b, omniasr, qwen3_asr, granite_speech, orpheus). Plumbing
-   is mechanical and identical per backend, so the per-backend rollout
-   risk that gates 69a/b doesn't apply here. WER=0 long-context
-   validation is the open piece.
+   target). Validate against #60's reproducer. *(#69a — still open)*
+2. ~~Land `CRISPASR_KV_ON_CPU`~~ — DONE 2026-05-04, shipped across
+   all 6 LLM-decode backends in one go alongside #69e. Helper
+   `core_attn::kv_backend_from_env(gpu, cpu, tag)` lives in
+   `src/core/attention.h`. Verified on voxtral4b that KV cache lands
+   on CPU with the correct transcript and stacks with asymmetric
+   KV_QUANT_K/_V. *(#69b)*
+3. ~~Land `CRISPASR_KV_QUANT_K` / `_V`~~ — DONE 2026-05-04, shipped
+   across all 6 LLM-decode backends in one go (voxtral, voxtral4b,
+   omniasr, qwen3_asr, granite_speech, orpheus). Plumbing is
+   mechanical and identical per backend, so the per-backend rollout
+   risk that gates 69a doesn't apply here. WER=0 long-context
+   validation is the open piece. *(#69e)*
 
 ### Files touched (per backend, approximate)
 

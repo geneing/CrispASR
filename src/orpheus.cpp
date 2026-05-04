@@ -450,7 +450,9 @@ static bool kv_alloc(orpheus_context* c, int max_ctx) {
     ggml_set_name(c->kv_k, "kv_k");
     ggml_set_name(c->kv_v, "kv_v");
     const size_t kb = ggml_nbytes(c->kv_k), vb = ggml_nbytes(c->kv_v);
-    c->kv_buf = ggml_backend_alloc_buffer(c->backend, kb + vb);
+    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(c->backend, c->backend_cpu, "orpheus");
+    c->kv_buf = ggml_backend_alloc_buffer(kv_backend, kb + vb);
     if (!c->kv_buf) {
         fprintf(stderr, "orpheus: kv alloc failed\n");
         return false;

@@ -1751,7 +1751,9 @@ extern "C" bool qwen3_asr_kv_init(qwen3_asr_context* ctx, int max_ctx) {
 
     const size_t kbytes = ggml_nbytes(ctx->kv_k);
     const size_t vbytes = ggml_nbytes(ctx->kv_v);
-    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kbytes + vbytes);
+    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "qwen3_asr");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kbytes + vbytes);
     if (!ctx->kv_buf) {
         fprintf(stderr, "qwen3_asr: failed to allocate kv buffer\n");
         return false;
