@@ -27,7 +27,7 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | Priority | Item | Effort | Status |
 |---|---|---|---|
 | **MEDIUM** | [#52 Qwen3-TTS](#52-qwen3-tts) — perf pass | Medium | talker + code_predictor + codec + ECAPA + codec_encoder all done; only step-4 perf pass open (~137 ms/frame → real-time) |
-| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phases 1-2 DONE; Phase 3 in progress — T3 Llama AR forward done (converter + 520M model loads, KV-cached AR decode generates speech tokens), S3Gen CFM denoiser + HiFT vocoder still pending |
+| **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phases 1-2 DONE; Phase 3 vocoder FIXED (2026-05-03) — full pipeline T3→S3Gen→HiFT→WAV produces correct "Hello world."; remaining: C API integration, F0 predictor, voice cloning |
 | **MEDIUM** | [#51c MiMo-V2.5-ASR F16 step decode](#51c-f16-step-decode) | Small | F16 step-decode validation blocked behind ≥32 GB box (see PLAN #51c); base runtime + Q4_K shipped → HISTORY §56 |
 | **MEDIUM** | [#56 Kokoro multilingual phonemizer](#56-kokoro-multilingual-phonemizer-espeak-ng) | Small | espeak-ng + DE backbone shipped; HF GGUFs published 2026-05-01; auto-download wired; only Mandarin tones / JA kanji + diff-harness phonemizer-step polish remain |
 | **MEDIUM** | [#58 MOSS-Audio-4B-Instruct](#58-moss-audio-4b-instruct) | Large | first audio-understanding (not just ASR) backend; introduces DeepStack cross-layer feature injection |
@@ -930,22 +930,27 @@ Full C++ pipeline running end-to-end with real weights:
 | Perceiver resampler | (in chatterbox.cpp) | 12 | ✅ Cross+self attention, 32 conditioning tokens |
 | Conformer encoder (6+4) | `src/chatterbox_s3gen.cpp` | ~200 | ✅ ggml graph, simplified attention (no rel-pos) |
 | UNet1D denoiser (14 blocks) | (in chatterbox_s3gen.cpp) | 910 | ✅ Causal conv + BasicTransformer + CFG |
-| HiFTGenerator vocoder | (in chatterbox_s3gen.cpp) | 328 | ⚠️ conv_pre → 3× ConvTranspose1d + 9 ResBlocks (Snake) + source fusion + iSTFT |
+| HiFTGenerator vocoder | (in chatterbox_s3gen.cpp) | 328 | ✅ FIXED — all stages cos=1.0 vs Python; ASR "Hello world." |
 | Reference backend | `tools/reference_backends/chatterbox.py` | — | ✅ Dumps 7 stages to GGUF |
 
 ASR roundtrip validation:
 - Python vocoder on Python mel → parakeet: **"Hello world."** ✅
-- C++ vocoder on Python mel → parakeet: **"Oh."** (first word recognition)
-- iSTFT verified bit-exact against torch.istft (RMS 0.0595 vs 0.0594)
+- C++ vocoder on Python mel → parakeet: **"Hello world."** ✅ (fixed 2026-05-03)
+- All ggml graph stages match Python to cos=1.000 (no source fusion)
+- Deterministic waveform cosine similarity: 0.93 vs torch.istft
 - GGUF weights verified matching Python to 5-6 significant figures
-- conv_pre RMS: C++ 5.72 vs Python 5.50 (4% drift, accumulates through ResBlocks)
+
+Bugs fixed (2026-05-03):
+1. **iSTFT transposed data access** — was `data[frame*C+f]`, correct `data[f*T+frame]` (ggml ne[0]=T fast)
+2. **Missing ReflectionPad1d((1,0))** at last upsample stage
+3. **Ad-hoc source STFT** → proper SineGen + windowed DFT (Box-Muller + Hann + center)
+4. **Nyquist term** in Hermitian iDFT missing imaginary component
 
 Remaining for production quality:
-1. **Fix conv_pre divergence** — ggml_conv_1d produces different values from PyTorch Conv1d on same weights+input. Manual computation matches Python, so the issue is in how the mel tensor is set or how im2col processes it. Investigating.
-2. **Conformer relative position attention** — pos_bias_u/v + linear_pos (encoder quality)
-3. **Pre-lookahead conv + upsample conv** in conformer
-4. **C API integration** — register in crispasr_c_api.cpp, CLI adapter
-5. **Voice cloning** — VoiceEncoder LSTM + S3Tokenizer + CAMPPlus
+1. **C API integration** — register in crispasr_c_api.cpp, CLI adapter (`--backend chatterbox`)
+2. **F0 predictor** — currently source fusion assumes F0≈0 (unvoiced); voiced speech needs F0 net
+3. **Conformer relative position attention** — pos_bias_u/v + linear_pos (encoder quality)
+4. **Voice cloning** — VoiceEncoder LSTM + S3Tokenizer + CAMPPlus
 
 The CFM solver landed here is **also** the gating piece for Phase 4
 CosyVoice 3 (license permitting) and partially for Fish-Speech S2
@@ -1009,9 +1014,9 @@ adding a codec head + sampling path. Cheaper than a full new backend.
 | 2 | lex-au Orpheus-3B-DE-Q8 | llama3.2 (HF tags Apache-2.0; underlying Llama-3.2-FT) | **DONE — registry alias `lex-au-orpheus-de` added pointing at the existing `lex-au/Orpheus-3b-German-FT-Q8_0.gguf` (3.52 GB). Factory dispatch wired. SNAC companion shared with the base orpheus row.** | XS |
 | 2 | gwen-tts-0.6B | MIT | queued — needs weight inspection first | S–M |
 | 2 | tada-3b-ml | llama3.2 | queued | M |
-| 3 | Chatterbox base | MIT | **in progress** — full pipeline running end-to-end: T3→S3Gen→HiFT→WAV. Vocoder produces word-recognizable audio ("Oh." from ref mel). conv_pre 4% RMS drift accumulates through ResBlocks → reduced spectral contrast. See Phase 3 status below. | L |
-| 3 | Kartoffelbox_Turbo DE | CC-BY-4.0 (gated) | blocked on Chatterbox base | XS |
-| 3 | lahgtna-chatterbox-v1 AR | MIT | blocked on Chatterbox base | XS |
+| 3 | Chatterbox base | MIT | **vocoder FIXED** — full pipeline T3→S3Gen→HiFT→WAV produces correct "Hello world." (was "Oh."). All ggml stages cos=1.0. Remaining: C API wiring, F0 predictor, voice cloning. | L |
+| 3 | Kartoffelbox_Turbo DE | CC-BY-4.0 (gated) | **UNBLOCKED** — Chatterbox base vocoder works; checkpoint swap is next | XS |
+| 3 | lahgtna-chatterbox-v1 AR | MIT | **UNBLOCKED** — Chatterbox base vocoder works; checkpoint swap is next | XS |
 | 4 | Voxtral-TTS (Mistral upstream) | CC-BY-NC 4.0 | **BLOCKED — license inherits from voice-ref training data; moved to Deferred. See Phase 4 prose.** | — |
 | 4 | Darwin-TTS-1.7B-Cross | Apache 2.0 | queued | M |
 | 5 | VoxCPM2 | Apache 2.0 | queued — large new arch | L |
