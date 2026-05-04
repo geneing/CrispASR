@@ -2837,3 +2837,190 @@ cos=0.93 vs `torch.istft`.
 - **Kartoffelbox_Turbo re-scoped**: inspection revealed GPT-2 architecture
   (fused QKV, LayerNorm+bias, learned pos embeddings) — NOT a Chatterbox
   Llama T3 checkpoint swap. Needs its own runtime (Tortoise-TTS variant).
+
+---
+
+### §79 — Cap-honesty audit + KV/layer offload knobs (2026-05-04)
+
+**Test-runner triage uncovered cap-declaration drift, which then led
+into the full llama.cpp-parity offload-knob roadmap (#69a/b/e + #72/73).**
+
+#### Phase 1 — cap-honesty audit (commits b2b8a10, 3a4633f)
+
+Running `tools/test-all-backends.py --profile feature` against the
+post-3c2864e widened test tuples surfaced 12 FAILs across 24 tested
+backends. Triage identified two distinct root causes:
+
+- **Test-runner under-invocation (10/12)** — `test_lid` ran with empty
+  args (no `-dl`); `test_word_timestamps` ran without `-am <aligner>`.
+  Whisper's auto-detect path uses CRISPASR_LOG_INFO and ignores
+  `--no-prints`, which is why the original whisper-only suite passed.
+  Fix: `test_lid` invokes with `quiet=False` (no `--no-prints`); regex
+  widened to accept the framework's `crispasr: LID -> language = '<x>'`
+  format too.
+- **Real cap drift (2/12)** — omniasr / omniasr-llm declared
+  CAP_PUNCTUATION_TOGGLE but their CTC vocab is lowercase + unpunctuated
+  ("and so my fellow americas ask not …"). Cap dropped.
+
+Then, following the same cap-honesty thread, dropped CAP_LANGUAGE_DETECT
+from parakeet, glm-asr, gemma4-e2b, qwen3 (all four declared the cap
+but had no functioning native LID code path). The framework's
+pre-step LID gate is `!has_native_lid`, so declaring the cap actually
+*disabled* LID for users running `-dl`. Fixed end-to-end.
+
+#### Phase 2 — Ruby bindings CI break (commit b2b8a10)
+
+`bindings/ruby/ext/extconf.rb` linker hit two issues on Linux:
+
+1. **Duplicate stb_vorbis / miniaudio symbols** — both `crispasr_audio.cpp`
+   and `examples/common-crispasr.cpp` translation-unit-include the
+   `_IMPLEMENTATION` macros. macOS ld silently picks the first; GNU ld
+   errors. Fix: `-Wl,--allow-multiple-definition` on Linux.
+2. **Catch2 not found** — CMake's STANDALONE-default `CRISPASR_BUILD_TESTS=ON`
+   pulled tests targets into the dep graph, the dependency walker put
+   `libCatch2*.a` in `$LOCAL_LIBS`, but `--target common crispasr` never
+   built them. Fix: `-D CRISPASR_BUILD_TESTS=OFF -D CRISPASR_BUILD_EXAMPLES=OFF
+   -D CRISPASR_BUILD_SERVER=OFF` to the cmake config.
+
+#### Phase 3 — full K/V split (#69b + #69e, commits 1bd9ff8, d70f275, af0d789, 8952b02, 5bb1a0e, 709eafe, c2e1829)
+
+Two independent env knobs:
+
+- `CRISPASR_KV_QUANT_K` / `_V` — per-half KV cache dtype. Common
+  llama.cpp recipe `K=q8_0 V=q4_0` saves ~40 % more KV memory than
+  symmetric Q8_0. Both fall through to `CRISPASR_KV_QUANT` (legacy)
+  when unset.
+- `CRISPASR_KV_ON_CPU=1` — spill the KV cache to system RAM even with
+  GPU weights. For long-context users where Q4_0 K/V doesn't fit.
+
+Helper in `src/core/attention.h`:
+```cpp
+ggml_type kv_dtype_pair_from_env(tag).{k, v}    // for tensor allocs
+ggml_backend_t kv_backend_from_env(gpu, cpu, tag)  // for buffer alloc
+bool kv_cache_write(ctx, gf, K, V, kv_k, kv_v, il, n_past, T, indices)
+                                                // F16 → ggml_cpy(view) fast path
+                                                // quant → ggml_set_rows(indices)
+```
+
+The `kv_cache_write` helper (#73) was needed because backends with the
+inline `ggml_cpy(K_perm, view_into_kv_k)` write pattern can't accept
+quant K/V — `ggml_cpy` requires contiguous dst, and a view into a
+multi-position cache is strided. Migration was straightforward for
+backends with single-token decode (kyutai_stt) and for backends that
+already had a `position` I32 graph input populated with `[offset,
+offset+1, …, offset+n_tokens-1]` (canary, cohere — that tensor doubles
+as the row-index input for the new ggml_set_rows path).
+
+For canary/cohere the cache *read* pipeline
+(`ggml_cont(ggml_permute(V, 1,0,2,3)) → ggml_mul_mat`) hits
+`!ggml_is_transposed(a)` for quant V — `ggml_cont` of a permuted quant
+tensor only flips the strides flag without moving data. Fix: insert
+`ggml_cast(view, F32)` before the permute when the cache is quant.
+Trades read-bandwidth saving for quant correctness; memory + write-
+bandwidth savings retained.
+
+**Coverage now: 14 backends with full K/V split.** voxtral, voxtral4b,
+omniasr (LLM), qwen3_asr, granite_speech, orpheus, glm_asr, gemma4_e2b,
+mimo_asr, qwen3_tts, chatterbox, kyutai_stt, canary, cohere — every
+KV-bearing backend in the tree.
+
+#### Phase 4 — layer-residency offload (#69a, commits 324a39c, aa3f54c, 1a0a5fd, 4f656ec)
+
+`CRISPASR_N_GPU_LAYERS=N` puts transformer blocks `[0..N)` on GPU and
+`[N..total)` on CPU. ggml_backend_sched routes compute to follow weight
+residency. Useful for users with VRAM smaller than the model.
+
+New helper:
+```cpp
+bool load_weights_split(path, gpu, cpu, is_gpu_fn, user, tag, &out)
+int blk_layer_of_with_prefix(name, prefix)
+bool is_gpu_tensor_with_prefix(name, &LayerSplitConfig{ prefix, threshold })
+```
+
+Per-backend prefix:
+```
+"blk."           voxtral, voxtral4b, qwen3_asr, granite_speech
+"llm.blk."       glm_asr
+"talker.blk."    orpheus
+"dec."           omniasr-llm   (gated on model_type==1, CTC variant skipped)
+"llm.layers."    gemma4_e2b
+"model.layers."  mimo_asr
+```
+
+Validated on JFK at default + half-offload N per backend; bit-identical
+correct transcripts across 9 backends. **Coverage: 9 backends.** Voxtral,
+voxtral4b, qwen3_asr, granite_speech, glm_asr, orpheus, omniasr-llm,
+gemma4_e2b, mimo_asr.
+
+#### Phase 5 — gemma4_e2b / mimo_asr GPU residency flip (#72, commit 8911126)
+
+Both backends used to load all weights to `backend_cpu` even when
+`use_gpu=true` (legacy "Q4_K CPU SIMD" assumption from when the GPU
+Q4_K kernels were immature). Today the GPU kernels are mature.
+
+One-line change per backend (`backend_cpu` → `backend` in `load_weights`
+call). Validated on Apple Silicon Metal:
+```
+mimo-asr     CPU-resident:  27.13 s  →  GPU-resident:  21.18 s   (-22 %)
+gemma4-e2b   CPU-resident:   8.52 s  →  GPU-resident:   3.95 s   (2.2x)
+```
+
+Cold-load wall time also dropped — gemma4_e2b 2:02 → 0:57 — because the
+GPU path takes `buffer_from_host_ptr` mmap-zero-copy that the CPU-only
+path doesn't. Linux/CUDA validation deferred (no host accessible);
+expect at least the same range since dGPUs dominate CPU on matmul
+throughput even more than Apple Silicon.
+
+#### Stacking
+
+The four knobs compose for tight-VRAM hosts:
+```bash
+CRISPASR_N_GPU_LAYERS=10 \
+  CRISPASR_KV_ON_CPU=1 \
+  CRISPASR_KV_QUANT_K=q8_0 \
+  CRISPASR_KV_QUANT_V=q4_0 \
+  ./crispasr --backend voxtral4b -m auto -f long-audio.wav
+```
+
+Each addresses an independent bottleneck:
+- `KV_QUANT_K/_V` — KV size in VRAM
+- `KV_ON_CPU` — KV doesn't fit in VRAM at all
+- `N_GPU_LAYERS` — model itself doesn't fit in VRAM
+
+#### Open follow-ups (in PLAN.md)
+
+- **#73 flash_attn_ext migration** for canary/cohere — replace the
+  `ggml_cont(ggml_permute(V, 1,0,2,3)) → mul_mat` chain with a single
+  `ggml_flash_attn_ext` call that natively handles quant K/V. Drops
+  the cast-on-read tax for full bandwidth saving. ~60-80 LOC each
+  with causal-mask graph-input plumbing. Worth doing for long-context
+  workloads; deferred without long-context perf evidence on those
+  backends.
+- **#72 Linux/CUDA validation** of the GPU-residency flip — needs a
+  CUDA host. Math is even more favourable on dGPUs.
+- **#69a vibevoice port** — complex ASR+TTS variants (`hp.tts_n_layers`
+  vs ASR-only mode). Deferred.
+
+#### Commits this session
+
+```
+b2b8a10  fix: cap-honesty + test-runner + Ruby CI from feature-suite triage
+3a4633f  fix(backends): drop dishonest CAP_LANGUAGE_DETECT from 4 backends
+1bd9ff8  feat(kv-cache): asymmetric K vs V quantization (PLAN #69e)
+d70f275  feat(kv-cache): KV-on-CPU offload (PLAN #69b)
+324a39c  feat(core+voxtral4b): layer-residency offload (PLAN #69a)
+aa3f54c  feat(qwen3_asr+granite_speech): port #69a layer offload
+af0d789  feat(kv-cache): extend #69e+#69b to 4 more backends
+8952b02  feat(kv-cache): Tier-2 K/V split — KV-on-CPU on 4 more backends
+5bb1a0e  feat(voxtral): port #69a layer offload (4th backend)
+8911126  perf(mimo_asr+gemma4_e2b): load weights to GPU when use_gpu=true
+709eafe  feat(kv-cache): quant-safe per-step write helper, kyutai_stt unlocked
+d477268  feat(canary): migrate cache write to core_attn::kv_cache_write
+c2e1829  feat(canary+cohere): full quant K/V via cast-on-read
+4f656ec  feat(#69a): layer offload on glm_asr, orpheus, omniasr-llm, gemma4_e2b, mimo_asr
+```
+
+14 commits. PLAN #69 functionally closed (#69a partial — 9/10 LLM-decode
+backends done, vibevoice deferred). PLAN #72 closed. PLAN #73 partial
+(write path closed everywhere, read-path optimization deferred for
+canary/cohere).
