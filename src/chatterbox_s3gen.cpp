@@ -1732,14 +1732,32 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
         }
     }
 
+    // Diagnostic: compare encoder and spk_proj with Python reference
+    if (ctx->verbosity >= 2) {
+        float enc_rms = 0;
+        for (auto v : h)
+            enc_rms += v * v;
+        enc_rms = std::sqrt(enc_rms / h.size());
+        fprintf(stderr, "s3gen: encoder_out rms=%.4f (ref: 0.4602)\n", enc_rms);
+        fprintf(stderr,
+                "s3gen: spk_proj first 5: [%.4f %.4f %.4f %.4f %.4f] (ref: [0.0964 0.0206 0.0434 -0.0960 "
+                "0.2453])\n",
+                spk_proj[0], spk_proj[1], spk_proj[2], spk_proj[3], spk_proj[4]);
+    }
+
     // 4. CFM Euler solver: noise → mel
     // Detect meanflow: time_embed_mixer weight exists only in meanflow models
     bool is_meanflow = (T(ctx, "s3.fd.tmx.weight") != nullptr);
-    float cfg = is_meanflow ? 0.0f : 0.7f; // meanflow = no CFG (distilled)
-    if (ctx->verbosity >= 1 && is_meanflow) {
-        fprintf(stderr, "s3gen: meanflow mode (linear schedule, no CFG)\n");
+    float cfg = is_meanflow ? 0.0f : 0.7f;
+    // Meanflow defaults to 2 CFM steps (distilled model); override if caller passed default 10
+    int actual_steps = n_cfm_steps;
+    if (is_meanflow && n_cfm_steps == 10) {
+        actual_steps = 2; // Python default for meanflow
     }
-    std::vector<float> mel = cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, n_cfm_steps, cfg, is_meanflow);
+    if (ctx->verbosity >= 1 && is_meanflow) {
+        fprintf(stderr, "s3gen: meanflow mode (%d steps, linear schedule, no CFG)\n", actual_steps);
+    }
+    std::vector<float> mel = cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, actual_steps, cfg, is_meanflow);
 
     // 5. Extract generated portion (skip prompt region)
     std::vector<float> gen_mel(80 * T_mel_gen);
