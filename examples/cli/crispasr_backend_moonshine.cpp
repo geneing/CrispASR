@@ -17,11 +17,12 @@ public:
     const char* name() const override { return "moonshine"; }
 
     uint32_t capabilities() const override {
-        return CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_PUNCTUATION_TOGGLE |
-               CAP_TIMESTAMPS_CTC | CAP_FLASH_ATTN;
         // Best-of-N is implemented in transcribe() as a sequential loop over
         // _transcribe_with_probs with a sticky seed. There's no CAP_BEST_OF_N
         // bit today; the matrix tracks it via README + adapter behaviour.
+        // CAP_DIARIZE: framework post-step works on the segment list.
+        return CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_PUNCTUATION_TOGGLE |
+               CAP_TIMESTAMPS_CTC | CAP_FLASH_ATTN | CAP_DIARIZE;
     }
 
     bool init(const whisper_params& params) override {

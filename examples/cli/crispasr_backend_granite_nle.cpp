@@ -22,7 +22,12 @@ public:
 
     const char* name() const override { return "granite-4.1-nar"; }
 
-    uint32_t capabilities() const override { return CAP_AUTO_DOWNLOAD | CAP_FLASH_ATTN; }
+    uint32_t capabilities() const override {
+        // granite-4.1-nar produces text segments → framework -am + --diarize
+        // post-steps work even though the runtime is encoder+projector only
+        // with no LLM decode features.
+        return CAP_AUTO_DOWNLOAD | CAP_FLASH_ATTN | CAP_TIMESTAMPS_CTC | CAP_DIARIZE;
+    }
 
     bool init(const whisper_params& params) override {
         granite_nle_context_params cp = granite_nle_context_default_params();

@@ -44,7 +44,8 @@ public:
     const char* name() const override { return "vibevoice"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_TTS;
+        // ASR mode produces segments → framework -am + --diarize work.
+        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_TTS | CAP_DIARIZE;
     }
 
     bool init(const whisper_params& p) override {

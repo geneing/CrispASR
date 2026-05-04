@@ -15,7 +15,12 @@ public:
 
     const char* name() const override { return "moonshine-streaming"; }
 
-    uint32_t capabilities() const override { return CAP_AUTO_DOWNLOAD | CAP_TIMESTAMPS_CTC; }
+    uint32_t capabilities() const override {
+        // Verified against src/moonshine_streaming.cpp as of 2026-05-04:
+        // uses ggml_flash_attn_ext (×3); produces segments → CAP_DIARIZE
+        // works as the framework post-step.
+        return CAP_AUTO_DOWNLOAD | CAP_TIMESTAMPS_CTC | CAP_FLASH_ATTN | CAP_DIARIZE;
+    }
 
     bool init(const whisper_params& params) override {
         moonshine_streaming_context_params cp = moonshine_streaming_context_default_params();

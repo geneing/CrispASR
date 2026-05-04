@@ -41,7 +41,7 @@ public:
         // friends) are English-only greedy-CTC models with no native
         // timestamp or punctuation control. Word-level timestamps via the
         // CTC aligner second pass (-am) work when requested.
-        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE;
+        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_DIARIZE;
     }
 
     bool init(const whisper_params& p) override {

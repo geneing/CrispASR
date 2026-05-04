@@ -51,7 +51,18 @@ public:
     ~MimoAsrBackend() override { MimoAsrBackend::shutdown(); }
 
     const char* name() const override { return "mimo-asr"; }
-    uint32_t capabilities() const override { return CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_TIMESTAMPS_CTC; }
+    uint32_t capabilities() const override {
+        // Verified against src/mimo_asr.cpp as of 2026-05-04:
+        //   CAP_AUTO_DOWNLOAD     registry entry exists
+        //   CAP_TIMESTAMPS_CTC    framework -am post-step works on segments
+        //   CAP_TOKEN_CONFIDENCE  emits per-token probs
+        //   CAP_FLASH_ATTN        uses ggml_flash_attn_ext (×2 in src)
+        //   CAP_TEMPERATURE       init() below plumbs params.temperature
+        //                         into cp.temperature → decode cfg
+        //   CAP_DIARIZE           framework post-step on segment list
+        return CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_TIMESTAMPS_CTC | CAP_FLASH_ATTN | CAP_TEMPERATURE |
+               CAP_DIARIZE;
+    }
 
     bool init(const whisper_params& params) override {
         auto cp = mimo_asr_context_default_params();

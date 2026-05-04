@@ -21,8 +21,9 @@ public:
         // emitted text token to its source audio frame at zero extra cost,
         // so both segment and word timestamps are native (no DTW or CTC
         // aligner needed).
+        // CAP_DIARIZE: framework post-step works on the segment list.
         return CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_TIMESTAMPS_NATIVE |
-               CAP_WORD_TIMESTAMPS | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN;
+               CAP_WORD_TIMESTAMPS | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN | CAP_DIARIZE;
     }
 
     bool init(const whisper_params& params) override {
