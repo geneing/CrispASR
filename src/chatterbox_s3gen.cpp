@@ -190,10 +190,7 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
     ggml_tensor* linear_pos_w = W("sa.lp.weight");
 
     ggml_tensor* attn;
-    // TODO: implement proper Transformer-XL rel_shift for relative position attention.
-    // The rel_shift involves pad+reshape+slice that reindexes attention positions.
-    // For now, use simple attention — the xscale fix brings encoder within 8% of Python.
-    if (false && pos_bias_u && pos_bias_v && linear_pos_w && pos_emb) {
+    if (pos_bias_u && pos_bias_v && linear_pos_w && pos_emb) {
         // Relative position multi-headed attention (Transformer-XL / ESPnet style)
         // Q is (hd, H, TT). Transpose to (hd, TT, H) for matmul.
         ggml_tensor* q_t = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3)); // (hd, TT, H)
@@ -226,18 +223,41 @@ static ggml_tensor* build_conformer_block(ggml_context* ctx, ggml_cgraph* gf, ch
         // matrix_bd = q_with_bias_v @ p^T
         ggml_tensor* matrix_bd = ggml_mul_mat(ctx, p, q_v); // (T_pos, TT, H)
 
-        // rel_shift: if shapes don't match (T_pos != TT), apply relative shift
-        // For Espnet: T_pos = 2*TT-1, so matrix_bd is (2*TT-1, TT, H)
-        // After rel_shift: (TT, TT, H)
+        // Transformer-XL rel_shift: (2T-1, T, H) → (T, T, H)
+        // matrix_bd: ne[0]=2T-1 (positions), ne[1]=T (queries), ne[2]=H (heads)
+        // This implements the Espnet rel_shift which extracts causal relative positions.
         if ((int)matrix_bd->ne[0] != TT) {
-            // Rel shift: pad column 0, reshape, slice
-            // Simplified: just crop to (TT, TT, H) by taking the right portion
-            // The proper rel_shift extracts the correct relative positions
-            // For now: view the central TT columns
-            int shift = (int)matrix_bd->ne[0] - TT;
-            matrix_bd = ggml_view_3d(ctx, matrix_bd, TT, TT, n_heads, matrix_bd->nb[1], matrix_bd->nb[2],
-                                     shift * matrix_bd->nb[0]);
+            int T_pos = (int)matrix_bd->ne[0]; // 2*TT - 1
+            // Step 1: Pad one zero on the left of ne[0] → (2T, T, H)
+            // Create zero column by scaling a cont view to zero
+            ggml_tensor* one_col =
+                ggml_cont(ctx, ggml_view_3d(ctx, matrix_bd, 1, TT, n_heads, matrix_bd->nb[1], matrix_bd->nb[2], 0));
+            ggml_tensor* zero_col = ggml_scale(ctx, one_col, 0.0f);
+            matrix_bd = ggml_concat(ctx, zero_col, matrix_bd, 0); // ne[0] = 2T
+
+            // Step 2: Reshape (2T, T, H) → (T, 2T, H)
+            // The memory is the same (2T*T*H floats) just reinterpreted
+            matrix_bd = ggml_reshape_3d(ctx, matrix_bd, TT, 2 * TT, n_heads);
+
+            // Step 3: Skip first "row" (offset ne[1] by 1) → view (T, 2T-1, H)
+            matrix_bd = ggml_view_3d(ctx, matrix_bd, TT, T_pos, n_heads, matrix_bd->nb[1], matrix_bd->nb[2],
+                                     1 * matrix_bd->nb[1]);
             matrix_bd = ggml_cont(ctx, matrix_bd);
+
+            // Step 3.5: Reshape back to (2T-1, T, H) → same as view_as(x)
+            // Python: x_padded[:,:,1:].view_as(x) where x was (H, T, 2T-1)
+            // Our layout: (T, 2T-1, H) in ne terms. Need (2T-1, T, H) after view_as.
+            // Wait — view_as preserves total elements. (H, 2T-1, T).view_as(H, T, 2T-1) swaps last two dims.
+            // In ggml terms: (T, 2T-1, H) → (2T-1, T, H). This is a transpose of ne[0] and ne[1].
+            matrix_bd = ggml_cont(ctx, ggml_permute(ctx, matrix_bd, 1, 0, 2, 3)); // (2T-1, T, H)
+
+            // Step 4: Slice ne[0] to keep positions 0..T (first T+1 positions)
+            // Python: x[:, :, :, :x.size(-1)//2 + 1] = [:, :, :, :T]
+            // In our layout ne[0] is the last Python dim, so slice ne[0] to T
+            if ((int)matrix_bd->ne[0] > TT) {
+                matrix_bd = ggml_view_3d(ctx, matrix_bd, TT, TT, n_heads, matrix_bd->nb[1], matrix_bd->nb[2], 0);
+                matrix_bd = ggml_cont(ctx, matrix_bd);
+            }
         }
 
         // scores = (matrix_ac + matrix_bd) / sqrt(d_k)
