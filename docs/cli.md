@@ -266,3 +266,143 @@ stereo (auto-mixed to mono).
 For anything in the bottom half, the reliable path is
 `ffmpeg -i in.X -ar 16000 -ac 1 -c:a pcm_s16le out.wav` then pass the
 WAV. To enable `CRISPASR_FFMPEG=ON`, see [install.md](install.md).
+
+## Memory footprint
+
+Three runtime knobs control how much RAM / VRAM the binary uses.
+All are env vars (no CLI flags — these are rarely-changed deployment
+settings, not per-invocation switches).
+
+### `CRISPASR_KV_QUANT={f16,q8_0,q4_0}` — KV cache dtype
+
+The default `f16` KV cache is the highest-quality option but the
+biggest VRAM consumer. `q8_0` halves it; `q4_0` quarters it. Quality
+drift is <0.1 % WER on validated backends; for long-audio chunked
+work on a VRAM-tight host, this is the cheapest knob you can turn.
+
+```bash
+CRISPASR_KV_QUANT=q8_0 ./build/bin/crispasr --backend voxtral4b -m auto -f audio.wav
+```
+
+Per-backend coverage:
+
+| Backend | Honors `KV_QUANT`? |
+|---|:-:|
+| voxtral / voxtral4b | ✔ |
+| qwen3-asr | ✔ |
+| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | ✔ |
+| glm-asr | ✔ |
+| mimo-asr | ✔ |
+| omniasr-llm | ✔ |
+| gemma4-e2b | ✔ |
+| orpheus | ✔ |
+| qwen3-tts | ✔ (talker only) |
+| whisper / parakeet / canary / cohere / fc-ctc / wav2vec2 / firered-asr / moonshine / kyutai-stt | — (no KV cache or model-specific path) |
+
+The flag is read once per session via
+`core_attn::kv_dtype_from_env(<backend_name>)`; subsequent
+`session_transcribe` calls reuse the dtype from session open. Set
+the env before launching `crispasr` (or before opening the session
+in Python / Rust / Dart).
+
+### `CRISPASR_GGUF_MMAP=1` — zero-copy weight load
+
+Map the GGUF file directly into the model's backend buffer instead
+of read-and-copy. Saves one full copy of the GGUF on load: a 14.9 GB
+F16 model goes from "load + 14.9 GB peak RSS" to "mmap +
+~working-set RSS." No quality impact; pure load-time + RAM win.
+
+```bash
+CRISPASR_GGUF_MMAP=1 ./build/bin/crispasr --backend voxtral4b -m auto -f audio.wav
+```
+
+Honored by every backend that uses `core_gguf::load_weights()` —
+all non-whisper backends. Whisper itself uses upstream's loader and
+isn't affected.
+
+### `CRISPASR_GGUF_PRELOAD=1` — page-walk on load
+
+When mmap is enabled, this triggers a one-byte read on every page
+to force the working set resident before returning. Trades cold-
+start *load* time for cold-start *prefill* time. Useful for servers
+that will do many short generations after one-time load and don't
+want the first request to pay the page-fault tax.
+
+```bash
+CRISPASR_GGUF_MMAP=1 CRISPASR_GGUF_PRELOAD=1 ./build/bin/crispasr ...
+```
+
+### Recommended combos for VRAM-constrained voxtral4b
+
+In order of cost — try the cheapest first:
+
+```bash
+# 1. Cheapest — half the KV. ~0.05 % WER drift on validated suite.
+CRISPASR_KV_QUANT=q8_0 \
+  ./build/bin/crispasr --backend voxtral4b -m auto -f audio.wav
+
+# 2. Aggressive — quarter the KV. ~0.2 % WER drift.
+CRISPASR_KV_QUANT=q4_0 \
+  ./build/bin/crispasr --backend voxtral4b -m auto -f audio.wav
+
+# 3. Plus mmap so the load doesn't double-allocate the model weights.
+#    Useful when you're loading a multi-GB F16 model and the host has
+#    less RAM than 2× model size.
+CRISPASR_KV_QUANT=q4_0 CRISPASR_GGUF_MMAP=1 \
+  ./build/bin/crispasr --backend voxtral4b -m auto -f audio.wav
+```
+
+**Not yet supported:** N-layer CPU offload (`--n-gpu-layers N` style)
+and KV-on-CPU-only modes — both tracked as PLAN #69 for future
+implementation. For most voxtral4b VRAM-pressure cases the
+`KV_QUANT=q4_0 + MMAP=1` combo above is sufficient; the layer-split
+features are only needed when even that doesn't fit.
+
+### TTS-side env vars
+
+For TTS-specific deployment knobs (codec backend selection, graph
+reuse, etc.) see [`tts.md`](tts.md):
+- `QWEN3_TTS_CODEC_GPU` — clean codec-on-GPU path (CUDA / Vulkan)
+- `QWEN3_TTS_O15` — code-predictor graph reuse (CPU/Metal opt-in)
+- `KOKORO_GEN_GPU` — generator on GPU (CUDA / Vulkan)
+- `VIBEVOICE_VAE_BACKEND={auto,cpu,gpu}` — VAE decoder placement
+
+### Comparison with llama.cpp
+
+For users coming from `llama.cpp`, here's how the equivalent knobs
+map:
+
+| Concern | llama.cpp | CrispASR |
+|---|---|---|
+| KV cache dtype | `--type-k q8_0 --type-v q8_0` (CLI flag, separate K/V) | `CRISPASR_KV_QUANT=q8_0` (env var, single setting) |
+| mmap weights | `--no-mmap` (mmap is default **on**) | `CRISPASR_GGUF_MMAP=1` (mmap is default **off**) |
+| Lock pages in RAM | `--mlock` | (not supported — `mmap+preload` is the closest analogue) |
+| GPU layer count | `--n-gpu-layers N` / `-ngl N` (CLI flag) | not supported yet — see [PLAN #69a](https://github.com/CrispStrobe/CrispASR/blob/main/PLAN.md) |
+| KV-on-CPU-only | `--no-kv-offload` | not supported yet — see [PLAN #69b](https://github.com/CrispStrobe/CrispASR/blob/main/PLAN.md) |
+| Flash attention | `--flash-attn` / `-fa` | always-on where the backend's `capabilities()` declares `CAP_FLASH_ATTN` |
+| Threads | `--threads N` / `-t N` | `--threads N` / `-t N` (matched) |
+| Force CPU | `--gpu-layers 0` | `--no-gpu` / `--gpu-backend cpu` |
+
+Differences worth flagging:
+
+1. **mmap default.** llama.cpp defaults mmap **on**, CrispASR defaults
+   it **off** (PLAN #51a flipped this opt-in pending wider RSS
+   measurements). On hosts with plenty of RAM, the default-off
+   behavior pays a copy that mmap would skip — set
+   `CRISPASR_GGUF_MMAP=1` to match llama.cpp's behavior.
+2. **K/V dtype unified.** llama.cpp lets you set `--type-k` and
+   `--type-v` independently (rare scenario: quantize K but keep V
+   at f16). CrispASR uses a single `CRISPASR_KV_QUANT` for both.
+   The split would be a small change if anyone needs it; file an
+   issue with a use case.
+3. **CLI flags vs env vars.** llama.cpp surfaces every memory knob
+   as a CLI flag; CrispASR uses env vars for them on the assumption
+   that they're rarely-changed deployment settings. If you want flag
+   parity, see open issue / PR — converting the env vars to flags
+   is mechanical (`-DCRISPASR_KV_QUANT=val` style) but adds CLI
+   surface area.
+4. **No `--n-gpu-layers` yet.** This is the biggest missing knob
+   for VRAM-constrained hosts. Tracked as PLAN #69a, prioritised by
+   external request on issue #60. Today the workaround is the
+   `KV_QUANT=q4_0 + MMAP=1` combo above, which usually clears
+   enough headroom for voxtral4b-class models.
