@@ -231,6 +231,8 @@ def choose_dtype(name: str, shape: list, t: torch.Tensor):
     # since they are read on CPU for embedding construction
     keep_f32 = (
         'emb.weight' in name or 'pos_emb.weight' in name or
+        'wpe.weight' in name or  # GPT-2 learned positional embeddings
+        'speech_head' in name or  # read on CPU for logit extraction
         'cond.' in name or 'conds.' in name or
         'perceiver.' in name or 've.' in name or
         'input_embedding' in name or 'embed_affine' in name or
@@ -614,15 +616,28 @@ def write_kartoffelbox_t3_gguf(
     print(f"  Loading {model_path}...")
     raw = torch.load(str(model_path), map_location='cpu', weights_only=True)
 
+    # GPT-2 Conv1D stores weights as (in, out) unlike nn.Linear's (out, in).
+    # ggml_mul_mat expects nn.Linear convention, so transpose Conv1D weights.
+    conv1d_weight_keys = {
+        'attn.c_attn.weight',  # (1024, 3072) → (3072, 1024)
+        'attn.c_proj.weight',  # (1024, 1024) → same (square)
+        'mlp.c_fc.weight',     # (1024, 4096) → (4096, 1024)
+        'mlp.c_proj.weight',   # (4096, 1024) → (1024, 4096)
+    }
+
     n_t3 = 0
     for hf_name, tensor in sorted(raw.items()):
         gguf_name = map_kartoffelbox_t3_name(hf_name)
         if gguf_name is None:
             continue
-        # Skip unmapped keys (still equal to original)
         if gguf_name == hf_name:
             print(f"  SKIP (unmapped): {hf_name}")
             continue
+        # Transpose Conv1D weights from (in, out) to (out, in)
+        for ck in conv1d_weight_keys:
+            if hf_name.endswith(ck):
+                tensor = tensor.t().contiguous()
+                break
         data, dtype = choose_dtype(gguf_name, list(tensor.shape), tensor)
         writer.add_tensor(gguf_name, data, raw_dtype=dtype)
         n_t3 += 1
