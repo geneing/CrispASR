@@ -990,10 +990,24 @@ static std::vector<float> build_prefill_embeds(chatterbox_context* c, const std:
             return std::make_pair(w, b);
         };
 
-        auto [qw, qb] = read_linear(m.perceiver_q_w, m.perceiver_q_b, D, D);
-        auto [kw, kb] = read_linear(m.perceiver_k_w, m.perceiver_k_b, D, D);
-        auto [vw, vb] = read_linear(m.perceiver_v_w, m.perceiver_v_b, D, D);
-        auto [ow, ob] = read_linear(m.perceiver_out_w, m.perceiver_out_b, D, D);
+        // Note: avoid `auto [qw, qb] = ...` structured bindings here.
+        // The `mha` lambda below uses `[&]` default capture and references
+        // these names; clang under C++17 (baseline for ubuntu-22-clang
+        // matrix builds) rejects with "reference to local binding 'qw'
+        // declared in enclosing function". Fixed in C++20 (P1091) but
+        // we're on C++17. Plain locals + const refs work everywhere.
+        auto q_pair = read_linear(m.perceiver_q_w, m.perceiver_q_b, D, D);
+        auto k_pair = read_linear(m.perceiver_k_w, m.perceiver_k_b, D, D);
+        auto v_pair = read_linear(m.perceiver_v_w, m.perceiver_v_b, D, D);
+        auto o_pair = read_linear(m.perceiver_out_w, m.perceiver_out_b, D, D);
+        const auto& qw = q_pair.first;
+        const auto& qb = q_pair.second;
+        const auto& kw = k_pair.first;
+        const auto& kb = k_pair.second;
+        const auto& vw = v_pair.first;
+        const auto& vb = v_pair.second;
+        const auto& ow = o_pair.first;
+        const auto& ob = o_pair.second;
 
         // Read LayerNorm
         std::vector<float> norm_w(D, 1.0f), norm_b(D, 0.0f);
