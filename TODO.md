@@ -68,6 +68,30 @@ voice-pack split, conv_post exp/sin, etc.).
 
 ---
 
+## Chatterbox TTS vocoder **[done]** — vocoder fixed 2026-05-03
+
+Full Chatterbox TTS pipeline (T3 AR + Conformer + UNet CFM + HiFTGenerator)
+running end-to-end in C++. Vocoder now produces correct output ("Hello world."
+from Python ref mel — was "Oh." before fix).
+
+**Fixed (2026-05-03):**
+- iSTFT transposed data layout (root cause)
+- Missing ReflectionPad1d((1,0)) at last upsample stage
+- Proper SineGen + windowed STFT for source fusion
+- Nyquist term in Hermitian iDFT
+
+**Remaining (next):**
+- Wire into `crispasr_c_api.cpp` + CLI adapter
+- F0 predictor C++ implementation (currently noise-only, assumes F0≈0)
+- Conformer relative position attention (pos_bias_u/v)
+
+**Remaining (later):**
+- Voice cloning (VoiceEncoder LSTM + S3Tokenizer + CAMPPlus)
+- Kartoffelbox_Turbo + lahgtna-chatterbox checkpoint swaps
+- Close 0.07 cos gap vs `torch.istft` COLA boundary handling
+
+---
+
 ## Kokoro multilingual phonemizer (espeak-ng) **[next]**
 
 Full plan: `PLAN.md` → §56. Lessons: `LEARNINGS.md` "Kokoro phonemizer:

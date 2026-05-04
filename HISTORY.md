@@ -2807,3 +2807,21 @@ Files: `ws_stream.h` (C API), `ws_stream.cpp` (implementation),
 #52 (TTS perf, needs quiet machine), #56 (phonemizer, needs external
 libs), #57 (Chatterbox CFM, multi-session), #58 (MOSS, large),
 #59 (Java/Ruby remaining gaps).
+
+---
+
+### §78 — Chatterbox vocoder fix (2026-05-03)
+
+**Vocoder now produces correct "Hello world." from Python reference mel**
+(previously "Oh."). Two bugs found via crispasr-diff per-stage protocol:
+
+1. **iSTFT transposed data access** — CPU iSTFT loop read ggml tensor
+   buffer as `data[frame*C+f]` but ggml stores `ne[0]=T` fast, so correct
+   access is `data[f*T+frame]`. Swapped frequency bins with time steps.
+2. **Missing ReflectionPad1d((1,0))** at the last upsample stage.
+
+Additional fixes: proper SineGen + windowed STFT for source fusion,
+Nyquist term fix in Hermitian iDFT. Debug infrastructure: per-stage
+output markers, `vocode_dump()` API, `CRISPASR_HIFT_FULL_IDFT=1` gate.
+All ggml graph stages match Python to cos=1.000; deterministic waveform
+cos=0.93 vs `torch.istft`.
