@@ -289,10 +289,15 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
         }
 
         // Optional CTC alignment (on original audio, not stitched).
-        const bool want_align = !params.aligner_model.empty() && (backend.capabilities() & CAP_TIMESTAMPS_CTC);
+        // Issue #62: --force-aligner bypasses both the CAP gate and the
+        // "skip already-aligned" guard, letting the user prefer the
+        // aligner's timestamps over native ones (whisper / parakeet /
+        // canary / cohere / kyutai-stt all produce native timing).
+        const bool want_align = !params.aligner_model.empty() &&
+                                ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
         if (want_align) {
             for (auto& seg : segs) {
-                if (!seg.words.empty())
+                if (!seg.words.empty() && !params.force_aligner)
                     continue;
                 // Find the original audio region for this segment.
                 const int s = (int)((double)seg.t0 / 100.0 * SR);
@@ -375,10 +380,12 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
             }
         }
 
-        const bool want_align = !params.aligner_model.empty() && (backend.capabilities() & CAP_TIMESTAMPS_CTC);
+        // Issue #62: --force-aligner bypasses CAP gate + already-aligned skip.
+        const bool want_align = !params.aligner_model.empty() &&
+                                ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
         if (want_align) {
             for (auto& seg : segs) {
-                if (!seg.words.empty())
+                if (!seg.words.empty() && !params.force_aligner)
                     continue;
                 auto words = crispasr_ctc_align(params.aligner_model, seg.text, samples.data() + sl.start,
                                                 sl.end - sl.start, sl.t0_cs, params.n_threads);
@@ -1199,12 +1206,14 @@ int crispasr_run_backend(const whisper_params& params_in) {
             // Applies to backends that expose CAP_TIMESTAMPS_CTC and don't
             // already have words populated. Runs per slice so absolute
             // timestamps come out right.
+            // Issue #62: --force-aligner overrides both gates so users
+            // can prefer aligner timing over native timestamps.
             const bool want_align =
                 !params.aligner_model.empty() &&
-                (backend->capabilities() & CAP_TIMESTAMPS_CTC);
+                ((backend->capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
             if (want_align) {
                 for (auto & seg : segs) {
-                    if (!seg.words.empty()) continue; // already aligned
+                    if (!seg.words.empty() && !params.force_aligner) continue; // already aligned
                     auto words = crispasr_ctc_align(
                         params.aligner_model,
                         seg.text,

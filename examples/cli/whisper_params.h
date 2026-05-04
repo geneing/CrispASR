@@ -105,6 +105,14 @@ struct whisper_params {
     bool show_alternatives = false;
     int32_t n_alternatives = 3;
     std::string aligner_model;
+    // PLAN issue #62: when true, the CTC forced aligner runs even on
+    // backends that already produce native timestamps — replacing
+    // their words rather than skipping. Default false keeps the existing
+    // semantics ("aligner only if the native path didn't produce
+    // words"). Useful when the user trusts the aligner's accuracy more
+    // than the backend's native timing (whisper, parakeet, canary,
+    // cohere, kyutai-stt).
+    bool force_aligner = false;
     int32_t max_new_tokens = 512;
     int32_t chunk_seconds = 30;
     std::string lid_backend;
