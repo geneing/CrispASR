@@ -295,6 +295,12 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
         // canary / cohere / kyutai-stt all produce native timing).
         const bool want_align = !params.aligner_model.empty() &&
                                 ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
+        if (params.verbose) {
+            fprintf(stderr,
+                    "crispasr[verbose]: align[stitched]: aligner='%s' caps_ctc=%d force=%d -> want=%d\n",
+                    params.aligner_model.c_str(), !!(backend.capabilities() & CAP_TIMESTAMPS_CTC),
+                    params.force_aligner ? 1 : 0, want_align ? 1 : 0);
+        }
         if (want_align) {
             for (auto& seg : segs) {
                 if (!seg.words.empty() && !params.force_aligner)
@@ -383,6 +389,12 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
         // Issue #62: --force-aligner bypasses CAP gate + already-aligned skip.
         const bool want_align = !params.aligner_model.empty() &&
                                 ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
+        if (params.verbose) {
+            fprintf(stderr,
+                    "crispasr[verbose]: align[slice]: aligner='%s' caps_ctc=%d force=%d -> want=%d\n",
+                    params.aligner_model.c_str(), !!(backend.capabilities() & CAP_TIMESTAMPS_CTC),
+                    params.force_aligner ? 1 : 0, want_align ? 1 : 0);
+        }
         if (want_align) {
             for (auto& seg : segs) {
                 if (!seg.words.empty() && !params.force_aligner)
@@ -689,6 +701,24 @@ int crispasr_run_backend(const whisper_params& params_in) {
         return 11;
     }
     params.model = resolved;
+
+    // Issue #62: `-am auto` resolves to the registered CTC aligner
+    // (canary-ctc-aligner-q4_k, ~442 MB). Same registry / cache /
+    // download path as -m auto. Lets users add force-alignment without
+    // hunting for an aligner GGUF first.
+    if (params.aligner_model == "auto" || params.aligner_model == "default") {
+        const std::string resolved_aligner =
+            crispasr_resolve_model_cli(params.aligner_model, "canary-ctc-aligner", params.no_prints,
+                                       params.cache_dir, params.auto_download);
+        if (resolved_aligner.empty()) {
+            fprintf(stderr, "crispasr: error: failed to resolve `-am auto` (canary-ctc-aligner)\n");
+            return 19;
+        }
+        if (params.verbose) {
+            fprintf(stderr, "crispasr[verbose]: resolved aligner   = '%s'\n", resolved_aligner.c_str());
+        }
+        params.aligner_model = resolved_aligner;
+    }
 
     // Create and init the backend.
     std::unique_ptr<CrispasrBackend> backend = crispasr_create_backend(backend_name);
@@ -1211,6 +1241,14 @@ int crispasr_run_backend(const whisper_params& params_in) {
             const bool want_align =
                 !params.aligner_model.empty() &&
                 ((backend->capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
+            if (params.verbose) {
+                fprintf(stderr,
+                        "crispasr[verbose]: align: aligner='%s' caps_ctc=%d force=%d -> want=%d\n",
+                        params.aligner_model.c_str(),
+                        !!(backend->capabilities() & CAP_TIMESTAMPS_CTC),
+                        params.force_aligner ? 1 : 0,
+                        want_align ? 1 : 0);
+            }
             if (want_align) {
                 for (auto & seg : segs) {
                     if (!seg.words.empty() && !params.force_aligner) continue; // already aligned

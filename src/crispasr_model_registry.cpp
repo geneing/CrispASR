@@ -254,6 +254,14 @@ constexpr Entry k_registry[] = {
      "~1.4 GB",
      "chatterbox-s3gen-q8_0.gguf",
      "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-s3gen-q8_0.gguf"},
+    // CTC forced aligner — used by `-am auto` to attach word-level
+    // timestamps (LLM-decode backends, or any backend when paired
+    // with `--force-aligner` / `-fa`). Q4_K is the recommended quant
+    // (~442 MB; quality is indistinguishable from Q8_0 on word-onset
+    // accuracy). Q5_0 / Q8_0 / F16 sit on the same repo.
+    {"canary-ctc-aligner", "canary-ctc-aligner-q4_k.gguf",
+     "https://huggingface.co/cstr/canary-ctc-aligner-GGUF/resolve/main/canary-ctc-aligner-q4_k.gguf",
+     "~442 MB", nullptr, nullptr},
     // M2M-100 (facebook/m2m100_418M, MIT) — multilingual text-to-text
     // translation. 100 source/target languages via SentencePiece + lang
     // codes prefix. Encoder-decoder transformer with cross-attention
