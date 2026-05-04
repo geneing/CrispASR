@@ -935,17 +935,19 @@ bool kv_alloc(qwen3_tts_context* c, int max_ctx) {
     const int n_lay = (int)hp.n_layers;
     ggml_init_params kp = {ggml_tensor_overhead() * 4 + 1024, nullptr, true};
     c->kv_ctx = ggml_init(kp);
-    // PLAN #60e: talker KV dtype from CRISPASR_KV_QUANT (default f16).
-    // Note: cp_kv (code-predictor cache, line ~2100) intentionally stays
-    // F16 — its decode path doesn't go through core_attn::kv_self_attn,
-    // so the quant-safe write/read paths there don't cover it.
-    const ggml_type kv_dtype = core_attn::kv_dtype_from_env("qwen3_tts");
-    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, kv_dtype, hd, max_ctx, n_kv, n_lay);
-    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, kv_dtype, hd, max_ctx, n_kv, n_lay);
+    // PLAN #60e + #69e: talker KV per-half dtype. cp_kv (code-predictor
+    // cache, line ~2100) intentionally stays F16 — its decode path
+    // doesn't go through core_attn::kv_self_attn, so the quant-safe
+    // write/read paths there don't cover it.
+    const auto kv_pair = core_attn::kv_dtype_pair_from_env("qwen3_tts");
+    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, kv_pair.k, hd, max_ctx, n_kv, n_lay);
+    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, kv_pair.v, hd, max_ctx, n_kv, n_lay);
     ggml_set_name(c->kv_k, "kv_k");
     ggml_set_name(c->kv_v, "kv_v");
     const size_t kb = ggml_nbytes(c->kv_k), vb = ggml_nbytes(c->kv_v);
-    c->kv_buf = ggml_backend_alloc_buffer(c->backend, kb + vb);
+    // PLAN #69b: optional KV-on-CPU spill.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(c->backend, c->backend_cpu, "qwen3_tts");
+    c->kv_buf = ggml_backend_alloc_buffer(kv_backend, kb + vb);
     if (!c->kv_buf) {
         return false;
     }

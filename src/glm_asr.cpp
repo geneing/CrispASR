@@ -907,14 +907,17 @@ extern "C" bool glm_asr_kv_init(struct glm_asr_context* ctx, int max_ctx) {
     // so the scheduler recognizes KV tensors as pre-allocated.
     ggml_init_params ip = {ggml_tensor_overhead() * 4 + 1024, nullptr, true};
     ctx->kv_ctx = ggml_init(ip);
-    // PLAN #60e: KV dtype from CRISPASR_KV_QUANT (default f16).
-    const ggml_type kv_dtype = core_attn::kv_dtype_from_env("glm_asr");
-    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
-    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, nl);
+    // PLAN #60e + #69e: per-half KV dtype. CRISPASR_KV_QUANT sets both,
+    // CRISPASR_KV_QUANT_{K,V} override per half. Default f16/f16.
+    const auto kv_pair = core_attn::kv_dtype_pair_from_env("glm_asr");
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.k, hd, max_ctx, n_kv, nl);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.v, hd, max_ctx, n_kv, nl);
     ggml_set_name(ctx->kv_k, "kv_k");
     ggml_set_name(ctx->kv_v, "kv_v");
     size_t kb = ggml_nbytes(ctx->kv_k), vb = ggml_nbytes(ctx->kv_v);
-    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kb + vb);
+    // PLAN #69b: optional KV-on-CPU spill.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "glm_asr");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kb + vb);
     if (!ctx->kv_buf) {
         ggml_free(ctx->kv_ctx);
         ctx->kv_ctx = nullptr;

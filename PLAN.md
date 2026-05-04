@@ -2440,8 +2440,9 @@ Stacks cleanly with #69e — verified `CRISPASR_KV_ON_CPU=1
 CRISPASR_KV_QUANT_K=q8_0 CRISPASR_KV_QUANT_V=q4_0` on voxtral4b
 produces 169 MiB on CPU with the correct transcript.
 
-Same 6 LLM-decode backends as #69e: voxtral, voxtral4b, omniasr,
-qwen3_asr, granite_speech, orpheus.
+Per-backend coverage (extended 2026-05-04 from 6 → 10): voxtral,
+voxtral4b, omniasr, qwen3_asr, granite_speech, orpheus, glm_asr,
+gemma4_e2b, mimo_asr, qwen3_tts.
 
 ### ~~69e. Asymmetric K-vs-V cache quantization (llama.cpp parity)~~ — SHIPPED 2026-05-04
 
@@ -2494,8 +2495,13 @@ type-specific var is unset.)
 
 #### Status (2026-05-04)
 
-Plumbing landed across all 6 LLM-decode backends in one session:
-voxtral, voxtral4b, omniasr, qwen3_asr, granite_speech, orpheus.
+Plumbing landed across 10 LLM-decode backends:
+voxtral, voxtral4b, omniasr, qwen3_asr, granite_speech, orpheus,
+glm_asr, gemma4_e2b, mimo_asr, qwen3_tts. The first 6 went in
+together; the tier-1 expansion (glm_asr / gemma4_e2b / mimo_asr /
+qwen3_tts — they already used `kv_dtype_from_env`, so the upgrade
+to the pair-aware helper was 5 LOC each) followed in the same
+session.
 The legacy `CRISPASR_KV_QUANT` keeps working unchanged; the new
 `CRISPASR_KV_QUANT_K` / `_V` overrides take precedence per half.
 Sanity-checked on JFK against voxtral4b and granite-speech-4.0-1b:

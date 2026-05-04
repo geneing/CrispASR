@@ -469,19 +469,19 @@ static bool mimo_asr_kv_init(mimo_asr_context* ctx, int max_ctx) {
     const int hd = (int)hp.llm_head_dim;
     const int n_kv = (int)hp.llm_kv_heads;
     const int n_lay = (int)hp.llm_layers;
-    // PLAN #60e: KV cache dtype configurable via CRISPASR_KV_QUANT
-    // (f16 default / q8_0 / q4_0). Shared lookup in core_attn pairs
-    // with kv_self_attn's quant-safe write/read paths.
-    const ggml_type kv_dtype = core_attn::kv_dtype_from_env("mimo_asr");
+    // PLAN #60e + #69e: per-half KV dtype.
+    const auto kv_pair = core_attn::kv_dtype_pair_from_env("mimo_asr");
     ggml_init_params kp = {ggml_tensor_overhead() * 4 + 1024, nullptr, true};
     ctx->kv_ctx = ggml_init(kp);
-    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, n_lay);
-    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, n_lay);
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.k, hd, max_ctx, n_kv, n_lay);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.v, hd, max_ctx, n_kv, n_lay);
     ggml_set_name(ctx->kv_k, "mimo_kv_k");
     ggml_set_name(ctx->kv_v, "mimo_kv_v");
     const size_t kbytes = ggml_nbytes(ctx->kv_k);
     const size_t vbytes = ggml_nbytes(ctx->kv_v);
-    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kbytes + vbytes);
+    // PLAN #69b: optional KV-on-CPU spill.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "mimo_asr");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kbytes + vbytes);
     if (!ctx->kv_buf) {
         fprintf(stderr, "mimo_asr: failed to alloc KV buffer (%zu bytes)\n", kbytes + vbytes);
         return false;
@@ -494,8 +494,9 @@ static bool mimo_asr_kv_init(mimo_asr_context* ctx, int max_ctx) {
     ctx->kv_max_ctx = max_ctx;
     ctx->kv_n_used = 0;
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "mimo_asr: kv cache %d MiB %s (head_dim=%d max_ctx=%d n_kv=%d n_layers=%d)\n",
-                (int)((kbytes + vbytes) / 1048576), ggml_type_name(kv_dtype), hd, max_ctx, n_kv, n_lay);
+        fprintf(stderr, "mimo_asr: kv cache %d MiB k=%s v=%s (on %s, head_dim=%d max_ctx=%d n_kv=%d n_layers=%d)\n",
+                (int)((kbytes + vbytes) / 1048576), ggml_type_name(kv_pair.k), ggml_type_name(kv_pair.v),
+                kv_backend == ctx->backend_cpu ? "cpu" : "gpu", hd, max_ctx, n_kv, n_lay);
     }
     return true;
 }

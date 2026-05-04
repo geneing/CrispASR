@@ -390,7 +390,8 @@ keeps working unchanged.
 
 Same per-backend coverage as the table above — the asymmetric
 plumbing was added to every backend that honored `CRISPASR_KV_QUANT`
-(voxtral, voxtral4b, omniasr, qwen3_asr, granite_speech, orpheus).
+(voxtral, voxtral4b, omniasr, qwen3_asr, granite_speech, orpheus,
+glm_asr, gemma4_e2b, mimo_asr, qwen3_tts).
 
 ### `CRISPASR_KV_ON_CPU=1` — spill KV cache to system RAM
 
@@ -421,7 +422,8 @@ voxtral4b: kv cache 169 MiB k=q8_0 v=q4_0 (on cpu, ...)
 ```
 
 Same per-backend coverage as `KV_QUANT` (voxtral, voxtral4b,
-omniasr, qwen3_asr, granite_speech, orpheus).
+omniasr, qwen3_asr, granite_speech, orpheus, glm_asr, gemma4_e2b,
+mimo_asr, qwen3_tts).
 
 ### `CRISPASR_N_GPU_LAYERS=N` — layer-residency offload (voxtral4b)
 

@@ -604,17 +604,17 @@ static bool g4e_kv_init(gemma4_e2b_context* ctx, int max_ctx) {
 
     ggml_init_params kp = {ggml_tensor_overhead() * 8 + 1024, nullptr, true};
     ctx->kv_ctx = ggml_init(kp);
-    // PLAN #60e: KV dtype from CRISPASR_KV_QUANT (default f16). Both the
-    // sliding-window cache (kv_k/kv_v) and the optional full-attention
-    // cache (kv_k_full/kv_v_full) share the same dtype.
-    const ggml_type kv_dtype = core_attn::kv_dtype_from_env("gemma4_e2b");
-    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, n_lay);
-    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd, max_ctx, n_kv, n_lay);
+    // PLAN #60e + #69e: per-half KV dtype. Both the sliding-window
+    // cache (kv_k/kv_v) and the optional full-attention cache
+    // (kv_k_full/kv_v_full) share the same K/V split.
+    const auto kv_pair = core_attn::kv_dtype_pair_from_env("gemma4_e2b");
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.k, hd, max_ctx, n_kv, n_lay);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.v, hd, max_ctx, n_kv, n_lay);
     ggml_set_name(ctx->kv_k, "kv_k");
     ggml_set_name(ctx->kv_v, "kv_v");
     if (has_full && hd_full != hd) {
-        ctx->kv_k_full = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd_full, max_ctx, n_kv, n_lay);
-        ctx->kv_v_full = ggml_new_tensor_4d(ctx->kv_ctx, kv_dtype, hd_full, max_ctx, n_kv, n_lay);
+        ctx->kv_k_full = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.k, hd_full, max_ctx, n_kv, n_lay);
+        ctx->kv_v_full = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.v, hd_full, max_ctx, n_kv, n_lay);
         ggml_set_name(ctx->kv_k_full, "kv_k_full");
         ggml_set_name(ctx->kv_v_full, "kv_v_full");
     }
@@ -623,7 +623,9 @@ static bool g4e_kv_init(gemma4_e2b_context* ctx, int max_ctx) {
     size_t vbytes = ggml_nbytes(ctx->kv_v);
     size_t kfbytes = ctx->kv_k_full ? ggml_nbytes(ctx->kv_k_full) : 0;
     size_t vfbytes = ctx->kv_v_full ? ggml_nbytes(ctx->kv_v_full) : 0;
-    ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, kbytes + vbytes + kfbytes + vfbytes);
+    // PLAN #69b: optional KV-on-CPU spill.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "gemma4_e2b");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kbytes + vbytes + kfbytes + vfbytes);
     if (!ctx->kv_buf) {
         fprintf(stderr, "gemma4_e2b: failed to alloc kv buffer\n");
         return false;
