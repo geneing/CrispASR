@@ -19,8 +19,13 @@ public:
         // Beam-search applies only to the LLM variant; the matrix lists it
         // there. CTC variant ignores beam_size at the decode layer.
         // CAP_DIARIZE: framework post-step works on the segment list.
-        return CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_PUNCTUATION_TOGGLE | CAP_AUTO_DOWNLOAD |
-               CAP_TIMESTAMPS_CTC | CAP_FLASH_ATTN | CAP_DIARIZE;
+        // CAP_PUNCTUATION_TOGGLE intentionally NOT declared: omniasr's
+        // CTC vocab is lowercase + unpunctuated by design (verified against
+        // JFK on 2026-05-04 — output is "and so my fellow americas ask not
+        // ..."), so there is nothing to toggle off. Re-add only if a
+        // post-step casing/punctuation restorer is wired in.
+        return CAP_TOKEN_CONFIDENCE | CAP_TEMPERATURE | CAP_BEAM_SEARCH | CAP_AUTO_DOWNLOAD | CAP_TIMESTAMPS_CTC |
+               CAP_FLASH_ATTN | CAP_DIARIZE;
     }
 
     bool init(const whisper_params& params) override {

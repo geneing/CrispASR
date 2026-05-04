@@ -2388,12 +2388,88 @@ copies the KV slice GPU↔CPU↔GPU. Typically slower than just using
 need it (very long context, very small VRAM headroom) but document
 that `KV_QUANT` should be tried first.
 
+### 69e. Asymmetric K-vs-V cache quantization (llama.cpp parity)
+
+Today our `KV_QUANT=<type>` flag (#60e, shipped) applies the same
+precision to both K and V. llama.cpp exposes the two halves
+independently (`--cache-type-k` / `--cache-type-v`) because the
+sensitivity profiles are very different:
+
+- **V** quantizes down well — it gets used as `softmax(QK^T) · V`.
+  The softmax already concentrates probability mass, so per-element
+  errors get averaged across attended positions. `q4_0` V is
+  typically indistinguishable from F16 in PPL.
+- **K** is the fragile half — `QK^T / sqrt(d)` produces attention
+  scores *before* the softmax, and softmax exponentiates. Errors
+  here distort *which* positions get attended to. K usually wants
+  Q8_0 or higher for the same PPL floor.
+
+The common llama.cpp recipe is `-ctk q8_0 -ctv q4_0` — about 40 %
+more KV memory savings than symmetric Q8_0, with PPL barely moved
+on Llama-class models. We have headroom to push V lower than the
+Q8_0 we shipped in #60e.
+
+Most useful on the LLM-decode backends where KV is the dominant
+memory pressure (voxtral4b, granite-speech-4.x, qwen3, mimo-asr).
+
+#### Implementation
+
+Split the env knob:
+
+```
+CRISPASR_KV_QUANT       (legacy; sets both)  → keep for back-compat
+CRISPASR_KV_QUANT_K     (new; overrides KV_QUANT for K only)
+CRISPASR_KV_QUANT_V     (new; overrides KV_QUANT for V only)
+```
+
+In each backend's `kv_init`, pick `k_type` and `v_type` independently
+from these env vars (default both to `KV_QUANT`, default that to
+F16). The K and V buffers already get separate `ggml_tensor`s in
+all current backends, so the change is:
+
+```cpp
+ggml_type k_type = parse_kv_quant("CRISPASR_KV_QUANT_K", default_kv);
+ggml_type v_type = parse_kv_quant("CRISPASR_KV_QUANT_V", default_kv);
+ctx->kv_k = ggml_new_tensor_3d(meta, k_type, ...);
+ctx->kv_v = ggml_new_tensor_3d(meta, v_type, ...);
+```
+
+(parse_kv_quant() falls back to `CRISPASR_KV_QUANT` when its
+type-specific var is unset.)
+
+#### Validation
+
+Use the same #60e methodology — bit-exact at F16 (no-op), WER=0
+floor at Q8_0/Q8_0, and confirm PPL/WER stays at the WER=0 floor
+for `-ctk q8_0 -ctv q4_0` on each LLM-decode backend. The Q8_0/Q4_0
+asymmetric pair is the one that ships; Q4_0/Q4_0 (symmetric) is
+expected to degrade and serves as the sanity check that V is the
+forgiving half. Compare on JFK + a few longer LibriSpeech clips
+because the longer the context the more the V error matters.
+
+#### Effort
+
+Small. The plumbing change is ~10 LOC per backend, and we already
+have parse helpers from #60e. Validation across 7 LLM-decode
+backends is the time sink. Estimate: 1 backend in a session, full
+roll-out across LLM-decode backends in a week.
+
+#### Out of scope
+
+- Per-layer K/V quant (some llama.cpp users go finer than `-ctk` /
+  `-ctv` — e.g. lower precision in middle layers). Adds a third
+  dimension of ablation surface that isn't justified until the
+  whole-cache asymmetric pair is shipped and validated.
+
 ### Approach (do these in order)
 
 1. Land `CRISPASR_N_GPU_LAYERS` for voxtral4b (the requesting user's
    target). Validate against #60's reproducer.
 2. Land `CRISPASR_KV_ON_CPU` for voxtral4b — same backend, ~5 LOC.
-3. If validation passes and there's pull, replicate to the rest of
+3. Land `CRISPASR_KV_QUANT_K` / `_V` (#69e) for voxtral4b — drop in
+   beside the existing KV_QUANT path; validate the `q8_0`/`q4_0`
+   pair against the WER=0 floor from #60e.
+4. If validation passes and there's pull, replicate to the rest of
    the LLM-decode backends one at a time. Don't preemptively roll
    it out everywhere — the per-backend test surface (each one's
    layer-tagging needs verifying) doesn't scale linearly.
@@ -2537,3 +2613,75 @@ chunked transfer.
   chunking is its own work item if anyone needs it.
 - Any changes to AR decoding itself — the AR loop stays
   unchanged; only the post-AR codec / VAE side is chunked.
+
+## 71. Test-runner under-invocation + cap-honesty audit (2026-05-04)
+
+`tools/test-all-backends.py --profile feature` was run against the
+fresh main with the widened cap tuples (commit 3c2864e). The suite
+was stopped at 15/24 backends due to slow external-disk model loads
+(USB-2-class 30 MB/s, granite-1b's 2.8 GB → ~90 s of I/O alone before
+each cap), but enough data landed to triage every advertised cap.
+
+### Findings shipped this session
+
+#### Real cap drift (binary-side)
+
+- **omniasr / omniasr-llm `CAP_PUNCTUATION_TOGGLE`** — both declared
+  the cap but their CTC vocab is lowercase + unpunctuated by design.
+  Verified against JFK: output is `"and so my fellow americas ask
+  not ..."`. **Fix shipped**: removed the cap from
+  `crispasr_backend_omniasr.cpp:22` and dropped `"punctuation"` from
+  the test tuples. Audit re-run is clean.
+
+#### Test-runner under-invocation (runner-side, not real drift)
+
+- **`test_lid` ran with empty extra args** — non-whisper backends only
+  trigger the framework LID pre-step on `-dl` / `-l auto`. **Fix
+  shipped**: pass `-dl` always, and widen the regex to also accept the
+  framework's `crispasr: LID -> language = '<lang>'` log line shape.
+- **`test_word_timestamps` only tests native** — backends that declare
+  only `CAP_TIMESTAMPS_CTC` need `-am <aligner.gguf>` to emit per-word
+  entries via the post-step CTC aligner. **Fix shipped (partial)**:
+  the runner now queries `--list-backends-json` and SKIPs (rather than
+  FAILs) when the backend has only `timestamps-ctc`. Wiring an actual
+  aligner default is deferred — see "Open work" below.
+
+### Open work
+
+- **CAP_LANGUAGE_DETECT honesty across non-whisper backends** —
+  parakeet, qwen3, glm-asr declare the cap but `-dl` produces no LID
+  stderr line in any of their transcribe paths. Same pattern as the
+  omniasr punctuation drift; either (a) the framework should print
+  the LID line on behalf of native-LID backends, or (b) the cap
+  should be removed from backends without an actual stderr-printing
+  LID path. Read each backend's transcribe() and decide per-backend
+  before changing anything. (Task #24)
+- **Wire a default CTC aligner into `test_word_timestamps`** — the
+  current SKIP is honest but it under-tests 15 backends that all
+  declare `CAP_TIMESTAMPS_CTC`. Pick a small, English-friendly
+  aligner (granite-aligner candidate or wav2vec2-en) and download it
+  on first need.
+- **Big-model perf in the test loop** — the runner spawns crispasr
+  fresh for each cap, so big models pay the full model-load tax on
+  every cap. For local laptop dev with `/Volumes/backups` (USB-class
+  30 MB/s), this turns granite/voxtral/gemma4-e2b into 5+ min/cap.
+  Two ergonomic options: (a) stage models to internal SSD before a
+  full feature-profile run, or (b) add a `--cap-once` mode that runs
+  all caps in a single process via the session API. (a) is fastest,
+  (b) is right for CI.
+- **Untracked variant backends (11)** — `data2vec`, `hubert`,
+  `granite-4.1-{nar,plus}`, `kartoffel-orpheus-de-{natural,synthetic}`,
+  `lex-au-orpheus-de`, `qwen3-tts-1.7b-{base,customvoice,voicedesign}`,
+  `qwen3-tts-customvoice`. Each is a minor variant of an architecture
+  already covered by a tracked backend; the audit reports them but
+  doesn't gate. Add as separate Backend tuples only if a variant
+  starts diverging in caps from its parent.
+
+### Why this came up
+
+The capability widening commit (3c2864e) made the test script's
+*intent* match the binary's *claims*. Running the resulting suite
+exposed the gap between "claim" and "behaviour": most failures were
+runners under-invoking, but two backends actually shipped with
+mis-declared caps. The audit script alone could not detect those
+because both directions of drift looked clean.

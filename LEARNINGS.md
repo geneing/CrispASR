@@ -2357,3 +2357,70 @@ examples *compile* — that's the per-merge signal we want. The
 deploy is incidental and shouldn't gate main-push CI. Default the
 trigger to `workflow_dispatch:` only and re-add `push: branches:
 [main]` together with enabling Pages. Commit `476c655`.
+
+## Audit script ≠ behavior test (2026-05-04)
+
+Two complementary checks, easy to confuse:
+
+- **`tools/audit-backend-capabilities.py`** parses the binary's
+  `--list-backends-json` and the test script's `Backend(...,
+  capabilities=(...))` tuples, and reports drift between *what the
+  binary claims* and *what the test script claims to cover*. It
+  cannot detect a backend that mis-declares a cap that the test
+  also dishonestly lists — both ends agree, audit says clean.
+- **`tools/test-all-backends.py --profile feature`** actually runs
+  each cap. This is what catches a cap declared but not implemented
+  (omniasr's `CAP_PUNCTUATION_TOGGLE` shipping with a CTC vocab that
+  has no punctuation; parakeet declaring `CAP_LANGUAGE_DETECT` with
+  no stderr LID line in its native path).
+
+Run the audit before pushing — it's seconds. Run the feature suite
+periodically and after backend changes — it's slow but the only way
+to catch *behaviour* drift.
+
+When both directions of the audit agree but feature-suite tests
+fail, the failure is one of:
+1. The runner is under-invoking (missing CLI flag like `-dl` or
+   `-am`). The runner must be widened — usually by inspecting the
+   binary's caps via `--list-backends-json` and branching.
+2. The backend declares a cap it doesn't actually deliver. The cap
+   must be dropped from the `.cpp` backend's `capabilities()`
+   override AND from the test tuple in lockstep, otherwise the
+   audit will start reporting drift.
+
+## libcrispasr.a + libcommon.a both define stb_vorbis / miniaudio impl (Linux ld dies)
+
+`src/crispasr_audio.cpp` and `examples/common-crispasr.cpp` both
+translation-unit-include `stb_vorbis.c` after `#undef
+STB_VORBIS_HEADER_ONLY` and both define `MINIAUDIO_IMPLEMENTATION`.
+This means *both* static libraries (libcrispasr.a, libcommon.a)
+ship the full set of stb_vorbis + miniaudio symbols.
+
+- **Apple ld** silently picks the first definition. macOS builds
+  passed without complaint for years.
+- **GNU ld** (Linux) errors with `multiple definition of …`. Comes
+  up the moment a downstream consumer links *both* archives — which
+  the Ruby binding does via `bindings/ruby/ext/dependencies.rb`'s
+  full-graph topological link.
+- **Main CI build doesn't trip** because libcrispasr is compiled as
+  a shared lib (`libcrispasr.so`) whose symbols are resolved at
+  build time, so the executable only sees one copy of stb_vorbis
+  (from libcommon.a).
+
+The proper fix is to extract the impl into its own dedicated
+translation unit linked exactly once — but that's a refactor with
+ripples (some `tests/` and `examples/crispasr-quantize/` link
+libcommon alone and would need the new lib added). For the Ruby
+binding specifically, `-Wl,--allow-multiple-definition` on Linux is
+the minimal workaround that mirrors macOS ld's behaviour.
+
+Also: when CMake's `CRISPASR_STANDALONE` is ON (default for any
+consumer that points `-S sources` at the repo root, including the
+Ruby binding's vendored copy), `CRISPASR_BUILD_TESTS` defaults ON,
+which pulls Catch2 into the configured target graph. The Ruby
+binding's dependency walker then lists `libCatch2*.a` in
+`$LOCAL_LIBS` even though `--target common crispasr` never built
+them, and the link fails with `cannot find libCatch2WithMain.a`.
+Fix: pass `-D CRISPASR_BUILD_TESTS=OFF -D CRISPASR_BUILD_EXAMPLES=OFF
+-D CRISPASR_BUILD_SERVER=OFF` to the Ruby binding's cmake config.
+Both fixes shipped together in `bindings/ruby/ext/extconf.rb`.

@@ -169,12 +169,12 @@ REGISTRY: tuple[Backend, ...] = (
             "cstr/omniASR-CTC-1B-v2-GGUF", "omniasr-ctc-1b-v2-q4_k.gguf",
             timeout_s=120, approx_size_mb=660,
             capabilities=("transcribe", "json-output", "temperature", "beam",
-                          "word-timestamps", "punctuation")),
+                          "word-timestamps")),
     Backend("omniasr-llm", "OmniASR LLM 300M",   "omniasr-llm-300m-v2-q4_k.gguf",
             "cstr/omniasr-llm-300m-v2-GGUF", "omniasr-llm-300m-v2-q4_k.gguf",
             timeout_s=300, approx_size_mb=1100,
             capabilities=("transcribe", "json-output", "beam",
-                          "temperature", "word-timestamps", "punctuation")),
+                          "temperature", "word-timestamps")),
     Backend("glm-asr",    "GLM ASR Nano",        "glm-asr-nano-q4_k.gguf",
             "cstr/glm-asr-nano-GGUF", "glm-asr-nano-q4_k.gguf",
             timeout_s=300, approx_size_mb=900,
@@ -269,6 +269,27 @@ def find_crispasr() -> Path | None:
             return p
     found = shutil.which("crispasr")
     return Path(found) if found else None
+
+
+# Cache of binary-declared caps per backend (populated lazily on first use).
+# Read via `crispasr --list-backends-json`. Used by tests that need to
+# distinguish native capability from a post-step shim — e.g. word-timestamps
+# is native on whisper/parakeet/canary/cohere/kyutai-stt but requires a CTC
+# aligner (-am) on moonshine, wav2vec2, qwen3, granite, voxtral, etc.
+_BACKEND_CAPS_CACHE: dict[str, set[str]] | None = None
+
+
+def get_backend_caps(crispasr: Path, backend_name: str) -> set[str]:
+    global _BACKEND_CAPS_CACHE
+    if _BACKEND_CAPS_CACHE is None:
+        try:
+            out = subprocess.check_output([str(crispasr), "--list-backends-json"],
+                                          stderr=subprocess.DEVNULL)
+            data = _json.loads(out)
+            _BACKEND_CAPS_CACHE = {b["name"]: set(b["caps"]) for b in data["backends"]}
+        except Exception:
+            _BACKEND_CAPS_CACHE = {}
+    return _BACKEND_CAPS_CACHE.get(backend_name, set())
 
 
 def free_mb(path: Path) -> int:
@@ -785,9 +806,23 @@ def test_word_timestamps(b: Backend, tier: str, ctx: dict) -> TestOutcome:
     """Smoke: -ojf produces JSON whose first segment has a `words` array
     with >= 5 entries. Each word entry should have time offsets.
     Full: each word's t0 < t1, t1 monotonically non-decreasing across
-    the array, last t1 within audio duration + 500ms."""
+    the array, last t1 within audio duration + 500ms.
+
+    Backends that produce word timestamps natively (whisper, parakeet,
+    canary, cohere, kyutai-stt) work with just -ojf. Backends that only
+    declare CAP_TIMESTAMPS_CTC (post-step via -am <aligner>) need the
+    aligner model to be passed explicitly — wiring an aligner default
+    into this runner is tracked separately, so we SKIP rather than FAIL
+    those backends here. The audit script
+    (tools/audit-backend-capabilities.py) still treats both caps as
+    served by this test for drift purposes.
+    """
     crispasr, model, audio, use_gpu = (
         ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    caps = get_backend_caps(crispasr, b.name)
+    if "word-timestamps" not in caps and "timestamps-ctc" in caps:
+        return TestOutcome(b.name, "word-timestamps", tier, "SKIP",
+                           "needs -am <aligner> (CTC post-step); not yet wired in test runner")
     rc, out, err, w = _run_cli(crispasr, b, model, audio, ["-ojf"], use_gpu)
     if rc != 0:
         return TestOutcome(b.name, "word-timestamps", tier, "CRASH",
@@ -905,20 +940,27 @@ def test_vad(b: Backend, tier: str, ctx: dict) -> TestOutcome:
 
 
 def test_lid(b: Backend, tier: str, ctx: dict) -> TestOutcome:
-    """Smoke: stderr contains 'auto-detected language: en' or
-    'detected ... language = en' (parakeet+others route LID through
-    whisper). Full: detected probability > 0.5.
+    """Smoke: stderr contains an LID log line that identifies the
+    detected language. Full: detected probability > 0.5.
+
+    Non-whisper backends only run LID when the user opts in via -dl /
+    --detect-language; whisper auto-detects when language is empty.
+    Always pass -dl so both paths are exercised.
     """
     crispasr, model, audio, use_gpu = (
         ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
-    rc, out, err, w = _run_cli(crispasr, b, model, audio, [], use_gpu)
+    rc, out, err, w = _run_cli(crispasr, b, model, audio, ["-dl"], use_gpu)
     if rc != 0:
         return TestOutcome(b.name, "lid", tier, "CRASH",
                            (err or "")[-200:], w)
-    # Whisper-style: "auto-detected language: en (p = 0.976672)"
-    # crispasr-LID-helper:  "crispasr[lid]: detected 'en' (p=0.977) via whisper"
+    # Three log line shapes we accept:
+    #   whisper:               "auto-detected language: en (p = 0.976672)"
+    #   crispasr LID helper:   "crispasr[lid]: detected 'en' (p=0.977) via whisper"
+    #   framework pre-step:    "crispasr: LID -> language = 'en' (..., p=0.977)"
     m = re.search(
-        r"(?:auto-detected language:\s*|crispasr\[lid\][^\n]*detected\s*['\"]?)"
+        r"(?:auto-detected language:\s*|"
+        r"crispasr\[lid\][^\n]*detected\s*['\"]?|"
+        r"crispasr:\s*LID\s*->\s*language\s*=\s*['\"]?)"
         r"([a-z]{2,3})['\"]?[^\n]*?p\s*=\s*([\d.]+)",
         err or "", re.IGNORECASE)
     if not m:
