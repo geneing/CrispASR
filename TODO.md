@@ -68,17 +68,15 @@ voice-pack split, conv_post exp/sin, etc.).
 
 ---
 
-## Chatterbox TTS vocoder **[done]** — vocoder fixed 2026-05-03
+## Chatterbox TTS **[done]** — vocoder fixed + GGUFs shipped 2026-05-04
 
-Full Chatterbox TTS pipeline (T3 AR + Conformer + UNet CFM + HiFTGenerator)
-running end-to-end in C++. Vocoder now produces correct output ("Hello world."
-from Python ref mel — was "Oh." before fix).
+Full Chatterbox TTS pipeline running end-to-end in C++. Vocoder produces
+correct "Hello world." from Python ref mel. F16/Q8_0/Q4_K published.
 
-**Fixed (2026-05-03):**
-- iSTFT transposed data layout (root cause)
-- Missing ReflectionPad1d((1,0)) at last upsample stage
-- Proper SineGen + windowed STFT for source fusion
-- Nyquist term in Hermitian iDFT
+**Shipped:**
+- Vocoder fix: iSTFT layout, ReflectionPad1d, SineGen+STFT, Nyquist term
+- [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) — T3 + S3Gen (6 quant files)
+- [`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF) — Arabic T3 (shares S3Gen)
 
 **Remaining (next):**
 - Wire into `crispasr_c_api.cpp` + CLI adapter
@@ -87,7 +85,7 @@ from Python ref mel — was "Oh." before fix).
 
 **Remaining (later):**
 - Voice cloning (VoiceEncoder LSTM + S3Tokenizer + CAMPPlus)
-- Kartoffelbox_Turbo + lahgtna-chatterbox checkpoint swaps
+- Kartoffelbox_Turbo — GPT-2 arch (NOT Llama T3), needs own runtime
 - Close 0.07 cos gap vs `torch.istft` COLA boundary handling
 
 ---

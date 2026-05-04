@@ -1014,9 +1014,9 @@ adding a codec head + sampling path. Cheaper than a full new backend.
 | 2 | lex-au Orpheus-3B-DE-Q8 | llama3.2 (HF tags Apache-2.0; underlying Llama-3.2-FT) | **DONE — registry alias `lex-au-orpheus-de` added pointing at the existing `lex-au/Orpheus-3b-German-FT-Q8_0.gguf` (3.52 GB). Factory dispatch wired. SNAC companion shared with the base orpheus row.** | XS |
 | 2 | gwen-tts-0.6B | MIT | queued — needs weight inspection first | S–M |
 | 2 | tada-3b-ml | llama3.2 | queued | M |
-| 3 | Chatterbox base | MIT | **vocoder FIXED** — full pipeline T3→S3Gen→HiFT→WAV produces correct "Hello world." (was "Oh."). All ggml stages cos=1.0. Remaining: C API wiring, F0 predictor, voice cloning. | L |
-| 3 | Kartoffelbox_Turbo DE | CC-BY-4.0 (gated) | **UNBLOCKED** — Chatterbox base vocoder works; checkpoint swap is next | XS |
-| 3 | lahgtna-chatterbox-v1 AR | MIT | **UNBLOCKED** — Chatterbox base vocoder works; checkpoint swap is next | XS |
+| 3 | Chatterbox base | MIT | **DONE + SHIPPED** — vocoder fixed, F16/Q8_0/Q4_K quantized, ASR "Hello world." on all quants. Published as [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) (T3: 1.1G/542M/287M + S3Gen: 548M/342M/237M). Remaining: C API wiring, F0 predictor, voice cloning. | L |
+| 3 | Kartoffelbox_Turbo DE | CC-BY-4.0 (gated) | **BLOCKED** — NOT a checkpoint swap. Uses GPT-2 architecture (fused QKV, LayerNorm+bias, learned pos embeddings), not Chatterbox Llama T3. Needs own runtime. Re-scoped to M effort. | M |
+| 3 | lahgtna-chatterbox-v1 AR | MIT | **DONE + SHIPPED** — T3 converted to GGUF (shares S3Gen with base). Published as [`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF) (T3 F16 1.1 GB). | XS |
 | 4 | Voxtral-TTS (Mistral upstream) | CC-BY-NC 4.0 | **BLOCKED — license inherits from voice-ref training data; moved to Deferred. See Phase 4 prose.** | — |
 | 4 | Darwin-TTS-1.7B-Cross | Apache 2.0 | queued | M |
 | 5 | VoxCPM2 | Apache 2.0 | queued — large new arch | L |

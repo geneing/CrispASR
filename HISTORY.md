@@ -2825,3 +2825,15 @@ Nyquist term fix in Hermitian iDFT. Debug infrastructure: per-stage
 output markers, `vocode_dump()` API, `CRISPASR_HIFT_FULL_IDFT=1` gate.
 All ggml graph stages match Python to cos=1.000; deterministic waveform
 cos=0.93 vs `torch.istft`.
+
+**Quantization + HF upload (2026-05-04):**
+- F16/Q8_0/Q4_K for both T3 and S3Gen — all quant levels ASR-verified
+  "Hello world" via moonshine-base.
+- Published: [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF)
+  (T3: 1.1G/542M/287M + S3Gen: 548M/342M/237M).
+- lahgtna-chatterbox-v1 (Arabic T3): converted, shares S3Gen with base.
+  Published: [`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF)
+  (T3 F16 1.1 GB).
+- **Kartoffelbox_Turbo re-scoped**: inspection revealed GPT-2 architecture
+  (fused QKV, LayerNorm+bias, learned pos embeddings) — NOT a Chatterbox
+  Llama T3 checkpoint swap. Needs its own runtime (Tortoise-TTS variant).
