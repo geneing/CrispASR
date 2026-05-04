@@ -135,4 +135,25 @@ struct whisper_params {
     std::string tts_ref_text;
     std::string tts_instruct; // VoiceDesign: natural-language voice description
     bool tts_trim_silence = false;
+
+    // Text-to-text translation input (m2m100 + future translate-only
+    // backends). When `--text` is set on a backend that declares
+    // CAP_TRANSLATE and has no input audio, crispasr_run dispatches to
+    // backend->translate_text() instead of transcribe.
+    //
+    // Language handling has TWO independent pairs to support 2-stage
+    // pipelines (e.g., ASR that only does EN→EN-text, then m2m100
+    // translates the EN-text to Tamil — those two stages have different
+    // source/target conventions):
+    //   - source_lang / target_lang : primary backend (canary AST etc.)
+    //   - translate_source_lang / translate_target_lang : second-stage
+    //     translator (m2m100). Empty falls back to source_lang /
+    //     target_lang. So standalone `--backend m2m100 -sl en -tl de`
+    //     just works without learning new flags; the dedicated `-trsl`
+    //     / `-trtl` flags only matter when the primary backend's
+    //     `-sl`/`-tl` mean something else (e.g., 2-stage piping).
+    std::string text_input;
+    int translate_max_tokens = 256;
+    std::string translate_source_lang; // overrides source_lang for the translator stage
+    std::string translate_target_lang; // overrides target_lang for the translator stage
 };

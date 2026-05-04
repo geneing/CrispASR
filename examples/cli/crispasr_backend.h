@@ -137,6 +137,17 @@ public:
         return {};
     }
 
+    // Text-to-text translation. m2m100 and any future translate-only
+    // backend overrides this. Default returns empty (not supported).
+    // src_lang / tgt_lang are ISO-639-1 codes ("en", "de", …).
+    virtual std::string translate_text(const std::string& text, const std::string& src_lang,
+                                       const std::string& tgt_lang, const whisper_params& /*params*/) {
+        (void)text;
+        (void)src_lang;
+        (void)tgt_lang;
+        return {};
+    }
+
     // Release all resources.
     virtual void shutdown() = 0;
 };

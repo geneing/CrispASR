@@ -24,7 +24,14 @@ public:
 
     const char* name() const override { return "m2m100"; }
 
-    uint32_t capabilities() const override { return CAP_TRANSLATE | CAP_AUTO_DOWNLOAD; }
+    uint32_t capabilities() const override {
+        // m2m100 takes a source AND target language (text-to-text); both
+        // are required arguments to m2m100_translate(). CAP_SRC_TGT_LANGUAGE
+        // suppresses the "backend does not support --source-lang" warning
+        // that warn_unsupported() would otherwise raise when the user
+        // passes -sl/-tl.
+        return CAP_TRANSLATE | CAP_AUTO_DOWNLOAD | CAP_SRC_TGT_LANGUAGE;
+    }
 
     std::vector<crispasr_segment> transcribe(const float* /*samples*/, int /*n_samples*/, int64_t /*t_offset_cs*/,
                                              const whisper_params& /*params*/) override {
@@ -46,6 +53,21 @@ public:
 
     std::vector<float> synthesize(const std::string& /*text*/, const whisper_params& /*params*/) override {
         return {}; // Not a TTS backend
+    }
+
+    std::string translate_text(const std::string& text, const std::string& src_lang, const std::string& tgt_lang,
+                               const whisper_params& params) override {
+        if (!ctx_ || text.empty() || src_lang.empty() || tgt_lang.empty()) {
+            return {};
+        }
+        const int max_tokens = params.translate_max_tokens > 0 ? params.translate_max_tokens : 256;
+        char* out = m2m100_translate(ctx_, text.c_str(), src_lang.c_str(), tgt_lang.c_str(), max_tokens);
+        if (!out) {
+            return {};
+        }
+        std::string result(out);
+        free(out);
+        return result;
     }
 
     void shutdown() override {

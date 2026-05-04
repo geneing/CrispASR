@@ -400,6 +400,21 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             params.tts_instruct = ARGV_NEXT;
         } else if (arg == "--tts-trim-silence") {
             params.tts_trim_silence = true;
+        } else if (arg == "--text") {
+            // Text-to-text translation input (m2m100). Source language
+            // via -sl / --source-lang (or --tr-sl for 2-stage pipes);
+            // target via -tl / --target-lang (or --tr-tl).
+            params.text_input = ARGV_NEXT;
+        } else if (arg == "--translate-max-tokens") {
+            params.translate_max_tokens = std::stoi(ARGV_NEXT);
+        } else if (arg == "-trsl" || arg == "--tr-sl" || arg == "--translate-source-lang") {
+            // Translator-stage source language. Falls back to -sl when
+            // unset. Only differs from -sl in 2-stage pipelines where
+            // the primary backend's -sl means something else (e.g.,
+            // ASR source on canary, then m2m100 src on the post-stage).
+            params.translate_source_lang = whisper_param_turn_lowercase(ARGV_NEXT);
+        } else if (arg == "-trtl" || arg == "--tr-tl" || arg == "--translate-target-lang") {
+            params.translate_target_lang = whisper_param_turn_lowercase(ARGV_NEXT);
         } else if (arg == "--auto-download") {
             params.auto_download = true;
         } else if (arg == "--server") {
@@ -665,6 +680,17 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             params.tts_steps);
     fprintf(stderr, "             --tts-trim-silence       [%-7s] trim leading silence from TTS output\n",
             params.tts_trim_silence ? "true" : "false");
+    // Text-to-text translation (m2m100)
+    fprintf(stderr, "\nText-to-text translation (m2m100) options:\n");
+    fprintf(stderr, "             --text \"TEXT\"           translate TEXT and write result to stdout "
+                    "(use with --backend m2m100; pair with -sl / -tl)\n");
+    fprintf(stderr,
+            "             --tr-sl LANG / --tr-tl LANG\n"
+            "                                        translator-stage source/target language "
+            "(falls back to -sl / -tl); only needed for 2-stage pipelines where the primary "
+            "backend's -sl/-tl mean something else\n");
+    fprintf(stderr, "             --translate-max-tokens N [%-7d] max output tokens for the translator stage\n",
+            params.translate_max_tokens);
     // Voice Activity Detection (VAD) parameters
     fprintf(stderr, "\nVoice Activity Detection (VAD) options:\n");
     fprintf(stderr, "             --vad                           [%-7s] enable Voice Activity Detection (VAD)\n",
@@ -1435,7 +1461,7 @@ int main(int argc, char** argv) {
         return crispasr_run_server(params, params.server_host, params.server_port);
     }
 
-    if (params.fname_inp.empty() && !params.stream && params.tts_text.empty()) {
+    if (params.fname_inp.empty() && !params.stream && params.tts_text.empty() && params.text_input.empty()) {
         fprintf(stderr, "error: no input files specified\n");
         whisper_print_usage(argc, argv, params);
         return 2;

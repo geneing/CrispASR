@@ -700,6 +700,36 @@ int crispasr_run_backend(const whisper_params& params_in) {
         fprintf(stderr, "crispasr[verbose]: backend '%s' initialised OK\n", backend_name.c_str());
     }
 
+    // ---- Text-to-text translation mode: m2m100 standalone ----
+    // Triggered by `--text "..."` on a backend declaring CAP_TRANSLATE.
+    // Source / target languages: use the dedicated --tr-sl / --tr-tl
+    // when set (for 2-stage pipelines), otherwise fall back to -sl /
+    // -tl. Result goes to stdout. See PLAN #74 / m2m100 wiring notes.
+    if (!params.text_input.empty()) {
+        if (!(backend->capabilities() & CAP_TRANSLATE)) {
+            fprintf(stderr, "crispasr: error: backend '%s' does not support text-to-text translation "
+                            "(missing CAP_TRANSLATE)\n",
+                    backend_name.c_str());
+            return 16;
+        }
+        const std::string& src = !params.translate_source_lang.empty() ? params.translate_source_lang
+                                                                       : params.source_lang;
+        const std::string& tgt = !params.translate_target_lang.empty() ? params.translate_target_lang
+                                                                       : params.target_lang;
+        if (src.empty() || tgt.empty()) {
+            fprintf(stderr, "crispasr: error: --text requires source + target language. Pass `-sl <code> "
+                            "-tl <code>` (or `--tr-sl` / `--tr-tl` for 2-stage pipes).\n");
+            return 17;
+        }
+        std::string out = backend->translate_text(params.text_input, src, tgt, params);
+        if (out.empty()) {
+            fprintf(stderr, "crispasr: error: translation failed\n");
+            return 18;
+        }
+        printf("%s\n", out.c_str());
+        return 0;
+    }
+
     // ---- TTS mode: synthesize speech from text ----
     if (!params.tts_text.empty()) {
         if (!(backend->capabilities() & CAP_TTS)) {
