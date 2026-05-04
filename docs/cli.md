@@ -4,6 +4,59 @@
 of backend-dispatch flags. Every historical whisper flag still works —
 when you don't pass `--backend`, whisper is the default.
 
+## Contents
+
+- [Quick reference](#quick-reference) — most-used flag patterns
+- [Core flags](#core) — model, backend, input, language
+- [Output formats](#output) — txt / srt / vtt / json / csv / lrc
+- [Segmentation & chunking](#segmentation--chunking) — VAD, fixed chunks
+- [Word-level timestamps via CTC alignment](#word-level-timestamps-via-ctc-alignment)
+- [Sampling / decoding](#sampling--decoding-whisper--llm-backends) — temperature, beam, grammar
+- [Language detection (LID)](#language-detection-lid)
+- [LLM-backend specific](#llm-backend-specific) — aligner, max-new-tokens
+- [Multi-language / translation](#multi-language--translation)
+- [Threading & processors](#threading--processors)
+- [Whisper-only flags](#whisper-only-flags)
+- [Auto-download (`-m auto`)](#auto-download--m-auto) — registry table
+- [Audio formats](#audio-formats) — WAV / FLAC / MP3 / OGG / Opus / M4A
+- [Memory footprint](#memory-footprint) — KV quant, mmap, recommended combos
+
+## Quick reference
+
+The 10 patterns that cover most usage:
+
+```bash
+# Auto-download + transcribe
+crispasr -m auto --backend parakeet -f audio.wav
+
+# VAD + SRT + sentence-split (best subtitle output)
+crispasr -m parakeet.gguf -f long.wav --vad -osrt --split-on-punct
+
+# Word timestamps via CTC aligner (LLM backends)
+crispasr --backend voxtral -m auto -f jfk.wav -am canary-ctc-aligner.gguf -osrt -ml 1
+
+# Auto language detection
+crispasr -m auto --backend cohere -f audio.wav -l auto
+
+# Translate to English
+crispasr -m auto --backend whisper -f de.wav --translate
+
+# Live mic
+crispasr --mic -m auto --backend parakeet
+
+# JSON with word + token detail
+crispasr -m auto --backend parakeet -f audio.wav -ojf
+
+# Force GPU pick
+crispasr --gpu-backend vulkan -dev 1 -m auto -f audio.wav
+
+# Half-VRAM voxtral4b
+CRISPASR_KV_QUANT=q4_0 CRISPASR_GGUF_MMAP=1 crispasr --backend voxtral4b -m auto -f audio.wav
+
+# List every backend + capabilities
+crispasr --list-backends
+```
+
 ## Core
 
 | Flag | Meaning |
@@ -205,9 +258,19 @@ unique to it (`-owts` karaoke, full-mode JSON DTW tokens, `-di`
 stereo diarize) — pass a `ggml-*.bin` model without `--backend` to
 get them.
 
-`--diarize`, `-tdrz` / `--tinydiarize`, `--carry-initial-prompt`,
-`-dtw`, `-fa` / `-nfa`, `-suppress-regex`, `-suppress-nst`, and the
-full upstream `crispasr --help` list.
+| Flag | Meaning |
+|---|---|
+| `--diarize` | Whisper-internal stereo diarization (upstream feature) |
+| `-tdrz`, `--tinydiarize` | TinyDiarize speaker turn detection |
+| `--carry-initial-prompt` | Forward `--prompt` across audio chunks |
+| `-dtw` | Output DTW token-level timing in `-ojf` JSON |
+| `-fa`, `-nfa` | Force flash-attn on / off |
+| `-suppress-regex` | Suppress tokens whose detokenized text matches the regex |
+| `-suppress-nst` | Suppress non-speech tokens |
+| `-owts` | Karaoke-style word-timestamp WTS output |
+
+For the full list of upstream whisper flags see `crispasr --help`
+when invoked with a `ggml-*.bin` model loaded.
 
 ## Auto-download (`-m auto`)
 
@@ -406,3 +469,28 @@ Differences worth flagging:
    external request on issue #60. Today the workaround is the
    `KV_QUANT=q4_0 + MMAP=1` combo above, which usually clears
    enough headroom for voxtral4b-class models.
+
+---
+
+## See also
+
+- [`docs/streaming.md`](streaming.md) — `--stream`, `--mic`, `--live`,
+  sliding-window flags, per-token confidence
+- [`docs/tts.md`](tts.md) — Kokoro / Qwen3-TTS / VibeVoice / Orpheus
+  + every TTS-side env var (`QWEN3_TTS_CODEC_GPU`,
+  `QWEN3_TTS_SKIP_REF_DECODE`, `QWEN3_TTS_O15`, `KOKORO_GEN_GPU`,
+  `VIBEVOICE_VAE_BACKEND`, …)
+- [`docs/server.md`](server.md) — HTTP `/inference` and OpenAI-compat
+  `/v1/audio/transcriptions`
+- [`docs/bindings.md`](bindings.md) — Python / Rust / Dart / Go / Java
+  / Ruby — every CLI feature is reachable through the C-ABI
+- [`docs/install.md`](install.md) — full build options, GPU backends,
+  ffmpeg ingestion, glibc compatibility
+- [`docs/quantize.md`](quantize.md) — `crispasr-quantize` per-backend
+  recommended quants
+- [`docs/architecture.md`](architecture.md) — internals: `src/core/`
+  primitives, per-backend graph survey
+- [`docs/contributing.md`](contributing.md) — adding a new backend,
+  PyTorch-vs-C++ stage diff workflow
+- [`docs/regression-matrix.md`](regression-matrix.md) —
+  `tools/test-all-backends.py` capability tiers
