@@ -84,13 +84,32 @@ public:
         if (!ctx_ || text.empty() || tgt_lang.empty()) {
             return {};
         }
-        // MADLAD-400 input convention: prefix with "<2xx> " where xx is
-        // the target ISO language code. The runtime tokenizes that
-        // prefix into the language token; the encoder is otherwise
-        // language-agnostic so source-lang isn't needed.
-        const std::string prefixed = "<2" + tgt_lang + "> " + text;
+        // MADLAD-400 input convention: prefix with "<2xx>" where xx is
+        // the target ISO language code (a single-piece token in MADLAD's
+        // 256K vocab covering all 419 supported languages). T5's
+        // encoder is language-agnostic so source-lang isn't needed.
+        //
+        // Other T5 family models (flan-t5, mT5, T5-base, …) DO NOT have
+        // <2xx> entries in their vocab. Prepending it on those would
+        // tokenize as [▁, <unk>] (= garbage) at the front of the
+        // encoder input and corrupt the cross-attention context. So
+        // we probe the vocab first; if the tag isn't a piece, we skip
+        // the prefix and pass the user's raw text through.
+        const std::string lang_tag = "<2" + tgt_lang + ">";
+        std::string input;
+        if (t5_has_token(ctx_, lang_tag.c_str())) {
+            input = lang_tag + " " + text;
+        } else {
+            input = text;
+            if (params.verbose && !params.no_prints) {
+                fprintf(stderr,
+                        "crispasr[madlad]: target-lang tag '%s' not in vocab — passing input through "
+                        "unmodified (this T5 variant uses prompt-driven translation, not language tags).\n",
+                        lang_tag.c_str());
+            }
+        }
         const int max_tokens = params.translate_max_tokens > 0 ? params.translate_max_tokens : 256;
-        char* out = t5_translate(ctx_, prefixed.c_str(), max_tokens);
+        char* out = t5_translate(ctx_, input.c_str(), max_tokens);
         if (!out) {
             return {};
         }

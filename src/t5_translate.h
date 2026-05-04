@@ -29,6 +29,14 @@ void t5_translate_free(struct t5_translate_context* ctx);
 // Returns a newly allocated UTF-8 string (caller must free()).
 char* t5_translate(struct t5_translate_context* ctx, const char* text, int max_new_tokens);
 
+// Returns true if the tokenizer's vocab contains `token_str` as an
+// exact-match piece. Used by the CLI adapter to decide whether to
+// prepend the MADLAD "<2xx>" target-language tag — MADLAD-400 has all
+// 419 lang tags as single-piece vocab entries; flan-t5 / mT5 / etc.
+// don't, so prepending the tag on those just adds garbage [▁, <unk>]
+// tokens to the input and corrupts the encoder context.
+bool t5_has_token(struct t5_translate_context* ctx, const char* token_str);
+
 #ifdef __cplusplus
 }
 #endif

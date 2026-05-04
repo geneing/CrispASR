@@ -924,6 +924,12 @@ extern "C" void t5_translate_free(struct t5_translate_context* ctx) {
     delete ctx;
 }
 
+extern "C" bool t5_has_token(struct t5_translate_context* ctx, const char* token_str) {
+    if (!ctx || !token_str)
+        return false;
+    return ctx->tokenizer.token_to_id.find(token_str) != ctx->tokenizer.token_to_id.end();
+}
+
 extern "C" char* t5_translate(struct t5_translate_context* ctx, const char* text, int max_new_tokens) {
     if (!ctx || !text)
         return nullptr;
