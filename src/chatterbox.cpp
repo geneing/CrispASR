@@ -1411,10 +1411,15 @@ static std::vector<float> build_prefill_embeds_gpt2(chatterbox_context* c, const
     std::vector<float> wpe_table((size_t)wpe_size * D);
     ggml_backend_tensor_get(m.wpe_w, wpe_table.data(), 0, wpe_table.size() * sizeof(float));
 
-    // 1. Speaker embedding projection (if conditioning is available)
+    // 1. Conditioning: speaker_emb projection + speech prompt token embeddings
+    // Python: cond_enc(t3_cond) returns [spkr_proj, speech_emb(cond_tokens)]
+    // For GPT-2 (Turbo): no perceiver, no text/speech pos embeddings, no emotion
     int cond_len = 0;
     std::vector<float> spkr_proj(D, 0.0f);
+    std::vector<float> cond_speech_embs; // speech prompt conditioning embeddings
+
     if (c->conds.loaded && m.cond_spkr_w) {
+        // Speaker embedding projection → 1 token
         std::vector<float> spkr_emb(c->hp.speaker_embed_size);
         ggml_backend_tensor_get(c->conds.speaker_emb, spkr_emb.data(), 0, spkr_emb.size() * sizeof(float));
 
@@ -1434,6 +1439,26 @@ static std::vector<float> build_prefill_embeds_gpt2(chatterbox_context* c, const
                 spkr_proj[i] += bias[i];
         }
         cond_len = 1;
+
+        // Speech prompt conditioning tokens → N embeddings (no pos emb for GPT-2)
+        if (c->conds.speech_prompt_tokens) {
+            int n_prompt = (int)c->conds.speech_prompt_tokens->ne[0];
+            std::vector<int32_t> prompt_toks(n_prompt);
+            ggml_backend_tensor_get(c->conds.speech_prompt_tokens, prompt_toks.data(), 0, n_prompt * sizeof(int32_t));
+
+            std::vector<float> speech_emb_table(c->hp.speech_vocab_size * D);
+            ggml_backend_tensor_get(m.speech_emb_w, speech_emb_table.data(), 0,
+                                    speech_emb_table.size() * sizeof(float));
+
+            cond_speech_embs.resize((size_t)n_prompt * D);
+            for (int i = 0; i < n_prompt; i++) {
+                int tok = std::max(0, std::min((int)c->hp.speech_vocab_size - 1, (int)prompt_toks[i]));
+                for (int j = 0; j < D; j++) {
+                    cond_speech_embs[i * D + j] = speech_emb_table[tok * D + j];
+                }
+            }
+            cond_len += n_prompt;
+        }
     }
 
     int text_len = (int)text_tokens.size();
@@ -1451,13 +1476,24 @@ static std::vector<float> build_prefill_embeds_gpt2(chatterbox_context* c, const
     int pos = 0;
     int wpe_pos = 0;
 
-    // Place speaker conditioning at position 0
+    // Place conditioning: [speaker_proj, cond_speech_embs...]
     if (cond_len > 0) {
+        // Speaker projection at position 0
         for (int j = 0; j < D; j++) {
             embeds[pos * D + j] = spkr_proj[j] + wpe_table[wpe_pos * D + j];
         }
         pos++;
         wpe_pos++;
+
+        // Speech conditioning tokens (if any)
+        int n_cond_speech = (int)(cond_speech_embs.size() / D);
+        for (int i = 0; i < n_cond_speech; i++) {
+            for (int j = 0; j < D; j++) {
+                embeds[(pos + i) * D + j] = cond_speech_embs[i * D + j] + wpe_table[(wpe_pos + i) * D + j];
+            }
+        }
+        pos += n_cond_speech;
+        wpe_pos += n_cond_speech;
     }
 
     // Place text embeddings: text_emb(tok) + wpe(pos)
