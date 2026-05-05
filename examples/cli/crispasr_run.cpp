@@ -734,6 +734,26 @@ int crispasr_run_backend(const whisper_params& params_in) {
         fprintf(stderr, "crispasr[verbose]: backend '%s' initialised OK\n", backend_name.c_str());
     }
 
+    // SubtitleEdit #10775: when a user explicitly passes --aligner-model
+    // for a backend that already produces native word timestamps, the
+    // alignment dispatch loop (crispasr_run.cpp:305 / :398 / :1252)
+    // skips the CTC pass per-segment because seg.words is already
+    // populated. Result: aligner is loaded into memory and silently
+    // becomes a no-op; the user sees the backend's native timing and
+    // assumes "alignment doesn't work for <backend>." Make the
+    // requirement explicit at startup so the next user doesn't have
+    // to read the dispatch code to figure it out.
+    if (!params.aligner_model.empty() && !params.force_aligner && (backend->capabilities() & CAP_WORD_TIMESTAMPS) &&
+        !params.no_prints) {
+        fprintf(stderr,
+                "crispasr: warning: --aligner-model is set, but backend '%s' already produces "
+                "native word timestamps. The aligner will be loaded but skipped per-segment "
+                "(CTC alignment only runs when no native words are available). Add "
+                "--force-aligner / -falign to override the native words with the CTC aligner's "
+                "output.\n",
+                backend_name.c_str());
+    }
+
     // ---- Text-to-text translation mode: m2m100 standalone ----
     // Triggered by `--text "..."` on a backend declaring CAP_TRANSLATE.
     // Source / target languages: use the dedicated --tr-sl / --tr-tl
