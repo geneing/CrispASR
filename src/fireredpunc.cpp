@@ -228,6 +228,13 @@ struct fireredpunc_context {
 
     // Backend
     ggml_backend_t backend = nullptr;
+    // GH issue #68: ggml_backend_sched_new asserts that the last
+    // backend in its list is CPU when a GPU backend is present —
+    // otherwise host-side fallbacks have nowhere to land. We always
+    // create a CPU backend alongside `backend` and append it to the
+    // sched list (when distinct), even if the model is light enough
+    // to fit fully on GPU. Mirror of voxtral4b / mimo_asr / etc.
+    ggml_backend_t backend_cpu = nullptr;
     ggml_backend_buffer_t buf = nullptr;
     ggml_context* w_ctx = nullptr;
     ggml_backend_sched_t sched = nullptr;
@@ -279,6 +286,11 @@ static bool fireredpunc_load(fireredpunc_context& ctx, const char* path) {
     ctx.backend = ggml_backend_init_best();
     if (!ctx.backend)
         ctx.backend = ggml_backend_cpu_init();
+    // Always have a separate CPU backend on hand for ggml_backend_sched
+    // to fall back to (issue #68). When init_best returned a CPU
+    // backend already, we still create a second one so the assert
+    // path is uniform.
+    ctx.backend_cpu = ggml_backend_cpu_init();
     core_gguf::WeightLoad wl;
     if (!core_gguf::load_weights(path, ctx.backend, "fireredpunc", wl))
         return false;
@@ -319,9 +331,16 @@ static bool fireredpunc_load(fireredpunc_context& ctx, const char* path) {
     ctx.cls_w = req("cls.weight");
     ctx.cls_b = req("cls.bias");
 
-    // Scheduler
-    auto* bk = ctx.backend;
-    ctx.sched = ggml_backend_sched_new(&bk, nullptr, 1, 8192, false, false);
+    // Scheduler. Issue #68: ggml_backend_sched_new asserts the last
+    // backend is CPU when a GPU backend is present, otherwise the
+    // process aborts with a stack trace. Pass the CPU backend last so
+    // CUDA / Vulkan / Metal hosts don't crash.
+    ggml_backend_t backends[2] = {ctx.backend, nullptr};
+    int n_backends = 1;
+    if (ctx.backend_cpu && ctx.backend_cpu != ctx.backend) {
+        backends[n_backends++] = ctx.backend_cpu;
+    }
+    ctx.sched = ggml_backend_sched_new(backends, nullptr, n_backends, 8192, false, false);
 
     return true;
 }
@@ -769,6 +788,8 @@ void fireredpunc_free(fireredpunc_context* ctx) {
         ggml_backend_buffer_free(ctx->buf);
     if (ctx->w_ctx)
         ggml_free(ctx->w_ctx);
+    if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
+        ggml_backend_free(ctx->backend_cpu);
     if (ctx->backend)
         ggml_backend_free(ctx->backend);
     delete ctx;
