@@ -1,5 +1,9 @@
 #define _USE_MATH_DEFINES // for M_PI
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include "common-crispasr.h"
 
 #include "common.h"
@@ -196,6 +200,12 @@ int timestamp_to_sample(int64_t t, int n_samples, int whisper_sample_rate) {
 }
 
 bool speak_with_file(const std::string & command, const std::string & text, const std::string & path, int voice_id) {
+#if defined(__APPLE__) && (TARGET_OS_IPHONE || TARGET_OS_TV || TARGET_OS_WATCH)
+    // system() is unavailable on iOS / tvOS / watchOS.
+    (void) command; (void) text; (void) path; (void) voice_id;
+    fprintf(stderr, "%s: not supported on this platform (system() unavailable)\n", __func__);
+    return false;
+#else
     std::ofstream speak_file(path.c_str());
     if (speak_file.fail()) {
         fprintf(stderr, "%s: failed to open speak_file\n", __func__);
@@ -210,6 +220,7 @@ bool speak_with_file(const std::string & command, const std::string & text, cons
         }
     }
     return true;
+#endif
 }
 
 #undef STB_VORBIS_HEADER_ONLY
