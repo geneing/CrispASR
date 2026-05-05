@@ -26,6 +26,6 @@ long F16×F16 dot products.
 
 Patch: `01-cpu-f16-f32-dot.patch` (4 files, +94/-9).
 
-**Verification.** Tested on M1 / M2 / M3 / M4 with Qwen3-TTS F16 GGUF;
+**Verification.** Tested on M1;
 talker emits valid logits and AR loop terminates on `codec_eos` instead
 of running to the cap. Existing `test-backend-ops` cases unchanged.
