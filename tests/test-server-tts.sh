@@ -389,6 +389,29 @@ code=$(curl -s -X POST \
 assert "second-call voice switch (ryan) → 200" "200" "$code"
 rm -f "$TMPVOICE"
 
+# Long-form chunking (PLAN §75d / issue #66): a multi-sentence input
+# should produce a longer audio body than a single sentence (chunks
+# are concatenated with 200 ms silence between them). Server log
+# should report chunks=N>1.
+TMP_SHORT=$(mktemp -t crispasr-short.XXXXXX.wav)
+TMP_LONG=$(mktemp -t crispasr-long.XXXXXX.wav)
+curl -s -X POST -H 'Content-Type: application/json' \
+    -d '{"input":"This is one sentence."}' \
+    -o "$TMP_SHORT" "http://127.0.0.1:$PORT/v1/audio/speech" >/dev/null
+curl -s -X POST -H 'Content-Type: application/json' \
+    -d '{"input":"This is one sentence. This is two. Here is three. Here is four."}' \
+    -o "$TMP_LONG" "http://127.0.0.1:$PORT/v1/audio/speech" >/dev/null
+SZ_SHORT=$(wc -c < "$TMP_SHORT" | tr -d ' ')
+SZ_LONG=$(wc -c < "$TMP_LONG" | tr -d ' ')
+if [ "$SZ_LONG" -gt "$SZ_SHORT" ]; then
+    echo "  ✓ multi-sentence input produces longer audio ($SZ_LONG vs $SZ_SHORT bytes)"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ multi-sentence input audio not larger: long=$SZ_LONG short=$SZ_SHORT"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$TMP_SHORT" "$TMP_LONG"
+
 # Unknown CustomVoice name → empty PCM from the adapter → 500 from the
 # server. Worth pinning so that future "fall back to first speaker"
 # changes are deliberate.

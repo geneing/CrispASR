@@ -49,6 +49,7 @@ add_executable(${TARGET}
     crispasr_diagnostics.cpp
     crispasr_run.cpp
     crispasr_server.cpp
+    crispasr_tts_chunking.cpp
 )
 
 # ---------------------------------------------------------------------------

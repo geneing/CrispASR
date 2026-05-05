@@ -217,6 +217,24 @@ catch_discover_tests(test_server_wav_writer
     PROPERTIES LABELS "unit"
 )
 
+# ─── test_server_chunking — Catch2 unit tests for the sentence splitter
+# used by /v1/audio/speech long-form input (PLAN §75d / issue #66).
+# Pure functions, no backend dependency.
+add_executable(test_server_chunking
+    test_server_chunking.cpp
+    ${PROJECT_SOURCE_DIR}/examples/cli/crispasr_tts_chunking.cpp
+)
+target_include_directories(test_server_chunking PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test_server_chunking PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test_server_chunking
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
 # ─── test-core-decode — Catch2 unit tests for core_greedy_decode + core_beam_decode
 #
 # Tests the shared decode helpers in isolation with a mock LLM. No models

@@ -25,6 +25,7 @@
 #include "whisper_params.h"
 
 #include "common-crispasr.h" // read_audio_data
+#include "crispasr_tts_chunking.h"
 #include "crispasr_wav_writer.h"
 #include "../server/httplib.h"
 #include "../json.hpp"
@@ -728,12 +729,30 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         if (!instructions.empty())
             rp.tts_instruct = instructions;
 
+        // Long-form chunking (PLAN §75d / issue #66): split input on
+        // sentence boundaries before dispatching to the backend so each
+        // synth stays inside the talker's healthy training horizon.
+        // Single-sentence input becomes a 1-element vector; the per-call
+        // overhead is one std::vector<float> move.
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<float> pcm;
+        std::vector<std::string> sentences = crispasr_tts_split_sentences(text);
+        if (sentences.empty()) // input was whitespace-only
+            sentences.push_back(text);
+
+        std::vector<std::vector<float>> chunks;
+        chunks.reserve(sentences.size());
         {
             std::lock_guard<std::mutex> lock(model_mutex);
-            pcm = backend->synthesize(text, rp);
+            for (const auto& sent : sentences) {
+                std::vector<float> chunk = backend->synthesize(sent, rp);
+                if (!chunk.empty())
+                    chunks.push_back(std::move(chunk));
+            }
         }
+        // 200 ms silence at 24 kHz between chunks. Inaudible click
+        // suppression at boundaries; long enough that the listener
+        // perceives a natural sentence pause without dragging.
+        std::vector<float> pcm = crispasr_tts_concat_with_silence(chunks, 4800);
         auto t1 = std::chrono::steady_clock::now();
 
         if (pcm.empty()) {
@@ -764,10 +783,10 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         const double audio_s = (double)pcm.size() / 24000.0;
         fprintf(stderr,
                 "crispasr-server: synthesized %.1fs audio in %.2fs (RTF=%.2f) "
-                "voice='%s' speed=%.2f format=%s model='%s'\n",
+                "voice='%s' speed=%.2f format=%s model='%s' chunks=%zu\n",
                 audio_s, elapsed_s, elapsed_s > 0 ? elapsed_s / audio_s : 0.0,
                 voice_name.empty() ? "<startup>" : voice_name.c_str(), speed, response_format.c_str(),
-                requested_model.empty() ? "<unset>" : requested_model.c_str());
+                requested_model.empty() ? "<unset>" : requested_model.c_str(), chunks.size());
 
         if (response_format == "f32") {
             std::string buf((const char*)pcm.data(), pcm.size() * sizeof(float));
