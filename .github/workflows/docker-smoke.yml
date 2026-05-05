@@ -30,6 +30,10 @@ on:
       - "examples/**"
       - "ggml/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   smoke:
     runs-on: ubuntu-24.04

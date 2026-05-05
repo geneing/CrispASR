@@ -9,6 +9,10 @@ on:
       - bindings/go/**
       - crispasr.h
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ubuntu-22:
     runs-on: ubuntu-22.04
