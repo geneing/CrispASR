@@ -50,6 +50,12 @@ struct omniasr_hparams {
     int n_dec = 12;
     int head_dim_dec = 512;
     int n_langs = 0;
+    // Streaming/Unlimited variant: 3 special tokens above vocab_size in tok_emb
+    //   streaming_lang = vocab_size     (lid marker)
+    //   last_segment   = vocab_size + 1 (signals final audio segment)
+    //   regular_segment= vocab_size + 2 (signals more segments follow)
+    int n_special_tokens = 0;   // 0=standard, 3=streaming/unlimited
+    float segment_secs = 15.0f; // audio chunk size for streaming
 };
 
 struct omniasr_model {
@@ -357,6 +363,11 @@ extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model
     hp.n_dec = core_gguf::kv_u32(gctx, "omniasr.n_dec_layers", 12);
     hp.head_dim_dec = core_gguf::kv_u32(gctx, "omniasr.head_dim_dec", 512);
     hp.n_langs = core_gguf::kv_u32(gctx, "omniasr.n_langs", 0);
+    hp.n_special_tokens = core_gguf::kv_u32(gctx, "omniasr.n_special_tokens", 0);
+
+    // Auto-detect streaming variant: tok_emb has vocab_size + 3 entries
+    // (streaming_lang, last_segment, regular_segment) even if metadata is absent.
+    // Defer detection to after tensor loading — see below.
 
     // CNN strides
     int stride_key = gguf_find_key(gctx, "omniasr.cnn_strides");
@@ -398,7 +409,8 @@ extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model
         fprintf(stderr, "omniasr-%s: enc=%dL d=%d, ", type_str, hp.n_enc, hp.d_model);
         if (hp.model_type == 1)
             fprintf(stderr, "dec=%dL d=%d ffn=%d heads=%d, ", hp.n_dec, hp.d_dec, hp.d_ffn_dec, hp.n_heads_dec);
-        fprintf(stderr, "cnn=%d, vocab=%d\n", hp.n_cnn, hp.vocab_size);
+        fprintf(stderr, "cnn=%d, vocab=%d%s\n", hp.n_cnn, hp.vocab_size,
+                hp.n_special_tokens == 3 ? " [streaming]" : "");
     }
 
     // Load weights
@@ -495,10 +507,24 @@ extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model
         ctx->lang_emb_w = G("lang_emb.weight");
         // Compute meta for graph building (generous size for 12-layer decoder)
         ctx->compute_meta.resize(ggml_tensor_overhead() * 4096 + ggml_graph_overhead_custom(32768, false));
+
+        // Auto-detect streaming/unlimited variant from tok_emb size.
+        // Standard: tok_emb has vocab_size+1 rows (extra lid_marker).
+        // Streaming: tok_emb has vocab_size+3 rows (streaming_lang, last_segment, regular_segment).
+        if (hp.n_special_tokens == 0 && ctx->tok_emb_w) {
+            int tok_emb_rows = (int)ctx->tok_emb_w->ne[1];
+            if (tok_emb_rows == hp.vocab_size + 3) {
+                hp.n_special_tokens = 3;
+                if (params.verbosity >= 1)
+                    fprintf(stderr, "omniasr: auto-detected streaming variant (tok_emb=%d = vocab+3)\n", tok_emb_rows);
+            }
+        }
     }
 
     if (params.verbosity >= 1) {
         fprintf(stderr, "omniasr: loaded %zu tensors, %zu vocab\n", m.tensors.size(), m.vocab.size());
+        if (hp.n_special_tokens == 3)
+            fprintf(stderr, "omniasr: streaming mode (segment_secs=%.1f)\n", hp.segment_secs);
     }
 
     return ctx;
@@ -1105,7 +1131,7 @@ static bool omniasr_run_dec_token(omniasr_context* ctx, int token_id, int n_past
 }
 
 static ggml_cgraph* omniasr_build_prefill_graph(omniasr_context* ctx, int d_enc, int T_enc, bool use_lang,
-                                                int prefix_len, bool output_token_id) {
+                                                bool use_seg_marker, int prefix_len, bool output_token_id) {
     auto& hp = ctx->model.hp;
     int dd = hp.d_dec;
 
@@ -1131,6 +1157,14 @@ static ggml_cgraph* omniasr_build_prefill_graph(omniasr_context* ctx, int d_enc,
         ggml_set_name(lang_id, "lang_id");
         ggml_set_input(lang_id);
         cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->lang_emb_w, lang_id), 1);
+    }
+
+    // Streaming segment marker: inserted between lang_emb and BOS
+    if (use_seg_marker) {
+        ggml_tensor* seg_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+        ggml_set_name(seg_id, "seg_marker_id");
+        ggml_set_input(seg_id);
+        cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->tok_emb_w, seg_id), 1);
     }
 
     ggml_tensor* bos_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
@@ -1163,8 +1197,8 @@ static ggml_cgraph* omniasr_build_prefill_graph(omniasr_context* ctx, int d_enc,
 }
 
 static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
-                                bool use_lang, int lang_id, int lid_marker_id, int prefix_len, int& next_token,
-                                omniasr_perf* perf, std::vector<float>* out_logits = nullptr) {
+                                bool use_lang, int lang_id, int lid_marker_id, int seg_marker_id, int prefix_len,
+                                int& next_token, omniasr_perf* perf, std::vector<float>* out_logits = nullptr) {
     std::vector<int32_t> positions(prefix_len);
     for (int i = 0; i < prefix_len; i++)
         positions[i] = i;
@@ -1179,9 +1213,12 @@ static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& 
     int32_t lid = lid_marker_id;
     int32_t lang = lang_id;
     int32_t bos = ctx->model.hp.bos_id;
+    int32_t seg = seg_marker_id;
+    const bool use_seg_marker = (seg_marker_id >= 0);
 
     const bool need_logits = (out_logits != nullptr);
-    ggml_cgraph* gf = omniasr_build_prefill_graph(ctx, d_enc, T_enc, use_lang, prefix_len, !need_logits);
+    ggml_cgraph* gf =
+        omniasr_build_prefill_graph(ctx, d_enc, T_enc, use_lang, use_seg_marker, prefix_len, !need_logits);
     if (perf)
         perf->prefill_nodes = ggml_graph_n_nodes(gf);
     ggml_backend_sched_reset(ctx->sched);
@@ -1199,6 +1236,8 @@ static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& 
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "lid_id"), &lid, 0, sizeof(lid));
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "lang_id"), &lang, 0, sizeof(lang));
     }
+    if (use_seg_marker)
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "seg_marker_id"), &seg, 0, sizeof(seg));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bos_id"), &bos, 0, sizeof(bos));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
                             positions.size() * sizeof(int32_t));
@@ -1279,53 +1318,63 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
     }
 
     bool use_lang = (hp.n_langs > 0 && ctx->lang_emb_w);
-    // Sequence: [audio_embs...] [lid_marker_emb] [lang_emb] [BOS_emb] [generated...]
-    // lid_marker is special token at index vocab_size (9812) in text_frontend
-    int lid_marker_id = hp.vocab_size; // 9812 — the extra token in tok_emb (size 9813)
+    // Standard sequence: [audio_embs] [lid_marker] [lang_emb] [BOS] [generated...]
+    // Streaming sequence: [audio_embs] [lid_marker] [lang_emb] [seg_marker] [BOS] [generated...]
+    // lid_marker = vocab_size (streaming_lang token in unlimited variant)
+    int lid_marker_id = hp.vocab_size;
     if (lang_id < 0 || lang_id >= hp.n_langs || lid_marker_id >= tok_emb_size)
         use_lang = false;
-    int n_lang_tokens = use_lang ? 2 : 0;       // lid_marker + lang_emb
-    int prefix_len = T_enc + n_lang_tokens + 1; // audio + [lid_marker + lang] + BOS
+
+    // Streaming/unlimited: insert segment marker between lang_emb and BOS.
+    // For single-segment audio, use last_segment (vocab_size+1).
+    // For multi-segment, the outer loop sets this per chunk.
+    const bool is_streaming = (hp.n_special_tokens == 3);
+    int seg_marker_id = -1; // -1 = not used (standard model)
+    if (is_streaming) {
+        seg_marker_id = hp.vocab_size + 1; // last_segment (single-segment default)
+        if (seg_marker_id >= tok_emb_size) {
+            fprintf(stderr, "omniasr-llm: streaming tok_emb too small for segment marker %d (size=%d)\n", seg_marker_id,
+                    tok_emb_size);
+            seg_marker_id = -1;
+        }
+    }
+
+    int n_lang_tokens = use_lang ? 2 : 0;                      // lid_marker + lang_emb
+    int n_seg_tokens = (seg_marker_id >= 0) ? 1 : 0;           // segment marker
+    int prefix_len = T_enc + n_lang_tokens + n_seg_tokens + 1; // audio + [lid + lang] + [seg] + BOS
 
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "omniasr-llm: prefix len=%d (%d audio%s + BOS), lang_id=%d, d=%d\n", prefix_len, T_enc,
-                use_lang ? " + lid + lang" : "", lang_id, dd);
+        fprintf(stderr, "omniasr-llm: prefix len=%d (%d audio%s%s + BOS), lang_id=%d, d=%d%s\n", prefix_len, T_enc,
+                use_lang ? " + lid + lang" : "", (seg_marker_id >= 0) ? " + seg" : "", lang_id, dd,
+                is_streaming ? " [streaming]" : "");
 
-    // 3. Allocate KV cache and run decoder via ggml graph
-    int max_gen = ctx->params.max_new_tokens > 0 ? ctx->params.max_new_tokens : 512;
-    int max_ctx = prefix_len + max_gen;
-    // Allocate KV cache
-    if (!ctx->kv_k) {
-        omniasr_alloc_kv_cache(ctx, max_ctx);
-    } else if (ctx->kv_max_ctx < max_ctx) {
-        // Reallocate if needed
-        if (ctx->kv_ctx)
-            ggml_free(ctx->kv_ctx);
-        if (ctx->kv_buf)
-            ggml_backend_buffer_free(ctx->kv_buf);
-        ctx->kv_k = ctx->kv_v = nullptr;
-        omniasr_alloc_kv_cache(ctx, max_ctx);
+    // 3. Segment splitting for streaming/unlimited variant.
+    // The unlimited model was trained on 15-second audio segments. For audio longer
+    // than segment_secs, split into chunks and decode each segment independently.
+    // CNN total stride = product of cnn_strides (typically 5*2^6 = 320).
+    // Frames per segment = (segment_secs * 16000) / total_stride.
+    int frames_per_seg = T_enc; // default: single segment (entire audio)
+    int n_segments = 1;
+    if (is_streaming && T_enc > 1) {
+        int total_stride = 1;
+        for (int s : m.cnn_strides)
+            total_stride *= s;
+        frames_per_seg = (int)(hp.segment_secs * 16000.0f) / total_stride;
+        if (frames_per_seg <= 0)
+            frames_per_seg = T_enc;
+        n_segments = (T_enc + frames_per_seg - 1) / frames_per_seg;
+        if (ctx->params.verbosity >= 1 && n_segments > 1)
+            fprintf(stderr, "omniasr-llm: splitting into %d segments (%d frames each)\n", n_segments, frames_per_seg);
     }
-    // Clear KV cache for new transcription
-    if (ctx->kv_buf)
-        ggml_backend_buffer_clear(ctx->kv_buf, 0);
-    ctx->kv_n_used = 0;
-    // 4. Prefill decoder with entire prefix. Capture logits when the caller
-    // wants per-token confidence OR when temperature sampling is requested
-    // (we need raw logits to draw a multinomial sample) OR when beam search
-    // is on (the helper seeds initial beams from prefill logits).
-    int cur_token = 0;
-    float cur_prob = 0.0f;
+
+    // 4. Shared decode state
+    int max_gen = ctx->params.max_new_tokens > 0 ? ctx->params.max_new_tokens : 512;
     const bool want_probs = (out_token_ids && out_token_probs);
     const bool sampling = (ctx->params.temperature > 0.0f);
     const bool beam = (ctx->params.beam_size > 1);
     const bool capture_logits = (want_probs || sampling || beam);
-    std::vector<float> step_logits;
 
-    // Per-call seed: derive deterministically from the audio buffer so
-    // repeated calls with the same input give the same trajectory. The
-    // sticky `seed_override` (set via omniasr_set_seed for best-of-N) is
-    // mixed in so callers can draw N independent samples from the same audio.
+    // Per-call seed
     uint64_t rng_state = 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)encoder_out.data() ^
                          (uint64_t)(encoder_out.size() ^ 0xDEADBEEFCAFEBABEull) ^
                          (ctx->seed_override * 0xBF58476D1CE4E5B9ull);
@@ -1338,9 +1387,6 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
         return (float)((rng_state >> 11) & 0x1FFFFF) / (float)(1 << 21);
     };
 
-    // Pick token from logits: argmax (temp == 0) or multinomial-from-softmax
-    // (temp > 0). Always populates picked_prob with the softmax probability
-    // of the picked token (with temperature applied when sampling).
     auto pick_from_logits = [&](const std::vector<float>& logits, int& picked, float& picked_prob) {
         const int V = (int)logits.size();
         if (V == 0) {
@@ -1386,127 +1432,163 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
         picked_prob = probs[picked];
     };
 
-    if (!omniasr_run_prefill(ctx, encoder_out, d_enc, T_enc, use_lang, lang_id, lid_marker_id, prefix_len, cur_token,
-                             perf, capture_logits ? &step_logits : nullptr)) {
-        fprintf(stderr, "omniasr-llm: prefill failed\n");
-        return nullptr;
-    }
-    ctx->kv_n_used = prefix_len;
-    if (capture_logits && !step_logits.empty()) {
-        // Override the helper's CPU-argmax cur_token with our pick (which
-        // may be a sampled token when temperature > 0). The captured prob
-        // is the softmax-with-temperature of whichever token we picked.
-        pick_from_logits(step_logits, cur_token, cur_prob);
-    }
-
-    if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "omniasr-llm: prefill done (%d tokens)\n", prefix_len);
-
-    // 5. Greedy / beam → emit output tokens.
+    // 5. Segment loop: decode each audio segment independently.
     std::vector<int> output_tokens;
-    if (ctx->params.verbosity >= 2)
-        fprintf(stderr, "  prefill → token=%d (%s)\n", cur_token,
-                cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
 
-    if (beam) {
-        // Beam path: seed B beams from prefill logits, then per-beam KV
-        // snapshot/restore through core_beam_decode::run_with_probs_branched.
-        // Mutually exclusive with greedy/sampled below — we return after.
-        struct omniasr_kv_snap {
-            std::vector<uint8_t> k_data;
-            std::vector<uint8_t> v_data;
-        };
-        auto save = [](omniasr_context* c) -> omniasr_kv_snap* {
-            auto* s = new omniasr_kv_snap();
-            const size_t kb = ggml_nbytes(c->kv_k);
-            const size_t vb = ggml_nbytes(c->kv_v);
-            s->k_data.resize(kb);
-            s->v_data.resize(vb);
-            ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, kb);
-            ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, vb);
-            return s;
-        };
-        auto restore = [](omniasr_context* c, omniasr_kv_snap* s) {
-            ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
-            ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
-        };
-        auto snap_free = [](omniasr_kv_snap* s) { delete s; };
-        std::vector<float> step_buf;
-        auto step = [&step_buf, perf](omniasr_context* c, int32_t tok, int n_past) -> float* {
-            int dummy = 0;
-            if (!omniasr_run_dec_token(c, tok, n_past, dummy, perf, &step_buf))
-                return nullptr;
-            const int V = (int)step_buf.size();
-            float* out = (float*)std::malloc((size_t)V * sizeof(float));
-            std::memcpy(out, step_buf.data(), (size_t)V * sizeof(float));
-            return out;
-        };
+    for (int seg_idx = 0; seg_idx < n_segments; seg_idx++) {
+        // Compute encoder frame range for this segment
+        int seg_start = seg_idx * frames_per_seg;
+        int seg_end = std::min(seg_start + frames_per_seg, T_enc);
+        int seg_T = seg_end - seg_start;
 
-        core_beam_decode::Config cfg;
-        cfg.max_new_tokens = max_gen;
-        cfg.eos_id = hp.eos_id;
-        cfg.vocab_size = (int)step_logits.size(); // captured at prefill (== logits tensor ne[0])
-        cfg.beam_size = ctx->params.beam_size;
-        cfg.prompt_len = prefix_len;
+        // Extract encoder output slice for this segment
+        std::vector<float> seg_enc((size_t)d_enc * seg_T);
+        memcpy(seg_enc.data(), encoder_out.data() + (size_t)seg_start * d_enc, (size_t)d_enc * seg_T * sizeof(float));
 
-        if (cfg.vocab_size <= 0) {
-            fprintf(stderr, "omniasr-llm: beam path requires prefill to capture logits\n");
-        } else {
-            auto r =
-                core_beam_decode::run_with_probs_branched(ctx, step_logits.data(), save, restore, snap_free, step, cfg);
-            for (size_t i = 0; i < r.tokens.size(); i++) {
-                if (r.tokens[i] == hp.eos_id)
-                    break;
-                output_tokens.push_back(r.tokens[i]);
-                if (want_probs) {
-                    out_token_ids->push_back(r.tokens[i]);
-                    out_token_probs->push_back(r.probs[i]);
+        // For streaming: set segment marker (last_segment vs regular_segment)
+        int cur_seg_marker = seg_marker_id; // default: last_segment (vocab_size+1)
+        if (is_streaming) {
+            bool is_last = (seg_idx == n_segments - 1);
+            cur_seg_marker = is_last ? (hp.vocab_size + 1) : (hp.vocab_size + 2);
+        }
+
+        // Compute prefix_len for this segment
+        int seg_prefix_len = seg_T + n_lang_tokens + n_seg_tokens + 1;
+
+        // Allocate/reallocate KV cache
+        int seg_max_ctx = seg_prefix_len + max_gen;
+        if (!ctx->kv_k) {
+            omniasr_alloc_kv_cache(ctx, seg_max_ctx);
+        } else if (ctx->kv_max_ctx < seg_max_ctx) {
+            if (ctx->kv_ctx)
+                ggml_free(ctx->kv_ctx);
+            if (ctx->kv_buf)
+                ggml_backend_buffer_free(ctx->kv_buf);
+            ctx->kv_k = ctx->kv_v = nullptr;
+            omniasr_alloc_kv_cache(ctx, seg_max_ctx);
+        }
+        // Clear KV cache for each segment
+        if (ctx->kv_buf)
+            ggml_backend_buffer_clear(ctx->kv_buf, 0);
+        ctx->kv_n_used = 0;
+
+        // Prefill this segment
+        int cur_token = 0;
+        float cur_prob = 0.0f;
+        std::vector<float> step_logits;
+
+        if (!omniasr_run_prefill(ctx, seg_enc, d_enc, seg_T, use_lang, lang_id, lid_marker_id, cur_seg_marker,
+                                 seg_prefix_len, cur_token, perf, capture_logits ? &step_logits : nullptr)) {
+            fprintf(stderr, "omniasr-llm: prefill failed (segment %d/%d)\n", seg_idx + 1, n_segments);
+            break;
+        }
+        ctx->kv_n_used = seg_prefix_len;
+        if (capture_logits && !step_logits.empty())
+            pick_from_logits(step_logits, cur_token, cur_prob);
+
+        if (ctx->params.verbosity >= 2)
+            fprintf(stderr, "  seg %d/%d prefill → token=%d (%s)\n", seg_idx + 1, n_segments, cur_token,
+                    cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
+
+        // Decode this segment
+        std::vector<int> seg_tokens;
+
+        if (beam) {
+            struct omniasr_kv_snap {
+                std::vector<uint8_t> k_data;
+                std::vector<uint8_t> v_data;
+            };
+            auto save = [](omniasr_context* c) -> omniasr_kv_snap* {
+                auto* s = new omniasr_kv_snap();
+                const size_t kb = ggml_nbytes(c->kv_k);
+                const size_t vb = ggml_nbytes(c->kv_v);
+                s->k_data.resize(kb);
+                s->v_data.resize(vb);
+                ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, kb);
+                ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, vb);
+                return s;
+            };
+            auto restore = [](omniasr_context* c, omniasr_kv_snap* s) {
+                ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
+                ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
+            };
+            auto snap_free = [](omniasr_kv_snap* s) { delete s; };
+            std::vector<float> step_buf;
+            auto step_fn = [&step_buf, perf](omniasr_context* c, int32_t tok, int n_past) -> float* {
+                int dummy = 0;
+                if (!omniasr_run_dec_token(c, tok, n_past, dummy, perf, &step_buf))
+                    return nullptr;
+                const int V = (int)step_buf.size();
+                float* out = (float*)std::malloc((size_t)V * sizeof(float));
+                std::memcpy(out, step_buf.data(), (size_t)V * sizeof(float));
+                return out;
+            };
+
+            core_beam_decode::Config cfg;
+            cfg.max_new_tokens = max_gen;
+            cfg.eos_id = hp.eos_id;
+            cfg.vocab_size = (int)step_logits.size();
+            cfg.beam_size = ctx->params.beam_size;
+            cfg.prompt_len = seg_prefix_len;
+
+            if (cfg.vocab_size > 0) {
+                auto r = core_beam_decode::run_with_probs_branched(ctx, step_logits.data(), save, restore, snap_free,
+                                                                   step_fn, cfg);
+                for (size_t i = 0; i < r.tokens.size(); i++) {
+                    if (r.tokens[i] == hp.eos_id)
+                        break;
+                    seg_tokens.push_back(r.tokens[i]);
+                    if (want_probs) {
+                        out_token_ids->push_back(r.tokens[i]);
+                        out_token_probs->push_back(r.probs[i]);
+                    }
                 }
             }
-        }
-    } else {
-        if (cur_token != hp.eos_id) {
-            output_tokens.push_back(cur_token);
-            if (want_probs) {
-                out_token_ids->push_back(cur_token);
-                out_token_probs->push_back(cur_prob);
+        } else {
+            if (cur_token != hp.eos_id) {
+                seg_tokens.push_back(cur_token);
+                if (want_probs) {
+                    out_token_ids->push_back(cur_token);
+                    out_token_probs->push_back(cur_prob);
+                }
+            }
+
+            for (int step = 0; (int)seg_tokens.size() < max_gen && cur_token != hp.eos_id; step++) {
+                if (cur_token < 0 || cur_token >= tok_emb_size)
+                    break;
+
+                int n_past = seg_prefix_len + step;
+                if (!omniasr_run_dec_token(ctx, cur_token, n_past, cur_token, perf,
+                                           capture_logits ? &step_logits : nullptr)) {
+                    fprintf(stderr, "omniasr-llm: decode step %d failed (segment %d)\n", step, seg_idx + 1);
+                    break;
+                }
+                if (capture_logits && !step_logits.empty())
+                    pick_from_logits(step_logits, cur_token, cur_prob);
+
+                if (cur_token == hp.eos_id)
+                    break;
+                seg_tokens.push_back(cur_token);
+                if (want_probs) {
+                    out_token_ids->push_back(cur_token);
+                    out_token_probs->push_back(cur_prob);
+                }
+
+                if (ctx->params.verbosity >= 2 && step < 5)
+                    fprintf(stderr, "  gen %d: token=%d (%s)\n", step, cur_token,
+                            cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
             }
         }
 
-        // 6. Autoregressive generation: one token at a time
-        for (int step = 0; (int)output_tokens.size() < max_gen && cur_token != hp.eos_id; step++) {
-            if (cur_token < 0 || cur_token >= tok_emb_size) {
-                break; // Invalid token
-            }
+        if (ctx->params.verbosity >= 1 && n_segments > 1)
+            fprintf(stderr, "omniasr-llm: segment %d/%d → %d tokens\n", seg_idx + 1, n_segments,
+                    (int)seg_tokens.size());
 
-            int n_past = prefix_len + step;
-            if (!omniasr_run_dec_token(ctx, cur_token, n_past, cur_token, perf,
-                                       capture_logits ? &step_logits : nullptr)) {
-                fprintf(stderr, "omniasr-llm: decode step %d failed\n", step);
-                break;
-            }
-            if (capture_logits && !step_logits.empty()) {
-                // Same override as the prefill step — sampling when temp > 0,
-                // otherwise the run helper's argmax pick stands.
-                pick_from_logits(step_logits, cur_token, cur_prob);
-            }
-
-            if (cur_token == hp.eos_id)
-                break;
-            output_tokens.push_back(cur_token);
-            if (want_probs)
-                out_token_probs->push_back(cur_prob);
-            if (want_probs)
-                out_token_ids->push_back(cur_token);
-
-            if (ctx->params.verbosity >= 2 && step < 5)
-                fprintf(stderr, "  gen %d: token=%d (%s)\n", step, cur_token,
-                        cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
-        }
+        output_tokens.insert(output_tokens.end(), seg_tokens.begin(), seg_tokens.end());
     }
 
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "omniasr-llm: generated %d tokens\n", (int)output_tokens.size());
+        fprintf(stderr, "omniasr-llm: generated %d tokens total\n", (int)output_tokens.size());
 
     // Detokenize (same as CTC)
     std::string result;

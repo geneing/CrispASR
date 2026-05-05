@@ -2752,3 +2752,35 @@ silently overwrote — re-apply from this list. The five patches above
 are the full inventory as of 2026-05-05. Note that (1) and (5) are
 **coupled**: applying one without the other crashes kokoro F16 CPU at
 `ggml_backend_sched_split_graph`. Always re-apply them together.
+
+### OmniASR-LLM-Unlimited: streaming segment-token protocol
+
+The "Unlimited" variant (`omniASR_LLM_Unlimited_300M_v2`) uses a streaming
+protocol where long audio is split into 15-second segments, decoded one at
+a time. This uses 3 special tokens allocated above vocab_size in tok_emb:
+
+- `streaming_lang` (vocab_size = 10288): replaces lid_marker in standard model
+- `last_segment` (vocab_size + 1 = 10289): signals "this is the final audio segment"
+- `regular_segment` (vocab_size + 2 = 10290): signals "more segments follow"
+
+**tok_emb size**: Standard model has vocab_size+1 entries (extra lid_marker).
+Unlimited has vocab_size+3 entries (streaming_lang + last_segment + regular_segment).
+Auto-detection: `tok_emb->ne[1] == vocab_size + 3`.
+
+**Prefix structure** (per segment):
+```
+[audio_embs] [streaming_lang] [lang_emb] [segment_marker] [BOS] → generate until EOS
+```
+
+The segment marker tells the model whether to expect more audio segments
+after this one. EOS=2 is still emitted to terminate each segment's text.
+Without the segment marker in the prefix, the model never sees the input
+shape it was trained on and generates until max_new_tokens.
+
+**Multi-segment**: Split encoder output at 750-frame boundaries (15s × 16kHz
+÷ 320 CNN stride). Each segment gets an independent KV cache and decodes to
+EOS. Results are concatenated.
+
+**Critical**: The 476 extra vocab tokens (9812→10287) are NOT segment tokens —
+they are additional text tokens in the v2 tokenizer. The 3 segment protocol
+tokens sit above the full vocab at indices 10288–10290.

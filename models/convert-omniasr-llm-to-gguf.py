@@ -131,6 +131,13 @@ def main():
     writer.add_array("omniasr.cnn_strides", strides)
     writer.add_array("tokenizer.ggml.tokens", vocab)
 
+    # Detect streaming/unlimited variant: tok_emb has 3 extra special tokens
+    # (streaming_lang, last_segment, regular_segment) above vocab_size.
+    tok_emb_key = "text_frontend.weight"
+    if tok_emb_key in sd and sd[tok_emb_key].shape[0] == vocab_size + 3:
+        writer.add_uint32("omniasr.n_special_tokens", 3)
+        print(f"  Streaming variant detected (tok_emb={vocab_size+3} = vocab+3)")
+
     if lang_codes:
         writer.add_array("omniasr.lang_codes", lang_codes)
 

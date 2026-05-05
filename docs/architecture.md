@@ -232,3 +232,126 @@ regression test against `samples/jfk.wav`:
   `core_greedy_decode`.
 - **GPU offload** for the still-CPU-only backends — needs
   `ggml_backend_sched` with GPU primary.
+
+---
+
+## Per-backend architecture details
+
+Detailed architecture notes for backends whose design warrants more than
+a one-line summary. The [README backend table](../README.md#asr-backends)
+links here for each entry.
+
+### granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar
+
+**granite** (`granite-speech-{3.2-8b, 3.3-2b, 3.3-8b}`, `granite-4.0-1b-speech`):
+Conformer encoder + BLIP-2 Q-Former + Granite LLM (μP scaling).
+
+**granite-4.1** (`granite-speech-4.1-2b`): Same architecture as 4.0
+(16-layer Conformer + Q-Former + Granite LLM); "2B" = full system.
+Encoder runs as a single ggml graph by default with per-layer Shaw RPE
+in attention (PLAN #16) — bit-near-identical to the per-op CPU loop,
+~2.1× faster end-to-end on M1+Q4_K. `GRANITE_DISABLE_ENCODER_GRAPH=1`
+falls back to the CPU loop.
+
+**granite-4.1-plus** (`granite-speech-4.1-2b-plus`): 4.1 + 2-layer
+encoder hidden-state concatenation (1024+1024=2048 projector input);
+emits punctuated / capitalised transcripts by default. `cat_hidden_layers`
+post-norm tensors are captured inline in the graph and `ggml_concat`-ed
+with the final encoder output, so PLUS rides the GPU path too (~2.5×
+end-to-end on M1+Q4_K).
+
+**granite-4.1-nar** (`granite-speech-4.1-2b-nar`): 4.1 with
+non-autoregressive decoder — single LLM forward over [audio, text+slots]
++ slot argmax decode (`is_causal=False` everywhere); 4-layer encoder
+hidden-state concatenation + posterior-pooled BPE auxiliary CTC head;
+bit-exact end-to-end on JFK via `crispasr-diff granite-nle`. Wired into
+the main CLI as `--backend granite-4.1-nar` (alias `granite-nar`).
+Encoder also runs as a single ggml graph (sibling builder with self-cond
+residual + snapshot concat + final CTC logits), ~3× faster end-to-end on
+M1+Q4_K.
+
+### kokoro
+
+StyleTTS2 / iSTFTNet (BERT + ProsodyPredictor + iSTFTNet decoder, 82M
+params); per-voice GGUF; in-process libespeak-ng phonemizer with LRU
+cache; auto-routing for `-l de` swaps in the German-trained backbone +
+cascading voice fallback.
+
+Models: [`hexgrad/Kokoro-82M`](https://huggingface.co/hexgrad/Kokoro-82M)
++ [`dida-80b/kokoro-german-hui-multispeaker-base`](https://huggingface.co/dida-80b/kokoro-german-hui-multispeaker-base)
+(German backbone) + [`kikiri-tts/kikiri-german-{victoria,martin}`](https://huggingface.co/kikiri-tts)
+(German voicepacks).
+
+### orpheus
+
+Llama-3.2-3B-Instruct talker (28L, 3072 d) + SNAC RVQ codec (3
+codebooks × 4096 @ 24 kHz); 8 baked English speakers
+(`tara`/`leah`/`leo`/...). Pick the speaker with `--voice <name>` and
+pass `--temperature 0.6` (engine_class.py default — greedy loops).
+
+Drop-in DE checkpoint variants:
+- `--backend kartoffel-orpheus-de-natural` — [`cstr/kartoffel-orpheus-3b-german-natural-GGUF`](https://huggingface.co/cstr/kartoffel-orpheus-3b-german-natural-GGUF), 19 speakers, ASR-roundtrip word-exact via parakeet-v3 -l de
+- `--backend kartoffel-orpheus-de-synthetic` — [`cstr/kartoffel-orpheus-3b-german-synthetic-GGUF`](https://huggingface.co/cstr/kartoffel-orpheus-3b-german-synthetic-GGUF), 4 speakers + 12 emotions + 5 outbursts via `{Speaker} - {Emotion}: {text}` syntax
+- `--backend lex-au-orpheus-de` — `lex-au/Orpheus-3b-German-FT-Q8_0.gguf`
+
+### chatterbox / chatterbox-turbo / kartoffelbox-turbo / lahgtna-chatterbox
+
+Two-GGUF runtime: T3 AR text→speech-tokens + S3Gen flow-matching
+speech-tokens→24 kHz waveform.
+
+**T3 (Text-to-Tokens)**: Llama-30L for base/lahgtna, GPT-2-24L for
+turbo/kartoffelbox-turbo.
+
+**S3Gen (Tokens-to-Speech)**: UpsampleConformerEncoder + UNet1D CFM +
+HiFTGenerator vocoder. Turbo uses 2-step meanflow CFM (vs 10-step cosine
+for base). Default voice baked into T3 (`conds.*`); `--voice <wav>`
+switches to clone mode via VoiceEncoder LSTM + CAMPPlus x-vector. S3Gen
+GGUF auto-discovered next to T3 or passed via `--codec-model`.
+
+Variants:
+- [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) — base, English
+- [`cstr/chatterbox-turbo-GGUF`](https://huggingface.co/cstr/chatterbox-turbo-GGUF) — 350M distilled, meanflow
+- [`cstr/kartoffelbox-turbo-GGUF`](https://huggingface.co/cstr/kartoffelbox-turbo-GGUF) — German fine-tune of turbo
+- [`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF) — Arabic fine-tune of base
+
+Conformer rel-pos parity gap closed in §80 — encoder_out now bit-exact
+to Python reference.
+
+### omniasr (CTC + LLM + Unlimited)
+
+wav2vec2-style CNN frontend (7 layers, stride 5+2×6=320) + 24–48L
+transformer encoder + either CTC head or 12L LLaMA decoder (SwiGLU,
+RoPE, d=4096, 8 heads).
+
+**CTC variant**: greedy argmax with CTC blank collapse.
+
+**LLM variant** (`omniasr-llm-300m-v2`): Encoder projection (1024→4096)
++ language conditioning (1694 FLORES-200 codes) + autoregressive decode.
+Best quality for the 1600+ language family.
+
+**Unlimited variant** (`omniasr-llm-unlimited-300m-v2`): Same architecture
+but trained with a streaming segment-token protocol. Audio is split into
+15-second segments; each segment is decoded independently with a segment
+marker token that signals whether more audio follows. Three special tokens
+above vocab_size in tok_emb: `streaming_lang` (lid marker),
+`last_segment`, `regular_segment`. Auto-detected at load time from
+tok_emb shape (vocab_size + 3). Supports arbitrarily long audio input.
+
+### vibevoice
+
+σ-VAE ConvNeXt encoders + Qwen2.5-7B decoder. Dual-mode: ASR (with
+timestamps, diarization, hotwords) and TTS (DPM-Solver++ flow matching).
+
+### mimo-asr
+
+6L input_local_transformer (1024d) + 36L Qwen2 LM (4096d, 32Q/8KV);
+8-channel RVQ codes from separate MiMo-Audio-Tokenizer GGUF
+(`--codec-model`). Mandarin (Wu/Cantonese/Hokkien/Sichuanese dialects)
++ English + code-switching.
+
+### qwen3-tts
+
+Qwen3 talker LM + 12 Hz RVQ speech tokenizer. Three variants:
+- `qwen3-tts-0.6b-base` — 0.6B talker, baked voice pack or WAV + `--ref-text`
+- `qwen3-tts-1.7b-base` — 1.7B talker, higher quality
+- `qwen3-tts-1.7b-voicedesign` — natural-language voice description via `--instruct`
