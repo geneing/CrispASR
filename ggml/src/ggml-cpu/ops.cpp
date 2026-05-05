@@ -6135,7 +6135,7 @@ static void ggml_compute_forward_im2col_f32(
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
-    GGML_ASSERT(src1->type == GGML_TYPE_F16 || src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT( dst->type == GGML_TYPE_F32);
 
     GGML_TENSOR_BINARY_OP_LOCALS;
@@ -6165,7 +6165,7 @@ static void ggml_compute_forward_im2col_f32(
     int ofs0 = is_2D ? nb13 : nb12;
     int ofs1 = is_2D ? nb12 : nb11;
 
-    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
+    GGML_ASSERT(nb10 == sizeof(float));
 
     // im2col: [N, IC, IH, IW] => [N, OH, OW, IC*KH*KW]
     {
@@ -6178,12 +6178,7 @@ static void ggml_compute_forward_im2col_f32(
 
                         // micro kernel
                         float * dst_data = wdata + (in*OH*OW + ioh*OW + iow)*(IC*KH*KW); // [IC, KH, KW]
-                        const float * const src_data_f32 = src1->type == GGML_TYPE_F32
-                            ? (const float *)((const char *) src1->data + in*ofs0 + iic*ofs1)
-                            : nullptr; // [IH, IW]
-                        const ggml_fp16_t * const src_data_f16 = src1->type == GGML_TYPE_F16
-                            ? (const ggml_fp16_t *)((const char *) src1->data + in*ofs0 + iic*ofs1)
-                            : nullptr; // [IH, IW]
+                        const float * const src_data = (float *)((char *) src1->data + in*ofs0 + iic*ofs1); // [IH, IW]
 
                         for (int64_t ikh = 0; ikh < KH; ikh++) {  // 1
                             for (int64_t ikw = 0; ikw < KW; ikw++) {
@@ -6193,11 +6188,7 @@ static void ggml_compute_forward_im2col_f32(
                                 if (iih < 0 || iih >= IH || iiw < 0 || iiw >= IW) {
                                     dst_data[iic*(KH*KW) + ikh*KW + ikw] = 0;
                                 } else {
-                                    if (src_data_f32 != nullptr) {
-                                        dst_data[iic*(KH*KW) + ikh*KW + ikw] = src_data_f32[iih*IW + iiw];
-                                    } else {
-                                        dst_data[iic*(KH*KW) + ikh*KW + ikw] = GGML_FP16_TO_FP32(src_data_f16[iih*IW + iiw]);
-                                    }
+                                    dst_data[iic*(KH*KW) + ikh*KW + ikw] = (src_data[iih*IW + iiw]);
                                 }
                             }
                         }
@@ -6220,6 +6211,7 @@ static void ggml_compute_forward_im2col_f16(
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
+    GGML_ASSERT(src0->type == GGML_TYPE_F16);
     GGML_ASSERT(src1->type == GGML_TYPE_F16 || src1->type == GGML_TYPE_F32);
     GGML_ASSERT( dst->type == GGML_TYPE_F16);
 

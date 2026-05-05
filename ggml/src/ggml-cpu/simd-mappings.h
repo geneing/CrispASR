@@ -246,13 +246,8 @@ inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
         GGML_F16xt_REDUCE_MIXED_IMPL(DEFAULT_PG16, res, sum1, sum2, sum3, sum4)
 
 // F16 NEON
-// CrispASR patch (issue #38): see notes on the duplicate block below in the
-// __ARM_NEON branch — same F16-accumulator overflow concern. SVE machines
-// (Graviton, Fugaku) aren't currently exercised by CrispASR so we leave the
-// SVE F16 vec_dot path in vec.cpp untouched, but if you reach this ifdef on
-// a system with FP16_VECTOR_ARITHMETIC the same fix applies. Kept inside an
-// `#if 0` for parity with the NEON branch.
-#if 0 /* CrispASR: force F32 accumulator path below */ && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+
+#if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
     #define GGML_F16_STEP 32
     #define GGML_F16_EPR  8
 
@@ -293,7 +288,8 @@ inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
     #define GGML_F16_VEC_MUL            GGML_F16x8_MUL
     #define GGML_F16_VEC_REDUCE         GGML_F16x8_REDUCE
 #else
-    // F16 in memory, F32 accumulator (vcvt_f32_f16 on load, vfmaq_f32 inner).
+    // if FP16 vector arithmetic is not supported, we use FP32 instead
+    // and take advantage of the vcvt_ functions to convert to/from FP16
 
     #define GGML_F16_STEP 16
     #define GGML_F16_EPR  4
@@ -366,21 +362,7 @@ inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
 
 // F16 NEON
 
-// CrispASR patch (issue #38): force F32 accumulator for F16 dot products on
-// ARM with FP16 vector arithmetic. Upstream uses `vfmaq_f16` (F16 multiply-
-// add into a float16x8_t register) which overflows at 65504 for long
-// accumulations. Symptom: an FFN ffn_down dot product (e.g. 3072-wide) with
-// F16 weights and moderate-magnitude F32 activations produces Inf, then NaN
-// propagates through the next layer. Q8_0 vec_dot uses an F32 scalar
-// accumulator and is unaffected; Apple Metal matmul kernels also accumulate
-// in F32. The workaround below short-circuits the FP16-FMA path and routes
-// to the existing F32-accumulator fallback (vcvt_f32_f16 + vfmaq_f32) — about
-// 2x slower per element but bit-correct. Reproduced via qwen3-tts code_pred
-// blk.2 ffn_down on Apple M1 CPU; a quick CPU-only synthesis of the F16
-// talker GGUF runs to the 1500-frame cap (no codec_eos) instead of the ~50
-// frames that Metal/CUDA produce. MUST RE-APPLY after every ggml bump (see
-// LEARNINGS.md "F16 vec_dot accumulator overflow on ARM NEON FP16").
-#if 0 /* CrispASR: force F32 accumulator path below */ && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+#if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
     #define GGML_F16_STEP 32
     #define GGML_F16_EPR  8
 
@@ -421,8 +403,8 @@ inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
     #define GGML_F16_VEC_MUL            GGML_F16x8_MUL
     #define GGML_F16_VEC_REDUCE         GGML_F16x8_REDUCE
 #else
-    // F16 in memory, F32 accumulator: vcvt_f32_f16 on load, vfmaq_f32 in
-    // the inner loop. Same path as the !FP16_VECTOR_ARITHMETIC fallback.
+    // if FP16 vector arithmetic is not supported, we use FP32 instead
+    // and take advantage of the vcvt_ functions to convert to/from FP16
 
     #define GGML_F16_STEP 16
     #define GGML_F16_EPR  4

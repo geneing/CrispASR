@@ -1,10 +1,5 @@
 #include "im2col.cuh"
 
-// CrispASR patch: clamp grid.y to MAX_GRIDDIM_Y and loop inside kernel.
-// Upstream ggml uses OW directly as grid.y, which crashes when OW > 65535
-// (e.g. SEANet encoder with 176000 samples). Must be re-applied after
-// every ggml bump. See LEARNINGS.md "CUDA im2col grid overflow".
-#define MAX_GRIDDIM_Y 65535
 #define MAX_GRIDDIM_Z 65535
 
 template <typename T>
@@ -23,25 +18,22 @@ static  __global__ void im2col_kernel(
     const int64_t ikh = rem / KW;
     const int64_t ikw = rem - ikh * KW;
 
-    // Loop over OW with stride MAX_GRIDDIM_Y to handle OW > 65535
-    // (e.g. SEANet encoder with 176000 samples → T_out = 176000)
-    for (int64_t iow = blockIdx.y; iow < OW; iow += MAX_GRIDDIM_Y) {
-        for (int64_t iz = blockIdx.z; iz < N_OH; iz += MAX_GRIDDIM_Z) {
-            const int64_t  in = iz / OH;
-            const int64_t  ioh = iz - in * OH;
+    const int64_t  iow = blockIdx.y;
+    for (int64_t iz = blockIdx.z; iz < N_OH; iz+=MAX_GRIDDIM_Z) {
+        const int64_t  in = iz / OH;
+        const int64_t  ioh = iz - in * OH;
 
-            const int64_t iiw = iow * s0 + ikw * d0 - p0;
-            const int64_t iih = ioh * s1 + ikh * d1 - p1;
+        const int64_t iiw = iow * s0 + ikw * d0 - p0;
+        const int64_t iih = ioh * s1 + ikh * d1 - p1;
 
-            const int64_t offset_dst =
-                ((in * OH + ioh) * OW + iow) * IC_KH_KW + iic * KH_KW + ikh * KW + ikw;
+        const int64_t offset_dst =
+            ((in * OH + ioh) * OW + iow) * IC_KH_KW + iic * KH_KW + ikh * KW + ikw;
 
-            if (iih < 0 || iih >= IH || iiw < 0 || iiw >= IW) {
-                dst[offset_dst] = 0.0f;
-            } else {
-                const int64_t offset_src = iic * IC_IH_IW + in * IH_IW;
-                dst[offset_dst] = x[offset_src + iih * IW + iiw];
-            }
+        if (iih < 0 || iih >= IH || iiw < 0 || iiw >= IW) {
+            dst[offset_dst] = 0.0f;
+        } else {
+            const int64_t offset_src = iic * IC_IH_IW + in * IH_IW;
+            dst[offset_dst] = x[offset_src + iih * IW + iiw];
         }
     }
 
@@ -59,7 +51,7 @@ static void im2col_cuda(const float * x, T* dst,
     const int64_t num_blocks = (IC_KH_KW + CUDA_IM2COL_BLOCK_SIZE - 1) / CUDA_IM2COL_BLOCK_SIZE;
     const int64_t N_OH = N * OH;
     const int64_t KH_KW = KW*KH;
-    dim3 block_nums(num_blocks, MIN(OW, MAX_GRIDDIM_Y), MIN(N_OH, MAX_GRIDDIM_Z));
+    dim3 block_nums(num_blocks, OW, MIN(N_OH, MAX_GRIDDIM_Z));
     im2col_kernel<<<block_nums, MIN(IC_KH_KW, CUDA_IM2COL_BLOCK_SIZE) , 0, stream>>>(x, dst, IC, IW, IH, OH, OW, KW, KH,
                                                                                      IC_IH_IW, IH_IW, N_OH, KH_KW, IC_KH_KW,
                                                                                      s0, s1, p0, p1, d0, d1);
