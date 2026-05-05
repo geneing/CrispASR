@@ -56,8 +56,6 @@ to the [TTS table](#text-to-speech-models) for the synthesis side.
 
 ### ASR backends
 
-Architecture details for entries marked with † are in [docs/architecture.md](docs/architecture.md#per-backend-architecture-details).
-
 | Backend | Model | Architecture | Languages | License |
 |---|---|---|---|---|
 | **whisper** | [`ggml-base.en.bin`](https://huggingface.co/ggerganov/whisper.cpp/) and all OpenAI Whisper variants | Encoder-decoder transformer | 99 | MIT |
@@ -66,10 +64,10 @@ Architecture details for entries marked with † are in [docs/architecture.md](d
 | **parakeet** | [`nvidia/parakeet-tdt_ctc-0.6b-ja`](https://huggingface.co/cstr/parakeet-tdt-0.6b-ja-GGUF) | FastConformer-TDT-CTC, xscaling, 80 mels | Japanese | CC-BY-4.0 |
 | **canary** | [`nvidia/canary-1b-v2`](https://huggingface.co/nvidia/canary-1b-v2) | FastConformer + Transformer decoder | 25 EU (explicit `-sl/-tl`) | CC-BY-4.0 |
 | **cohere** | [`CohereLabs/cohere-transcribe-03-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) | Conformer + Transformer | 13 | Apache-2.0 |
-| **granite** | [`ibm-granite/granite-speech-{3.2-8b,3.3-2b,3.3-8b}`](https://huggingface.co/ibm-granite/granite-speech-3.3-2b), [`granite-4.0-1b-speech`](https://huggingface.co/ibm-granite/granite-4.0-1b-speech) | Conformer + Q-Former + Granite LLM (μP) † | en fr de es pt ja | Apache-2.0 |
-| **granite-4.1** | [`ibm-granite/granite-speech-4.1-2b`](https://huggingface.co/ibm-granite/granite-speech-4.1-2b) | 16L Conformer + Q-Former + Granite LLM; single ggml graph encoder † | en fr de es pt ja | Apache-2.0 |
-| **granite-4.1-plus** | [`ibm-granite/granite-speech-4.1-2b-plus`](https://huggingface.co/ibm-granite/granite-speech-4.1-2b-plus) | 4.1 + hidden-state concat; punctuated output † | en fr de es pt | Apache-2.0 |
-| **granite-4.1-nar** | [`ibm-granite/granite-speech-4.1-2b-nar`](https://huggingface.co/ibm-granite/granite-speech-4.1-2b-nar) | Non-autoregressive: single LLM forward + slot argmax † | en fr de es pt | Apache-2.0 |
+| **granite** | [`ibm-granite/granite-speech-{3.2-8b,3.3-2b,3.3-8b}`](https://huggingface.co/ibm-granite/granite-speech-3.3-2b), [`granite-4.0-1b-speech`](https://huggingface.co/ibm-granite/granite-4.0-1b-speech) | Conformer + Q-Former + Granite LLM (μP) ([more](docs/architecture.md#granite--granite-41--granite-41-plus--granite-41-nar)) | en fr de es pt ja | Apache-2.0 |
+| **granite-4.1** | [`ibm-granite/granite-speech-4.1-2b`](https://huggingface.co/ibm-granite/granite-speech-4.1-2b) | 16L Conformer + Q-Former + Granite LLM; single ggml graph ([more](docs/architecture.md#granite--granite-41--granite-41-plus--granite-41-nar)) | en fr de es pt ja | Apache-2.0 |
+| **granite-4.1-plus** | [`ibm-granite/granite-speech-4.1-2b-plus`](https://huggingface.co/ibm-granite/granite-speech-4.1-2b-plus) | 4.1 + hidden-state concat; punctuated output ([more](docs/architecture.md#granite--granite-41--granite-41-plus--granite-41-nar)) | en fr de es pt | Apache-2.0 |
+| **granite-4.1-nar** | [`ibm-granite/granite-speech-4.1-2b-nar`](https://huggingface.co/ibm-granite/granite-speech-4.1-2b-nar) | Non-autoregressive: single LLM forward + slot argmax ([more](docs/architecture.md#granite--granite-41--granite-41-plus--granite-41-nar)) | en fr de es pt | Apache-2.0 |
 | **fastconformer-ctc** | [`nvidia/stt_en_fastconformer_ctc_large`](https://huggingface.co/nvidia/stt_en_fastconformer_ctc_large) | FastConformer + CTC (NeMo family, all sizes) | en | CC-BY-4.0 |
 | **voxtral** | [`mistralai/Voxtral-Mini-3B-2507`](https://huggingface.co/mistralai/Voxtral-Mini-3B-2507) | Whisper encoder + Mistral 3B LLM | 8 | Apache-2.0 |
 | **voxtral4b** | [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) | Causal encoder + 3.4B LLM, sliding window | 13, realtime streaming | Apache-2.0 |
@@ -83,26 +81,25 @@ Architecture details for entries marked with † are in [docs/architecture.md](d
 | **moonshine** | [`UsefulSensors/moonshine-{tiny,base}`](https://huggingface.co/cstr/moonshine-base-GGUF) | Conv + 6L enc + 6L dec; multilingual variants | English + 6 langs | MIT |
 | **moonshine-streaming** | [`UsefulSensors/moonshine-streaming-{tiny,small,medium}`](https://huggingface.co/cstr/moonshine-streaming-tiny-GGUF) | Streaming: sliding-window encoder + AR decoder (34–245M) | English | MIT |
 | **gemma4-e2b** | [`google/gemma-4-E2B-it`](https://huggingface.co/cstr/gemma4-e2b-it-GGUF) | USM Conformer 12L + Gemma4 LLM 35L (GQA, PLE) | 140+ langs | Apache-2.0 |
-| **omniasr** | [`facebook/omniASR-CTC-{300M,1B}`](https://huggingface.co/cstr/omniASR-CTC-1B-GGUF) | wav2vec2 CNN + 24–48L transformer + CTC † | **1600+** | Apache-2.0 |
-| **omniasr-llm** | [`omniASR-LLM-300M-v2`](https://huggingface.co/cstr/omniasr-llm-300m-v2-GGUF) | Same encoder + 12L LLaMA decoder (SwiGLU, RoPE) † | **1600+** | Apache-2.0 |
-| **omniasr-llm** | [`omniASR-LLM-Unlimited-300M-v2`](https://huggingface.co/cstr/omniasr-llm-unlimited-300m-v2-GGUF) | Streaming variant: 15s segment protocol, unlimited audio length † | **1600+** | Apache-2.0 |
-| **vibevoice** | [`microsoft/VibeVoice-ASR`](https://huggingface.co/cstr/vibevoice-asr-GGUF) | σ-VAE ConvNeXt + Qwen2.5-7B; timestamps, diarization † | 50+ | MIT |
-| **mimo-asr** | [`XiaomiMiMo/MiMo-V2.5-ASR`](https://huggingface.co/cstr/mimo-asr-GGUF) | 6L transformer + 36L Qwen2 LM + RVQ codec † | Mandarin + dialects + English | MIT |
+| **omniasr** | [`facebook/omniASR-CTC-{300M,1B}`](https://huggingface.co/cstr/omniASR-CTC-1B-GGUF) | wav2vec2 CNN + 24–48L transformer + CTC ([more](docs/architecture.md#omniasr-ctc--llm--unlimited)) | **1600+** | Apache-2.0 |
+| **omniasr-llm** | [`omniASR-LLM-300M-v2`](https://huggingface.co/cstr/omniasr-llm-300m-v2-GGUF) | Same encoder + 12L LLaMA decoder ([more](docs/architecture.md#omniasr-ctc--llm--unlimited)) | **1600+** | Apache-2.0 |
+| **omniasr-llm** | [`omniASR-LLM-Unlimited-300M-v2`](https://huggingface.co/cstr/omniasr-llm-unlimited-300m-v2-GGUF) | Streaming: 15s segment protocol, unlimited audio ([more](docs/architecture.md#omniasr-ctc--llm--unlimited)) | **1600+** | Apache-2.0 |
+| **vibevoice** | [`microsoft/VibeVoice-ASR`](https://huggingface.co/cstr/vibevoice-asr-GGUF) | σ-VAE ConvNeXt + Qwen2.5-7B ([more](docs/architecture.md#vibevoice)) | 50+ | MIT |
+| **mimo-asr** | [`XiaomiMiMo/MiMo-V2.5-ASR`](https://huggingface.co/cstr/mimo-asr-GGUF) | 6L transformer + 36L Qwen2 LM + RVQ codec ([more](docs/architecture.md#mimo-asr)) | Mandarin + dialects + English | MIT |
 
 ### Text-to-Speech models
 
 Synthesis backends, driven by the `--tts` flag and a `--tts-output PATH.wav`.
 See the dedicated [Text-to-Speech](#text-to-speech-tts) section below for
-quick-start commands and engine selection guidance. Architecture details
-marked with † are in [docs/architecture.md](docs/architecture.md#per-backend-architecture-details).
+quick-start commands and engine selection guidance.
 
 | Backend | Models | Architecture | Languages | License |
 |---------|--------|-------------|-----------|---------|
 | **vibevoice-tts** | [`VibeVoice-Realtime-0.5B`](https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF), [`VibeVoice-1.5B`](https://huggingface.co/cstr/vibevoice-1.5b-GGUF) | DPM-Solver++ + σ-VAE decoder; voice presets or cloning | en, zh | MIT |
-| **qwen3-tts** | [`Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF), [`1.7B-Base`](https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF), [`1.7B-VoiceDesign`](https://huggingface.co/cstr/qwen3-tts-1.7b-voicedesign-GGUF) | Qwen3 talker LM + 12 Hz RVQ; voice pack or WAV+ref-text † | multilingual | Apache-2.0 |
-| **kokoro** | [`hexgrad/Kokoro-82M`](https://huggingface.co/hexgrad/Kokoro-82M) + German backbones | StyleTTS2 / iSTFTNet (82M); per-voice GGUF; espeak-ng phonemizer † | en, es, fr, hi, it, ja, pt, zh, de | Apache-2.0 |
-| **orpheus** | [`Orpheus-3B-FT`](https://huggingface.co/cstr/orpheus-3b-base-GGUF) + [`SNAC 24 kHz`](https://huggingface.co/cstr/snac-24khz-GGUF) | Llama-3.2-3B + SNAC RVQ codec; 8 speakers; DE variants † | en, de | Llama / MIT |
-| **chatterbox** | [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) + turbo/kartoffelbox/lahgtna variants | T3 AR + S3Gen flow-matching; voice cloning via x-vector † | en, de, ar | MIT |
+| **qwen3-tts** | [`Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF), [`1.7B-Base`](https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF), [`1.7B-VoiceDesign`](https://huggingface.co/cstr/qwen3-tts-1.7b-voicedesign-GGUF) | Qwen3 talker LM + 12 Hz RVQ ([more](docs/architecture.md#qwen3-tts)) | multilingual | Apache-2.0 |
+| **kokoro** | [`hexgrad/Kokoro-82M`](https://huggingface.co/hexgrad/Kokoro-82M) + German backbones | StyleTTS2 / iSTFTNet (82M); per-voice GGUF ([more](docs/architecture.md#kokoro)) | en, es, fr, hi, it, ja, pt, zh, de | Apache-2.0 |
+| **orpheus** | [`Orpheus-3B-FT`](https://huggingface.co/cstr/orpheus-3b-base-GGUF) + [`SNAC 24 kHz`](https://huggingface.co/cstr/snac-24khz-GGUF) | Llama-3.2-3B + SNAC RVQ codec; 8 speakers ([more](docs/architecture.md#orpheus)) | en, de | Llama / MIT |
+| **chatterbox** | [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) + turbo/kartoffelbox/lahgtna variants | T3 AR + S3Gen flow-matching ([more](docs/architecture.md#chatterbox--chatterbox-turbo--kartoffelbox-turbo--lahgtna-chatterbox)) | en, de, ar | MIT |
 
 ### Translation
 
@@ -112,9 +109,9 @@ Driven by `--text "..." -sl <src> -tl <tgt>`.
 
 | Backend | Models | Architecture | Languages | License |
 |---|---|---|---|---|
-| **m2m100** | [`facebook/m2m100_418M`](https://huggingface.co/cstr/m2m100-418m-GGUF) | 12L encoder + 12L decoder transformer (d=1024, 16 heads, FFN=4096, ReLU, pre-norm) + SentencePiece BPE (128K vocab, 100 lang codes) + sinusoidal pos-emb + cross-attn KV cache + greedy decode. en→de exact match to the Python reference; Q8_0 (~502 MB) preserves quality on the test set. | 100 languages, any-to-any (no English pivot) | MIT |
-| **m2m100-wmt21** | [`facebook/wmt21-dense-24-wide-en-x`](https://huggingface.co/cstr/wmt21-dense-24-wide-en-x-GGUF) | Same m2m100 architecture as the 418M base, scaled to 4.7B parameters (24L encoder, wider). Won the WMT21 News competition. Routes through the m2m100 runtime; vocab fix landed in commit 7f48bad. | English → 7 target languages | MIT |
-| **madlad** | [`google/madlad400-3b-mt`](https://huggingface.co/cstr/madlad400-3b-mt-GGUF) | T5 encoder-decoder (12L+12L, d=2048, gated-GELU FFN, RMSNorm, bucketed relative-position bias) + SentencePiece (256K vocab). Target language as `<2xx>` input prefix. Tokens match Python SP bit-by-bit; output matches the HF reference (e.g. `"Hello world, how are you today?" -tl de` → `"Hallo Welt, wie geht es dir heute?"`). | 419 languages | Apache-2.0 |
+| **m2m100** | [`facebook/m2m100_418M`](https://huggingface.co/cstr/m2m100-418m-GGUF) | 12L enc + 12L dec transformer, SentencePiece 128K ([more](docs/architecture.md#m2m100--wmt21)) | 100 langs, any-to-any | MIT |
+| **m2m100-wmt21** | [`facebook/wmt21-dense-24-wide-en-x`](https://huggingface.co/cstr/wmt21-dense-24-wide-en-x-GGUF) | Same as m2m100, scaled to 4.7B (24L enc) ([more](docs/architecture.md#m2m100--wmt21)) | English → 7 langs | MIT |
+| **madlad** | [`google/madlad400-3b-mt`](https://huggingface.co/cstr/madlad400-3b-mt-GGUF) | T5 enc-dec (12L+12L, d=2048, gated-GELU, RMSNorm) ([more](docs/architecture.md#madlad)) | 419 languages | Apache-2.0 |
 
 ```bash
 # m2m100 base (production-ready)

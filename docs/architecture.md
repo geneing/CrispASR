@@ -355,3 +355,22 @@ Qwen3 talker LM + 12 Hz RVQ speech tokenizer. Three variants:
 - `qwen3-tts-0.6b-base` — 0.6B talker, baked voice pack or WAV + `--ref-text`
 - `qwen3-tts-1.7b-base` — 1.7B talker, higher quality
 - `qwen3-tts-1.7b-voicedesign` — natural-language voice description via `--instruct`
+
+### m2m100 / wmt21
+
+12L encoder + 12L decoder transformer (d=1024, 16 heads, FFN=4096, ReLU,
+pre-norm) + SentencePiece BPE (128K vocab, 100 language codes) +
+sinusoidal positional embeddings + cross-attention KV cache + greedy
+decode. en→de exact match to the Python reference; Q8_0 (~502 MB)
+preserves quality.
+
+**WMT21** (`wmt21-dense-24-wide-en-x`): Same architecture scaled to 4.7B
+parameters (24L encoder, wider FFN). Won the WMT21 News competition.
+Routes through the same m2m100 runtime.
+
+### madlad
+
+T5 encoder-decoder (12L+12L, d=2048, gated-GELU FFN, RMSNorm, bucketed
+relative-position bias) + SentencePiece (256K vocab). Target language
+specified as `<2xx>` input prefix. Tokens match Python SentencePiece
+bit-by-bit; output matches HF reference.
