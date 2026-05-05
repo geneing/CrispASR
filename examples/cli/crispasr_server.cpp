@@ -732,6 +732,13 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     svr.Get("/v1/voices", [&](const Request& req, Response& res) {
         if (!require_auth(req, res))
             return;
+        if (!(backend->capabilities() & CAP_TTS)) {
+            json_error(res, 400,
+                       "loaded backend '" + backend_name +
+                           "' does not support TTS (no CAP_TTS); load a TTS backend "
+                           "(e.g. qwen3-tts, kokoro, vibevoice, orpheus) via POST /load");
+            return;
+        }
 
         std::ostringstream js;
         js << "{\"voices\": [";
