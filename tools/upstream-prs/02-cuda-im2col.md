@@ -16,6 +16,7 @@ Patch: `02-cuda-im2col.patch` (1 file, +32/-29). Covers both the
 existing 2D `im2col_kernel` and the 3D `im2col_3d_kernel` added
 upstream since v0.10.0 — both have the same `OW`-as-grid-Y bug.
 
-**Verification.** Tested on T4 / Jetson Orin via downstream consumer
-(crispasr with SEANet encoder at 11s/16kHz, codec graphs reaching T_out ≈ 176000).
-Existing `test-backend-ops` im2col cases unchanged.
+**Verification.** Tested on T4 / Jetson Orin with a SEANet encoder
+running on 11 s / 16 kHz audio (im2col reaching OW ≈ 176000); pre-fix
+launch returns `invalid configuration argument`, post-fix runs to
+completion. Existing `test-backend-ops` im2col cases unchanged.

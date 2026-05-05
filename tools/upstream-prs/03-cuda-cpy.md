@@ -25,8 +25,9 @@ first.
 
 Patch: `03-cuda-cpy.patch` (1 file, +24/-16).
 
-**Verification.** Tested on Jetson Orin AGX (sm_87, CUDA 12.8) via
-downstream consumer (crispasr with qwen3-tts codec at T_pcm = 2.88M). `_q*_cuda`
+**Verification.** Tested on Jetson Orin AGX (sm_87, CUDA 12.8) with
+the Qwen3-TTS codec at T_pcm = 2.88M; pre-fix `SIGABRT` on the
+`grid_y < USHRT_MAX` assert, post-fix runs to completion. `_q*_cuda`
 overloads not affected — they use 1D `num_blocks < UINT_MAX` grids.
 Recommend running existing `test-backend-ops` cpy cases (single chunk,
 unchanged path).

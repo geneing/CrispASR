@@ -39,10 +39,10 @@ type-conversion path.
 
 Patch: `01-cpu-f16-saturation.patch` (5 files, +80/-16).
 
-**Verification.** Tested on M1 with downstream consumer (crispasr with kokoro F16 GGUF on
-`--gpu-backend cpu` and Qwen3-TTS F16 talker on `--gpu-backend cpu`);
-talker emits valid logits and AR loop terminates on `codec_eos`
-instead of running to the cap. Without (b), kokoro F16 CPU TTS
-aborts at `ggml_backend_sched_split_graph` trying to schedule
-`MUL_MAT(F16 reshape, F16 conv1.weight)` from the F0N predictor.
+**Verification.** Tested on M1 with kokoro F16 and Qwen3-TTS F16
+talker inference on the ggml CPU backend; talker emits valid logits
+and the AR loop terminates on its codec EOS instead of running to the
+token cap. Without (b), kokoro F16 CPU inference aborts at
+`ggml_backend_sched_split_graph` trying to schedule
+`MUL_MAT(F16 reshape, F16 conv1.weight)` from the F0 predictor.
 Existing `test-backend-ops` cases unchanged.
