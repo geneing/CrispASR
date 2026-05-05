@@ -406,9 +406,9 @@ static std::vector<int> tokenize_sp(const t5_tokenizer& tok, const std::string& 
     // tok.scores[id]. Backtrack through dp[] to recover the piece sequence.
     //
     // Pieces missing from the vocab fall through to <unk> as in standard SP.
-    constexpr int MAX_PIECE_LEN = 64;  // longest piece in any T5 vocab
+    constexpr int MAX_PIECE_LEN = 64; // longest piece in any T5 vocab
     constexpr float NEG_INF = -1e30f;
-    constexpr float UNK_PENALTY = -100.0f;  // pretend <unk> has very low score
+    constexpr float UNK_PENALTY = -100.0f; // pretend <unk> has very low score
 
     // Build the SP-style input: leading ▁ + replace spaces with ▁.
     std::string s;

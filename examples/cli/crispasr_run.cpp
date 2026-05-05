@@ -293,11 +293,10 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
         // "skip already-aligned" guard, letting the user prefer the
         // aligner's timestamps over native ones (whisper / parakeet /
         // canary / cohere / kyutai-stt all produce native timing).
-        const bool want_align = !params.aligner_model.empty() &&
-                                ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
+        const bool want_align =
+            !params.aligner_model.empty() && ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
         if (params.verbose) {
-            fprintf(stderr,
-                    "crispasr[verbose]: align[stitched]: aligner='%s' caps_ctc=%d force=%d -> want=%d\n",
+            fprintf(stderr, "crispasr[verbose]: align[stitched]: aligner='%s' caps_ctc=%d force=%d -> want=%d\n",
                     params.aligner_model.c_str(), !!(backend.capabilities() & CAP_TIMESTAMPS_CTC),
                     params.force_aligner ? 1 : 0, want_align ? 1 : 0);
         }
@@ -387,11 +386,10 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
         }
 
         // Issue #62: --force-aligner bypasses CAP gate + already-aligned skip.
-        const bool want_align = !params.aligner_model.empty() &&
-                                ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
+        const bool want_align =
+            !params.aligner_model.empty() && ((backend.capabilities() & CAP_TIMESTAMPS_CTC) || params.force_aligner);
         if (params.verbose) {
-            fprintf(stderr,
-                    "crispasr[verbose]: align[slice]: aligner='%s' caps_ctc=%d force=%d -> want=%d\n",
+            fprintf(stderr, "crispasr[verbose]: align[slice]: aligner='%s' caps_ctc=%d force=%d -> want=%d\n",
                     params.aligner_model.c_str(), !!(backend.capabilities() & CAP_TIMESTAMPS_CTC),
                     params.force_aligner ? 1 : 0, want_align ? 1 : 0);
         }
@@ -670,8 +668,8 @@ int crispasr_run_backend(const whisper_params& params_in) {
     // already named a language-specific chatterbox variant.
     if (model_is_auto && !params.language.empty() && params.language != "auto") {
         auto is_en_chatterbox = [](const std::string& n) {
-            return n == "chatterbox" || n == "chatterbox-tts" || n == "chatterbox-base" ||
-                   n == "chatterbox-turbo" || n == "chatterbox_turbo";
+            return n == "chatterbox" || n == "chatterbox-tts" || n == "chatterbox-base" || n == "chatterbox-turbo" ||
+                   n == "chatterbox_turbo";
         };
         if (is_en_chatterbox(backend_name)) {
             std::string routed;
@@ -682,8 +680,8 @@ int crispasr_run_backend(const whisper_params& params_in) {
             }
             if (!routed.empty()) {
                 if (!params.no_prints) {
-                    fprintf(stderr, "crispasr: -l %s with --backend %s — auto-routing to %s\n",
-                            params.language.c_str(), backend_name.c_str(), routed.c_str());
+                    fprintf(stderr, "crispasr: -l %s with --backend %s — auto-routing to %s\n", params.language.c_str(),
+                            backend_name.c_str(), routed.c_str());
                 }
                 backend_name = routed;
                 params.backend = routed;
@@ -707,9 +705,8 @@ int crispasr_run_backend(const whisper_params& params_in) {
     // download path as -m auto. Lets users add force-alignment without
     // hunting for an aligner GGUF first.
     if (params.aligner_model == "auto" || params.aligner_model == "default") {
-        const std::string resolved_aligner =
-            crispasr_resolve_model_cli(params.aligner_model, "canary-ctc-aligner", params.no_prints,
-                                       params.cache_dir, params.auto_download);
+        const std::string resolved_aligner = crispasr_resolve_model_cli(
+            params.aligner_model, "canary-ctc-aligner", params.no_prints, params.cache_dir, params.auto_download);
         if (resolved_aligner.empty()) {
             fprintf(stderr, "crispasr: error: failed to resolve `-am auto` (canary-ctc-aligner)\n");
             return 19;
@@ -744,15 +741,16 @@ int crispasr_run_backend(const whisper_params& params_in) {
     // -tl. Result goes to stdout. See PLAN #74 / m2m100 wiring notes.
     if (!params.text_input.empty()) {
         if (!(backend->capabilities() & CAP_TRANSLATE)) {
-            fprintf(stderr, "crispasr: error: backend '%s' does not support text-to-text translation "
-                            "(missing CAP_TRANSLATE)\n",
+            fprintf(stderr,
+                    "crispasr: error: backend '%s' does not support text-to-text translation "
+                    "(missing CAP_TRANSLATE)\n",
                     backend_name.c_str());
             return 16;
         }
-        const std::string& src = !params.translate_source_lang.empty() ? params.translate_source_lang
-                                                                       : params.source_lang;
-        const std::string& tgt = !params.translate_target_lang.empty() ? params.translate_target_lang
-                                                                       : params.target_lang;
+        const std::string& src =
+            !params.translate_source_lang.empty() ? params.translate_source_lang : params.source_lang;
+        const std::string& tgt =
+            !params.translate_target_lang.empty() ? params.translate_target_lang : params.target_lang;
         if (src.empty() || tgt.empty()) {
             fprintf(stderr, "crispasr: error: --text requires source + target language. Pass `-sl <code> "
                             "-tl <code>` (or `--tr-sl` / `--tr-tl` for 2-stage pipes).\n");

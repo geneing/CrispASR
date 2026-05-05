@@ -67,10 +67,9 @@ public:
             return false;
         }
         if (!p.no_prints) {
-            fprintf(stderr,
-                    "crispasr[madlad]: T5 runtime is WIP — output may be incorrect "
-                    "(rel-pos bias debugging pending; see commit 1d9026c). Use the m2m100 backend "
-                    "for production translation today.\n");
+            fprintf(stderr, "crispasr[madlad]: T5 runtime is WIP — output may be incorrect "
+                            "(rel-pos bias debugging pending; see commit 1d9026c). Use the m2m100 backend "
+                            "for production translation today.\n");
         }
         return true;
     }

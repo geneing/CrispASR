@@ -1271,7 +1271,7 @@ struct whisper_state {
 
     whisper_mel mel;
 
-    whisper_batch batch;
+    whisper_batch batch = {};
 
     whisper_decoder decoders[CRISPASR_MAX_DECODERS];
 
@@ -2335,6 +2335,11 @@ static bool whisper_model_load(struct whisper_model_loader* loader, whisper_cont
 
             if (loader->eof(loader->context)) {
                 break;
+            }
+
+            if (n_dims < 1 || n_dims > GGML_MAX_DIMS) {
+                CRISPASR_LOG_ERROR("%s: tensor has invalid n_dims = %d\n", __func__, n_dims);
+                return false;
             }
 
             int32_t nelements = 1;
@@ -5288,6 +5293,11 @@ struct whisper_vad_context* whisper_vad_init_with_params(struct whisper_model_lo
 
             if (loader->eof(loader->context)) {
                 break;
+            }
+
+            if (n_dims < 1 || n_dims > GGML_MAX_DIMS) {
+                CRISPASR_LOG_ERROR("%s: tensor has invalid n_dims = %d\n", __func__, n_dims);
+                return nullptr;
             }
 
             int32_t nelements = 1;

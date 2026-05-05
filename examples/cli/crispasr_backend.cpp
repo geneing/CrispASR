@@ -81,15 +81,15 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         name == "kartoffel-orpheus-de-synthetic" || name == "kartoffel-orpheus-natural" ||
         name == "kartoffel-orpheus-synthetic" || name == "lex-au-orpheus-de" || name == "lex-au-orpheus")
         return crispasr_make_orpheus_backend();
-    if (name == "chatterbox" || name == "chatterbox-tts" || name == "chatterbox-base" ||
-        name == "chatterbox-turbo" || name == "chatterbox_turbo" || name == "kartoffelbox" ||
-        name == "kartoffelbox-turbo" || name == "kartoffelbox_turbo" || name == "lahgtna" ||
-        name == "lahgtna-chatterbox" || name == "lahgtna-chatterbox-v1")
+    if (name == "chatterbox" || name == "chatterbox-tts" || name == "chatterbox-base" || name == "chatterbox-turbo" ||
+        name == "chatterbox_turbo" || name == "kartoffelbox" || name == "kartoffelbox-turbo" ||
+        name == "kartoffelbox_turbo" || name == "lahgtna" || name == "lahgtna-chatterbox" ||
+        name == "lahgtna-chatterbox-v1")
         return crispasr_make_chatterbox_backend();
     if (name == "kokoro" || name == "styletts2" || name == "styletts2-ljspeech" || name == "kokoro-tts")
         return crispasr_make_kokoro_backend();
-    if (name == "m2m100" || name == "m2m-100" || name == "translate" || name == "m2m100-wmt21" ||
-        name == "wmt21" || name == "m2m100-1.2b")
+    if (name == "m2m100" || name == "m2m-100" || name == "translate" || name == "m2m100-wmt21" || name == "wmt21" ||
+        name == "m2m100-1.2b")
         return crispasr_make_m2m100_backend();
     if (name == "madlad" || name == "madlad400" || name == "madlad-400" || name == "t5" || name == "t5-translate")
         return crispasr_make_t5_backend();

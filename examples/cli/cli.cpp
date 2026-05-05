@@ -696,11 +696,10 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
     fprintf(stderr, "\nText-to-text translation (m2m100) options:\n");
     fprintf(stderr, "             --text \"TEXT\"           translate TEXT and write result to stdout "
                     "(use with --backend m2m100; pair with -sl / -tl)\n");
-    fprintf(stderr,
-            "             --tr-sl LANG / --tr-tl LANG\n"
-            "                                        translator-stage source/target language "
-            "(falls back to -sl / -tl); only needed for 2-stage pipelines where the primary "
-            "backend's -sl/-tl mean something else\n");
+    fprintf(stderr, "             --tr-sl LANG / --tr-tl LANG\n"
+                    "                                        translator-stage source/target language "
+                    "(falls back to -sl / -tl); only needed for 2-stage pipelines where the primary "
+                    "backend's -sl/-tl mean something else\n");
     fprintf(stderr, "             --translate-max-tokens N [%-7d] max output tokens for the translator stage\n",
             params.translate_max_tokens);
     // Voice Activity Detection (VAD) parameters
