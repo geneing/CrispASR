@@ -1706,7 +1706,7 @@ The CTC blank = pad_id = 1 (SentencePiece <pad>).
 1. **Input normalization required**: wav2vec2 models expect `layer_norm(waveform)`
    — zero mean, unit variance. Without this, the model outputs mostly blanks.
 
-2. **CTC blank = token 0 (<s>)**: In fairseq2, the BOS token serves as CTC blank.
+2. **CTC blank = `token 0 (<s>)`**: In fairseq2, the BOS token serves as CTC blank.
    NOT token 1 (<pad>) which is the HuggingFace convention.
    The official code just removes consecutive duplicates + skip_special_tokens.
 
