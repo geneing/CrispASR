@@ -18,8 +18,8 @@ open the PR.
 `MASTER-AUDIT.md` records the cross-check against `ggml-org/ggml`
 master (fetched 2026-05-05): all four still apply in shape; none
 have been fixed upstream. Note: `im2col` gained a second target
-site (`im2col_3d_kernel`) since v0.10.0; mirror the fix onto it at
-PR time.
+site (`im2col_3d_kernel`) since v0.10.0; the PR 02 patch covers
+both kernels.
 
 ## Sending
 

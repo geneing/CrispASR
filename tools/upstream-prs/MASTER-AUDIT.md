@@ -5,7 +5,7 @@ Cross-checked our four upstream-PR drafts against the current upstream
 upstream" cases. None are already fixed; all still apply in shape.
 Two notes worth keeping in mind:
 - `im2col` gained a second target site (`im2col_3d_kernel`) since
-  v0.10.0; both need the same fix.
+  v0.10.0. The PR 02 patch covers both kernels.
 - The original audit grep only matched `// CrispASR patch` and missed
   the conv-graph kernel-cast hunks in `ggml.c` (marked
   `// CrispASR fork`). They're now bundled into PR 01 — without them,
@@ -15,7 +15,7 @@ Two notes worth keeping in mind:
 | # | Patch | Master state | Action needed at PR time |
 | - | --- | --- | --- |
 | 01 | F16 mul_mat saturation (CPU type traits + conv graph builders, bundled) | Vulnerable. `ggml-cpu.c:218` still has `vec_dot=ggml_vec_dot_f16, vec_dot_type=GGML_TYPE_F16`. `simd-mappings.h:250,365` still gate on `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` with `vfmaq_f16`. `ggml.c:4471-4521` (`ggml_conv_1d`, `ggml_conv_1d_dw`) and `ggml.c:4575-4750` (`ggml_conv_2d`, `ggml_conv_2d_dw`) hardcode `im2col_type=GGML_TYPE_F16` with no kernel cast. | Apply as drafted (5 files in one PR). Consider opening a design discussion first. |
-| 02 | im2col grid_y > 65535 | Vulnerable, **two sites**. `im2col.cu:54` (existing 2D kernel — our patch). New since v0.10.0: `im2col_3d_kernel` at `im2col.cu:118` with `dim3 block_nums(num_blocks, OW, …)` at line 181 and unbounded `iow = blockIdx.y` at line 139. | Apply existing 2D fix **plus** mirror the same fix on `im2col_3d_kernel` and its dispatch. Send as one PR (same op, same bug class). |
+| 02 | im2col grid_y > 65535 | Vulnerable, **two sites**. `im2col.cu:54` (existing 2D kernel). New since v0.10.0: `im2col_3d_kernel` at `im2col.cu:118` with `dim3 block_nums(num_blocks, OW, …)` at line 181 and unbounded `iow = blockIdx.y` at line 139. | Apply as drafted — patch covers both kernels. |
 | 03 | cpy_scalar_transpose grid_y | Vulnerable. `cpy.cu:222` still has `GGML_ASSERT(grid_y < USHRT_MAX)`. | Apply as drafted (re-derive code first per AI policy). |
 | 04 | Metal conv_transpose_1d | Vulnerable / inefficient. `ggml-metal.metal:4860-4861` still iterates full IL with the in-loop `if`. | Apply as drafted. |
 
