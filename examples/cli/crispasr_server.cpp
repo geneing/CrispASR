@@ -25,6 +25,7 @@
 #include "whisper_params.h"
 
 #include "common-crispasr.h" // read_audio_data
+#include "crispasr_wav_writer.h"
 #include "../server/httplib.h"
 #include "../json.hpp"
 
@@ -284,58 +285,8 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// TTS helpers
-// ---------------------------------------------------------------------------
-
-// Build a 16-bit PCM RIFF WAV from float32 samples in [-1, 1].
-// Mono, sample_rate Hz. Header is the standard 44-byte PCM-fmt RIFF.
-// Returned buffer is contiguous and safe to pass to res.set_content().
-static std::string make_wav_int16(const float* pcm, int n_samples, int sample_rate) {
-    const uint16_t num_channels = 1;
-    const uint16_t bits_per_sample = 16;
-    const uint32_t byte_rate = sample_rate * num_channels * (bits_per_sample / 8);
-    const uint16_t block_align = num_channels * (bits_per_sample / 8);
-    const uint32_t data_size = (uint32_t)n_samples * block_align;
-    const uint32_t riff_size = 36 + data_size;
-
-    std::string out;
-    out.reserve(44 + (size_t)data_size);
-    auto put_u32 = [&](uint32_t v) {
-        out.push_back((char)(v & 0xff));
-        out.push_back((char)((v >> 8) & 0xff));
-        out.push_back((char)((v >> 16) & 0xff));
-        out.push_back((char)((v >> 24) & 0xff));
-    };
-    auto put_u16 = [&](uint16_t v) {
-        out.push_back((char)(v & 0xff));
-        out.push_back((char)((v >> 8) & 0xff));
-    };
-    out.append("RIFF", 4);
-    put_u32(riff_size);
-    out.append("WAVE", 4);
-    out.append("fmt ", 4);
-    put_u32(16); // PCM fmt chunk size
-    put_u16(1);  // PCM format
-    put_u16(num_channels);
-    put_u32(sample_rate);
-    put_u32(byte_rate);
-    put_u16(block_align);
-    put_u16(bits_per_sample);
-    out.append("data", 4);
-    put_u32(data_size);
-    out.resize(out.size() + (size_t)data_size);
-    int16_t* dst = reinterpret_cast<int16_t*>(&out[out.size() - data_size]);
-    for (int i = 0; i < n_samples; i++) {
-        float s = pcm[i];
-        if (s > 1.0f)
-            s = 1.0f;
-        if (s < -1.0f)
-            s = -1.0f;
-        dst[i] = (int16_t)std::lround(s * 32767.0f);
-    }
-    return out;
-}
+// crispasr_make_wav_int16 lives in crispasr_wav_writer.h so the unit
+// tests can exercise it without linking the server translation unit.
 
 // ---------------------------------------------------------------------------
 // Server entry point
@@ -735,7 +686,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             std::string buf((const char*)pcm.data(), pcm.size() * sizeof(float));
             res.set_content(std::move(buf), "application/octet-stream");
         } else {
-            std::string wav = make_wav_int16(pcm.data(), (int)pcm.size(), 24000);
+            std::string wav = crispasr_make_wav_int16(pcm.data(), (int)pcm.size(), 24000);
             res.set_content(std::move(wav), "audio/wav");
         }
     });

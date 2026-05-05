@@ -200,6 +200,23 @@ catch_discover_tests(test-registry
     PROPERTIES LABELS "unit"
 )
 
+# ─── test_server_wav_writer — Catch2 unit tests for crispasr_make_wav_int16
+#
+# Header-only WAV serializer used by /v1/audio/speech and crispasr_diff.
+# Pure CPU, no model dependencies — sub-millisecond per case. Pins the
+# RIFF byte layout so OpenAI clients keep working.
+add_executable(test_server_wav_writer test_server_wav_writer.cpp)
+target_include_directories(test_server_wav_writer PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test_server_wav_writer PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test_server_wav_writer
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
 # ─── test-core-decode — Catch2 unit tests for core_greedy_decode + core_beam_decode
 #
 # Tests the shared decode helpers in isolation with a mock LLM. No models
