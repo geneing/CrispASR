@@ -12,7 +12,7 @@
 #
 # Defaults to the current repo (gh resolves it from the working dir).
 
-set -euo pipefail
+set -eo pipefail
 
 REPO="${REPO:-}"
 DRY_RUN=true
@@ -22,13 +22,14 @@ DRY_RUN=true
 command -v gh >/dev/null || { echo "error: gh not on PATH" >&2; exit 2; }
 command -v jq >/dev/null || { echo "error: jq not on PATH" >&2; exit 2; }
 
-repo_args=()
-[[ -n "$REPO" ]] && repo_args=(--repo "$REPO")
+# gh args (works on bash 3.2 where ${arr[@]} on empty trips set -u)
+gh_args=()
+[[ -n "$REPO" ]] && gh_args=(--repo "$REPO")
 
 # Pull up to 200 most recent runs, filter to active ones, group by
 # (workflow name, branch), keep the newest per group, output the rest.
-mapfile -t stale < <(
-    gh run list "${repo_args[@]}" --limit 200 \
+stale_lines=$(
+    gh run list "${gh_args[@]}" --limit 200 \
         --json databaseId,name,status,headBranch,createdAt \
     | jq -r '
         [ .[] | select(.status == "in_progress" or .status == "queued"
@@ -42,13 +43,14 @@ mapfile -t stale < <(
     '
 )
 
-if (( ${#stale[@]} == 0 )); then
+if [[ -z "$stale_lines" ]]; then
     echo "No stale active runs to cancel."
     exit 0
 fi
 
-echo "Stale active runs (${#stale[@]}):"
-printf '  %s\n' "${stale[@]}"
+n_stale=$(printf '%s\n' "$stale_lines" | wc -l | tr -d ' ')
+echo "Stale active runs ($n_stale):"
+printf '%s\n' "$stale_lines" | sed 's/^/  /'
 echo
 
 if $DRY_RUN; then
@@ -56,11 +58,11 @@ if $DRY_RUN; then
     exit 0
 fi
 
-for line in "${stale[@]}"; do
-    id="${line%%$'\t'*}"
+while IFS=$'\t' read -r id _name _branch _created; do
+    [[ -z "$id" ]] && continue
     echo "cancelling $id ..."
-    gh run cancel "$id" "${repo_args[@]}" || true
-done
+    gh run cancel "$id" "${gh_args[@]}" || true
+done <<< "$stale_lines"
 
 echo
-echo "Done. Verify with: gh run list ${repo_args[*]} --limit 20"
+echo "Done. Verify with: gh run list ${gh_args[*]:-} --limit 20"
