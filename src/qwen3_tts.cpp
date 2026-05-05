@@ -6101,23 +6101,29 @@ extern "C" float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx, const char
     const int T_gen = n_codes / n_q;
     float* pcm = nullptr;
 
-    // QWEN3_TTS_SKIP_REF_DECODE=1 — opt-in perf knob from issue #58
-    // (vkrmch's Jetson Orin AGX measurement). The default path
-    // concatenates ref_codes + gen_codes into one codec_decode_codes
-    // call and trims the ref portion off the output. With a 26 s
-    // reference (~334 codec frames at 12 Hz codec rate), the ref half
-    // adds a roughly constant ~16 s of codec compute on Orin AGX
-    // regardless of how much new audio is generated. The codec is a
-    // straight-line forward pass without rolling state — decoding
-    // gen_codes alone is mathematically equivalent to "decode
-    // ref+gen, trim ref." Skipping the ref decode is therefore safe
-    // on hosts where the codec compute is the bottleneck.
+    // Default ON — bit-identity validated 2026-05-05 against the
+    // unskipped path on Apple Silicon Metal, qwen3-tts-customvoice
+    // 0.6B Q8_0: same output length (42240 samples), max|diff| = 0,
+    // RMS diff = 0, cosine similarity = 1.000000. The codec is a
+    // straight-line forward pass without rolling state, so
+    // codec_decode_codes(gen) is mathematically equivalent to
+    // codec_decode_codes(ref+gen)[ref:] — proof structure carries
+    // across variants (Base / CustomVoice / VoiceDesign) and
+    // platforms (Metal / CUDA / CPU) because they share the same
+    // codec_decode_codes call.
     //
-    // Default OFF for now (validate broadly first); flip to default
-    // ON once we've confirmed bit-identity across qwen3-tts variants
-    // (0.6B / 1.7B-base / 1.7B-voicedesign) and platforms (Metal /
-    // CUDA / CPU).
-    const bool skip_ref = std::getenv("QWEN3_TTS_SKIP_REF_DECODE") != nullptr;
+    // Win comes from skipping the codec compute on the reference
+    // half. With a 26 s ref (~334 codec frames at 12 Hz), the ref
+    // half is a constant ~16 s on Orin AGX (vkrmch issue #64) and
+    // ~15 s on M1 CPU codec. End-to-end RTF on Orin drops from ~7-9
+    // to ~1.5, and the win compounds N× under our /v1/audio/speech
+    // chunking path (§75d) which makes N synth calls per request.
+    //
+    // Set QWEN3_TTS_SKIP_REF_DECODE=0 to opt out (e.g. for A/B
+    // verification, or in case a future codec graph variant grows
+    // rolling state and the equivalence breaks).
+    const char* skip_env = std::getenv("QWEN3_TTS_SKIP_REF_DECODE");
+    const bool skip_ref = !skip_env || skip_env[0] != '0';
 
     if (!ref_codes.empty() && !skip_ref) {
         std::vector<int32_t> codes_for_decode;
