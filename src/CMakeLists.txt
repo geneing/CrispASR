@@ -504,23 +504,35 @@ endif()
 
 # ---------------------------------------------------------------------------
 # moonshine — Moonshine ASR (UsefulSensors)
+# Tokenizer is its own static lib so both moonshine and moonshine_streaming
+# can depend on it without bundling moonshine-tokenizer.o into both archives.
+# Without the split, libtool -static packs combined.a with duplicate symbols
+# and the iOS xcframework link fails.
 # ---------------------------------------------------------------------------
+add_library(moonshine_tokenizer STATIC moonshine-tokenizer.h moonshine-tokenizer.cpp)
+set_target_properties(moonshine_tokenizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(moonshine_tokenizer PUBLIC .)
+target_compile_features   (moonshine_tokenizer PUBLIC cxx_std_17)
+target_link_libraries     (moonshine_tokenizer PUBLIC ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(moonshine_tokenizer PRIVATE -O3)
+endif()
+
 add_library(moonshine STATIC moonshine.h moonshine.cpp moonshine-impl.h
-            moonshine-audio.h moonshine-tokenizer.h moonshine-tokenizer.cpp)
+            moonshine-audio.h)
 set_target_properties(moonshine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(moonshine PUBLIC .)
 target_compile_features   (moonshine PUBLIC cxx_std_17)
-target_link_libraries     (moonshine PUBLIC ggml ggml-base ggml-cpu)
+target_link_libraries     (moonshine PUBLIC ggml ggml-base ggml-cpu moonshine_tokenizer)
 if(NOT MSVC)
     target_compile_options(moonshine PRIVATE -O3)
 endif()
 
-add_library(moonshine_streaming STATIC moonshine_streaming.h moonshine_streaming.cpp
-            moonshine-tokenizer.h moonshine-tokenizer.cpp)
+add_library(moonshine_streaming STATIC moonshine_streaming.h moonshine_streaming.cpp)
 set_target_properties(moonshine_streaming PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(moonshine_streaming PUBLIC .)
 target_compile_features   (moonshine_streaming PUBLIC cxx_std_17)
-target_link_libraries     (moonshine_streaming PUBLIC ggml ggml-base ggml-cpu)
+target_link_libraries     (moonshine_streaming PUBLIC ggml ggml-base ggml-cpu moonshine_tokenizer)
 if(NOT MSVC)
     target_compile_options(moonshine_streaming PRIVATE -O3)
 endif()
