@@ -782,9 +782,18 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     });
 
     // -----------------------------------------------------------------------
-    // Log unmatched requests (helps debug wrong endpoints like /audio/transcriptions)
+    // Catch unmatched routes. cpp-httplib invokes the error handler for any
+    // 4xx/5xx response, including ones our own route handlers produced via
+    // json_error() — so guard on `res.body.empty()` to avoid clobbering the
+    // structured error bodies the route handlers already set. Empty body
+    // here means no route matched (or a matched route forgot to call
+    // set_content), so falling back to the legacy "not found" payload is
+    // safe.
     svr.set_error_handler([&](const Request& req, Response& res) {
-        fprintf(stderr, "crispasr-server: %s %s → 404 (no matching route)\n", req.method.c_str(), req.path.c_str());
+        if (!res.body.empty())
+            return;
+        fprintf(stderr, "crispasr-server: %s %s → %d (no matching route)\n", req.method.c_str(), req.path.c_str(),
+                res.status);
         res.set_content("{\"error\": \"not found. Use POST /v1/audio/transcriptions\"}", "application/json");
     });
 
