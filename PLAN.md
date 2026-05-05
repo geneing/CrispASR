@@ -41,6 +41,7 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **DONE** | [#63 Feature matrix parity](#63-feature-matrix-parity) | Phased | All 9 phases → HISTORY §72 |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
 | **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | License unclear |
+| **MEDIUM** | [#75 /v1/audio/speech OpenAI parity round 1](#75-v1audiospeech-openai-feature-parity-round-1) | Small-Medium | PR #63 merged + corrective batch (`d35940b`…`85302c5`) shipped 2026-05-05; 75a (`model`/length-cap/`instructions`) + 75b (real OpenAI `pcm`, CORS, error fields) + 75c-opt-1 (`speed` via post-synth resample) + 75d (issue #66 long-form chunking helper) pending |
 
 **Recently completed** (full write-ups in HISTORY.md): **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 
@@ -2745,3 +2746,218 @@ README links to both. ~200 LOC across the generator script + the HTML template. 
 Chatterbox T3 AR decode currently uses sampling (temp / top_p / min_p / repetition_penalty). Adding beam search would unlock `--beam-size N` for the backend and add a row to the feature matrix. Honest scope: ~200-300 LOC for parallel decode paths + length-normalised score accumulation + KV cache replication-or-sequential-with-separate-caches + early-termination handling. Plus validation that beam decode doesn't amplify the open Conformer rel-pos parity gap (matrix_bd 7.08 vs 10.06).
 
 **Blocker:** the rel-pos parity gap dominates output quality today; beam search would be polish on a runtime that still has unresolved structural issues. Defer until parity closes — at that point beam search is an obvious win, but not before. Tracking here so it doesn't get lost.
+
+---
+
+## 75. /v1/audio/speech OpenAI feature-parity round 1
+
+PR #63 (vkrmch's `/v1/audio/speech` + `/v1/voices`) merged 2026-05-05 as
+commit `cd30c46`. The follow-up batch (`d35940b` … `85302c5`) corrected the
+voice-resolution shape to match the #58 design (server passes `voice`
+through verbatim; backend adapter resolves via `--voice-dir` for qwen3-tts
+Base), gated `/v1/voices` on `CAP_TTS`, renamed `response_format=pcm` →
+`f32` (because OpenAI's `pcm` is 24 kHz signed 16-bit LE, not float32),
+fixed a pre-existing bug where `set_error_handler` clobbered every 4xx
+body, added a 20-assertion integration smoke (`tests/test-server-tts.sh`)
+and 54 Catch2 unit assertions for the WAV writer.
+
+What still falls short of OpenAI / ElevenLabs / Coqui-XTTS-server:
+
+### 75a. P0 — blocks real OpenAI clients (trivial)
+
+Every OpenAI SDK and curl recipe in the wild sends these. Today we either
+silently ignore them or 400 the request:
+
+* **`model` request field** — OpenAI clients always include it
+  (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`). We currently parse-and-ignore
+  via `body.value("model", "")` (the body is parsed but the field is
+  unread); make the read explicit and surface it in the synth log line
+  for diagnostics. ~3 LOC.
+* **Input length cap** — OpenAI's spec is 4096 chars; we don't validate.
+  A 1 MB `input` blob would happily OOM the synth loop. Add a configurable
+  cap (default 4096) and reject longer with a 400 carrying the actual length
+  and the limit. ~6 LOC.
+* **`instructions` request field** — gpt-4o-mini-tts uses it for per-
+  request voice direction. Maps 1:1 to our `params.tts_instruct`
+  (qwen3-tts VoiceDesign). Wire it through. Note: when both `voice` and
+  `instructions` are present and the loaded model is a CustomVoice/Base
+  variant (which doesn't have `tts_instruct`), the field should be ignored
+  with a stderr breadcrumb (not a 400 — OpenAI clients don't expect it
+  to ever fail). ~5 LOC.
+
+### 75b. P1 — substantial usability wins (small)
+
+* **Real OpenAI `pcm` (24 kHz signed 16-bit LE, no header)** — currently
+  rejected with a helpful 400 pointing at `wav` or `f32`. Adding it is
+  ~15 LOC: just emit `int16` LE bytes from the float32 buffer, same
+  clamping logic as `crispasr_make_wav_int16` minus the RIFF header. The
+  `f32` path stays as the crispasr-specific extension for downstream DSP
+  consumers that don't want the int16 round-trip. After landing,
+  unconditional OpenAI client compatibility (`response_format=pcm` is
+  the only path some clients try by default).
+* **CORS preflight + headers** — needed for any browser client (the
+  whole reason an OpenAI-compat server exists). httplib supports
+  `Access-Control-Allow-*` set on every response via a single
+  `set_pre_routing_handler` hook. ~10 LOC. Worth gating behind a
+  `--cors-origin '*'` flag so deployed servers stay default-locked.
+* **Error response shape upgrade** — OpenAI's `error` object has
+  `{message, type, code, param}`. We have `{message, type}` only.
+  `code` and `param` are useful for clients that programmatically branch
+  on the error reason (e.g. "voice_not_found" → re-fetch voice list).
+  Adding two fields is ~5 LOC of `json_error()` signature widening; the
+  callers gain optional `code`/`param` arguments and pass them through.
+
+### 75c. P1 — `speed` parameter (deferred — needs backend support)
+
+OpenAI: `speed` 0.25–4.0 (default 1.0). None of our TTS backends today
+expose a tempo / rate knob through `whisper_params`. Adding it means
+either:
+
+1. Do nothing in the adapter, just resample the float32 PCM at the
+   server layer with a linear or sinc resampler. Quality loss on
+   pitch is minimal at modest speeds; this is what most production
+   servers fall back to when the underlying model doesn't support
+   tempo.
+2. Plumb a `params.tts_speed` field through to backends that can
+   actually do it natively (vibevoice's σ-VAE has a duration knob;
+   qwen3-tts AR can be conditioned on a duration target via the
+   instruct path on VoiceDesign).
+
+Option 1 is cleaner for v1 — single resampler in the server; backends
+stay untouched. Option 2 is the right long-term shape but needs
+backend-by-backend work. Land option 1 here; option 2 becomes its own
+follow-up.
+
+### 75d. P1 — long-form input via sentence chunking (issue #66)
+
+vkrmch filed [#66] proposing transparent sentence-level chunking inside
+`/v1/audio/speech` for long-form input, with a working local prototype
+showing RTF stays flat at ~1.5 from 9 words → 1605 words / 50 chunks
+on Orin AGX (qwen3-tts-1.7b-base + #57). Chunk boundaries inaudible
+in their A/B listening; voice consistency holds across chunks because
+the talker's ICL prefill re-runs with the same speaker prompt each time
+(and our `last_voice_key_` cache keeps the per-call cost flat).
+
+This **supersedes the §75a input-length-cap** above — instead of
+rejecting long input with a 400, transparently chunk it. The cap is
+still useful as a hard ceiling against pathological input (e.g. 100 MB
+blobs), but the soft path becomes "chunk if > N chars, synth each
+chunk, concatenate with a brief silence pad."
+
+Implementation per #66's recommended shape (option 2 — standalone
+helper):
+
+* **`examples/cli/crispasr_tts_chunking.{h,cpp}`** — sentence splitter
+  + concatenator with silence padding. Pure functions, no backend
+  dependency, unit-testable.
+* **Splitter heuristics:** primary split on ASCII `.!?` + whitespace.
+  Secondary fallback: any chunk over `max_chars` (default 600) breaks
+  on whitespace. Extend the primary set with non-ASCII terminators
+  (`。` U+3002, `।` U+0964) before merge — vkrmch's prototype skipped
+  these and relied on the max-chars fallback; cheap to fix while we're
+  there.
+* **Concatenator:** float32 PCM with `silence_samples = 4800` (200 ms
+  at 24 kHz) between chunks. Skip leading/trailing silence pad to
+  avoid clicks at output boundaries.
+* **No `chunked: true` opt-in field** — chunk by default per #66's
+  reasoning (single-shot failure mode is silently truncated audio,
+  perceptible cost on short input is zero).
+* **Server route handler:** call `crispasr_tts_chunk_split(text)`,
+  iterate, accumulate, return the concatenated PCM through the
+  existing WAV/`f32`/`pcm` (real OpenAI int16 LE) format dispatch.
+
+Subtleties to surface in the helper's docstring:
+
+* Splitter over-splits on English abbreviations (`Mr. Smith` becomes
+  two chunks). Acceptable for v1 — adds an extra 200 ms pause, doesn't
+  break audio. Real fix is Unicode-aware sentence segmentation
+  (ICU's BreakIterator), worth a follow-up if anyone files a
+  comprehensible-prosody bug.
+* Voice consistency assumes the backend's `synthesize` re-applies
+  the speaker prompt on every call (true for qwen3-tts via
+  `last_voice_key_`; need to confirm kokoro / vibevoice / orpheus
+  don't drift across chunks). Add a smoke-test assertion that
+  re-synthesizing the same chunk twice produces bit-identical
+  output for each backend.
+* Chunking compounds on top of #64 (qwen3_tts_synthesize re-decodes
+  the ref every call, ~16 s constant cost on Orin). Once #64 lands
+  the chunked-path RTF will drop further. Note in the route's log
+  line so we can spot the speedup when #64 ships.
+
+Files touched (75d):
+
+* `examples/cli/crispasr_tts_chunking.h` (new) — `split_sentences`,
+  `concat_with_silence` declarations.
+* `examples/cli/crispasr_tts_chunking.cpp` (new) — implementations.
+* `examples/cli/CMakeLists.txt` — add the new translation unit to
+  `crispasr-cli`.
+* `examples/cli/crispasr_server.cpp` — route handler iterates chunks
+  + concatenates instead of calling `synthesize` once.
+* `tests/test_server_chunking.cpp` (new, Catch2) — splitter
+  edge-cases: empty / whitespace-only input, single-sentence (no
+  split), abbreviations (over-splits acceptably), non-ASCII
+  terminators after the extension, max_chars fallback on a
+  no-terminator paragraph, mixed terminators.
+* `tests/test-server-tts.sh` — happy-path assertion that a
+  multi-paragraph input produces a longer WAV than a single sentence.
+
+### 75e. P2 — bigger lifts (separate work items)
+
+* **Streaming response (chunked / SSE)** — already covered by §70 above.
+  Per-#58 deferred; couples with chunked codec / VAE decode for the
+  full latency win. Composes with §75d cleanly: each chunk gets
+  flushed as it completes, time-to-first-byte drops from "full long-
+  form wall-clock" to "first sentence's wall-clock + flush latency."
+* **mp3/opus/aac/flac encoding** — needs lame/opusenc/flac/etc. as
+  build deps. Worth a separate item with explicit licensing review;
+  some encoders are GPL/LGPL.
+* **POST /v1/voices upload** (multipart for runtime voice provisioning)
+  — per #58 follow-up. Threat surface: file size limits, content-type
+  validation, disk quota. Worth its own PR.
+* **DELETE /v1/voices/{name}** — pairs with the upload endpoint above.
+* **Per-request voice settings** (ElevenLabs-style `stability`,
+  `similarity_boost`, `style`) — not in OpenAI spec; only useful if we
+  add an ElevenLabs-compat surface.
+* **Prosody / SSML support** — Azure-style. Big undertaking; defer
+  until there's actual demand.
+
+### Files touched (75a + 75b + 75c-option-1)
+
+* `examples/cli/crispasr_server.cpp` — `/v1/audio/speech` route handler:
+  parse + log `model`, validate input length, parse `instructions`,
+  parse + apply `speed` via post-synth resampler, emit OpenAI `pcm`
+  format, set CORS headers (under flag), pass `code`/`param` through
+  `json_error()`.
+* `examples/cli/whisper_params.h` — `tts_max_input_chars` (default 4096),
+  `cors_origin` (default empty = no CORS headers).
+* `examples/cli/cli.cpp` — `--tts-max-input-chars N`,
+  `--cors-origin ORIGIN` flags.
+* `tests/test-server-tts.sh` — assertions for: `model` field accepted,
+  too-long input → 400 with limit in message, `instructions` accepted
+  and applied (when a VoiceDesign model is loaded; ignored otherwise),
+  `response_format=pcm` → 200 with int16 LE body (verify size = 2 ×
+  n_samples and no RIFF header), CORS headers present when flag is on
+  and absent when off.
+* `tests/test_server_wav_writer.cpp` — extract a `crispasr_pcm_int16_le`
+  helper next to the WAV writer (same clamp+round logic, no header).
+  Add Catch2 cases for it: empty input, boundary clamping,
+  byte-alignment, sample-count match.
+* `docs/server.md` (or wherever the existing /inference docs live) —
+  document each new field + the deferred ones.
+
+### Out of scope for this round
+
+* Streaming response (§70).
+* mp3 / opus / aac / flac encoding (separate item; deps).
+* POST/DELETE voice management endpoints (per-#58 follow-up; threat
+  surface).
+* `speed` via native-backend duration knobs (§75c option 2).
+* ElevenLabs-style per-voice settings.
+
+### Acceptance
+
+`./tests/test-server-tts.sh` passes (current 20 + new ~10 assertions);
+`./build-ninja-compile/bin/test_server_wav_writer` passes (current 54 +
+new ~15 assertions); a stock OpenAI Python SDK script can hit our
+server with a chat-completion-style synth call (no client-side
+patching) and get back a playable file.
