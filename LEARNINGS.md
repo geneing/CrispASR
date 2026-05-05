@@ -2580,3 +2580,130 @@ loads fast on tight memory. Once flan-t5-small matches, MADLAD
 matches by construction (same kernels, same algorithms, larger model).
 Save the next round of T5 debugging by validating on flan-t5-small
 first.
+
+## 2026-05-05 — ggml fork patches we carry (must re-apply on every ggml bump)
+
+Authoritative inventory of every CrispASR-local change to the vendored
+`ggml/` subtree. Each file has a `// CrispASR patch ...` marker so a
+mechanical bump (`git subtree pull` or equivalent) won't silently lose
+them, but the marker is only a tripwire — the actual fixes are listed
+here. After every ggml bump, grep for `CrispASR patch` and verify each
+hunk is still present; ggml has lost ours twice already (commits
+`1552434` first added the im2col fix, `ca6c523` re-applied it after
+the 0.9.8 → 0.10.0 bump dropped it).
+
+Mirror this list in `UPSTREAM.md` so future-us (or whoever bumps next)
+knows which of these are candidates to send upstream.
+
+### 1. F16 weight × F32 input → F32 dot product (issue #38)
+
+Files: `ggml/src/ggml-cpu/{vec.cpp, vec.h, ggml-cpu.c, simd-mappings.h}`.
+
+Upstream `MUL_MAT` with `src0=F16, src1=F32` quantises the F32 input to
+F16 first. F16's dynamic range tops out at ±65504, so any activation
+above that saturates to ±Inf and feeds NaN into the next layer. The
+qwen3-tts code-prediction path (and several conformer encoders on long
+inputs) routinely produces logits well past 65504, masking precision
+issues as outright NaN spirals.
+
+Fix: introduce `ggml_vec_dot_f16_f32` that loads the F16 weight, casts
+it to F32, and accumulates in F32 — no quantisation step on the input
+side. `vec_dot_type` for F16 is set to F32 so `MUL_MAT` takes this path
+without an intermediate quantize. ARM NEON path uses `vcvt_f32_f16` +
+FMA; AVX2/AVX-512 paths use `_mm256_cvtph_ps` + FMA. Verified on the
+qwen3-tts codec head where the saturation surfaced.
+
+Symptom if lost: silent NaN propagation, decoder produces `<unk>` or
+locks onto a single token. Won't show up in unit tests if the tests
+use small synthetic inputs that stay inside F16 range.
+
+### 2. CUDA `im2col` grid_y > 65535 (`ggml/src/ggml-cuda/im2col.cu`)
+
+Upstream uses `OW` as `block_nums.y` directly. CUDA caps grid Y at
+65535; SEANet-style encoders with 11-second 16 kHz inputs land at
+`OW = 176000`, busting the cap and triggering an abort *or* (worse) a
+silent partial copy depending on driver behaviour.
+
+Fix: clamp `block_nums.y/z` to `MAX_GRIDDIM_Y = 65535` at dispatch and
+loop inside the kernel with stride `gl_NumWorkGroups.{y,z}` so each
+thread covers `ceil(OW/65535)` output positions. Kernel-internal stride
+loop, single launch — possible because `im2col` has no shared-memory
+state between iterations.
+
+Symptom if lost: any conv encoder with `T_out > 65535` aborts on CUDA
+and the supervisor restarts the process. CPU is unaffected.
+
+### 3. CUDA cpy_scalar_transpose grid_y > USHRT_MAX (`ggml/src/ggml-cuda/cpy.cu`, GH issue #65)
+
+Same class of bug as (2) but in the *transposed* cpy path used by
+`ggml_cont(ggml_transpose(...))`. Asserts `grid_y < USHRT_MAX` (= 65535)
+inside `ggml_cpy_scalar_cuda`'s transposed branch. The qwen3-tts codec
+graph emits `[T_pcm, 1, 1, 1]` tensors with `T_pcm = T_codec * 1920` ≈
+2.88M when `QWEN3_TTS_CODEC_GPU=1` and the talker hits its 1500-frame
+cap, so `grid_y = ceil(T_pcm/32) ≈ 90,000` busts the assert and the
+process aborts with `GGML_ASSERT(grid_y < USHRT_MAX)`.
+
+Fix: tile the launch along the y axis. Add an `int y_block_offset`
+parameter to `cpy_scalar_transpose`; the host loops in chunks of
+`MAX_GRID_Y = USHRT_MAX-1` and each launch covers a y-slab
+`[y_block_offset, y_block_offset + grid_y_this)`. The kernel splices
+`blockIdx.y` back onto the offset (`by = blockIdx.y + y_block_offset`).
+Bit-identical output, full transposed-tile coalescing preserved per
+chunk. Multi-launch (vs the in-kernel-stride pattern used in (2))
+because the transposed kernel relies on `__shared__` tile state per
+launch — folding the chunk loop inside the kernel would break the
+`cur_tile_buf` toggle.
+
+The first attempt (commit `eb9e4a2`) shipped a scalar fallback when
+the assert would fire. That worked but threw away the transposed-tile
+coalescing entirely on any shape that tripped it; commit `2639461`
+replaced it with proper tiling.
+
+Other CUDA-class backends — HIP / MUSA — share `ggml-cuda/cpy.cu` via
+the `vendors/` shim and inherit the fix. Vulkan's `copy_transpose.comp`
+already has an in-kernel stride loop and is unaffected. Metal's
+`kernel_cpy_t_t` doesn't tile and Apple GPUs don't have the 65535 cap.
+
+Symptom if lost: any large-T audio codec / vocoder graph on CUDA
+(qwen3-tts, future SNAC/Encodec/XTTS ports) aborts with
+`GGML_ASSERT(grid_y < USHRT_MAX)` once `T_codec * upsample_total >
+~65535*32`.
+
+### 4. Metal `kernel_conv_transpose_1d` input-range tightening (`ggml/src/ggml-metal/ggml-metal.metal`)
+
+Upstream's transposed conv1d kernel iterates the full IL input range
+per output position and filters with `if (...)`. For the qwen3-tts
+codec decoder block 1 (IL=320, K=10, s0=5) that's 64× more iterations
+than necessary; on M1 with the codec running at full T_codec, the GPU
+watchdog fires `kIOGPUCommandBufferCallbackErrorImpactingInteractivity`
+and the kernel is killed.
+
+Fix: compute `i_min, i_max` analytically as the input positions whose
+kernel weight `k = j - i*s0` lands inside `[0, K)`, then iterate only
+that range. At most `ceil(K/s0)` iterations per output position
+(typically 2 for stride==K/2 transposed convs). Bit-identical output,
+~K/s0× speedup, watchdog-safe.
+
+Symptom if lost: long qwen3-tts (or any large transposed-conv) graph on
+Metal triggers GPU watchdog and the command buffer is killed mid-graph.
+CUDA / CPU / Vulkan are unaffected — they don't have the same
+per-command-buffer watchdog.
+
+### Bump procedure
+
+```bash
+# Before the bump
+grep -rn "CrispASR patch" ggml/ > /tmp/patches-before.txt
+
+# Do the bump
+git subtree pull --prefix=ggml https://github.com/ggml-org/ggml master --squash
+
+# After the bump
+grep -rn "CrispASR patch" ggml/ > /tmp/patches-after.txt
+diff /tmp/patches-before.txt /tmp/patches-after.txt
+# If any patch is missing, find the original commit and cherry-pick the hunk.
+```
+
+Anything that disappears from the diff is a patch ggml's master
+silently overwrote — re-apply from this list. The four patches above
+are the full inventory as of 2026-05-05.
