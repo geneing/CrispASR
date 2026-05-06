@@ -353,6 +353,13 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             // the user explicitly asked for it. Note: short alias is
             // `-falign`, NOT `-fa` (already taken by `--flash-attn`).
             params.force_aligner = true;
+        } else if (arg == "--no-auto-aligner") {
+            // SubtitleEdit #10775: opt out of the canary auto-aligner
+            // default (see crispasr_run.cpp for the implicit-enable
+            // logic). With this flag, --backend canary uses its
+            // cross-attn DTW timing (no aligner GGUF download, no
+            // second forward pass) — matches pre-v0.7.0 behaviour.
+            params.no_auto_aligner = true;
         } else if (arg == "-n" || arg == "--max-new-tokens") {
             params.max_new_tokens = std::stoi(ARGV_NEXT);
         } else if (arg == "-ck" || arg == "--chunk-seconds") {
@@ -630,6 +637,10 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             "  -falign,   --force-aligner        [%-7s] use the CTC aligner's word "
             "timestamps even when the backend produces native ones (issue #62)\n",
             params.force_aligner ? "true" : "false");
+    fprintf(stderr,
+            "             --no-auto-aligner      [%-7s] for --backend canary, skip the implicit "
+            "`-am auto --force-aligner` default (SubtitleEdit #10775)\n",
+            params.no_auto_aligner ? "true" : "false");
     fprintf(
         stderr,
         "  --lid-backend NAME                [%-7s] language-detect backend: whisper|silero|firered (for non-native "

@@ -113,6 +113,16 @@ struct whisper_params {
     // than the backend's native timing (whisper, parakeet, canary,
     // cohere, kyutai-stt).
     bool force_aligner = false;
+    // SubtitleEdit #10775: opt out of the canary auto-aligner default.
+    // For --backend canary, when the user requests word-level output
+    // (srt/vtt/json-full/wts/max-len/split-on-punct/print-colors) and
+    // hasn't passed --aligner-model explicitly, crispasr now defaults
+    // to `-am auto --force-aligner` because canary's native cross-attn
+    // DTW timing is ~5× looser than canary-ctc-aligner (~414 ms vs
+    // ~78 ms MAE on word boundaries — see canary-ctc-aligner-GGUF
+    // README). `--no-auto-aligner` reverts to the pre-default native
+    // DTW path (no second forward pass, no ~442 MB download).
+    bool no_auto_aligner = false;
     int32_t max_new_tokens = 512;
     int32_t chunk_seconds = 30;
     std::string lid_backend;

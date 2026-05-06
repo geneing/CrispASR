@@ -700,6 +700,46 @@ int crispasr_run_backend(const whisper_params& params_in) {
     }
     params.model = resolved;
 
+    // SubtitleEdit #10775: implicit `-am auto --force-aligner` for
+    // canary when the user requests word-level output but didn't
+    // pass an aligner. Canary's native timing is cross-attention DTW
+    // on the encoder–decoder, MAE ~414 ms on word boundaries
+    // (canary.cpp:1377-1390 / canary-ctc-aligner-GGUF README).
+    // The official NeMo Forced Aligner companion model
+    // (canary-ctc-aligner-q4_k, ~442 MB, separate FastConformer+CTC
+    // head) gives ~78 ms MAE — 5.3× tighter — and is the path NVIDIA
+    // recommends. Users who want the legacy DTW timing can opt out
+    // with --no-auto-aligner.
+    //
+    // Gates:
+    //   - backend is canary (the only backend with a documented MAE
+    //     gap that big AND a curated aligner sibling in the registry)
+    //   - --aligner-model not set (we don't override an explicit one)
+    //   - --no-auto-aligner not set
+    //   - output type that benefits from word ts (srt/vtt/json-full/
+    //     wts/max-len/split-on-punct/print-colors). Plain transcript
+    //     stdout doesn't pay the second-forward-pass cost.
+    //   - not stream/mic/server/text-only/TTS-only mode
+    if (backend_name == "canary" && params.aligner_model.empty() && !params.no_auto_aligner && !params.stream &&
+        !params.mic && !params.server && params.text_input.empty() && params.tts_text.empty()) {
+        const bool wants_word_ts = params.output_srt || params.output_vtt || params.output_jsn_full ||
+                                   params.output_wts || params.split_on_punct || params.max_len > 0 ||
+                                   params.print_colors;
+        if (wants_word_ts) {
+            params.aligner_model = "auto";
+            params.force_aligner = true;
+            if (!params.no_prints) {
+                fprintf(stderr, "crispasr: canary auto-aligner: enabling `-am auto --force-aligner` "
+                                "(canary-ctc-aligner, ~442 MB; ~78 ms MAE vs ~414 ms for native DTW). "
+                                "Pass --no-auto-aligner to disable.\n");
+            }
+            if (params.verbose) {
+                fprintf(stderr, "crispasr[verbose]: auto-aligner: backend=canary wants_word_ts=1 "
+                                "explicit_aligner=0 -> aligner_model='auto' force_aligner=1\n");
+            }
+        }
+    }
+
     // Issue #62: `-am auto` resolves to the registered CTC aligner
     // (canary-ctc-aligner-q4_k, ~442 MB). Same registry / cache /
     // download path as -m auto. Lets users add force-alignment without

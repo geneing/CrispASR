@@ -231,6 +231,44 @@ Notes:
 - Parakeet remains the better choice when timestamp quality is the
   top priority and you don't want to pay for a second forward pass.
 
+### Canary auto-aligner default — `--no-auto-aligner` (SubtitleEdit #10775)
+
+Canary's native word timing is cross-attention DTW on the encoder–
+decoder, which has a measured **~414 ms MAE on word boundaries**
+(`src/canary.cpp:1377-1390`). The official NVIDIA companion model
+**`canary-ctc-aligner`** (separate 600 M FastConformer + CTC head,
+shipped inside the same `.nemo` tarball as the main canary weights;
+`hf_readmes/canary-ctc-aligner-GGUF.md`) gets ~78 ms MAE — **5.3×
+tighter**.
+
+Because the gap is so large and the aligner is curated/registered,
+`--backend canary` now defaults to `-am auto --force-aligner` whenever
+the requested output benefits from word-level timestamps (`-osrt`,
+`-ovtt`, `-ojf`, `-owts`, `--max-len > 0`, `--split-on-punct`,
+`--print-colors`). This auto-downloads `canary-ctc-aligner-q4_k.gguf`
+(~442 MB) into the crispasr cache the first time and reuses it
+afterwards. Stream / mic / server / `--text` / `--tts` modes are
+exempt.
+
+```bash
+# v0.7.0+: equivalent to passing `-am auto --force-aligner` automatically
+./build/bin/crispasr --backend canary -m auto -f samples/jfk.wav \
+    --max-len 50 --split-on-punct -osrt
+```
+
+To opt out (e.g., to keep the old DTW path because you don't want
+the ~442 MB download or the second forward pass), add
+`--no-auto-aligner`:
+
+```bash
+./build/bin/crispasr --backend canary -m auto -f samples/jfk.wav \
+    --max-len 50 --split-on-punct -osrt --no-auto-aligner
+```
+
+The implicit-enable line goes to stderr (suppressed under
+`--no-prints`) so it doesn't perturb stdout subtitle parsing in
+upstream tools like SubtitleEdit.
+
 ## Sampling / decoding (whisper + LLM backends)
 
 | Flag | Meaning |
