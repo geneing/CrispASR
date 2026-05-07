@@ -106,21 +106,19 @@ public:
     std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
         // Voice resolution order:
         //   1. Bare-name in --voice-dir: <voice-dir>/<name>.gguf
-        //      (matches qwen3-tts post-d35940b — server-mode callers can
-        //       pass the same {"voice": "<name>"} request shape across all
-        //       TTS backends; the adapter does the filesystem lookup
-        //       against `params.tts_voice_dir`.)
-        //   2. Explicit --voice <path>: literal path to a voice GGUF.
+        //      (matches qwen3-tts post-d35940b — server callers can pass the same
+        //       {"voice": "<name>"} shape across all TTS backends.)
+        //   2. Explicit --voice <path.gguf>: literal path to a voice GGUF.
+        //      --voice <path.wav>: 1.5B WAV-cloning path (see wav_ref_path_ below).
         //   3. Per-language sibling pick (vibevoice-voice-<lang>-Spk1_woman.gguf
         //      → vibevoice-voice-<lang>-Spk0_man.gguf), if -l <lang> is set.
         //   4. Sibling vibevoice-voice-emma.gguf as English default (matches
         //      the auto-download companion).
         std::string voice_path = params.tts_voice;
 
-        // (1) Bare name → voice-dir lookup. A "bare name" is a token with
-        // no path separators and no `.gguf`/`.wav` extension — e.g.
-        // `voice: "vik"` from a /v1/audio/speech request. Path-traversal
-        // sanitization (reject `..` and NUL) mirrors the qwen3-tts adapter.
+        // (1) Bare name → voice-dir lookup. A "bare name" is a token with no path
+        // separators and no .gguf/.wav extension (e.g. `voice: "vik"` from a server
+        // request). Path-traversal sanitization mirrors the qwen3-tts adapter.
         if (!voice_path.empty() && !params.tts_voice_dir.empty() && voice_path.find('/') == std::string::npos &&
             voice_path.find('\\') == std::string::npos && !ends_with_ci(voice_path, ".gguf") &&
             !ends_with_ci(voice_path, ".wav")) {
@@ -130,21 +128,25 @@ public:
                 return {};
             }
             const std::string gguf_path = params.tts_voice_dir + "/" + voice_path + ".gguf";
-            if (file_exists(gguf_path)) {
+            if (file_exists(gguf_path))
                 voice_path = gguf_path;
-            }
-            // else: leave bare name; vibevoice_load_voice will fail with a
-            // clearer "could not be loaded" path below.
+            // else: leave bare name; loader will fail with a clear error below.
         }
 
-        if (voice_path.empty()) {
+        // (2b) WAV reference → 1.5B cloning path. Don't attempt to load .wav as GGUF;
+        // store it and expose via VIBEVOICE_VOICE_AUDIO before each synthesize call.
+        if (ends_with_ci(voice_path, ".wav")) {
+            wav_ref_path_ = voice_path;
+            voice_path.clear();
+        }
+
+        // (3)+(4) Sibling auto-pick when nothing was explicitly provided.
+        if (voice_path.empty() && wav_ref_path_.empty()) {
             auto slash = params.model.find_last_of("/\\");
             std::string dir = (slash == std::string::npos) ? "." : params.model.substr(0, slash);
             auto try_sibling = [&](const std::string& fname) -> std::string {
                 std::string p = dir + "/" + fname;
-                if (file_exists(p))
-                    return p;
-                return {};
+                return file_exists(p) ? p : std::string{};
             };
             const std::string& lang = params.language;
             if (!lang.empty() && lang != "auto" && lang.size() >= 2) {
@@ -157,11 +159,8 @@ public:
                 voice_path = try_sibling("vibevoice-voice-emma.gguf");
         }
 
-        // Per-call voice-key cache. Replaces the previous `voice_loaded_`
-        // boolean so server callers can switch voice per request just by
-        // changing params.tts_voice. CLI single-shot behaviour is unchanged
-        // (first call still pays one load); vibevoice_load_voice() replaces
-        // the active voice when re-called.
+        // Per-call voice-key cache: reload only when the resolved path changes.
+        // Replaces the old bool so server callers can switch voice per request.
         if (!voice_path.empty() && voice_path != last_voice_key_) {
             if (vibevoice_load_voice(ctx_, voice_path.c_str()) == 0) {
                 last_voice_key_ = voice_path;
@@ -175,14 +174,26 @@ public:
                 return {};
             }
         }
-        if (last_voice_key_.empty()) {
-            fprintf(stderr, "crispasr[vibevoice-tts]: no voice prompt resolved (pass --voice <path>, "
-                            "drop a <name>.gguf into --voice-dir, or place a vibevoice-voice-*.gguf "
-                            "next to the model).\n");
-            return {};
+
+        // Gate: no GGUF voice and no WAV reference → check env var fallback or bail.
+        if (last_voice_key_.empty() && wav_ref_path_.empty()) {
+            const char* voice_wav_env = getenv("VIBEVOICE_VOICE_AUDIO");
+            if (!voice_wav_env || !voice_wav_env[0]) {
+                fprintf(stderr, "crispasr[vibevoice-tts]: no voice prompt resolved (pass --voice <path.gguf>, "
+                                "--voice <path.wav>, drop a <name>.gguf into --voice-dir, "
+                                "set VIBEVOICE_VOICE_AUDIO=<wav>, or place a vibevoice-voice-*.gguf "
+                                "next to the model).\n");
+                return {};
+            }
         }
+
         if (!ctx_ || text.empty())
             return {};
+
+        // Expose --voice <path.wav> to vibevoice_synthesize via env var.
+        if (!wav_ref_path_.empty())
+            setenv("VIBEVOICE_VOICE_AUDIO", wav_ref_path_.c_str(), 1);
+
         int n_samples = 0;
         float* pcm = vibevoice_synthesize(ctx_, text.c_str(), &n_samples);
         if (!pcm || n_samples <= 0)
@@ -203,6 +214,7 @@ public:
 private:
     vibevoice_context* ctx_ = nullptr;
     std::string last_voice_key_;
+    std::string wav_ref_path_; // set when --voice <path.wav> is used (1.5B WAV cloning)
 };
 
 } // namespace
