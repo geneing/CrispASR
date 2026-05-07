@@ -474,6 +474,15 @@ static std::vector<std::string> well_known_search_dirs(const std::string& cache_
     return dirs;
 }
 
+std::string probe_cached_file(const std::string& filename, const std::string& cache_dir_override) {
+    for (const auto& d : well_known_search_dirs(cache_dir_override)) {
+        const std::string p = d + "/" + filename;
+        if (file_present(p))
+            return p;
+    }
+    return "";
+}
+
 std::string ensure_cached_file(const std::string& filename, const std::string& url, bool quiet,
                                const char* pretty_label, const std::string& cache_dir_override) {
     // Probe all well-known locations first. The first hit wins; we

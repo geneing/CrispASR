@@ -40,6 +40,13 @@ bool file_present(const std::string& path);
 // `quiet=true` suppresses progress bars; failure messages always go to stderr.
 bool fetch(const std::string& url, const std::string& dest, bool quiet);
 
+// Search all well-known locations (canonical cache + /Volumes/backups/ai/crispasr-models
+// + CRISPASR_MODELS_DIR env + ~/.cache/huggingface/hub) for `filename` without
+// downloading. Returns the first hit's absolute path, or "" if not found anywhere.
+// Used by dry-run preview to reflect the same "cached/local" status that
+// ensure_cached_file() would report at runtime.
+std::string probe_cached_file(const std::string& filename, const std::string& cache_dir_override = "");
+
 // Composite helper: if `dest` (= dir(cache_dir_override) + "/" + filename)
 // already satisfies file_present(), return its path immediately. Otherwise
 // invoke fetch() to populate it. Returns the absolute path on success or an

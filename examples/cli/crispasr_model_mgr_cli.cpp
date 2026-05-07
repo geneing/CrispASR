@@ -85,9 +85,13 @@ static CrispasrResolvePreview build_preview(const std::string& model_arg, const 
     out.approx_size = match.approx_size;
     out.resolved_path = cache_path_for(match.filename);
 
-    if (!ignore_cache && crispasr_cache::file_present(out.resolved_path)) {
-        out.exists_locally = true;
-        return out;
+    if (!ignore_cache) {
+        const std::string found = crispasr_cache::probe_cached_file(match.filename, cache_dir_override);
+        if (!found.empty()) {
+            out.exists_locally = true;
+            out.resolved_path = found;
+            return out;
+        }
     }
 
     out.would_download = true;
