@@ -114,7 +114,7 @@ static ggml_tensor* TR(chatterbox_s3gen_context* c, const char* name) {
 // ── Public API ──────────────────────────────────────────────────
 
 extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(const char* path, int n_threads,
-                                                                            int verbosity) {
+                                                                            int verbosity, bool use_gpu) {
     auto* c = new chatterbox_s3gen_context();
     c->n_threads = n_threads > 0 ? n_threads : 4;
     c->verbosity = verbosity;
@@ -130,7 +130,13 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
         delete c;
         return nullptr;
     }
-    c->backend = c->backend_cpu;
+    c->backend = use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    if (!c->backend) {
+        if (verbosity >= 1 && use_gpu) {
+            fprintf(stderr, "s3gen: GPU backend unavailable, falling back to CPU\n");
+        }
+        c->backend = c->backend_cpu;
+    }
 
     // Load weights
     core_gguf::WeightLoad wl;
@@ -156,8 +162,12 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
 
     // Scheduler
     {
-        ggml_backend_t backends[] = {c->backend};
-        c->sched = ggml_backend_sched_new(backends, nullptr, 1, 32768, false, false);
+        ggml_backend_t backends[2];
+        int n_be = 0;
+        backends[n_be++] = c->backend;
+        if (c->backend != c->backend_cpu)
+            backends[n_be++] = c->backend_cpu;
+        c->sched = ggml_backend_sched_new(backends, nullptr, n_be, 32768, false, false);
         c->compute_meta.resize(ggml_tensor_overhead() * 32768 + ggml_graph_overhead_custom(32768, false));
     }
 

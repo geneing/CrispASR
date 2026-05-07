@@ -16,7 +16,8 @@ extern "C" {
 
 struct chatterbox_s3gen_context;
 
-struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(const char* path, int n_threads, int verbosity);
+struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(const char* path, int n_threads, int verbosity,
+                                                                 bool use_gpu);
 
 // Run the full S3Gen pipeline: speech tokens → 24 kHz PCM.
 // Conditioning: prompt_token (ref speech tokens), prompt_feat (ref mel),

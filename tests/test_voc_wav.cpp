@@ -8,12 +8,15 @@
 
 static void write_wav(const char* path, const float* data, int n_samples, int sample_rate) {
     FILE* f = fopen(path, "wb");
-    if (!f) return;
+    if (!f)
+        return;
     int16_t* pcm16 = (int16_t*)malloc(n_samples * 2);
     for (int i = 0; i < n_samples; i++) {
         float v = data[i];
-        if (v > 1.0f) v = 1.0f;
-        if (v < -1.0f) v = -1.0f;
+        if (v > 1.0f)
+            v = 1.0f;
+        if (v < -1.0f)
+            v = -1.0f;
         pcm16[i] = (int16_t)(v * 32767.0f);
     }
     uint32_t data_size = n_samples * 2;
@@ -24,12 +27,17 @@ static void write_wav(const char* path, const float* data, int n_samples, int sa
     fwrite("fmt ", 1, 4, f);
     uint32_t fmt_size = 16;
     fwrite(&fmt_size, 4, 1, f);
-    uint16_t audio_fmt = 1; fwrite(&audio_fmt, 2, 1, f);
-    uint16_t channels = 1; fwrite(&channels, 2, 1, f);
+    uint16_t audio_fmt = 1;
+    fwrite(&audio_fmt, 2, 1, f);
+    uint16_t channels = 1;
+    fwrite(&channels, 2, 1, f);
     fwrite(&sample_rate, 4, 1, f);
-    uint32_t byte_rate = sample_rate * 2; fwrite(&byte_rate, 4, 1, f);
-    uint16_t block_align = 2; fwrite(&block_align, 2, 1, f);
-    uint16_t bits = 16; fwrite(&bits, 2, 1, f);
+    uint32_t byte_rate = sample_rate * 2;
+    fwrite(&byte_rate, 4, 1, f);
+    uint16_t block_align = 2;
+    fwrite(&block_align, 2, 1, f);
+    uint16_t bits = 16;
+    fwrite(&bits, 2, 1, f);
     fwrite("data", 1, 4, f);
     fwrite(&data_size, 4, 1, f);
     fwrite(pcm16, 2, n_samples, f);
@@ -38,8 +46,11 @@ static void write_wav(const char* path, const float* data, int n_samples, int sa
 }
 
 int main() {
-    auto* ctx = chatterbox_s3gen_init_from_file("/mnt/storage/chatterbox/chatterbox-s3gen-f16.gguf", 4, 2);
-    if (!ctx) { fprintf(stderr, "Failed to load model\n"); return 1; }
+    auto* ctx = chatterbox_s3gen_init_from_file("/mnt/storage/chatterbox/chatterbox-s3gen-f16.gguf", 4, 2, false);
+    if (!ctx) {
+        fprintf(stderr, "Failed to load model\n");
+        return 1;
+    }
 
     std::vector<float> mel(80 * 62);
     FILE* f = fopen("/mnt/storage/chatterbox/ref_mel_80x62.bin", "rb");

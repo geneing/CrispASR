@@ -4,17 +4,88 @@
 
 #include "crispasr_backend.h"
 #include "crispasr_backend_utils.h"
+#include "crispasr_cache.h"
+#include "crispasr_model_mgr_cli.h"
 #include "whisper_params.h"
 
 #include "chatterbox.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sys/stat.h>
 #include <string>
 #include <vector>
 
 namespace {
+
+static bool file_exists(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+}
+
+static bool contains_ci(const std::string& haystack, const std::string& needle) {
+    if (needle.empty() || haystack.size() < needle.size())
+        return false;
+    for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            unsigned char a = (unsigned char)haystack[i + j];
+            unsigned char b = (unsigned char)needle[j];
+            if ((char)std::tolower(a) != (char)std::tolower(b)) {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            return true;
+    }
+    return false;
+}
+
+static std::string discover_s3gen(const whisper_params& p) {
+    const bool turbo_like = contains_ci(p.backend, "turbo") || contains_ci(p.backend, "kartoffel") ||
+                            contains_ci(p.model, "turbo") || contains_ci(p.model, "kartoffel");
+    const char* const* candidates = nullptr;
+    static const char* turbo_candidates[] = {
+        "chatterbox-turbo-s3gen-f16.gguf",
+        nullptr,
+    };
+    static const char* base_candidates[] = {
+        "chatterbox-s3gen-q8_0.gguf",
+        "chatterbox-s3gen-f16.gguf",
+        nullptr,
+    };
+    candidates = turbo_like ? turbo_candidates : base_candidates;
+
+    auto try_dir = [&](const std::string& dir) -> std::string {
+        for (const char* const* it = candidates; *it; ++it) {
+            const std::string path = dir + "/" + *it;
+            if (file_exists(path))
+                return path;
+        }
+        return "";
+    };
+
+    auto sep = p.model.find_last_of("/\\");
+    const std::string model_dir = (sep == std::string::npos) ? std::string(".") : p.model.substr(0, sep);
+    std::string path = try_dir(model_dir);
+    if (!path.empty())
+        return path;
+
+    const std::string cache_dir = crispasr_cache::dir(p.cache_dir);
+    path = try_dir(cache_dir);
+    if (!path.empty())
+        return path;
+
+    if (p.auto_download) {
+        const char* wanted = turbo_like ? "chatterbox-turbo-s3gen-f16.gguf" : "chatterbox-s3gen-q8_0.gguf";
+        return crispasr_resolve_model_cli(wanted, "", p.no_prints, p.cache_dir, true);
+    }
+
+    return "";
+}
 
 class ChatterboxBackend : public CrispasrBackend {
 public:
@@ -37,36 +108,24 @@ public:
         chatterbox_context_params cp = chatterbox_context_default_params();
         cp.n_threads = p.n_threads;
         cp.verbosity = p.no_prints ? 0 : 1;
+        cp.use_gpu = p.use_gpu;
         ctx_ = chatterbox_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
             fprintf(stderr, "crispasr[chatterbox]: failed to load T3 model '%s'\n", p.model.c_str());
             return false;
         }
-        // S3Gen companion: --codec-model <path>
-        if (!p.tts_codec_model.empty()) {
-            if (chatterbox_set_s3gen_path(ctx_, p.tts_codec_model.c_str()) != 0) {
-                fprintf(stderr, "crispasr[chatterbox]: failed to load S3Gen '%s'\n", p.tts_codec_model.c_str());
+        std::string s3gen_path = p.tts_codec_model;
+        if (s3gen_path.empty()) {
+            s3gen_path = discover_s3gen(p);
+        }
+        if (!s3gen_path.empty()) {
+            if (chatterbox_set_s3gen_path(ctx_, s3gen_path.c_str()) != 0) {
+                fprintf(stderr, "crispasr[chatterbox]: failed to load S3Gen '%s'\n", s3gen_path.c_str());
                 return false;
             }
             s3gen_loaded_ = true;
-        } else {
-            // Try auto-discovering S3Gen next to the T3 model
-            std::string dir;
-            auto slash = p.model.find_last_of("/\\");
-            dir = (slash == std::string::npos) ? "." : p.model.substr(0, slash);
-            // Try turbo variant first, then base
-            for (const char* candidate : {"chatterbox-turbo-s3gen-f16.gguf", "chatterbox-s3gen-f16.gguf"}) {
-                std::string path = dir + "/" + candidate;
-                FILE* f = fopen(path.c_str(), "rb");
-                if (f) {
-                    fclose(f);
-                    if (chatterbox_set_s3gen_path(ctx_, path.c_str()) == 0) {
-                        s3gen_loaded_ = true;
-                        if (!p.no_prints)
-                            fprintf(stderr, "crispasr[chatterbox]: auto-loaded S3Gen '%s'\n", path.c_str());
-                        break;
-                    }
-                }
+            if (!p.no_prints) {
+                fprintf(stderr, "crispasr[chatterbox]: S3Gen loaded from '%s'\n", s3gen_path.c_str());
             }
         }
         return true;

@@ -1628,7 +1628,13 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
         delete c;
         return nullptr;
     }
-    c->backend = c->backend_cpu;
+    c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    if (!c->backend) {
+        if (params.verbosity >= 1 && params.use_gpu) {
+            fprintf(stderr, "chatterbox: GPU backend unavailable, falling back to CPU\n");
+        }
+        c->backend = c->backend_cpu;
+    }
 
     // Pass 2: weights
     {
@@ -1665,8 +1671,12 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
 
     // Compute scheduler
     {
-        ggml_backend_t backends[] = {c->backend};
-        c->sched = ggml_backend_sched_new(backends, nullptr, 1, 16384, false, false);
+        ggml_backend_t backends[2];
+        int n_be = 0;
+        backends[n_be++] = c->backend;
+        if (c->backend != c->backend_cpu)
+            backends[n_be++] = c->backend_cpu;
+        c->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
         c->compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
     }
 
@@ -1684,7 +1694,7 @@ extern "C" int chatterbox_set_s3gen_path(struct chatterbox_context* ctx, const c
         ctx->s3gen_ctx = nullptr;
     }
 
-    ctx->s3gen_ctx = chatterbox_s3gen_init_from_file(path, ctx->n_threads, ctx->params.verbosity);
+    ctx->s3gen_ctx = chatterbox_s3gen_init_from_file(path, ctx->n_threads, ctx->params.verbosity, ctx->params.use_gpu);
     if (!ctx->s3gen_ctx) {
         fprintf(stderr, "chatterbox: failed to load S3Gen from %s\n", path);
         return -1;
