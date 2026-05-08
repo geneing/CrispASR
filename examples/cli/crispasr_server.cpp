@@ -731,15 +731,24 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         if (!instructions.empty())
             rp.tts_instruct = instructions;
 
-        // Long-form chunking (PLAN §75d / issue #66): split input on
+        // Long-form chunking (PLAN �75d / issue #66): split input on
         // sentence boundaries before dispatching to the backend so each
         // synth stays inside the talker's healthy training horizon.
         // Single-sentence input becomes a 1-element vector; the per-call
         // overhead is one std::vector<float> move.
+        //
+        // VibeVoice exception: VibeVoice Base (voice cloning) relies on the
+        // continuous context of the prompt + generated text to maintain
+        // speaker identity and prosody. Chunking degrades it, so we disable it.
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<std::string> sentences = crispasr_tts_split_sentences(text);
-        if (sentences.empty()) // input was whitespace-only
+        std::vector<std::string> sentences;
+        if (std::string(backend->name()) == "vibevoice") {
             sentences.push_back(text);
+        } else {
+            sentences = crispasr_tts_split_sentences(text);
+            if (sentences.empty()) // input was whitespace-only
+                sentences.push_back(text);
+        }
 
         std::vector<std::vector<float>> chunks;
         chunks.reserve(sentences.size());
