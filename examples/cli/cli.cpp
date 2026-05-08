@@ -421,8 +421,10 @@ static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, 
         params.tts_voice = ARGV_NEXT;
     } else if (arg == "--tts-steps") {
         params.tts_steps = std::stoi(ARGV_NEXT);
-        if (params.tts_steps < 1) params.tts_steps = 1;
-        if (params.tts_steps > 100) params.tts_steps = 100;
+        if (params.tts_steps < 1)
+            params.tts_steps = 1;
+        if (params.tts_steps > 100)
+            params.tts_steps = 100;
     } else if (arg == "--codec-model") {
         params.tts_codec_model = ARGV_NEXT;
         std::string auto_base;
