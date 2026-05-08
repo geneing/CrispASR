@@ -19,6 +19,8 @@
 // Adapted from examples/server/server.cpp for multi-backend support.
 
 #include "crispasr_backend.h"
+#include "crispasr_lid.h"
+#include "crispasr_lid_cli.h"
 #include "crispasr_output.h"
 #include "crispasr_model_mgr_cli.h"
 #include "crispasr_vad_cli.h"
@@ -218,6 +220,7 @@ struct transcription_result {
     bool ok = false;
     std::string error;
     std::vector<crispasr_segment> segs;
+    std::string language;
     double duration_s = 0.0;
     double elapsed_s = 0.0;
 };
@@ -225,8 +228,9 @@ struct transcription_result {
 // Load audio from a multipart file upload, transcribe it, return result.
 // Acquires model_mutex internally.
 static transcription_result do_transcribe(const httplib::MultipartFormData& audio_file, CrispasrBackend* backend,
-                                          std::mutex& model_mutex, const whisper_params& rp) {
+                                          std::mutex& model_mutex, whisper_params rp) {
     transcription_result result;
+    result.language = rp.language;
 
     if (rp.verbose)
         fprintf(stderr, "crispasr-server: processing '%s' (%zu bytes)\n", audio_file.filename.c_str(),
@@ -256,6 +260,10 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
 
     result.duration_s = (double)pcmf32.size() / 16000.0;
 
+    const bool want_auto_lang = rp.detect_language || rp.language == "auto";
+    const bool has_native_lid = (backend->capabilities() & CAP_LANGUAGE_DETECT) != 0;
+    const bool lid_disabled = rp.lid_backend == "off" || rp.lid_backend == "none";
+
     // Auto-chunk long audio to prevent OOM (#27).
     // Most backends have O(T²) attention in the encoder — 30s chunks keep
     // memory bounded. The CLI does this via --vad / --chunk-seconds.
@@ -266,6 +274,33 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
     {
         std::lock_guard<std::mutex> lock(model_mutex);
         auto t0 = std::chrono::steady_clock::now();
+
+        // Match file-mode `-l auto`: run LID once per uploaded audio sample
+        // before dispatching chunks to backends that need explicit language.
+        if (want_auto_lang && !has_native_lid && !lid_disabled) {
+            crispasr_lid_result lid;
+            if (crispasr_detect_language_cli(pcmf32.data(), (int)pcmf32.size(), rp, lid)) {
+                rp.language = lid.lang_code;
+                if (rp.source_lang.empty() || rp.source_lang == "auto")
+                    rp.source_lang = lid.lang_code;
+                if (!rp.no_prints) {
+                    fprintf(stderr, "crispasr-server: LID -> language = '%s' (%s, p=%.3f)\n", lid.lang_code.c_str(),
+                            lid.source.c_str(), lid.confidence);
+                }
+            } else if (rp.language == "auto") {
+                if (!rp.no_prints) {
+                    fprintf(stderr, "crispasr-server: LID failed and no -l was set — "
+                                    "defaulting to 'en'. Pass `-l <code>` or a request language field to override.\n");
+                }
+                rp.language = "en";
+                if (rp.source_lang.empty() || rp.source_lang == "auto")
+                    rp.source_lang = "en";
+            } else if (!rp.no_prints) {
+                fprintf(stderr, "crispasr-server: LID failed, falling back to language='%s'\n", rp.language.c_str());
+            }
+            crispasr_lid_free_cache();
+        }
+        result.language = rp.language;
 
         if (n_samples <= max_chunk_samples) {
             // Short audio — single pass
@@ -494,9 +529,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             res.set_content(crispasr_segments_to_vtt(result.segs), "text/vtt; charset=utf-8");
         } else if (response_format == "verbose_json") {
             std::string task = rp.translate ? "translate" : "transcribe";
-            res.set_content(
-                crispasr_segments_to_openai_verbose_json(result.segs, result.duration_s, language, task, temperature),
-                "application/json");
+            res.set_content(crispasr_segments_to_openai_verbose_json(result.segs, result.duration_s, result.language,
+                                                                     task, temperature),
+                            "application/json");
         } else {
             // Default: json — {"text": "..."}
             res.set_content(crispasr_segments_to_openai_json(result.segs), "application/json");
@@ -731,15 +766,15 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         if (!instructions.empty())
             rp.tts_instruct = instructions;
 
-        // Long-form chunking (PLAN �75d / issue #66): split input on
+        // Long-form chunking (PLAN §75d / issue #66): split input on
         // sentence boundaries before dispatching to the backend so each
         // synth stays inside the talker's healthy training horizon.
         // Single-sentence input becomes a 1-element vector; the per-call
         // overhead is one std::vector<float> move.
         //
-        // VibeVoice exception: VibeVoice Base (voice cloning) relies on the
-        // continuous context of the prompt + generated text to maintain
-        // speaker identity and prosody. Chunking degrades it, so we disable it.
+        // VibeVoice Base voice cloning relies on the continuous prompt +
+        // generated-text context to maintain speaker identity and prosody.
+        // Chunking degrades it, so keep the request as one synthesis call.
         auto t0 = std::chrono::steady_clock::now();
         std::vector<std::string> sentences;
         if (std::string(backend->name()) == "vibevoice") {

@@ -134,7 +134,8 @@ public:
             } else if (file_exists(wav_path)) {
                 voice_path = wav_path;
             } else {
-                fprintf(stderr, "crispasr[vibevoice-tts]: warning: neither '%s' nor '%s' were found on disk!\n", gguf_path.c_str(), wav_path.c_str());
+                fprintf(stderr, "crispasr[vibevoice-tts]: warning: neither '%s' nor '%s' were found on disk\n",
+                        gguf_path.c_str(), wav_path.c_str());
             }
             // else: leave bare name; loader will fail with a clear error below.
         }

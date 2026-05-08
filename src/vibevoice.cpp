@@ -2575,34 +2575,58 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                     fseek(fv, 0, SEEK_END);
                     long fsize = ftell(fv);
                     fseek(fv, 0, SEEK_SET);
-                    
-                    if (fsize > 12) {
-                        std::vector<uint8_t> buf(fsize);
-                        fread(buf.data(), 1, fsize, fv);
-                        uint32_t offset = 12; // skip RIFF, size, WAVE
+
+                    if (fsize > 12 && fsize <= INT32_MAX) {
+                        std::vector<uint8_t> buf((size_t)fsize);
+                        const size_t rd = fread(buf.data(), 1, buf.size(), fv);
+                        auto rd_u16 = [&](size_t off) -> uint16_t {
+                            return (uint16_t)buf[off] | ((uint16_t)buf[off + 1] << 8);
+                        };
+                        auto rd_u32 = [&](size_t off) -> uint32_t {
+                            return (uint32_t)buf[off] | ((uint32_t)buf[off + 1] << 8) | ((uint32_t)buf[off + 2] << 16) |
+                                   ((uint32_t)buf[off + 3] << 24);
+                        };
+
+                        uint32_t audio_format = 0;
+                        uint32_t channels = 0;
+                        uint32_t bits_per_sample = 0;
                         int data_offset = -1;
                         uint32_t data_size = 0;
-                        
-                        // Robustly scan for the "data" chunk (skips FFmpeg metadata tags)
-                        while (offset + 8 <= fsize) {
-                            if (memcmp(buf.data() + offset, "data", 4) == 0) {
-                                data_offset = offset + 8;
-                                memcpy(&data_size, buf.data() + offset + 4, 4);
-                                break;
+
+                        if (rd == buf.size() && memcmp(buf.data(), "RIFF", 4) == 0 &&
+                            memcmp(buf.data() + 8, "WAVE", 4) == 0) {
+                            uint32_t offset = 12; // skip RIFF, size, WAVE
+                            while (offset + 8 <= buf.size()) {
+                                const uint32_t chunk_sz = rd_u32(offset + 4);
+                                const uint32_t chunk_data = offset + 8;
+                                if ((uint64_t)chunk_data + chunk_sz > buf.size())
+                                    break;
+                                if (memcmp(buf.data() + offset, "fmt ", 4) == 0 && chunk_sz >= 16) {
+                                    audio_format = rd_u16(chunk_data);
+                                    channels = rd_u16(chunk_data + 2);
+                                    bits_per_sample = rd_u16(chunk_data + 14);
+                                } else if (memcmp(buf.data() + offset, "data", 4) == 0) {
+                                    data_offset = (int)chunk_data;
+                                    data_size = chunk_sz;
+                                    break;
+                                }
+                                offset = chunk_data + chunk_sz + (chunk_sz & 1u);
                             }
-                            uint32_t chunk_sz;
-                            memcpy(&chunk_sz, buf.data() + offset + 4, 4);
-                            offset += 8 + chunk_sz;
-                            if (chunk_sz % 2 != 0) offset++; 
                         }
-                        
-                        if (data_offset > 0 && data_offset + data_size <= fsize) {
-                            int n_samples_ref = data_size / 2;
+
+                        if (data_offset > 0 && audio_format == 1 && channels == 1 && bits_per_sample == 16 &&
+                            (uint64_t)data_offset + data_size <= buf.size()) {
+                            int n_samples_ref = (int)(data_size / 2);
                             ref_pcm.resize(n_samples_ref);
-                            const int16_t* pcm16 = reinterpret_cast<const int16_t*>(buf.data() + data_offset);
                             for (int i = 0; i < n_samples_ref; i++) {
-                                ref_pcm[i] = pcm16[i] / 32768.0f;
+                                const size_t off = (size_t)data_offset + (size_t)i * 2;
+                                const int16_t s = (int16_t)rd_u16(off);
+                                ref_pcm[i] = (float)s / 32768.0f;
                             }
+                        } else if (verbosity >= 1) {
+                            fprintf(stderr,
+                                    "vibevoice TTS: voice WAV '%s' must be mono PCM16 with a RIFF/WAVE header\n",
+                                    voice_wav);
                         }
                     }
                     fclose(fv);
@@ -2612,39 +2636,46 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                 if (n_samples_ref > 0) {
                     // Normalize to -25 dB FS (matches Microsoft's default)
                     float rms = 0.0f;
-                    for (int i = 0; i < n_samples_ref; i++) rms += ref_pcm[i] * ref_pcm[i];
+                    for (int i = 0; i < n_samples_ref; i++)
+                        rms += ref_pcm[i] * ref_pcm[i];
                     rms = sqrtf(rms / (float)n_samples_ref);
                     float target_rms = powf(10.0f, -25.0f / 20.0f);
                     float scalar = target_rms / (rms + 1e-6f);
-                    
+
                     float max_val = 0.0f;
                     for (int i = 0; i < n_samples_ref; i++) {
                         ref_pcm[i] *= scalar;
-                        if (fabsf(ref_pcm[i]) > max_val) max_val = fabsf(ref_pcm[i]);
+                        if (fabsf(ref_pcm[i]) > max_val)
+                            max_val = fabsf(ref_pcm[i]);
                     }
-                    
+
                     // Uniform scaling to prevent hard-clipping distortion
                     if (max_val > 1.0f) {
                         float clip_scalar = max_val + 1e-6f;
-                        for (int i = 0; i < n_samples_ref; i++) ref_pcm[i] /= clip_scalar;
+                        for (int i = 0; i < n_samples_ref; i++)
+                            ref_pcm[i] /= clip_scalar;
                     }
 
                     // TTS Voice Cloning uses ONLY the acoustic encoder and applies scaling
                     float sf = 0.196f, bf = -0.049f;
                     auto* tsf = G("speech_scaling_factor");
                     auto* tbf = G("speech_bias_factor");
-                    if (tsf) ggml_backend_tensor_get(tsf, &sf, 0, sizeof(float));
-                    if (tbf) ggml_backend_tensor_get(tbf, &bf, 0, sizeof(float));
+                    if (tsf)
+                        ggml_backend_tensor_get(tsf, &sf, 0, sizeof(float));
+                    if (tbf)
+                        ggml_backend_tensor_get(tbf, &bf, 0, sizeof(float));
 
                     int T_at = 0, vd_at = 0;
                     auto at_mean = run_encoder_stage(ctx, "at_enc", ref_pcm.data(), n_samples_ref, &T_at, &vd_at);
 
                     if (!at_mean.empty()) {
                         n_voice_frames = T_at;
-                        for (int i = 0; i < T_at * vd_at; i++) at_mean[i] = (at_mean[i] + bf) * sf;
+                        for (int i = 0; i < T_at * vd_at; i++)
+                            at_mean[i] = (at_mean[i] + bf) * sf;
 
                         auto at_feat = run_connector_stage(ctx, "at_conn", at_mean.data(), T_at, vd_at);
-                        if (!at_feat.empty()) voice_embeds = at_feat;
+                        if (!at_feat.empty())
+                            voice_embeds = at_feat;
                     }
                 }
             }
@@ -2890,22 +2921,19 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         int n_past = prefix_len;
         const auto t_pure_infer_start = std::chrono::high_resolution_clock::now();
 
-        // --- NEW: Calculate True Negative Condition for CFG ---
-        // Pass the <|vision_start|> token through the LM to get the baseline "bland voice" vector
+        // Calculate negative condition for CFG from the speech-start token.
         std::vector<float> neg_cond(hp.d_lm, 0.0f);
         {
             int32_t bos_id = SPEECH_START;
             std::vector<float> neg_emb = run_token_embedding_lookup(ctx, &bos_id, 1);
             if (!neg_emb.empty()) {
-                std::vector<float> neg_hidden = run_qwen2_prefill_no_kv(
-                    ctx, neg_emb.data(), 1, "lm", hp.n_lm_layers, true, false
-                );
+                std::vector<float> neg_hidden =
+                    run_qwen2_prefill_no_kv(ctx, neg_emb.data(), 1, "lm", hp.n_lm_layers, true, false);
                 if (!neg_hidden.empty()) {
                     neg_cond = neg_hidden;
                 }
             }
         }
-        // ------------------------------------------------------
 
         // Autoregressive generation
         ddim_schedule sched = make_ddim_schedule(20);
@@ -2928,7 +2956,6 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             }
             mt19937_seed(rng, seed);
         }
-        float cfg_scale = 1.5f; // Lower CFG for base model (no proper negative conditioning)
         int speech_frames = 0;
         int max_speech_frames = std::max(12, (int)(text_ids.size() * 3));
 
@@ -2978,14 +3005,13 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                                             vae_dim * 2 * sizeof(float));
                     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pred_t_sin"), t_sin.data(), 0,
                                             256 * sizeof(float));
-                    
                     // Pass BOTH our positive hidden state and our calculated neg_cond
-                    std::vector<float> cond_pair((size_t)hp.d_lm * 2);
-                    memcpy(cond_pair.data(), hidden_v.data(), hp.d_lm * sizeof(float));
-                    memcpy(cond_pair.data() + hp.d_lm, neg_cond.data(), hp.d_lm * sizeof(float));
+                    std::vector<float> cond_pair((size_t)d_lm * 2);
+                    memcpy(cond_pair.data(), hidden_v.data(), d_lm * sizeof(float));
+                    memcpy(cond_pair.data() + d_lm, neg_cond.data(), d_lm * sizeof(float));
                     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pred_condition"), cond_pair.data(), 0,
-                                            (size_t)hp.d_lm * 2 * sizeof(float));
-                    
+                                            (size_t)d_lm * 2 * sizeof(float));
+
                     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
                         break;
                     std::vector<float> v_both(vae_dim * 2);
@@ -3102,12 +3128,15 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         memcpy(out_buf, raw_audio.data() + trim_start, (size_t)trimmed_len * sizeof(float));
         if (out_n_samples)
             *out_n_samples = trimmed_len;
-        // --- RTF Calc ---
-        const auto t_pure_infer_end = std::chrono::high_resolution_clock::now();
-        double infer_sec = std::chrono::duration<double>(t_pure_infer_end - t_pure_infer_start).count();
-        double audio_sec = trimmed_len / 24000.0;
-        fprintf(stderr, "\n[BENCH] Pure Inference RTF: %.3f (Audio: %.2fs | Compute: %.2fs)\n\n", 
-                infer_sec / audio_sec, audio_sec, infer_sec);
+        if (getenv("VIBEVOICE_BENCH")) {
+            const auto t_pure_infer_end = std::chrono::high_resolution_clock::now();
+            double infer_sec = std::chrono::duration<double>(t_pure_infer_end - t_pure_infer_start).count();
+            double audio_sec = trimmed_len / 24000.0;
+            if (audio_sec > 0.0) {
+                fprintf(stderr, "\n[BENCH] Pure Inference RTF: %.3f (Audio: %.2fs | Compute: %.2fs)\n\n",
+                        infer_sec / audio_sec, audio_sec, infer_sec);
+            }
+        }
 
         return out_buf;
     }
