@@ -491,8 +491,8 @@ static StageResult chatterbox_mel_from_tokens_with_noise_r(chatterbox_context* c
                                                            const float* init_noise_cf, int init_noise_T_total) {
     StageResult r;
     int T_mel = 0;
-    float* mel_cf =
-        chatterbox_synthesize_mel_from_tokens_with_noise(ctx, tokens, n_tokens, init_noise_cf, init_noise_T_total, &T_mel);
+    float* mel_cf = chatterbox_synthesize_mel_from_tokens_with_noise(ctx, tokens, n_tokens, init_noise_cf,
+                                                                     init_noise_T_total, &T_mel);
     if (!mel_cf) {
         r.note = "chatterbox_synthesize_mel_from_tokens_with_noise returned null";
         return r;
@@ -609,8 +609,8 @@ static bool file_exists(const std::string& path) {
 }
 
 static std::string chatterbox_find_s3gen(const std::string& model_path) {
-    const bool turbo_like = model_path.find("turbo") != std::string::npos ||
-                            model_path.find("kartoffel") != std::string::npos;
+    const bool turbo_like =
+        model_path.find("turbo") != std::string::npos || model_path.find("kartoffel") != std::string::npos;
     const char* const* candidates = nullptr;
     static const char* turbo_candidates[] = {
         "chatterbox-turbo-s3gen-f16.gguf",
@@ -894,8 +894,7 @@ int main(int argc, char** argv) {
                     n_skip++;
                 } else {
                     // Reference is (2, T, D) in C-order; first T*D floats are batch[0] (cond path)
-                    auto rep = compare_with_row_width(ref, "t3_prefill_emb", pemb,
-                                                      (size_t)pT * pD, pD);
+                    auto rep = compare_with_row_width(ref, "t3_prefill_emb", pemb, (size_t)pT * pD, pD);
                     print_row_mean("t3_prefill_emb[0]", rep, CHATTERBOX_MEAN_THRESHOLD,
                                    "criterion=cos_mean>=0.95  deterministic  batch=cond");
                     record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
@@ -978,14 +977,8 @@ int main(int argc, char** argv) {
                             int row_width;
                         };
                         static const VocStage voc_stages[] = {
-                            {"voc_conv_pre", 512},
-                            {"voc_ups_0", 256},
-                            {"voc_rb_0", 256},
-                            {"voc_ups_1", 128},
-                            {"voc_rb_1", 128},
-                            {"voc_ups_2", 64},
-                            {"voc_rb_2", 64},
-                            {"voc_conv_post", 18},
+                            {"voc_conv_pre", 512}, {"voc_ups_0", 256}, {"voc_rb_0", 256}, {"voc_ups_1", 128},
+                            {"voc_rb_1", 128},     {"voc_ups_2", 64},  {"voc_rb_2", 64},  {"voc_conv_post", 18},
                         };
                         for (const auto& s : voc_stages) {
                             if (ref.shape(s.name).empty()) {
@@ -1013,7 +1006,8 @@ int main(int argc, char** argv) {
 
                     auto ref_conv_post_pair = ref.get_f32("voc_conv_post");
                     auto ref_conv_post_shape = ref.shape("voc_conv_post");
-                    if (ref_conv_post_pair.first && ref_conv_post_shape.size() >= 2 && (int)ref_conv_post_shape[0] == 18) {
+                    if (ref_conv_post_pair.first && ref_conv_post_shape.size() >= 2 &&
+                        (int)ref_conv_post_shape[0] == 18) {
                         const int T_conv = (int)ref_conv_post_shape[1];
                         std::vector<float> conv_post_cf((size_t)18 * T_conv);
                         for (int t = 0; t < T_conv; ++t) {
@@ -1039,12 +1033,11 @@ int main(int argc, char** argv) {
                         n_skip++;
                     }
 
-                    auto voc_r = chatterbox_vocode_mel_with_source_stft_r(ctx, mel_cf.data(), T_mel, ref_source_stft,
-                                                                          T_src);
+                    auto voc_r =
+                        chatterbox_vocode_mel_with_source_stft_r(ctx, mel_cf.data(), T_mel, ref_source_stft, T_src);
                     if (voc_r.ok) {
                         auto rep = ref.compare("hift_pcm", voc_r.data.data(), voc_r.data.size());
-                        print_row_mean("hift_pcm(ref_mel)", rep, CHATTERBOX_MEAN_THRESHOLD,
-                                       "criterion=cos_mean>=0.95");
+                        print_row_mean("hift_pcm(ref_mel)", rep, CHATTERBOX_MEAN_THRESHOLD, "criterion=cos_mean>=0.95");
                         record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
                     } else {
                         printf("[ERR ] hift_pcm(ref_mel)      %s\n", voc_r.note.c_str());

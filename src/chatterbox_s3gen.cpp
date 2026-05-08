@@ -2116,7 +2116,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                         src_max = std::max(src_max, v);
                     }
                     src_rms = std::sqrt(src_rms / source.size());
-                    fprintf(stderr, "s3gen: source  rms=%.4f min=%.4f max=%.4f  ll_b=%.4f ll_w[0..2]={%.4f,%.4f,%.4f}\n",
+                    fprintf(stderr,
+                            "s3gen: source  rms=%.4f min=%.4f max=%.4f  ll_b=%.4f ll_w[0..2]={%.4f,%.4f,%.4f}\n",
                             src_rms, src_min, src_max, ll_b, ll_w[0], ll_w[1], ll_w[2]);
                 }
 
@@ -2156,9 +2157,10 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     ss_max = std::max(ss_max, v);
                 }
                 ss_rms = std::sqrt(ss_rms / src_stft.size());
-                fprintf(stderr,
-                        "s3gen: src_stft rms=%.4f min=%.4f max=%.4f  T_src=%d  (ref: rms=0.0125 min=-0.0245 max=0.0483)\n",
-                        ss_rms, ss_min, ss_max, T_src);
+                fprintf(
+                    stderr,
+                    "s3gen: src_stft rms=%.4f min=%.4f max=%.4f  T_src=%d  (ref: rms=0.0125 min=-0.0245 max=0.0483)\n",
+                    ss_rms, ss_min, ss_max, T_src);
             }
             ggml_backend_tensor_set(src_t, src_stft.data(), 0, src_stft.size() * sizeof(float));
         }
@@ -2303,9 +2305,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
 
 static bool chatterbox_s3gen_compute_gen_mel(struct chatterbox_s3gen_context* ctx, const int32_t* speech_tokens,
                                              int n_speech_tokens, const int32_t* prompt_tokens, int n_prompt_tokens,
-                                             const float* prompt_feat, int prompt_feat_len,
-                                             const float* spk_embedding, int n_cfm_steps, const float* init_noise_cf,
-                                             int init_noise_T_total,
+                                             const float* prompt_feat, int prompt_feat_len, const float* spk_embedding,
+                                             int n_cfm_steps, const float* init_noise_cf, int init_noise_T_total,
                                              std::vector<float>& gen_mel_out, int* out_T_mel) {
     if (!ctx || !speech_tokens || n_speech_tokens <= 0)
         return false;
@@ -2427,9 +2428,8 @@ static bool chatterbox_s3gen_compute_gen_mel(struct chatterbox_s3gen_context* ct
     if (ctx->verbosity >= 1 && is_meanflow) {
         fprintf(stderr, "s3gen: meanflow mode (%d steps, linear schedule, no CFG)\n", actual_steps);
     }
-    std::vector<float> mel =
-        cfm_euler_solve(ctx, h, cond, spk_proj, init_noise_cf, T_mel_total, actual_steps, cfg, is_meanflow,
-                        dump_stages);
+    std::vector<float> mel = cfm_euler_solve(ctx, h, cond, spk_proj, init_noise_cf, T_mel_total, actual_steps, cfg,
+                                             is_meanflow, dump_stages);
 
     // 5. Extract generated portion (skip prompt region)
     std::vector<float> gen_mel(80 * T_mel_gen);
@@ -2445,8 +2445,8 @@ static bool chatterbox_s3gen_compute_gen_mel(struct chatterbox_s3gen_context* ct
             gen_max = std::max(gen_max, v);
         }
         gen_rms = std::sqrt(gen_rms / gen_mel.size());
-        fprintf(stderr, "s3gen[dump]: gen_mel (%d, %d) rms=%.4f min=%.4f max=%.4f\n", 80, T_mel_gen, gen_rms,
-                gen_min, gen_max);
+        fprintf(stderr, "s3gen[dump]: gen_mel (%d, %d) rms=%.4f min=%.4f max=%.4f\n", 80, T_mel_gen, gen_rms, gen_min,
+                gen_max);
         fprintf(stderr, "s3gen[dump]: gen_mel (t=0,ch=0..4): ");
         for (int ch = 0; ch < 5; ch++)
             fprintf(stderr, "%.4f ", gen_mel[ch * T_mel_gen + 0]);
@@ -2479,13 +2479,10 @@ extern "C" float* chatterbox_s3gen_synthesize_mel(struct chatterbox_s3gen_contex
     return out;
 }
 
-extern "C" float* chatterbox_s3gen_synthesize_mel_with_noise(struct chatterbox_s3gen_context* ctx,
-                                                             const int32_t* speech_tokens, int n_speech_tokens,
-                                                             const int32_t* prompt_tokens, int n_prompt_tokens,
-                                                             const float* prompt_feat, int prompt_feat_len,
-                                                             const float* spk_embedding, int n_cfm_steps,
-                                                             const float* init_noise_cf, int init_noise_T_total,
-                                                             int* out_T_mel) {
+extern "C" float* chatterbox_s3gen_synthesize_mel_with_noise(
+    struct chatterbox_s3gen_context* ctx, const int32_t* speech_tokens, int n_speech_tokens,
+    const int32_t* prompt_tokens, int n_prompt_tokens, const float* prompt_feat, int prompt_feat_len,
+    const float* spk_embedding, int n_cfm_steps, const float* init_noise_cf, int init_noise_T_total, int* out_T_mel) {
     if (!ctx || !speech_tokens || n_speech_tokens <= 0 || !out_T_mel || !init_noise_cf || init_noise_T_total <= 0)
         return nullptr;
     *out_T_mel = 0;
@@ -2539,8 +2536,8 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
     std::vector<float> wav = hift_vocoder_cpu(ctx, gen_mel, T_mel_gen, nullptr, 0, dump_voc ? &voc_dump : nullptr);
     if (dump_voc) {
         // Print per-stage RMS for comparison against reference GGUF
-        const char* stage_names[] = {"voc_conv_pre", "voc_ups_0", "voc_rb_0", "voc_ups_1", "voc_rb_1", "voc_ups_2",
-                                     "voc_rb_2", "voc_conv_post"};
+        const char* stage_names[] = {"voc_conv_pre", "voc_ups_0", "voc_rb_0", "voc_ups_1",
+                                     "voc_rb_1",     "voc_ups_2", "voc_rb_2", "voc_conv_post"};
         for (auto& sn : stage_names) {
             auto it = voc_dump.find(sn);
             if (it == voc_dump.end())
@@ -2602,8 +2599,9 @@ extern "C" float* chatterbox_s3gen_vocode_dump(struct chatterbox_s3gen_context* 
                                                          stage_data, stage_sizes, n_stages);
 }
 
-extern "C" float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbox_s3gen_context* ctx, const float* mel_cf,
-                                                                int T_mel, const float* source_stft_cf, int T_src,
+extern "C" float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbox_s3gen_context* ctx,
+                                                                const float* mel_cf, int T_mel,
+                                                                const float* source_stft_cf, int T_src,
                                                                 int* out_n_samples, const char** stage_names,
                                                                 float** stage_data, int* stage_sizes, int n_stages) {
     if (!ctx || !mel_cf || T_mel <= 0 || !out_n_samples)
@@ -2636,7 +2634,8 @@ extern "C" float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbo
     return out;
 }
 
-extern "C" float* chatterbox_s3gen_hift_from_conv_post(const float* stft_cf, int T_stft, int T_mel, int* out_n_samples) {
+extern "C" float* chatterbox_s3gen_hift_from_conv_post(const float* stft_cf, int T_stft, int T_mel,
+                                                       int* out_n_samples) {
     if (!stft_cf || T_stft <= 0 || T_mel <= 0 || !out_n_samples) {
         return nullptr;
     }

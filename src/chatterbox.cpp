@@ -352,11 +352,13 @@ static std::vector<int32_t> tokenize_text_hf_bpe(const cb_tokenizer& tok, const 
         }
 
         const unsigned char ch = (unsigned char)encoded[i];
-        const bool is_alnum = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
-        const bool cur_alnum = !cur.empty() && (((unsigned char)cur.back() >= '0' && (unsigned char)cur.back() <= '9') ||
-                                                ((unsigned char)cur.back() >= 'A' && (unsigned char)cur.back() <= 'Z') ||
-                                                ((unsigned char)cur.back() >= 'a' && (unsigned char)cur.back() <= 'z') ||
-                                                (unsigned char)cur.back() == '_');
+        const bool is_alnum =
+            (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+        const bool cur_alnum =
+            !cur.empty() && (((unsigned char)cur.back() >= '0' && (unsigned char)cur.back() <= '9') ||
+                             ((unsigned char)cur.back() >= 'A' && (unsigned char)cur.back() <= 'Z') ||
+                             ((unsigned char)cur.back() >= 'a' && (unsigned char)cur.back() <= 'z') ||
+                             (unsigned char)cur.back() == '_');
         if (!cur.empty() && is_alnum != cur_alnum) {
             flush_pretok(cur);
             cur.clear();
@@ -693,8 +695,8 @@ static void load_metadata(chatterbox_context* c, gguf_context* g) {
         c->tokenizer.bpe_byte_level = !c->tokenizer.bpe_space_token;
         if (c->params.verbosity >= 1 && c->tokenizer.has_bpe) {
             fprintf(stderr, "chatterbox: %s tokenizer: %zu tokens, %zu merges\n",
-                    c->tokenizer.bpe_byte_level ? "GPT-2 BPE" : "HF BPE",
-                    c->tokenizer.id_to_token.size(), c->tokenizer.merge_rank.size());
+                    c->tokenizer.bpe_byte_level ? "GPT-2 BPE" : "HF BPE", c->tokenizer.id_to_token.size(),
+                    c->tokenizer.merge_rank.size());
         }
     } else {
         // Character-level tokenizer (base Chatterbox)
@@ -729,8 +731,8 @@ static std::vector<float> build_llama3_rope_freq_factors(const cb_t3_hp& hp) {
         if (wavelen > low_freq_wavelen) {
             new_inv_freq = inv_freq * inv_factor;
         } else if (wavelen >= high_freq_wavelen) {
-            const float smooth =
-                (old_context_len / wavelen - hp.rope_low_freq_factor) / (hp.rope_high_freq_factor - hp.rope_low_freq_factor);
+            const float smooth = (old_context_len / wavelen - hp.rope_low_freq_factor) /
+                                 (hp.rope_high_freq_factor - hp.rope_low_freq_factor);
             new_inv_freq = ((1.0f - smooth) * inv_freq * inv_factor) + (smooth * inv_freq);
         }
         factors[(size_t)i] = inv_freq / new_inv_freq;
@@ -2159,9 +2161,9 @@ static std::vector<float> synthesize_mel_internal(chatterbox_context* ctx, const
         spk_emb = se_buf.data();
     }
 
-    float* mel_cf = chatterbox_s3gen_synthesize_mel(ctx->s3gen_ctx, speech_tokens, n_tokens, prompt_tokens, n_prompt,
-                                                    prompt_feat, prompt_feat_len, spk_emb, ctx->params.cfm_steps,
-                                                    out_T_mel);
+    float* mel_cf =
+        chatterbox_s3gen_synthesize_mel(ctx->s3gen_ctx, speech_tokens, n_tokens, prompt_tokens, n_prompt, prompt_feat,
+                                        prompt_feat_len, spk_emb, ctx->params.cfm_steps, out_T_mel);
     chatterbox_tokens_free(speech_tokens);
     if (!mel_cf || *out_T_mel <= 0) {
         if (mel_cf)
@@ -2328,8 +2330,8 @@ extern "C" float* chatterbox_synthesize_mel_from_tokens(struct chatterbox_contex
 
 extern "C" float* chatterbox_synthesize_mel_from_tokens_with_noise(struct chatterbox_context* ctx,
                                                                    const int32_t* speech_tokens, int n_speech_tokens,
-                                                                   const float* init_noise_cf,
-                                                                   int init_noise_T_total, int* out_T_mel) {
+                                                                   const float* init_noise_cf, int init_noise_T_total,
+                                                                   int* out_T_mel) {
     if (!ctx || !speech_tokens || n_speech_tokens <= 0 || !out_T_mel || !init_noise_cf || init_noise_T_total <= 0)
         return nullptr;
     *out_T_mel = 0;
@@ -2362,10 +2364,9 @@ extern "C" float* chatterbox_synthesize_mel_from_tokens_with_noise(struct chatte
         ggml_backend_tensor_get(ctx->conds.gen_embedding, se_buf.data(), 0, 192 * sizeof(float));
         spk_emb = se_buf.data();
     }
-    return chatterbox_s3gen_synthesize_mel_with_noise(ctx->s3gen_ctx, speech_tokens, n_speech_tokens, prompt_tokens,
-                                                      n_prompt, prompt_feat, prompt_feat_len, spk_emb,
-                                                      ctx->params.cfm_steps, init_noise_cf, init_noise_T_total,
-                                                      out_T_mel);
+    return chatterbox_s3gen_synthesize_mel_with_noise(
+        ctx->s3gen_ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt, prompt_feat, prompt_feat_len, spk_emb,
+        ctx->params.cfm_steps, init_noise_cf, init_noise_T_total, out_T_mel);
 }
 
 extern "C" float* chatterbox_vocode_mel(struct chatterbox_context* ctx, const float* mel_cf, int T_mel,
@@ -2374,8 +2375,7 @@ extern "C" float* chatterbox_vocode_mel(struct chatterbox_context* ctx, const fl
 }
 
 extern "C" float* chatterbox_vocode_mel_with_source_stft(struct chatterbox_context* ctx, const float* mel_cf, int T_mel,
-                                                         const float* source_stft_cf, int T_src,
-                                                         int* out_n_samples) {
+                                                         const float* source_stft_cf, int T_src, int* out_n_samples) {
     if (!ctx || !mel_cf || T_mel <= 0 || !out_n_samples)
         return nullptr;
     *out_n_samples = 0;
@@ -2445,8 +2445,8 @@ extern "C" void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_t
         ctx->n_threads = n_threads > 0 ? n_threads : 4;
 }
 
-extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text,
-                                                 int* out_T, int* out_D, int* out_cond_T) {
+extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text, int* out_T,
+                                                 int* out_D, int* out_cond_T) {
     if (!ctx || !text || !out_T || !out_D || !out_cond_T)
         return nullptr;
     if (ctx->hp.arch == "chatterbox_turbo" || ctx->hp.arch == "kartoffelbox")
@@ -2483,11 +2483,8 @@ extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx,
 }
 
 extern "C" int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, const char* text,
-                                              const int32_t* prefix_tokens, int n_prefix,
-                                              float** out_logits_cond,
-                                              float** out_logits_uncond,
-                                              float** out_logits_blended,
-                                              int* out_V) {
+                                              const int32_t* prefix_tokens, int n_prefix, float** out_logits_cond,
+                                              float** out_logits_uncond, float** out_logits_blended, int* out_V) {
     if (!ctx || !text || !out_V) {
         return -1;
     }
@@ -2633,10 +2630,8 @@ extern "C" int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, co
 }
 
 extern "C" int chatterbox_dump_t3_step0_logits(struct chatterbox_context* ctx, const char* text,
-                                               float** out_logits_cond,
-                                               float** out_logits_uncond,
-                                               float** out_logits_blended,
-                                               int* out_V) {
-    return chatterbox_dump_t3_next_logits(ctx, text, nullptr, 0, out_logits_cond, out_logits_uncond,
-                                          out_logits_blended, out_V);
+                                               float** out_logits_cond, float** out_logits_uncond,
+                                               float** out_logits_blended, int* out_V) {
+    return chatterbox_dump_t3_next_logits(ctx, text, nullptr, 0, out_logits_cond, out_logits_uncond, out_logits_blended,
+                                          out_V);
 }

@@ -39,5 +39,4 @@ std::string crispasr_resolve_model_cli(const std::string& model_arg, const std::
 /// `would_download` instead of `exists_locally`.
 CrispasrResolvePreview crispasr_preview_model_cli(const std::string& model_arg, const std::string& backend_name,
                                                   const std::string& cache_dir_override = "",
-                                                  const std::string& preferred_quant = "",
-                                                  bool ignore_cache = false);
+                                                  const std::string& preferred_quant = "", bool ignore_cache = false);

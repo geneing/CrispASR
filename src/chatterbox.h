@@ -125,28 +125,22 @@ void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_threads);
 // build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
 // Also sets *out_cond_T to the number of conditioning tokens (cond_len).
 // Caller frees result with free(). Returns nullptr on error.
-float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text,
-                                      int* out_T, int* out_D, int* out_cond_T);
+float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text, int* out_T, int* out_D,
+                                      int* out_cond_T);
 
 // Diff/debug: run the T3 prefill for the given text and return the step-0
 // speech logits. Returned buffers have shape (*out_V,). Any of the output
 // pointers may be null; if non-null, the caller frees them with free().
 // For CFG runs, `out_logits_blended = cond + cfg * (cond - uncond)`.
-int chatterbox_dump_t3_step0_logits(struct chatterbox_context* ctx, const char* text,
-                                    float** out_logits_cond,
-                                    float** out_logits_uncond,
-                                    float** out_logits_blended,
-                                    int* out_V);
+int chatterbox_dump_t3_step0_logits(struct chatterbox_context* ctx, const char* text, float** out_logits_cond,
+                                    float** out_logits_uncond, float** out_logits_blended, int* out_V);
 
 // Diff/debug: return next-step T3 logits after forcing a speech-token prefix.
 // `prefix_tokens` are generated speech tokens after BOS, using speech positions
 // 1..n_prefix. When n_prefix == 0, this is equivalent to step-0 logits.
-int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, const char* text,
-                                   const int32_t* prefix_tokens, int n_prefix,
-                                   float** out_logits_cond,
-                                   float** out_logits_uncond,
-                                   float** out_logits_blended,
-                                   int* out_V);
+int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, const char* text, const int32_t* prefix_tokens,
+                                   int n_prefix, float** out_logits_cond, float** out_logits_uncond,
+                                   float** out_logits_blended, int* out_V);
 
 #ifdef __cplusplus
 }

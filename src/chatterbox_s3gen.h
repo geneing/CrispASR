@@ -47,8 +47,7 @@ float* chatterbox_s3gen_synthesize_mel_with_noise(struct chatterbox_s3gen_contex
                                                   int n_speech_tokens, const int32_t* prompt_tokens,
                                                   int n_prompt_tokens, const float* prompt_feat, int prompt_feat_len,
                                                   const float* spk_embedding, int n_cfm_steps,
-                                                  const float* init_noise_cf, int init_noise_T_total,
-                                                  int* out_T_mel);
+                                                  const float* init_noise_cf, int init_noise_T_total, int* out_T_mel);
 
 // Run only the vocoder on externally-provided mel.
 // mel_cf: channel-first (80 * T_mel) float array.
@@ -70,10 +69,10 @@ float* chatterbox_s3gen_vocode_dump(struct chatterbox_s3gen_context* ctx, const 
                                     int* out_n_samples, const char** stage_names, float** stage_data, int* stage_sizes,
                                     int n_stages);
 
-float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
-                                                     const float* source_stft_cf, int T_src, int* out_n_samples,
-                                                     const char** stage_names, float** stage_data, int* stage_sizes,
-                                                     int n_stages);
+float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbox_s3gen_context* ctx, const float* mel_cf,
+                                                     int T_mel, const float* source_stft_cf, int T_src,
+                                                     int* out_n_samples, const char** stage_names, float** stage_data,
+                                                     int* stage_sizes, int n_stages);
 
 // Diff/debug: reconstruct the final HiFT waveform directly from the
 // conv_post output tensor. stft_cf is channel-first (18 * T_stft),
