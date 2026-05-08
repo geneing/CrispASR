@@ -36,9 +36,30 @@ DEFAULT_STAGES = [
     "s3gen_enc0_matrix_bd",
     "s3gen_enc0_attn_out",
     "s3gen_pos_emb_pre",
+    "s3gen_init_noise",
     "s3gen_gen_mel",
     "hift_pcm",
 ]
+
+
+def _capture_randn_like(run_fn):
+    import torch
+
+    original = torch.randn_like
+    captured = {}
+
+    def hooked_randn_like(*args, **kwargs):
+        out = original(*args, **kwargs)
+        if "tensor" not in captured:
+            captured["tensor"] = out.detach().clone()
+        return out
+
+    torch.randn_like = hooked_randn_like
+    try:
+        result = run_fn()
+    finally:
+        torch.randn_like = original
+    return result, captured.get("tensor")
 
 
 def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
@@ -146,11 +167,13 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     print(f"  running S3Gen with {speech_tokens.size(1)} speech tokens (meanflow, 2 steps)")
 
     with torch.inference_mode():
-        mel = model.s3gen.flow_inference(
-            speech_tokens=speech_tokens,
-            ref_dict=ref_dict,
-            n_cfm_timesteps=2,
-            finalize=True,
+        mel, init_noise = _capture_randn_like(
+            lambda: model.s3gen.flow_inference(
+                speech_tokens=speech_tokens,
+                ref_dict=ref_dict,
+                n_cfm_timesteps=2,
+                finalize=True,
+            )
         )
 
     # Extract encoder output separately (need to re-run encoder only)
@@ -183,6 +206,8 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     if "s3gen_gen_mel" in stages and mel is not None:
         # mel shape: (B, 80, T_gen)
         out["s3gen_gen_mel"] = mel.detach().squeeze(0).permute(1, 0).contiguous().cpu().float().numpy()
+    if "s3gen_init_noise" in stages and init_noise is not None:
+        out["s3gen_init_noise"] = init_noise.detach().squeeze(0).permute(1, 0).contiguous().cpu().float().numpy()
 
     # Vocoder
     if "hift_pcm" in stages:

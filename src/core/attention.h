@@ -442,6 +442,8 @@ struct KvSelfAttnParams {
     // we just need to run the normalisation op on V. Default false → no
     // op, matches every other consumer.
     bool v_rms_norm = false;
+    // Optional per-dimension RoPE frequency factors (e.g. Llama 3 scaling).
+    ggml_tensor* rope_freq_factors = nullptr;
 };
 
 // KV-cached self-attention. Writes the new K/V into the persistent cache
@@ -575,10 +577,10 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
     // means rotate the entire head_dim, which matches every existing
     // caller's prior behaviour.
     const int n_rot = p.n_rot > 0 ? p.n_rot : hd;
-    Q = ggml_rope_ext(ctx0, Q, positions, nullptr, n_rot, p.rope_type, p.n_ctx_orig, p.rope_theta,
+    Q = ggml_rope_ext(ctx0, Q, positions, p.rope_freq_factors, n_rot, p.rope_type, p.n_ctx_orig, p.rope_theta,
                       /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f,
                       /*attn_factor*/ 1.0f, p.rope_beta_fast, p.rope_beta_slow);
-    K = ggml_rope_ext(ctx0, K, positions, nullptr, n_rot, p.rope_type, p.n_ctx_orig, p.rope_theta, 1.0f, 0.0f, 1.0f,
+    K = ggml_rope_ext(ctx0, K, positions, p.rope_freq_factors, n_rot, p.rope_type, p.n_ctx_orig, p.rope_theta, 1.0f, 0.0f, 1.0f,
                       p.rope_beta_fast, p.rope_beta_slow);
 
     // ---- Permute new K/V to (hd, T, n_kv) for cache write ----

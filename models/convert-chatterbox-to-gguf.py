@@ -481,19 +481,34 @@ def write_t3_gguf(
         elif isinstance(v, float):
             writer.add_float32(key, v)
 
-    # ── Load and write character tokenizer ──
+    # ── Load and write base Chatterbox tokenizer ──
     if tokenizer_path and tokenizer_path.exists():
         with open(tokenizer_path, 'r') as f:
             tok_data = json.load(f)
-        # Extract vocabulary
-        if 'model' in tok_data and 'vocab' in tok_data['model']:
-            vocab = tok_data['model']['vocab']
-            tokens = [""] * len(vocab)
+        model = tok_data.get('model', {})
+        vocab = model.get('vocab')
+        if vocab:
+            max_id = max(vocab.values())
+            tokens = [""] * (max_id + 1)
             for token, idx in vocab.items():
                 if idx < len(tokens):
                     tokens[idx] = token
+            writer.add_array("tokenizer.ggml.tokens", tokens)
+            # Keep legacy field for older runtimes, but prefer tokenizer.ggml.tokens.
             writer.add_array("chatterbox.t3.text_tokens", tokens)
-            print(f"  Tokenizer: {len(tokens)} text tokens")
+            print(f"  Tokenizer: {len(tokens)} tokens from tokenizer.json")
+
+            merges = model.get('merges', [])
+            if merges:
+                flat_merges = []
+                for m in merges:
+                    if isinstance(m, list) and len(m) == 2:
+                        flat_merges.append(f"{m[0]} {m[1]}")
+                    elif isinstance(m, str):
+                        flat_merges.append(m)
+                if flat_merges:
+                    writer.add_array("tokenizer.ggml.merges", flat_merges)
+                    print(f"  Merges: {len(flat_merges)} from tokenizer.json")
 
     # ── Load and write precomputed conditioning ──
     if conds_path and conds_path.exists():

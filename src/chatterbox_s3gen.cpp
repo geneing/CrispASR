@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,171 @@ static void tensor_get_f32(ggml_tensor* t, float* out, size_t offset_bytes, size
     }
 }
 
+static std::vector<float> hift_pcm_from_conv_post_impl(const float* stft_cf, int T_stft, int T_mel, bool full_idft) {
+    const int istft_nfft = 16;
+    const int istft_hop = 4;
+    const int n_freq = istft_nfft / 2 + 1; // 9
+    if (!stft_cf || T_stft <= 0 || T_mel <= 0) {
+        return {};
+    }
+
+    const int n_samples = (T_stft - 1) * istft_hop + istft_nfft;
+    std::vector<float> wav(n_samples, 0.0f);
+    std::vector<float> win_sum(n_samples, 0.0f);
+
+    std::vector<float> win(istft_nfft);
+    for (int i = 0; i < istft_nfft; ++i) {
+        win[i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * i / (float)istft_nfft));
+    }
+
+    for (int frame = 0; frame < T_stft; ++frame) {
+        float mag[9], ph[9];
+        for (int f = 0; f < n_freq; ++f) {
+            const float raw_mag = stft_cf[(size_t)f * T_stft + (size_t)frame];
+            mag[f] = std::min(100.0f, std::exp(raw_mag));
+            ph[f] = std::sin(stft_cf[(size_t)(n_freq + f) * T_stft + (size_t)frame]);
+        }
+
+        float re[9], im[9];
+        for (int f = 0; f < n_freq; ++f) {
+            re[f] = mag[f] * std::cos(ph[f]);
+            im[f] = mag[f] * std::sin(ph[f]);
+        }
+
+        const int start = frame * istft_hop;
+        if (full_idft) {
+            float re_full[16] = {0.0f}, im_full[16] = {0.0f};
+            for (int f = 0; f < n_freq; ++f) {
+                re_full[f] = re[f];
+                im_full[f] = im[f];
+            }
+            for (int f = 1; f < n_freq - 1; ++f) {
+                re_full[istft_nfft - f] = re[f];
+                im_full[istft_nfft - f] = -im[f];
+            }
+            for (int n = 0; n < istft_nfft && (start + n) < n_samples; ++n) {
+                float sample = 0.0f;
+                for (int k = 0; k < istft_nfft; ++k) {
+                    const float angle = 2.0f * (float)M_PI * k * n / (float)istft_nfft;
+                    sample += re_full[k] * std::cos(angle) - im_full[k] * std::sin(angle);
+                }
+                sample /= (float)istft_nfft;
+                wav[start + n] += sample * win[n];
+                win_sum[start + n] += win[n] * win[n];
+            }
+        } else {
+            for (int n = 0; n < istft_nfft && (start + n) < n_samples; ++n) {
+                float sample = re[0];
+                for (int f = 1; f < n_freq - 1; ++f) {
+                    const float angle = 2.0f * (float)M_PI * f * n / (float)istft_nfft;
+                    sample += 2.0f * (re[f] * std::cos(angle) - im[f] * std::sin(angle));
+                }
+                const float angle_ny = 2.0f * (float)M_PI * (n_freq - 1) * n / (float)istft_nfft;
+                sample += re[n_freq - 1] * std::cos(angle_ny) - im[n_freq - 1] * std::sin(angle_ny);
+                sample /= (float)istft_nfft;
+                wav[start + n] += sample * win[n];
+                win_sum[start + n] += win[n] * win[n];
+            }
+        }
+    }
+
+    for (int i = 0; i < n_samples; ++i) {
+        if (win_sum[i] > 1e-8f) {
+            wav[i] /= win_sum[i];
+        }
+    }
+
+    const int center_pad = istft_nfft / 2;
+    const int final_len = T_mel * 480;
+    std::vector<float> wav_trimmed;
+    wav_trimmed.reserve((size_t)final_len);
+    for (int i = 0; i < final_len; ++i) {
+        const int src = center_pad + i;
+        const float v = (src >= 0 && src < (int)wav.size()) ? wav[src] : 0.0f;
+        wav_trimmed.push_back(std::max(-0.99f, std::min(0.99f, v)));
+    }
+
+    return wav_trimmed;
+}
+
+// PyTorch-compatible MT19937 Gaussian fill. Matches the helper already used
+// by VibeVoice so diffusion noise follows the same CPU torch.randn path.
+struct mt19937_state {
+    uint32_t mt[624];
+    int mti = 624;
+};
+
+static void mt19937_seed(mt19937_state& s, uint32_t seed) {
+    s.mt[0] = seed;
+    for (int i = 1; i < 624; i++) {
+        s.mt[i] = 1812433253u * (s.mt[i - 1] ^ (s.mt[i - 1] >> 30)) + (uint32_t)i;
+    }
+    s.mti = 624;
+}
+
+static uint32_t mt19937_next(mt19937_state& s) {
+    if (s.mti >= 624) {
+        for (int i = 0; i < 624; i++) {
+            uint32_t y = (s.mt[i] & 0x80000000u) | (s.mt[(i + 1) % 624] & 0x7FFFFFFFu);
+            s.mt[i] = s.mt[(i + 397) % 624] ^ (y >> 1);
+            if (y & 1) {
+                s.mt[i] ^= 0x9908B0DFu;
+            }
+        }
+        s.mti = 0;
+    }
+    uint32_t y = s.mt[s.mti++];
+    y ^= (y >> 11);
+    y ^= (y << 7) & 0x9D2C5680u;
+    y ^= (y << 15) & 0xEFC60000u;
+    y ^= (y >> 18);
+    return y;
+}
+
+static inline float mt_uniform_torch_float(mt19937_state& rng) {
+    return (float)(mt19937_next(rng) & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+}
+
+static void torch_normal_fill_16(float* data) {
+    for (int j = 0; j < 8; j++) {
+        const float u1 = 1.0f - data[j];
+        const float u2 = data[j + 8];
+        const float radius = sqrtf(-2.0f * logf(u1));
+        const float theta = 2.0f * (float)M_PI * u2;
+        data[j] = radius * cosf(theta);
+        data[j + 8] = radius * sinf(theta);
+    }
+}
+
+static void fill_gaussian_noise(float* data, int n, mt19937_state& rng) {
+    if (n <= 0) {
+        return;
+    }
+    if (n < 16) {
+        float tmp[16];
+        for (int i = 0; i < 16; i++) {
+            tmp[i] = mt_uniform_torch_float(rng);
+        }
+        torch_normal_fill_16(tmp);
+        memcpy(data, tmp, (size_t)n * sizeof(float));
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        data[i] = mt_uniform_torch_float(rng);
+    }
+    int i = 0;
+    for (; i <= n - 16; i += 16) {
+        torch_normal_fill_16(data + i);
+    }
+    if (i < n) {
+        float* tail = data + n - 16;
+        for (int j = 0; j < 16; j++) {
+            tail[j] = mt_uniform_torch_float(rng);
+        }
+        torch_normal_fill_16(tail);
+    }
+}
+
 // ── Context ──────────────────────────────────────────────────────
 
 struct chatterbox_s3gen_context {
@@ -86,6 +252,8 @@ struct chatterbox_s3gen_context {
 
     ggml_backend_sched_t sched = nullptr;
     std::vector<uint8_t> compute_meta;
+    mt19937_state noise_rng{};
+    uint32_t noise_seed = 0;
 
     ~chatterbox_s3gen_context() {
         if (sched)
@@ -122,6 +290,15 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
         const char* env = std::getenv("CRISPASR_HIFT_FULL_IDFT");
         c->istft_full_idft = env && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
     }
+    {
+        const char* env = std::getenv("CRISPASR_CHATTERBOX_SEED");
+        if (env && env[0]) {
+            c->noise_seed = (uint32_t)strtoul(env, nullptr, 10);
+        } else {
+            c->noise_seed = (uint32_t)std::random_device{}();
+        }
+        mt19937_seed(c->noise_rng, c->noise_seed);
+    }
 
     // Backend
     c->backend_cpu = ggml_backend_cpu_init();
@@ -150,6 +327,7 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
 
     if (verbosity >= 1) {
         fprintf(stderr, "s3gen: loaded %zu tensors from %s\n", c->tensors.size(), path);
+        fprintf(stderr, "s3gen: diffusion noise seed=%u\n", c->noise_seed);
     }
 
     // Verify critical tensors exist
@@ -814,7 +992,8 @@ static std::vector<float> run_conformer_encoder(chatterbox_s3gen_context* c, con
 // ── Sinusoidal positional embedding ──────────────────────────────
 
 static std::vector<float> sinusoidal_embedding(float t_val, int dim) {
-    // Same as SinusoidalPosEmb in matcha/decoder.py
+    // Same as SinusoidalPosEmb in matcha/decoder.py (scale=1000 applied to t)
+    t_val *= 1000.0f;
     std::vector<float> emb(dim);
     int half = dim / 2;
     float log_term = std::log(10000.0f) / (float)(half - 1);
@@ -867,6 +1046,13 @@ static ggml_tensor* causal_conv1d(ggml_context* ctx, ggml_tensor* x, // input: (
 }
 
 // Helper: CausalBlock1D — causal_conv(k=3) + LayerNorm(transpose) + Mish
+static ggml_tensor* ggml_mish(ggml_context* ctx, ggml_tensor* x) {
+    ggml_tensor* exp_x = ggml_exp(ctx, x);
+    ggml_tensor* ones = ggml_div(ctx, exp_x, exp_x);
+    ggml_tensor* softplus = ggml_log(ctx, ggml_add(ctx, exp_x, ones));
+    return ggml_mul(ctx, x, ggml_tanh(ctx, softplus));
+}
+
 static ggml_tensor* causal_block1d(ggml_context* ctx, ggml_tensor* x, // (C, T)
                                    ggml_tensor* conv_w, ggml_tensor* conv_b, ggml_tensor* ln_w, ggml_tensor* ln_b) {
     x = causal_conv1d(ctx, x, conv_w, conv_b);
@@ -882,8 +1068,7 @@ static ggml_tensor* causal_block1d(ggml_context* ctx, ggml_tensor* x, // (C, T)
     if (ln_b)
         x = ggml_add(ctx, x, ln_b);
     x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T, C)
-    // SiLU ≈ Mish
-    x = ggml_silu(ctx, x);
+    x = ggml_mish(ctx, x);
     return x;
 }
 
@@ -902,9 +1087,10 @@ static ggml_tensor* causal_resnet_block(ggml_context* ctx, ggml_tensor* x, ggml_
     x = causal_block1d(ctx, x, W("b1.0.weight"), W("b1.0.bias"), W("b1.2.weight"), W("b1.2.bias"));
     // DISABLED: if (mask) x = ggml_mul(ctx, x, mask);
 
-    // Time MLP: linear(1024 → C_out) → add broadcast over T
+    // Time MLP: Mish → linear(1024 → C_out) → add broadcast over T
     // t_emb is (1024,), W is (C_out, 1024) → t_proj is (C_out,)
-    ggml_tensor* t_proj = ggml_mul_mat(ctx, W("mlp.1.weight"), t_emb);
+    ggml_tensor* t_proj_in = ggml_mish(ctx, t_emb);
+    ggml_tensor* t_proj = ggml_mul_mat(ctx, W("mlp.1.weight"), t_proj_in);
     ggml_tensor* t_b = W("mlp.1.bias");
     if (t_b)
         t_proj = ggml_add(ctx, t_proj, t_b);
@@ -1137,6 +1323,7 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
                                           const std::vector<float>& mu,      // (80, T) encoder output (channel-first)
                                           const std::vector<float>& cond,    // (80, T) conditioning mel (channel-first)
                                           const std::vector<float>& spk_emb, // (80,) projected speaker embedding
+                                          const float* init_noise_cf,        // (80, T) full initial noise or null
                                           int T_mel, int n_steps, float cfg_rate, bool meanflow = false,
                                           bool dump_stages = false) {
     // Generate time schedule
@@ -1152,17 +1339,11 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
 
     // Start from noise
     std::vector<float> x(80 * T_mel);
-    uint64_t rng = 42;
-    for (size_t i = 0; i < x.size(); i++) {
-        float u1 = (float)((rng = rng * 6364136223846793005ULL + 1) >> 33) / (float)(1ULL << 31);
-        float u2 = (float)((rng = rng * 6364136223846793005ULL + 1) >> 33) / (float)(1ULL << 31);
-        if (u1 < 1e-7f)
-            u1 = 1e-7f;
-        x[i] = std::sqrt(-2.0f * std::log(u1)) * std::cos(2.0f * (float)M_PI * u2);
+    if (init_noise_cf) {
+        std::memcpy(x.data(), init_noise_cf, x.size() * sizeof(float));
+    } else {
+        fill_gaussian_noise(x.data(), (int)x.size(), c->noise_rng);
     }
-
-    // Build the UNet1D graph once (can be reused across steps)
-    ggml_cgraph* gf = build_graph_unet1d(c, T_mel);
 
     // Prepare mask (all ones)
     std::vector<float> mask_data(T_mel, 1.0f);
@@ -1171,6 +1352,10 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
     for (int step = 0; step < n_steps; step++) {
         float t_val = t_span[step];
         float r_val = t_span[step + 1];
+
+        // Rebuild the graph each step so Metal re-allocates tensors and reads
+        // the updated time_emb, rather than caching the first step's values.
+        ggml_cgraph* gf = build_graph_unet1d(c, T_mel);
         float dt = r_val - t_val;
 
         // Build conditioned input: [x, mu, spks, cond] concatenated along channels
@@ -1495,14 +1680,15 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                                            int T_mel, const float* source_stft_cf = nullptr, int T_src_ext = 0,
                                            std::map<std::string, std::vector<float>>* stage_dump = nullptr) {
     if (c->verbosity >= 1) {
-        float mel_rms = 0, mel_max = 0;
+        float mel_rms = 0, mel_min = 1e30f, mel_max = -1e30f;
         for (size_t i = 0; i < mel.size(); i++) {
             mel_rms += mel[i] * mel[i];
-            if (std::abs(mel[i]) > mel_max)
-                mel_max = std::abs(mel[i]);
+            mel_min = std::min(mel_min, mel[i]);
+            mel_max = std::max(mel_max, mel[i]);
         }
         mel_rms = std::sqrt(mel_rms / mel.size());
-        fprintf(stderr, "s3gen: vocoder mel T=%d rms=%.3f max=%.3f\n", T_mel, mel_rms, mel_max);
+        fprintf(stderr, "s3gen: vocoder mel T=%d rms=%.3f min=%.3f max=%.3f  (ref: rms=5.115 min=-11.559 max=1.402)\n",
+                T_mel, mel_rms, mel_min, mel_max);
     }
 
     // Build and run HiFTGenerator ggml graph:
@@ -1860,10 +2046,13 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                 }
 
                 // 2. Upsample F0 to audio rate (nearest-neighbor)
-                int T_audio = T_mel * upsample_factor * stft_hop;
+                // Python: f0_upsamp = Upsample(scale_factor=prod(upsample_rates)*hop_len)
+                //         = Upsample(120 * 4 = 480). Divisor must be 480, not 120.
+                const int total_upsample = upsample_factor * stft_hop; // 480
+                int T_audio = T_mel * total_upsample;
                 std::vector<float> f0_up(T_audio);
                 for (int t = 0; t < T_audio; t++)
-                    f0_up[t] = f0[t / upsample_factor];
+                    f0_up[t] = f0[t / total_upsample];
 
                 // 3. SineGen: 9 harmonics with phase accumulation
                 uint64_t rng = 54321;
@@ -1919,6 +2108,18 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     source[t] = std::tanh(val);
                 }
 
+                if (c->verbosity >= 1) {
+                    float src_rms = 0, src_min = 1e30f, src_max = -1e30f;
+                    for (auto v : source) {
+                        src_rms += v * v;
+                        src_min = std::min(src_min, v);
+                        src_max = std::max(src_max, v);
+                    }
+                    src_rms = std::sqrt(src_rms / source.size());
+                    fprintf(stderr, "s3gen: source  rms=%.4f min=%.4f max=%.4f  ll_b=%.4f ll_w[0..2]={%.4f,%.4f,%.4f}\n",
+                            src_rms, src_min, src_max, ll_b, ll_w[0], ll_w[1], ll_w[2]);
+                }
+
                 // 5. STFT of source signal (center=True, pad_mode='reflect', Hann window)
                 std::vector<float> stft_win(stft_nfft);
                 for (int i = 0; i < stft_nfft; i++)
@@ -1946,6 +2147,18 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                         src_stft[(n_freq + f) * T_src + frame] = im;
                     }
                 }
+            }
+            if (c->verbosity >= 1) {
+                float ss_rms = 0, ss_min = 1e30f, ss_max = -1e30f;
+                for (auto v : src_stft) {
+                    ss_rms += v * v;
+                    ss_min = std::min(ss_min, v);
+                    ss_max = std::max(ss_max, v);
+                }
+                ss_rms = std::sqrt(ss_rms / src_stft.size());
+                fprintf(stderr,
+                        "s3gen: src_stft rms=%.4f min=%.4f max=%.4f  T_src=%d  (ref: rms=0.0125 min=-0.0245 max=0.0483)\n",
+                        ss_rms, ss_min, ss_max, T_src);
             }
             ggml_backend_tensor_set(src_t, src_stft.data(), 0, src_stft.size() * sizeof(float));
         }
@@ -2081,105 +2294,9 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
         fprintf(stderr, "\n");
     }
 
-    // iSTFT: split into magnitude (first 9 channels) and phase (last 9 channels)
-    // Python: magnitude = exp(clip(x[:, :9, :], max=100))
-    //         phase = sin(x[:, 9:, :])
-    //         complex = magnitude * (cos(phase) + j * sin(phase))
-    //         wav = torch.istft(complex, n_fft=16, hop_length=4, win_length=16, window=hann)
-    int n_freq = istft_nfft / 2 + 1; // 9
-    int n_samples = (T_stft - 1) * istft_hop + istft_nfft;
-
-    std::vector<float> wav(n_samples, 0.0f);
-    std::vector<float> win_sum(n_samples, 0.0f);
-
-    // Hann window
-    std::vector<float> win(istft_nfft);
-    for (int i = 0; i < istft_nfft; i++)
-        win[i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * i / (float)istft_nfft));
-
-    for (int frame = 0; frame < T_stft; frame++) {
-        // stft_data layout: ggml ne[0]=T_stft (fast), ne[1]=18 (slow)
-        // → data[channel * T_stft + frame]
-        // First 9 channels = log-magnitude, last 9 = raw phase input
-        float mag[9], ph[9];
-        for (int f = 0; f < n_freq; f++) {
-            float raw_mag = stft_data[f * T_stft + frame];
-            if (raw_mag > 100.0f)
-                raw_mag = 100.0f; // clip
-            mag[f] = std::exp(raw_mag);
-            ph[f] = std::sin(stft_data[(n_freq + f) * T_stft + frame]);
-        }
-
-        // Build complex STFT bins: X[f] = mag[f] * (cos(ph[f]) + j*sin(ph[f]))
-        float re[9], im[9];
-        for (int f = 0; f < n_freq; f++) {
-            re[f] = mag[f] * std::cos(ph[f]);
-            im[f] = mag[f] * std::sin(ph[f]);
-        }
-
-        int start = frame * istft_hop;
-        if (c->istft_full_idft) {
-            // Full N-point iDFT matching torch.istft: build the complete
-            // spectrum via Hermitian symmetry, then standard inverse DFT.
-            // X_full[0..N-1] where X_full[k] = conj(X_full[N-k]) for real signals.
-            float re_full[16], im_full[16];
-            for (int f = 0; f < n_freq; f++) {
-                re_full[f] = re[f];
-                im_full[f] = im[f];
-            }
-            // Mirror: X[N-f] = conj(X[f]) for f = 1..N/2-1
-            for (int f = 1; f < n_freq - 1; f++) {
-                re_full[istft_nfft - f] = re[f];
-                im_full[istft_nfft - f] = -im[f];
-            }
-            // iDFT: x[n] = (1/N) * sum_{k=0}^{N-1} X[k] * e^{j*2π*k*n/N}
-            for (int n = 0; n < istft_nfft && (start + n) < n_samples; n++) {
-                float sample = 0.0f;
-                for (int k = 0; k < istft_nfft; k++) {
-                    float angle = 2.0f * (float)M_PI * k * n / (float)istft_nfft;
-                    sample += re_full[k] * std::cos(angle) - im_full[k] * std::sin(angle);
-                }
-                sample /= (float)istft_nfft;
-                wav[start + n] += sample * win[n];
-                win_sum[start + n] += win[n] * win[n];
-            }
-        } else {
-            // Default: Hermitian-optimized iDFT (fewer ops, same result for real signals)
-            for (int n = 0; n < istft_nfft && (start + n) < n_samples; n++) {
-                float sample = re[0]; // DC: real part only (imag=0 for real signal at DC)
-                for (int f = 1; f < n_freq - 1; f++) {
-                    float angle = 2.0f * (float)M_PI * f * n / (float)istft_nfft;
-                    sample += 2.0f * (re[f] * std::cos(angle) - im[f] * std::sin(angle));
-                }
-                // Nyquist (f=N/2): real only, no conjugate pair
-                float angle_ny = 2.0f * (float)M_PI * (n_freq - 1) * n / (float)istft_nfft;
-                sample += re[n_freq - 1] * std::cos(angle_ny) - im[n_freq - 1] * std::sin(angle_ny);
-                sample /= (float)istft_nfft;
-                wav[start + n] += sample * win[n];
-                win_sum[start + n] += win[n] * win[n];
-            }
-        }
-    }
-
-    // Normalize by COLA (constant overlap-add) condition
-    for (int i = 0; i < n_samples; i++) {
-        if (win_sum[i] > 1e-8f)
-            wav[i] /= win_sum[i];
-    }
-
-    // torch.istft(center=True) removes the n_fft/2 padding implied by
-    // centered frames, returning exactly hop * (n_frames - 1) samples.
-    const int center_pad = istft_nfft / 2;
-    int final_len = T_mel * 480;
-    std::vector<float> wav_trimmed;
-    wav_trimmed.reserve((size_t)final_len);
-    for (int i = 0; i < final_len; ++i) {
-        int src = center_pad + i;
-        float v = (src >= 0 && src < (int)wav.size()) ? wav[src] : 0.0f;
-        wav_trimmed.push_back(std::max(-0.99f, std::min(0.99f, v)));
-    }
-
-    return wav_trimmed;
+    // iSTFT: split into magnitude (first 9 channels) and phase (last 9 channels),
+    // then mirror torch.istft(center=True) on the final conv_post tensor.
+    return hift_pcm_from_conv_post_impl(stft_data.data(), T_stft, T_mel, c->istft_full_idft);
 }
 
 // ── Full pipeline ───────────────────────────────────────────────
@@ -2187,7 +2304,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
 static bool chatterbox_s3gen_compute_gen_mel(struct chatterbox_s3gen_context* ctx, const int32_t* speech_tokens,
                                              int n_speech_tokens, const int32_t* prompt_tokens, int n_prompt_tokens,
                                              const float* prompt_feat, int prompt_feat_len,
-                                             const float* spk_embedding, int n_cfm_steps,
+                                             const float* spk_embedding, int n_cfm_steps, const float* init_noise_cf,
+                                             int init_noise_T_total,
                                              std::vector<float>& gen_mel_out, int* out_T_mel) {
     if (!ctx || !speech_tokens || n_speech_tokens <= 0)
         return false;
@@ -2211,6 +2329,10 @@ static bool chatterbox_s3gen_compute_gen_mel(struct chatterbox_s3gen_context* ct
     int T_mel_total = (n_prompt_tokens + n_speech_tokens) * 2; // 2x upsample
     int T_mel_prompt = n_prompt_tokens * 2;
     int T_mel_gen = n_speech_tokens * 2;
+    if (init_noise_cf && init_noise_T_total != T_mel_total) {
+        fprintf(stderr, "s3gen: init noise T mismatch (%d != %d)\n", init_noise_T_total, T_mel_total);
+        return false;
+    }
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "s3gen: encoder output T_mel=%d (prompt=%d, gen=%d)\n", T_mel_total, T_mel_prompt, T_mel_gen);
@@ -2306,7 +2428,8 @@ static bool chatterbox_s3gen_compute_gen_mel(struct chatterbox_s3gen_context* ct
         fprintf(stderr, "s3gen: meanflow mode (%d steps, linear schedule, no CFG)\n", actual_steps);
     }
     std::vector<float> mel =
-        cfm_euler_solve(ctx, h, cond, spk_proj, T_mel_total, actual_steps, cfg, is_meanflow, dump_stages);
+        cfm_euler_solve(ctx, h, cond, spk_proj, init_noise_cf, T_mel_total, actual_steps, cfg, is_meanflow,
+                        dump_stages);
 
     // 5. Extract generated portion (skip prompt region)
     std::vector<float> gen_mel(80 * T_mel_gen);
@@ -2315,11 +2438,15 @@ static bool chatterbox_s3gen_compute_gen_mel(struct chatterbox_s3gen_context* ct
     }
 
     if (dump_stages) {
-        float gen_rms = 0;
-        for (auto v : gen_mel)
+        float gen_rms = 0, gen_min = 1e30f, gen_max = -1e30f;
+        for (auto v : gen_mel) {
             gen_rms += v * v;
+            gen_min = std::min(gen_min, v);
+            gen_max = std::max(gen_max, v);
+        }
         gen_rms = std::sqrt(gen_rms / gen_mel.size());
-        fprintf(stderr, "s3gen[dump]: gen_mel (%d, %d) rms=%.4f\n", 80, T_mel_gen, gen_rms);
+        fprintf(stderr, "s3gen[dump]: gen_mel (%d, %d) rms=%.4f min=%.4f max=%.4f\n", 80, T_mel_gen, gen_rms,
+                gen_min, gen_max);
         fprintf(stderr, "s3gen[dump]: gen_mel (t=0,ch=0..4): ");
         for (int ch = 0; ch < 5; ch++)
             fprintf(stderr, "%.4f ", gen_mel[ch * T_mel_gen + 0]);
@@ -2341,8 +2468,31 @@ extern "C" float* chatterbox_s3gen_synthesize_mel(struct chatterbox_s3gen_contex
     *out_T_mel = 0;
     std::vector<float> gen_mel;
     if (!chatterbox_s3gen_compute_gen_mel(ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt_tokens,
-                                          prompt_feat, prompt_feat_len, spk_embedding, n_cfm_steps, gen_mel,
+                                          prompt_feat, prompt_feat_len, spk_embedding, n_cfm_steps, nullptr, 0, gen_mel,
                                           out_T_mel)) {
+        return nullptr;
+    }
+    float* out = (float*)malloc(gen_mel.size() * sizeof(float));
+    if (!out)
+        return nullptr;
+    std::memcpy(out, gen_mel.data(), gen_mel.size() * sizeof(float));
+    return out;
+}
+
+extern "C" float* chatterbox_s3gen_synthesize_mel_with_noise(struct chatterbox_s3gen_context* ctx,
+                                                             const int32_t* speech_tokens, int n_speech_tokens,
+                                                             const int32_t* prompt_tokens, int n_prompt_tokens,
+                                                             const float* prompt_feat, int prompt_feat_len,
+                                                             const float* spk_embedding, int n_cfm_steps,
+                                                             const float* init_noise_cf, int init_noise_T_total,
+                                                             int* out_T_mel) {
+    if (!ctx || !speech_tokens || n_speech_tokens <= 0 || !out_T_mel || !init_noise_cf || init_noise_T_total <= 0)
+        return nullptr;
+    *out_T_mel = 0;
+    std::vector<float> gen_mel;
+    if (!chatterbox_s3gen_compute_gen_mel(ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt_tokens,
+                                          prompt_feat, prompt_feat_len, spk_embedding, n_cfm_steps, init_noise_cf,
+                                          init_noise_T_total, gen_mel, out_T_mel)) {
         return nullptr;
     }
     float* out = (float*)malloc(gen_mel.size() * sizeof(float));
@@ -2377,13 +2527,35 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
     std::vector<float> gen_mel;
     int T_mel_gen = 0;
     if (!chatterbox_s3gen_compute_gen_mel(ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt_tokens,
-                                          prompt_feat, prompt_feat_len, spk_embedding, n_cfm_steps, gen_mel,
+                                          prompt_feat, prompt_feat_len, spk_embedding, n_cfm_steps, nullptr, 0, gen_mel,
                                           &T_mel_gen)) {
         return nullptr;
     }
 
     // 6. Vocoder: mel → waveform
-    std::vector<float> wav = hift_vocoder_cpu(ctx, gen_mel, T_mel_gen);
+    const char* dump_env2 = std::getenv("CRISPASR_S3GEN_DUMP");
+    bool dump_voc = dump_env2 && dump_env2[0] == '1';
+    std::map<std::string, std::vector<float>> voc_dump;
+    std::vector<float> wav = hift_vocoder_cpu(ctx, gen_mel, T_mel_gen, nullptr, 0, dump_voc ? &voc_dump : nullptr);
+    if (dump_voc) {
+        // Print per-stage RMS for comparison against reference GGUF
+        const char* stage_names[] = {"voc_conv_pre", "voc_ups_0", "voc_rb_0", "voc_ups_1", "voc_rb_1", "voc_ups_2",
+                                     "voc_rb_2", "voc_conv_post"};
+        for (auto& sn : stage_names) {
+            auto it = voc_dump.find(sn);
+            if (it == voc_dump.end())
+                continue;
+            const auto& d = it->second;
+            float rms = 0, mn = 1e30f, mx = -1e30f;
+            for (auto v : d) {
+                rms += v * v;
+                mn = std::min(mn, v);
+                mx = std::max(mx, v);
+            }
+            rms = std::sqrt(rms / d.size());
+            fprintf(stderr, "s3gen[voc]: %-16s rms=%.4f min=%.3f max=%.3f\n", sn, rms, mn, mx);
+        }
+    }
     apply_trim_fade(wav);
 
     if (ctx->verbosity >= 1) {
@@ -2459,6 +2631,27 @@ extern "C" float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbo
     if (wav.empty())
         return nullptr;
     float* out = (float*)malloc(wav.size() * sizeof(float));
+    std::memcpy(out, wav.data(), wav.size() * sizeof(float));
+    *out_n_samples = (int)wav.size();
+    return out;
+}
+
+extern "C" float* chatterbox_s3gen_hift_from_conv_post(const float* stft_cf, int T_stft, int T_mel, int* out_n_samples) {
+    if (!stft_cf || T_stft <= 0 || T_mel <= 0 || !out_n_samples) {
+        return nullptr;
+    }
+    *out_n_samples = 0;
+    const char* env = std::getenv("CRISPASR_HIFT_FULL_IDFT");
+    const bool full_idft = env && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
+    std::vector<float> wav = hift_pcm_from_conv_post_impl(stft_cf, T_stft, T_mel, full_idft);
+    apply_trim_fade(wav);
+    if (wav.empty()) {
+        return nullptr;
+    }
+    float* out = (float*)malloc(wav.size() * sizeof(float));
+    if (!out) {
+        return nullptr;
+    }
     std::memcpy(out, wav.data(), wav.size() * sizeof(float));
     *out_n_samples = (int)wav.size();
     return out;

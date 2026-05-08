@@ -487,6 +487,28 @@ static StageResult chatterbox_mel_from_tokens_r(chatterbox_context* ctx, const i
     return r;
 }
 
+static StageResult chatterbox_mel_from_tokens_with_noise_r(chatterbox_context* ctx, const int32_t* tokens, int n_tokens,
+                                                           const float* init_noise_cf, int init_noise_T_total) {
+    StageResult r;
+    int T_mel = 0;
+    float* mel_cf =
+        chatterbox_synthesize_mel_from_tokens_with_noise(ctx, tokens, n_tokens, init_noise_cf, init_noise_T_total, &T_mel);
+    if (!mel_cf) {
+        r.note = "chatterbox_synthesize_mel_from_tokens_with_noise returned null";
+        return r;
+    }
+    r.shape = {T_mel, 80};
+    r.data.resize((size_t)T_mel * 80);
+    for (int t = 0; t < T_mel; ++t) {
+        for (int c = 0; c < 80; ++c) {
+            r.data[(size_t)t * 80 + c] = mel_cf[(size_t)c * T_mel + t];
+        }
+    }
+    free(mel_cf);
+    r.ok = true;
+    return r;
+}
+
 static StageResult chatterbox_pcm_r(chatterbox_context* ctx, const char* text) {
     StageResult r;
     int n = 0;
@@ -841,6 +863,47 @@ int main(int argc, char** argv) {
             chatterbox_free(ctx);
             return 4;
         }
+        // ---- t3_cond_emb + t3_prefill_emb (deterministic, compare before stochastic T3) ----
+        {
+            const char* syn_text = std::getenv("CHATTERBOX_SYN_TEXT");
+            if (!syn_text)
+                syn_text = "Hello world.";
+            int pT = 0, pD = 0, pCondT = 0;
+            float* pemb = chatterbox_dump_t3_prefill_emb(ctx, syn_text, &pT, &pD, &pCondT);
+            if (!pemb) {
+                printf("[SKIP] t3_cond_emb            chatterbox_dump_t3_prefill_emb failed\n");
+                printf("[SKIP] t3_prefill_emb         chatterbox_dump_t3_prefill_emb failed\n");
+                n_skip += 2;
+            } else {
+                // t3_cond_emb: first pCondT rows of pemb, compare against ref (pCondT, D)
+                auto cond_ref = ref.shape("t3_cond_emb");
+                if (cond_ref.empty()) {
+                    printf("[SKIP] t3_cond_emb            not in reference archive\n");
+                    n_skip++;
+                } else {
+                    auto rep = compare_with_row_width(ref, "t3_cond_emb", pemb, (size_t)pCondT * pD, pD);
+                    print_row_mean("t3_cond_emb", rep, CHATTERBOX_MEAN_THRESHOLD,
+                                   "criterion=cos_mean>=0.95  deterministic");
+                    record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                }
+
+                // t3_prefill_emb: compare against ref batch[0] (first pT*pD floats of the (2,T,D) archive)
+                auto prefill_ref = ref.shape("t3_prefill_emb");
+                if (prefill_ref.empty()) {
+                    printf("[SKIP] t3_prefill_emb         not in reference archive\n");
+                    n_skip++;
+                } else {
+                    // Reference is (2, T, D) in C-order; first T*D floats are batch[0] (cond path)
+                    auto rep = compare_with_row_width(ref, "t3_prefill_emb", pemb,
+                                                      (size_t)pT * pD, pD);
+                    print_row_mean("t3_prefill_emb[0]", rep, CHATTERBOX_MEAN_THRESHOLD,
+                                   "criterion=cos_mean>=0.95  deterministic  batch=cond");
+                    record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                }
+                free(pemb);
+            }
+        }
+
         auto ref_tok_pair = ref.get_f32("t3_speech_tokens");
         if (!ref_tok_pair.first || ref_tok_pair.second == 0) {
             printf("[SKIP] t3_speech_tokens       exact upstream T3 path is stochastic; replaying downstream stages "
@@ -855,10 +918,28 @@ int main(int argc, char** argv) {
                    "reference tokens from the official path\n");
             n_skip++;
 
-            auto mel_r = chatterbox_mel_from_tokens_r(ctx, ref_tokens.data(), (int)ref_tokens.size());
+            auto ref_noise_pair = ref.get_f32("s3gen_init_noise");
+            auto ref_noise_shape = ref.shape("s3gen_init_noise");
+            StageResult mel_r;
+            if (ref_noise_pair.first && ref_noise_shape.size() >= 2 && (int)ref_noise_shape[0] == 80) {
+                const int T_total = (int)ref_noise_shape[1];
+                std::vector<float> noise_cf((size_t)T_total * 80);
+                for (int t = 0; t < T_total; ++t) {
+                    for (int c = 0; c < 80; ++c) {
+                        noise_cf[(size_t)c * T_total + (size_t)t] = ref_noise_pair.first[(size_t)t * 80 + (size_t)c];
+                    }
+                }
+                mel_r = chatterbox_mel_from_tokens_with_noise_r(ctx, ref_tokens.data(), (int)ref_tokens.size(),
+                                                                noise_cf.data(), T_total);
+            } else {
+                mel_r = chatterbox_mel_from_tokens_r(ctx, ref_tokens.data(), (int)ref_tokens.size());
+            }
             if (mel_r.ok) {
+                const char* note = (ref_noise_pair.first && ref_noise_shape.size() >= 2)
+                                       ? "criterion=cos_mean>=0.95  replay=exact_init_noise"
+                                       : "criterion=cos_mean>=0.95  replay=legacy_rng";
                 auto rep = compare_with_row_width(ref, "s3gen_mel", mel_r.data.data(), mel_r.data.size(), 80);
-                print_row_mean("s3gen_mel", rep, CHATTERBOX_MEAN_THRESHOLD, "criterion=cos_mean>=0.95");
+                print_row_mean("s3gen_mel", rep, CHATTERBOX_MEAN_THRESHOLD, note);
                 record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
             } else {
                 printf("[ERR ] s3gen_mel              %s\n", mel_r.note.c_str());
@@ -927,6 +1008,34 @@ int main(int argc, char** argv) {
                     } else {
                         printf("[SKIP] hift_source_stft      not in reference archive; re-dump with latest "
                                "tools/reference_backends/chatterbox.py\n");
+                        n_skip++;
+                    }
+
+                    auto ref_conv_post_pair = ref.get_f32("voc_conv_post");
+                    auto ref_conv_post_shape = ref.shape("voc_conv_post");
+                    if (ref_conv_post_pair.first && ref_conv_post_shape.size() >= 2 && (int)ref_conv_post_shape[0] == 18) {
+                        const int T_conv = (int)ref_conv_post_shape[1];
+                        std::vector<float> conv_post_cf((size_t)18 * T_conv);
+                        for (int t = 0; t < T_conv; ++t) {
+                            for (int c = 0; c < 18; ++c) {
+                                conv_post_cf[(size_t)c * T_conv + (size_t)t] =
+                                    ref_conv_post_pair.first[(size_t)t * 18 + (size_t)c];
+                            }
+                        }
+                        int pcm_n = 0;
+                        float* pcm = chatterbox_hift_from_conv_post(conv_post_cf.data(), T_conv, T_mel, &pcm_n);
+                        if (pcm) {
+                            auto rep = ref.compare("hift_pcm", pcm, (size_t)pcm_n);
+                            print_row_mean("hift_pcm(ref_conv_post)", rep, CHATTERBOX_MEAN_THRESHOLD,
+                                           "criterion=cos_mean>=0.95  direct_last_stage");
+                            record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                            chatterbox_pcm_free(pcm);
+                        } else {
+                            printf("[ERR ] hift_pcm(ref_conv_post) chatterbox_hift_from_conv_post returned null\n");
+                            n_fail++;
+                        }
+                    } else {
+                        printf("[SKIP] hift_pcm(ref_conv_post) missing voc_conv_post in reference archive\n");
                         n_skip++;
                     }
 

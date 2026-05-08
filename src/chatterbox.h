@@ -77,6 +77,12 @@ float* chatterbox_synthesize_from_tokens(struct chatterbox_context* ctx, const i
 float* chatterbox_synthesize_mel_from_tokens(struct chatterbox_context* ctx, const int32_t* speech_tokens,
                                              int n_speech_tokens, int* out_T_mel);
 
+// Diff-only entry point: replay S3Gen from caller-provided full initial
+// diffusion noise in channel-first layout (80 * T_total, including prompt).
+float* chatterbox_synthesize_mel_from_tokens_with_noise(struct chatterbox_context* ctx, const int32_t* speech_tokens,
+                                                        int n_speech_tokens, const float* init_noise_cf,
+                                                        int init_noise_T_total, int* out_T_mel);
+
 // Run only the HiFT vocoder on a channel-first mel tensor (80 * T_mel).
 float* chatterbox_vocode_mel(struct chatterbox_context* ctx, const float* mel_cf, int T_mel, int* out_n_samples);
 
@@ -89,6 +95,11 @@ float* chatterbox_vocode_mel_dump_with_source_stft(struct chatterbox_context* ct
                                                    const float* source_stft_cf, int T_src, int* out_n_samples,
                                                    const char** stage_names, float** stage_data, int* stage_sizes,
                                                    int n_stages);
+
+// Diff/debug: reconstruct the final HiFT waveform directly from a dumped
+// conv_post tensor. stft_cf uses channel-first layout (18 * T_stft),
+// matching the "voc_conv_post" reference archive tensor.
+float* chatterbox_hift_from_conv_post(const float* stft_cf, int T_stft, int T_mel, int* out_n_samples);
 
 // Set voice from a reference WAV path for voice cloning.
 // Requires VE (in T3 GGUF) + S3Tokenizer + CAMPPlus (in S3Gen GGUF).
@@ -109,6 +120,33 @@ void chatterbox_pcm_free(float* pcm);
 
 void chatterbox_free(struct chatterbox_context* ctx);
 void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_threads);
+
+// Diff/debug: return the T3 prefill embeddings for the given text (output of
+// build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
+// Also sets *out_cond_T to the number of conditioning tokens (cond_len).
+// Caller frees result with free(). Returns nullptr on error.
+float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text,
+                                      int* out_T, int* out_D, int* out_cond_T);
+
+// Diff/debug: run the T3 prefill for the given text and return the step-0
+// speech logits. Returned buffers have shape (*out_V,). Any of the output
+// pointers may be null; if non-null, the caller frees them with free().
+// For CFG runs, `out_logits_blended = cond + cfg * (cond - uncond)`.
+int chatterbox_dump_t3_step0_logits(struct chatterbox_context* ctx, const char* text,
+                                    float** out_logits_cond,
+                                    float** out_logits_uncond,
+                                    float** out_logits_blended,
+                                    int* out_V);
+
+// Diff/debug: return next-step T3 logits after forcing a speech-token prefix.
+// `prefix_tokens` are generated speech tokens after BOS, using speech positions
+// 1..n_prefix. When n_prefix == 0, this is equivalent to step-0 logits.
+int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, const char* text,
+                                   const int32_t* prefix_tokens, int n_prefix,
+                                   float** out_logits_cond,
+                                   float** out_logits_uncond,
+                                   float** out_logits_blended,
+                                   int* out_V);
 
 #ifdef __cplusplus
 }

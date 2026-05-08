@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -170,9 +171,10 @@ struct cb_precomputed_conds {
 struct cb_tokenizer {
     std::unordered_map<std::string, int32_t> token_to_id;
     std::vector<std::string> id_to_token;
-    // GPT-2 BPE (Kartoffelbox only)
     std::unordered_map<std::string, int32_t> merge_rank; // "left right" → rank
     bool has_bpe = false;
+    bool bpe_byte_level = false;
+    bool bpe_space_token = false;
 };
 
 // ── Punctuation normalization (from chatterbox/tts.py) ──────────
@@ -306,21 +308,126 @@ static std::vector<int32_t> tokenize_text_bpe(const cb_tokenizer& tok, const std
     return result;
 }
 
-// ── Sampler ──────────────────────────────────────────────────────
+// Plain HF BPE tokenization used by base Chatterbox.
+static std::vector<int32_t> tokenize_text_hf_bpe(const cb_tokenizer& tok, const std::string& text) {
+    if (!tok.has_bpe) {
+        return tokenize_text(tok, text);
+    }
 
-static uint64_t xorshift64star(uint64_t& state) {
-    state ^= state >> 12;
-    state ^= state << 25;
-    state ^= state >> 27;
-    return state * 0x2545F4914F6CDD1DULL;
+    std::vector<int32_t> result;
+    std::string encoded = text;
+    if (tok.bpe_space_token) {
+        std::string replaced;
+        replaced.reserve(encoded.size() * 2);
+        for (char ch : encoded) {
+            if (ch == ' ') {
+                replaced += "[SPACE]";
+            } else {
+                replaced.push_back(ch);
+            }
+        }
+        encoded.swap(replaced);
+    }
+
+    auto flush_pretok = [&](const std::string& piece) {
+        if (piece.empty()) {
+            return;
+        }
+        auto it = tok.token_to_id.find(piece);
+        if (it != tok.token_to_id.end()) {
+            result.push_back(it->second);
+            return;
+        }
+        core_bpe::bpe_one(tok.token_to_id, tok.merge_rank, piece, result);
+    };
+
+    std::string cur;
+    for (size_t i = 0; i < encoded.size();) {
+        if (tok.bpe_space_token && encoded.compare(i, 7, "[SPACE]") == 0) {
+            flush_pretok(cur);
+            cur.clear();
+            flush_pretok("[SPACE]");
+            i += 7;
+            continue;
+        }
+
+        const unsigned char ch = (unsigned char)encoded[i];
+        const bool is_alnum = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+        const bool cur_alnum = !cur.empty() && (((unsigned char)cur.back() >= '0' && (unsigned char)cur.back() <= '9') ||
+                                                ((unsigned char)cur.back() >= 'A' && (unsigned char)cur.back() <= 'Z') ||
+                                                ((unsigned char)cur.back() >= 'a' && (unsigned char)cur.back() <= 'z') ||
+                                                (unsigned char)cur.back() == '_');
+        if (!cur.empty() && is_alnum != cur_alnum) {
+            flush_pretok(cur);
+            cur.clear();
+        }
+        cur.push_back((char)ch);
+        ++i;
+    }
+    flush_pretok(cur);
+    return result;
 }
 
-static float rand_uniform(uint64_t& rng) {
-    return (float)(xorshift64star(rng) >> 11) / (float)(1ULL << 53);
+// ── Sampler ──────────────────────────────────────────────────────
+
+struct mt19937_state {
+    uint32_t mt[624];
+    int left = 1;
+    int next = 0;
+};
+
+static void mt19937_seed(mt19937_state& s, uint32_t seed) {
+    s.mt[0] = seed;
+    for (int i = 1; i < 624; i++) {
+        s.mt[i] = 1812433253u * (s.mt[i - 1] ^ (s.mt[i - 1] >> 30)) + (uint32_t)i;
+    }
+    s.left = 1;
+    s.next = 0;
+}
+
+static inline uint32_t mt19937_mix_bits(uint32_t u, uint32_t v) {
+    return (u & 0x80000000u) | (v & 0x7fffffffu);
+}
+
+static inline uint32_t mt19937_twist(uint32_t u, uint32_t v) {
+    return (mt19937_mix_bits(u, v) >> 1) ^ ((v & 1u) ? 0x9908b0dfu : 0u);
+}
+
+static void mt19937_next_state(mt19937_state& s) {
+    uint32_t* p = s.mt;
+    s.left = 624;
+    s.next = 0;
+    for (int j = 624 - 397 + 1; --j; ++p) {
+        *p = p[397] ^ mt19937_twist(p[0], p[1]);
+    }
+    for (int j = 397; --j; ++p) {
+        *p = p[397 - 624] ^ mt19937_twist(p[0], p[1]);
+    }
+    *p = p[397 - 624] ^ mt19937_twist(p[0], s.mt[0]);
+}
+
+static uint32_t mt19937_next(mt19937_state& s) {
+    if (--s.left == 0) {
+        mt19937_next_state(s);
+    }
+    uint32_t y = s.mt[s.next++];
+    y ^= (y >> 11);
+    y ^= (y << 7) & 0x9D2C5680u;
+    y ^= (y << 15) & 0xEFC60000u;
+    y ^= (y >> 18);
+    return y;
+}
+
+static double rand_uniform_torch(mt19937_state& rng) {
+    return (double)(mt19937_next(rng) & 0x00FFFFFFu) * (1.0 / 16777216.0);
+}
+
+static double rand_uniform_torch_u32(mt19937_state& rng) {
+    return (double)mt19937_next(rng) * (1.0 / 4294967296.0);
 }
 
 static int32_t sample_token(const float* logits, int vocab_size, float temperature, float min_p, float top_p,
-                            float rep_penalty, const std::vector<int32_t>& prev_tokens, uint64_t& rng) {
+                            float rep_penalty, const std::vector<int32_t>& prev_tokens, mt19937_state& rng) {
     std::vector<float> probs(vocab_size);
 
     // Apply repetition penalty
@@ -328,8 +435,13 @@ static int32_t sample_token(const float* logits, int vocab_size, float temperatu
         probs[i] = logits[i];
     }
     if (rep_penalty != 1.0f) {
+        std::vector<uint8_t> seen((size_t)vocab_size, 0);
         for (int32_t tok : prev_tokens) {
             if (tok >= 0 && tok < vocab_size) {
+                if (seen[(size_t)tok]) {
+                    continue;
+                }
+                seen[(size_t)tok] = 1;
                 if (probs[tok] > 0)
                     probs[tok] /= rep_penalty;
                 else
@@ -349,60 +461,102 @@ static int32_t sample_token(const float* logits, int vocab_size, float temperatu
         }
     }
 
-    // Softmax
-    float max_val = *std::max_element(probs.begin(), probs.end());
-    float sum = 0.0f;
-    for (int i = 0; i < vocab_size; i++) {
-        probs[i] = std::exp(probs[i] - max_val);
-        sum += probs[i];
-    }
-    for (int i = 0; i < vocab_size; i++) {
-        probs[i] /= sum;
-    }
-
     // Min-p filtering
     if (min_p > 0.0f) {
+        float max_val = *std::max_element(probs.begin(), probs.end());
+        float sum = 0.0f;
+        for (int i = 0; i < vocab_size; i++) {
+            probs[i] = std::exp(probs[i] - max_val);
+            sum += probs[i];
+        }
+        for (int i = 0; i < vocab_size; i++) {
+            probs[i] /= sum;
+        }
+
         float max_prob = *std::max_element(probs.begin(), probs.end());
         float threshold = max_prob * min_p;
+        std::vector<uint8_t> to_remove((size_t)vocab_size, 0);
         for (int i = 0; i < vocab_size; i++) {
-            if (probs[i] < threshold)
+            if (probs[i] < threshold) {
+                to_remove[(size_t)i] = 1;
+            }
+        }
+        auto best_it = std::max_element(probs.begin(), probs.end());
+        if (best_it != probs.end()) {
+            to_remove[(size_t)(best_it - probs.begin())] = 0;
+        }
+        for (int i = 0; i < vocab_size; i++) {
+            if (to_remove[(size_t)i]) {
                 probs[i] = 0.0f;
+            }
         }
     }
 
     // Top-p filtering
     if (top_p < 1.0f) {
-        // Sort indices by probability descending
         std::vector<int> indices(vocab_size);
         for (int i = 0; i < vocab_size; i++)
             indices[i] = i;
-        std::sort(indices.begin(), indices.end(), [&](int a, int b) { return probs[a] > probs[b]; });
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) { return probs[a] < probs[b]; });
+        std::vector<uint8_t> to_remove((size_t)vocab_size, 0);
         float cumsum = 0.0f;
         for (int idx : indices) {
             cumsum += probs[idx];
-            if (cumsum > top_p) {
-                probs[idx] = 0.0f;
+            if (cumsum <= (1.0f - top_p)) {
+                to_remove[(size_t)idx] = 1;
+            }
+        }
+        if (!indices.empty()) {
+            to_remove[(size_t)indices.back()] = 0;
+        }
+        for (int i = 0; i < vocab_size; i++) {
+            if (to_remove[(size_t)i]) {
+                probs[i] = 0.0f;
             }
         }
     }
 
-    // Re-normalize
-    sum = 0.0f;
-    for (int i = 0; i < vocab_size; i++)
+    // Softmax / re-normalize after filtering
+    float sum = 0.0f;
+    bool already_probs = (min_p > 0.0f);
+    if (!already_probs) {
+        float max_val = *std::max_element(probs.begin(), probs.end());
+        for (int i = 0; i < vocab_size; i++) {
+            probs[i] = std::exp(probs[i] - max_val);
+        }
+    }
+    for (int i = 0; i < vocab_size; i++) {
         sum += probs[i];
+    }
     if (sum <= 0.0f) {
         return (int32_t)(std::max_element(logits, logits + vocab_size) - logits);
     }
-
-    // Multinomial sampling
-    float r = rand_uniform(rng) * sum;
-    float cumsum = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
-        cumsum += probs[i];
-        if (cumsum >= r)
-            return i;
+        probs[i] /= sum;
     }
-    return vocab_size - 1;
+
+    // Closest empirical match so far for CPU torch.multinomial on the
+    // Chatterbox path: sample argmax(p_i / e_i) with e_i ~ Exp(1), using
+    // MT19937 full-32-bit uniforms and consuming draws only for live tokens.
+    int32_t best_idx = 0;
+    float best_score = -1.0f;
+    for (int i = 0; i < vocab_size; i++) {
+        const float p = probs[i];
+        if (p <= 0.0f) {
+            continue;
+        }
+        float u = (float)rand_uniform_torch_u32(rng);
+        if (u >= 1.0f) {
+            u = std::nextafter(1.0f, 0.0f);
+        }
+        const float e = -std::log1pf(-u);
+        const float score = p / e;
+        if (score > best_score) {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+    return best_idx;
 }
 
 // ── Bind T3 tensors ─────────────────────────────────────────────
@@ -411,6 +565,7 @@ static bool bind_t3(chatterbox_context* c);
 static bool bind_t3_gpt2(chatterbox_context* c);
 static bool bind_ve(chatterbox_context* c);
 static void load_metadata(chatterbox_context* c, gguf_context* g);
+static std::vector<float> build_llama3_rope_freq_factors(const cb_t3_hp& hp);
 
 } // namespace
 
@@ -454,7 +609,9 @@ struct chatterbox_context {
     chatterbox_s3gen_context* s3gen_ctx = nullptr;
 
     // RNG
-    uint64_t rng_state = 0xdeadbeefcafebabeULL;
+    mt19937_state rng_state{};
+    uint32_t rng_seed = 0;
+    std::vector<float> rope_freq_factors;
 
     ~chatterbox_context() {
         if (s3gen_ctx)
@@ -513,6 +670,7 @@ static void load_metadata(chatterbox_context* c, gguf_context* g) {
     hp.speaker_embed_size = core_gguf::kv_u32(g, "chatterbox.t3.speaker_embed_size", hp.speaker_embed_size);
     hp.perceiver_n_queries = core_gguf::kv_u32(g, "chatterbox.t3.perceiver_n_queries", hp.perceiver_n_queries);
     hp.wpe_max_positions = core_gguf::kv_u32(g, "chatterbox.t3.wpe_max_positions", hp.wpe_max_positions);
+    c->rope_freq_factors = build_llama3_rope_freq_factors(hp);
 
     // Precomputed conds
     c->conds.emotion_adv = core_gguf::kv_f32(g, "chatterbox.conds.emotion_adv", c->conds.emotion_adv);
@@ -521,7 +679,6 @@ static void load_metadata(chatterbox_context* c, gguf_context* g) {
     // Text tokenizer vocab — try GPT-2 BPE first, then character-level
     auto bpe_tokens = core_gguf::kv_str_array(g, "tokenizer.ggml.tokens");
     if (!bpe_tokens.empty()) {
-        // GPT-2 BPE tokenizer (Kartoffelbox)
         c->tokenizer.id_to_token = std::move(bpe_tokens);
         c->tokenizer.token_to_id.reserve(c->tokenizer.id_to_token.size());
         for (int i = 0; i < (int)c->tokenizer.id_to_token.size(); i++) {
@@ -532,8 +689,11 @@ static void load_metadata(chatterbox_context* c, gguf_context* g) {
             c->tokenizer.merge_rank[merges[i]] = i;
         }
         c->tokenizer.has_bpe = !merges.empty();
+        c->tokenizer.bpe_space_token = c->tokenizer.token_to_id.find("[SPACE]") != c->tokenizer.token_to_id.end();
+        c->tokenizer.bpe_byte_level = !c->tokenizer.bpe_space_token;
         if (c->params.verbosity >= 1 && c->tokenizer.has_bpe) {
-            fprintf(stderr, "chatterbox: GPT-2 BPE tokenizer: %zu tokens, %zu merges\n",
+            fprintf(stderr, "chatterbox: %s tokenizer: %zu tokens, %zu merges\n",
+                    c->tokenizer.bpe_byte_level ? "GPT-2 BPE" : "HF BPE",
                     c->tokenizer.id_to_token.size(), c->tokenizer.merge_rank.size());
         }
     } else {
@@ -547,6 +707,36 @@ static void load_metadata(chatterbox_context* c, gguf_context* g) {
             }
         }
     }
+}
+
+static std::vector<float> build_llama3_rope_freq_factors(const cb_t3_hp& hp) {
+    if (hp.rope_factor <= 1.0f || hp.rope_original_max_pos == 0 || hp.head_dim == 0 || (hp.head_dim % 2) != 0) {
+        return {};
+    }
+
+    const int n_pairs = (int)hp.head_dim / 2;
+    std::vector<float> factors((size_t)n_pairs, 1.0f);
+
+    const float old_context_len = (float)hp.rope_original_max_pos;
+    const float low_freq_wavelen = old_context_len / hp.rope_low_freq_factor;
+    const float high_freq_wavelen = old_context_len / hp.rope_high_freq_factor;
+    const float inv_factor = 1.0f / hp.rope_factor;
+
+    for (int i = 0; i < n_pairs; ++i) {
+        const float inv_freq = std::pow(hp.rope_theta, -(2.0f * i) / (float)hp.head_dim);
+        const float wavelen = 2.0f * (float)M_PI / inv_freq;
+        float new_inv_freq = inv_freq;
+        if (wavelen > low_freq_wavelen) {
+            new_inv_freq = inv_freq * inv_factor;
+        } else if (wavelen >= high_freq_wavelen) {
+            const float smooth =
+                (old_context_len / wavelen - hp.rope_low_freq_factor) / (hp.rope_high_freq_factor - hp.rope_low_freq_factor);
+            new_inv_freq = ((1.0f - smooth) * inv_freq * inv_factor) + (smooth * inv_freq);
+        }
+        factors[(size_t)i] = inv_freq / new_inv_freq;
+    }
+
+    return factors;
 }
 
 // ── Bind T3 model tensors ───────────────────────────────────────
@@ -840,6 +1030,12 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
     ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
     ggml_set_name(positions, "positions");
     ggml_set_input(positions);
+    ggml_tensor* rope_freq_factors = nullptr;
+    if (!c->rope_freq_factors.empty()) {
+        rope_freq_factors = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, (int64_t)c->rope_freq_factors.size());
+        ggml_set_name(rope_freq_factors, "rope_freq_factors");
+        ggml_set_input(rope_freq_factors);
+    }
     ggml_tensor* causal_mask = nullptr;
     if (T > 1) {
         causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T);
@@ -859,6 +1055,10 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
         /*attn_scale*/ attn_scale,
         /*qk_norm_eps*/ 0.0f,
         /*gqa_mode*/ core_attn::GQA_MANUAL_CONT,
+        /*rope_type*/ GGML_ROPE_TYPE_NEOX,
+        /*n_rot*/ 0,
+        /*v_rms_norm*/ false,
+        /*rope_freq_factors*/ rope_freq_factors,
     };
 
     ggml_tensor* cur = embeds;
@@ -930,6 +1130,10 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
                             (size_t)D * n_tokens * sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
                             positions.size() * sizeof(int32_t));
+    if (!c->rope_freq_factors.empty()) {
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "rope_freq_factors"), c->rope_freq_factors.data(), 0,
+                                c->rope_freq_factors.size() * sizeof(float));
+    }
     if (n_tokens > 1) {
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
                                 mask.size() * sizeof(ggml_fp16_t));
@@ -1594,6 +1798,15 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
     auto* c = new chatterbox_context();
     c->params = params;
     c->n_threads = params.n_threads > 0 ? params.n_threads : 4;
+    {
+        const char* env = std::getenv("CRISPASR_CHATTERBOX_T3_SEED");
+        if (env && env[0]) {
+            c->rng_seed = (uint32_t)strtoul(env, nullptr, 10);
+        } else {
+            c->rng_seed = 0;
+        }
+        mt19937_seed(c->rng_state, c->rng_seed);
+    }
 
     // Pass 1: metadata
     {
@@ -1612,6 +1825,7 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
         fprintf(stderr, "chatterbox: arch=%s T3 %uL d=%u h=%u hd=%u ff=%u text_vocab=%u speech_vocab=%u\n",
                 c->hp.arch.c_str(), c->hp.n_layers, c->hp.hidden_size, c->hp.n_heads, c->hp.head_dim,
                 c->hp.intermediate_size, c->hp.text_vocab_size, c->hp.speech_vocab_size);
+        fprintf(stderr, "chatterbox: T3 sampler seed=%u\n", c->rng_seed);
         if (is_gpt2) {
             fprintf(stderr, "chatterbox: GPT-2 wpe_max=%u  tokenizer=%zu tokens\n", c->hp.wpe_max_positions,
                     c->tokenizer.id_to_token.size());
@@ -1717,15 +1931,16 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
     // 1. Normalize and tokenize text
     std::string norm_text = punc_norm(text);
     std::vector<int32_t> text_tokens;
-    if (is_gpt2 && ctx->tokenizer.has_bpe) {
-        text_tokens = tokenize_text_bpe(ctx->tokenizer, norm_text);
+    if (ctx->tokenizer.has_bpe) {
+        text_tokens = ctx->tokenizer.bpe_byte_level ? tokenize_text_bpe(ctx->tokenizer, norm_text)
+                                                    : tokenize_text_hf_bpe(ctx->tokenizer, norm_text);
     } else {
         text_tokens = tokenize_text(ctx->tokenizer, norm_text);
     }
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "chatterbox: text \"%s\" → %zu %s tokens\n", norm_text.c_str(), text_tokens.size(),
-                (is_gpt2 && ctx->tokenizer.has_bpe) ? "BPE" : "char");
+                ctx->tokenizer.has_bpe ? "BPE" : "char");
     }
 
     // 2. Add start/stop text tokens
@@ -1746,6 +1961,14 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
         prefill_embeds = build_prefill_embeds_gpt2(ctx, text_tokens);
     } else {
         prefill_embeds = build_prefill_embeds(ctx, text_tokens);
+        // Python's T3.inference() appends a second speech-start embed (pos=0) on top of
+        // prepare_input_embeds output before running the transformer, so the prefill ends
+        // with [...|speech_start@pos0|BOS@pos0]. The duplicate is identical to the last
+        // token but shifts the last RoPE position from N-1 to N, which is load-bearing
+        // for the first-step logits.
+        const int D = (int)ctx->hp.hidden_size;
+        std::vector<float> bos_extra(prefill_embeds.end() - D, prefill_embeds.end());
+        prefill_embeds.insert(prefill_embeds.end(), bos_extra.begin(), bos_extra.end());
     }
     int prefill_len = (int)(prefill_embeds.size() / ctx->hp.hidden_size);
 
@@ -1758,14 +1981,18 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
     const bool use_cfg = (!is_gpt2 && cfg_w > 0.0f && ctx->kv_k_cfg);
     std::vector<float> uncond_embeds;
     if (use_cfg) {
-        // Unconditioned: zero out text embeddings, keep cond + speech_start
+        // Unconditioned CFG path in Python zeros only text token embeddings
+        // before adding learned text positions, so the text span becomes
+        // text_pos_emb(pos) rather than all zeros.
         uncond_embeds = prefill_embeds; // copy
         const int D = ctx->hp.hidden_size;
-        int text_start = prefill_len - (int)text_tokens.size() - 1; // cond_len
-        int text_end = prefill_len - 1;                             // before speech_start
-        // Zero out text region
+        int text_start = prefill_len - (int)text_tokens.size() - 2; // cond_len
+        int text_end = prefill_len - 2;                             // before speech tokens
+        std::vector<float> text_pos_table(ctx->hp.text_pos_emb_size * D);
+        tensor_get_f32(ctx->t3.text_pos_emb_w, text_pos_table.data(), text_pos_table.size());
         for (int i = text_start; i < text_end; i++) {
-            std::memset(&uncond_embeds[i * D], 0, D * sizeof(float));
+            const int pos_idx = i - text_start;
+            std::memcpy(&uncond_embeds[(size_t)i * D], &text_pos_table[(size_t)pos_idx * D], (size_t)D * sizeof(float));
         }
     }
 
@@ -1807,9 +2034,13 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
             std::memcpy(blended.data(), logits, V * sizeof(float));
         }
 
+        std::vector<int32_t> token_hist;
+        token_hist.reserve(speech_tokens.size() + 1);
+        token_hist.push_back((int32_t)ctx->hp.start_speech_token);
+        token_hist.insert(token_hist.end(), speech_tokens.begin(), speech_tokens.end());
         // Sample next token
         int32_t tok = sample_token(blended.data(), V, ctx->params.temperature, ctx->params.min_p, ctx->params.top_p,
-                                   ctx->params.repetition_penalty, speech_tokens, ctx->rng_state);
+                                   ctx->params.repetition_penalty, token_hist, ctx->rng_state);
         free(logits);
         logits = nullptr;
         if (logits_uncond) {
@@ -1817,7 +2048,7 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
             logits_uncond = nullptr;
         }
 
-        if (ctx->params.verbosity >= 2 && step < 16) {
+        if (ctx->params.verbosity >= 1 && step < 32) {
             fprintf(stderr, "chatterbox[ar]: step=%d tok=%d\n", step, tok);
         }
 
@@ -2095,6 +2326,48 @@ extern "C" float* chatterbox_synthesize_mel_from_tokens(struct chatterbox_contex
                                            prompt_feat, prompt_feat_len, spk_emb, ctx->params.cfm_steps, out_T_mel);
 }
 
+extern "C" float* chatterbox_synthesize_mel_from_tokens_with_noise(struct chatterbox_context* ctx,
+                                                                   const int32_t* speech_tokens, int n_speech_tokens,
+                                                                   const float* init_noise_cf,
+                                                                   int init_noise_T_total, int* out_T_mel) {
+    if (!ctx || !speech_tokens || n_speech_tokens <= 0 || !out_T_mel || !init_noise_cf || init_noise_T_total <= 0)
+        return nullptr;
+    *out_T_mel = 0;
+    if (!ctx->s3gen_ctx) {
+        fprintf(stderr, "chatterbox: S3Gen not loaded.\n");
+        return nullptr;
+    }
+    const int32_t* prompt_tokens = nullptr;
+    int n_prompt = 0;
+    const float* prompt_feat = nullptr;
+    int prompt_feat_len = 0;
+    const float* spk_emb = nullptr;
+    std::vector<int32_t> pt_buf;
+    std::vector<float> pf_buf;
+    std::vector<float> se_buf;
+    if (ctx->conds.gen_prompt_token) {
+        n_prompt = (int)ctx->conds.gen_prompt_token->ne[0];
+        pt_buf.resize(n_prompt);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_token, pt_buf.data(), 0, n_prompt * sizeof(int32_t));
+        prompt_tokens = pt_buf.data();
+    }
+    if (ctx->conds.gen_prompt_feat) {
+        prompt_feat_len = (int)ctx->conds.gen_prompt_feat->ne[1];
+        pf_buf.resize(prompt_feat_len * 80);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_feat, pf_buf.data(), 0, pf_buf.size() * sizeof(float));
+        prompt_feat = pf_buf.data();
+    }
+    if (ctx->conds.gen_embedding) {
+        se_buf.resize(192);
+        ggml_backend_tensor_get(ctx->conds.gen_embedding, se_buf.data(), 0, 192 * sizeof(float));
+        spk_emb = se_buf.data();
+    }
+    return chatterbox_s3gen_synthesize_mel_with_noise(ctx->s3gen_ctx, speech_tokens, n_speech_tokens, prompt_tokens,
+                                                      n_prompt, prompt_feat, prompt_feat_len, spk_emb,
+                                                      ctx->params.cfm_steps, init_noise_cf, init_noise_T_total,
+                                                      out_T_mel);
+}
+
 extern "C" float* chatterbox_vocode_mel(struct chatterbox_context* ctx, const float* mel_cf, int T_mel,
                                         int* out_n_samples) {
     return chatterbox_vocode_mel_with_source_stft(ctx, mel_cf, T_mel, nullptr, 0, out_n_samples);
@@ -2127,6 +2400,10 @@ extern "C" float* chatterbox_vocode_mel_dump_with_source_stft(struct chatterbox_
     }
     return chatterbox_s3gen_vocode_dump_with_source_stft(ctx->s3gen_ctx, mel_cf, T_mel, source_stft_cf, T_src,
                                                          out_n_samples, stage_names, stage_data, stage_sizes, n_stages);
+}
+
+extern "C" float* chatterbox_hift_from_conv_post(const float* stft_cf, int T_stft, int T_mel, int* out_n_samples) {
+    return chatterbox_s3gen_hift_from_conv_post(stft_cf, T_stft, T_mel, out_n_samples);
 }
 
 extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, const char* wav_path) {
@@ -2166,4 +2443,200 @@ extern "C" void chatterbox_free(struct chatterbox_context* ctx) {
 extern "C" void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_threads) {
     if (ctx)
         ctx->n_threads = n_threads > 0 ? n_threads : 4;
+}
+
+extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text,
+                                                 int* out_T, int* out_D, int* out_cond_T) {
+    if (!ctx || !text || !out_T || !out_D || !out_cond_T)
+        return nullptr;
+    if (ctx->hp.arch == "chatterbox_turbo" || ctx->hp.arch == "kartoffelbox")
+        return nullptr; // GPT-2 path not supported here
+    if (!ctx->conds.loaded)
+        return nullptr;
+
+    std::string norm_text = punc_norm(text);
+    std::vector<int32_t> text_tokens;
+    if (ctx->tokenizer.has_bpe) {
+        text_tokens = ctx->tokenizer.bpe_byte_level ? tokenize_text_bpe(ctx->tokenizer, norm_text)
+                                                    : tokenize_text_hf_bpe(ctx->tokenizer, norm_text);
+    } else {
+        text_tokens = tokenize_text(ctx->tokenizer, norm_text);
+    }
+    text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
+    text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
+
+    std::vector<float> emb = build_prefill_embeds(ctx, text_tokens);
+    if (emb.empty())
+        return nullptr;
+
+    const int D = (int)ctx->hp.hidden_size;
+    const int T = (int)(emb.size() / D);
+    // cond_len = T - text_len - 1 (speech_start)
+    *out_T = T;
+    *out_D = D;
+    *out_cond_T = T - (int)text_tokens.size() - 1;
+
+    float* r = (float*)malloc(emb.size() * sizeof(float));
+    if (r)
+        std::memcpy(r, emb.data(), emb.size() * sizeof(float));
+    return r;
+}
+
+extern "C" int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, const char* text,
+                                              const int32_t* prefix_tokens, int n_prefix,
+                                              float** out_logits_cond,
+                                              float** out_logits_uncond,
+                                              float** out_logits_blended,
+                                              int* out_V) {
+    if (!ctx || !text || !out_V) {
+        return -1;
+    }
+    if (out_logits_cond) {
+        *out_logits_cond = nullptr;
+    }
+    if (out_logits_uncond) {
+        *out_logits_uncond = nullptr;
+    }
+    if (out_logits_blended) {
+        *out_logits_blended = nullptr;
+    }
+
+    if (ctx->hp.arch == "chatterbox_turbo" || ctx->hp.arch == "kartoffelbox") {
+        return -2;
+    }
+    if (!ctx->conds.loaded) {
+        return -3;
+    }
+
+    std::string norm_text = punc_norm(text);
+    std::vector<int32_t> text_tokens;
+    if (ctx->tokenizer.has_bpe) {
+        text_tokens = ctx->tokenizer.bpe_byte_level ? tokenize_text_bpe(ctx->tokenizer, norm_text)
+                                                    : tokenize_text_hf_bpe(ctx->tokenizer, norm_text);
+    } else {
+        text_tokens = tokenize_text(ctx->tokenizer, norm_text);
+    }
+    text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
+    text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
+
+    std::vector<float> prefill_embeds = build_prefill_embeds(ctx, text_tokens);
+    if (prefill_embeds.empty()) {
+        return -4;
+    }
+
+    const int D = (int)ctx->hp.hidden_size;
+    std::vector<float> bos_extra(prefill_embeds.end() - D, prefill_embeds.end());
+    prefill_embeds.insert(prefill_embeds.end(), bos_extra.begin(), bos_extra.end());
+    const int prefill_len = (int)(prefill_embeds.size() / D);
+
+    const int max_speech = ctx->params.max_speech_tokens > 0 ? ctx->params.max_speech_tokens : 1000;
+    const int max_ctx = (int)text_tokens.size() + max_speech + 64;
+    if (!kv_alloc(ctx, max_ctx)) {
+        return -7;
+    }
+
+    const float cfg_w = ctx->params.cfg_weight;
+    const bool use_cfg = (cfg_w > 0.0f && ctx->kv_k_cfg);
+    std::vector<float> uncond_embeds;
+    if (use_cfg) {
+        uncond_embeds = prefill_embeds;
+        const int text_start = prefill_len - (int)text_tokens.size() - 2;
+        const int text_end = prefill_len - 2;
+        std::vector<float> text_pos_table((size_t)ctx->hp.text_pos_emb_size * D);
+        tensor_get_f32(ctx->t3.text_pos_emb_w, text_pos_table.data(), text_pos_table.size());
+        for (int i = text_start; i < text_end; ++i) {
+            const int pos_idx = i - text_start;
+            std::memcpy(&uncond_embeds[(size_t)i * D], &text_pos_table[(size_t)pos_idx * D], (size_t)D * sizeof(float));
+        }
+    }
+
+    int n_past = 0;
+    float* logits_cond = run_t3_kv(ctx, prefill_embeds.data(), prefill_len, n_past);
+    if (!logits_cond) {
+        return -5;
+    }
+
+    float* logits_uncond = nullptr;
+    int n_past_cfg = 0;
+    if (use_cfg) {
+        logits_uncond = run_t3_kv(ctx, uncond_embeds.data(), prefill_len, n_past_cfg, ctx->kv_k_cfg, ctx->kv_v_cfg);
+        if (!logits_uncond) {
+            free(logits_cond);
+            return -6;
+        }
+    }
+
+    n_past += prefill_len;
+    n_past_cfg += prefill_len;
+
+    for (int i = 0; i < n_prefix; ++i) {
+        const int32_t tok = prefix_tokens ? prefix_tokens[i] : 0;
+        std::vector<float> tok_embed = build_speech_token_embed(ctx, tok, i + 1);
+
+        float* next_cond = run_t3_kv(ctx, tok_embed.data(), 1, n_past);
+        if (!next_cond) {
+            free(logits_cond);
+            free(logits_uncond);
+            return -8;
+        }
+        free(logits_cond);
+        logits_cond = next_cond;
+        n_past++;
+
+        if (use_cfg) {
+            float* next_uncond = run_t3_kv(ctx, tok_embed.data(), 1, n_past_cfg, ctx->kv_k_cfg, ctx->kv_v_cfg);
+            if (!next_uncond) {
+                free(logits_cond);
+                free(logits_uncond);
+                return -9;
+            }
+            free(logits_uncond);
+            logits_uncond = next_uncond;
+            n_past_cfg++;
+        }
+    }
+
+    const int V = (int)ctx->hp.speech_vocab_size;
+    *out_V = V;
+
+    auto dup_logits = [&](const float* src) -> float* {
+        if (!src) {
+            return nullptr;
+        }
+        float* dst = (float*)malloc((size_t)V * sizeof(float));
+        if (dst) {
+            std::memcpy(dst, src, (size_t)V * sizeof(float));
+        }
+        return dst;
+    };
+
+    if (out_logits_cond) {
+        *out_logits_cond = dup_logits(logits_cond);
+    }
+    if (out_logits_uncond) {
+        *out_logits_uncond = dup_logits(logits_uncond);
+    }
+    if (out_logits_blended) {
+        float* blended = (float*)malloc((size_t)V * sizeof(float));
+        if (blended) {
+            for (int i = 0; i < V; ++i) {
+                blended[i] = (use_cfg && logits_uncond) ? (logits_cond[i] + cfg_w * (logits_cond[i] - logits_uncond[i]))
+                                                        : logits_cond[i];
+            }
+        }
+        *out_logits_blended = blended;
+    }
+
+    free(logits_cond);
+    free(logits_uncond);
+    return 0;
+}
+
+extern "C" int chatterbox_dump_t3_step0_logits(struct chatterbox_context* ctx, const char* text,
+                                               float** out_logits_cond,
+                                               float** out_logits_uncond,
+                                               float** out_logits_blended,
+                                               int* out_V) {
+    return chatterbox_dump_t3_next_logits(ctx, text, nullptr, 0, out_logits_cond, out_logits_uncond,
+                                          out_logits_blended, out_V);
 }

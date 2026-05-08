@@ -40,6 +40,16 @@ float* chatterbox_s3gen_synthesize_mel(struct chatterbox_s3gen_context* ctx, con
                                        const float* prompt_feat, int prompt_feat_len, const float* spk_embedding,
                                        int n_cfm_steps, int* out_T_mel);
 
+// Diff-only entry point: same as chatterbox_s3gen_synthesize_mel but
+// starts the Euler solver from a caller-provided full initial latent
+// noise tensor in channel-first layout (80 * T_total, including prompt).
+float* chatterbox_s3gen_synthesize_mel_with_noise(struct chatterbox_s3gen_context* ctx, const int32_t* speech_tokens,
+                                                  int n_speech_tokens, const int32_t* prompt_tokens,
+                                                  int n_prompt_tokens, const float* prompt_feat, int prompt_feat_len,
+                                                  const float* spk_embedding, int n_cfm_steps,
+                                                  const float* init_noise_cf, int init_noise_T_total,
+                                                  int* out_T_mel);
+
 // Run only the vocoder on externally-provided mel.
 // mel_cf: channel-first (80 * T_mel) float array.
 float* chatterbox_s3gen_vocode(struct chatterbox_s3gen_context* ctx, const float* mel_cf, int T_mel,
@@ -64,6 +74,11 @@ float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbox_s3gen_con
                                                      const float* source_stft_cf, int T_src, int* out_n_samples,
                                                      const char** stage_names, float** stage_data, int* stage_sizes,
                                                      int n_stages);
+
+// Diff/debug: reconstruct the final HiFT waveform directly from the
+// conv_post output tensor. stft_cf is channel-first (18 * T_stft),
+// matching the dumped "voc_conv_post" reference layout.
+float* chatterbox_s3gen_hift_from_conv_post(const float* stft_cf, int T_stft, int T_mel, int* out_n_samples);
 
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);

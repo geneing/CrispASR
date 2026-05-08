@@ -38,6 +38,7 @@ DEFAULT_STAGES = [
     "t3_speech_tokens",
     "s3gen_token_emb",
     "s3gen_encoder_out",
+    "s3gen_init_noise",
     "s3gen_mel",
     "hift_source",
     "hift_source_stft",
@@ -58,6 +59,26 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_REPETITION_PENALTY = 1.2
 DEFAULT_MIN_P = 0.05
 DEFAULT_TOP_P = 1.0
+
+
+def _capture_randn_like(run_fn):
+    import torch
+
+    original = torch.randn_like
+    captured = {}
+
+    def hooked_randn_like(*args, **kwargs):
+        out = original(*args, **kwargs)
+        if "tensor" not in captured:
+            captured["tensor"] = out.detach().clone()
+        return out
+
+    torch.randn_like = hooked_randn_like
+    try:
+        result = run_fn()
+    finally:
+        torch.randn_like = original
+    return result, captured.get("tensor")
 
 
 def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
@@ -166,7 +187,9 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
 
     # Extract mel from flow_inference
     with torch.inference_mode():
-        mel = model.s3gen.flow_inference(**flow_kwargs)
+        mel, init_noise = _capture_randn_like(lambda: model.s3gen.flow_inference(**flow_kwargs))
+    if init_noise is not None and "s3gen_init_noise" in stages:
+        out["s3gen_init_noise"] = init_noise.detach().squeeze(0).permute(1, 0).contiguous().cpu().float().numpy()
     if "s3gen_mel" in stages:
         # mel shape: (B, 80, T) → (T, 80)
         out["s3gen_mel"] = mel.detach().squeeze(0).permute(1, 0).contiguous().cpu().float().numpy()
