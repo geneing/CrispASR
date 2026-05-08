@@ -2476,6 +2476,38 @@ reads. Fix: read `ggml_nbytes(tensor)` bytes, then use
 ALL manual tensor reads in CPU-side code (F0 predictor, SourceModule
 linear, speaker embedding projection).
 
+## Chatterbox repaired GGUF split — stage-specific regen (May 2026)
+
+The repaired `*-regen.gguf` artifacts are intentionally asymmetric:
+base Chatterbox regenerated T3, while Chatterbox Turbo regenerated
+S3Gen.
+
+- `chatterbox-t3-f16-regen.gguf` fixes the base T3 GGUF export. The
+  old artifact only carried the legacy character-token vocabulary and
+  missed the real HF BPE tokenizer tokens/merges, so C++ fed a different
+  text-token sequence than Python.
+- `chatterbox-turbo-s3gen-f16-regen.gguf` fixes the Turbo companion
+  stage. Turbo T3 uses the GPT-2-style path and was not the artifact
+  being repaired; the downstream S3Gen/vocoder GGUF needed rebuilding
+  after the S3Gen parity fixes.
+- Turbo T3 still needs quant coverage even though it did not need
+  regeneration. Publish `chatterbox-turbo-t3-q8_0.gguf` and
+  `chatterbox-turbo-t3-q4_k.gguf` from the canonical F16 so users can
+  select matching T3/S3Gen quants without relying on local `-regen`
+  names.
+- `-regen` is a local repair marker, not a registry contract. HF uploads
+  should publish the repaired bytes under canonical filenames so
+  auto-download and auto-resolve keep working without special cases.
+- Do not infer a general rule that base always needs T3 regeneration or
+  Turbo always needs S3Gen regeneration. The regenerated file is the
+  stage whose GGUF export/runtime contract was wrong.
+
+Current debug boundary: base T3 tokenizer, conditioning, prefill, CFG,
+step-0 logits, and forced step-1 logits match Python. S3Gen replay and
+HiFT final reconstruction also match when fed reference tensors. The
+remaining token-stream drift is sampler parity with CPU
+`torch.multinomial`, not model math.
+
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 
 Bringing up the T5 encoder-decoder runtime (`src/t5_translate.cpp`)

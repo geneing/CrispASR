@@ -934,6 +934,13 @@ GGUFs shipped (2026-05-04):
 - [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) — T3 F16/Q8_0/Q4_K (1.1G/542M/287M) + S3Gen F16/Q8_0/Q4_K (548M/342M/237M). All quants ASR-verified "Hello world."
 - [`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF) — Arabic T3 F16 (1.1 GB), shares S3Gen with base
 
+Repaired GGUF refresh (2026-05-08):
+- **Base Chatterbox:** regenerated `chatterbox-t3-f16-regen.gguf` because the old base T3 export lacked the real HF BPE tokenizer metadata and made C++ feed the wrong text-token sequence. The repaired F16/Q8_0/Q4_K have been uploaded to HF under canonical `chatterbox-t3-*` names.
+- **Chatterbox Turbo:** regenerated `chatterbox-turbo-s3gen-f16-regen.gguf` because the active breakage was in the downstream S3Gen/vocoder companion, while `chatterbox-turbo-t3-f16.gguf` was not the artifact under repair. The repaired S3Gen F16/Q8_0/Q4_K have been uploaded to HF under canonical `chatterbox-turbo-s3gen-*` names.
+- **Turbo T3 quant coverage:** `chatterbox-turbo-t3-f16.gguf` did not need regeneration, but Q8_0/Q4_K were produced from the canonical F16 in `/Volumes/backups/ai/crispasr/` and uploaded as `chatterbox-turbo-t3-q8_0.gguf` / `chatterbox-turbo-t3-q4_k.gguf` so explicit quant selection and auto-resolve have matching T3 files.
+- **HF publication:** keep `-regen` locally for traceability where a file was repaired, but upload/replace under canonical filenames by stripping `-regen` so registry auto-resolve and auto-download keep using the existing names.
+- Current runtime status: T3 tokenizer, conditioning, prefill, CFG, step-0 logits, forced step-1 logits, S3Gen replay, and HiFT replay are matched against Python; remaining nondeterministic mismatch is isolated to CPU `torch.multinomial` sampler parity after logits are already correct.
+
 Remaining for production quality:
 1. **C API integration** — register in crispasr_c_api.cpp, CLI adapter (`--backend chatterbox`)
 2. **F0 predictor** — currently source fusion assumes F0≈0 (unvoiced); voiced speech needs F0 net

@@ -229,13 +229,14 @@ constexpr Entry k_registry[] = {
     // Chatterbox-Turbo: distilled GPT-2 T3 (24L) + 2-step meanflow S3Gen.
     // Different architecture from base — runtime keys off
     // `chatterbox.t3.arch` ("kartoffelbox" branch handles GPT-2 T3 for
-    // both Turbo and the German Kartoffelbox fine-tune). Only F16
-    // published upstream.
-    {"chatterbox-turbo", "chatterbox-turbo-t3-f16.gguf",
-     "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-t3-f16.gguf",
-     "~1.6 GB",
-     "chatterbox-turbo-s3gen-f16.gguf",
-     "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-s3gen-f16.gguf"},
+    // both Turbo and the German Kartoffelbox fine-tune). Default download
+    // is Q8_0 for both T3 and S3Gen; F16/Q4_K share the same filename stem
+    // for explicit quant selection.
+    {"chatterbox-turbo", "chatterbox-turbo-t3-q8_0.gguf",
+     "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-t3-q8_0.gguf",
+     "~980 MB",
+     "chatterbox-turbo-s3gen-q8_0.gguf",
+     "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-s3gen-q8_0.gguf"},
     // Kartoffelbox-Turbo: SebastianBodza's German fine-tune of
     // chatterbox-turbo. Same GPT-2 T3 arch as Turbo; reuses the
     // chatterbox-turbo S3Gen verbatim (companion points at the Turbo

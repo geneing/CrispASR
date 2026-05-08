@@ -31,7 +31,11 @@ Two GGUF files are needed: the **T3 model** (text to speech tokens) and the **S3
 | File | Size | Notes |
 |---|---:|---|
 | `chatterbox-turbo-t3-f16.gguf`     | 964 MB | T3 GPT-2 AR model (24L, 1024D) |
+| `chatterbox-turbo-t3-q8_0.gguf`    | 628 MB | Quantized T3, recommended deployment default |
+| `chatterbox-turbo-t3-q4_k.gguf`    | 457 MB | Smaller T3 quant for memory-constrained use |
 | `chatterbox-turbo-s3gen-f16.gguf`  | 628 MB | S3Gen encoder + meanflow CFM + HiFT vocoder |
+| `chatterbox-turbo-s3gen-q8_0.gguf` | 350 MB | Quantized S3Gen, recommended deployment default |
+| `chatterbox-turbo-s3gen-q4_k.gguf` | 244 MB | Smaller S3Gen quant for memory-constrained use |
 
 Encoder attention/FFN weights are stored at F32 precision for quality. Vocoder weights (conv_pre, resblocks, conv_post, source fusion, F0 predictor) are F32.
 
@@ -44,9 +48,9 @@ cd CrispASR
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
 cmake --build build -j --target chatterbox
 
-# 2. Pull both model files
-huggingface-cli download cstr/chatterbox-turbo-GGUF chatterbox-turbo-t3-f16.gguf --local-dir .
-huggingface-cli download cstr/chatterbox-turbo-GGUF chatterbox-turbo-s3gen-f16.gguf --local-dir .
+# 2. Pull both model files (Q8_0 recommended)
+huggingface-cli download cstr/chatterbox-turbo-GGUF chatterbox-turbo-t3-q8_0.gguf --local-dir .
+huggingface-cli download cstr/chatterbox-turbo-GGUF chatterbox-turbo-s3gen-q8_0.gguf --local-dir .
 
 # 3. Synthesise (C API — CLI adapter in progress)
 # See test programs in SESSION_HANDOVER.md for usage examples
