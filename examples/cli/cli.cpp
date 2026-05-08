@@ -186,6 +186,305 @@ static void print_resolve_preview(const char* label, const CrispasrResolvePrevie
     fprintf(stderr, "  path:      %s\n", preview.resolved_path.c_str());
 }
 
+static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_params& params) {
+    std::string arg = argv[i];
+
+#define ARGV_NEXT (((i + 1) < argc) ? argv[++i] : requires_value_error(arg))
+
+    if (arg == "-t" || arg == "--threads") {
+        params.n_threads = std::stoi(ARGV_NEXT);
+    } else if (arg == "-p" || arg == "--processors") {
+        params.n_processors = std::stoi(ARGV_NEXT);
+    } else if (arg == "-ot" || arg == "--offset-t") {
+        params.offset_t_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "-on" || arg == "--offset-n") {
+        params.offset_n = std::stoi(ARGV_NEXT);
+    } else if (arg == "-d" || arg == "--duration") {
+        params.duration_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "-mc" || arg == "--max-context") {
+        params.max_context = std::stoi(ARGV_NEXT);
+    } else if (arg == "-ml" || arg == "--max-len") {
+        params.max_len = std::stoi(ARGV_NEXT);
+    } else if (arg == "-sp" || arg == "--split-on-punct") {
+        params.split_on_punct = true;
+    } else if (arg == "-bo" || arg == "--best-of") {
+        params.best_of = std::stoi(ARGV_NEXT);
+    } else if (arg == "-bs" || arg == "--beam-size") {
+        params.beam_size = std::stoi(ARGV_NEXT);
+    } else if (arg == "-ac" || arg == "--audio-ctx") {
+        params.audio_ctx = std::stoi(ARGV_NEXT);
+    } else if (arg == "-wt" || arg == "--word-thold") {
+        params.word_thold = std::stof(ARGV_NEXT);
+    } else if (arg == "-et" || arg == "--entropy-thold") {
+        params.entropy_thold = std::stof(ARGV_NEXT);
+    } else if (arg == "-lpt" || arg == "--logprob-thold") {
+        params.logprob_thold = std::stof(ARGV_NEXT);
+    } else if (arg == "-nth" || arg == "--no-speech-thold") {
+        params.no_speech_thold = std::stof(ARGV_NEXT);
+    } else if (arg == "-tp" || arg == "--temperature") {
+        params.temperature = std::stof(ARGV_NEXT);
+    } else if (arg == "-tpi" || arg == "--temperature-inc") {
+        params.temperature_inc = std::stof(ARGV_NEXT);
+    } else if (arg == "-debug" || arg == "--debug-mode") {
+        params.debug_mode = true;
+    } else if (arg == "-tr" || arg == "--translate") {
+        params.translate = true;
+    } else if (arg == "-di" || arg == "--diarize") {
+        params.diarize = true;
+    } else if (arg == "-tdrz" || arg == "--tinydiarize") {
+        params.tinydiarize = true;
+    } else if (arg == "-sow" || arg == "--split-on-word") {
+        params.split_on_word = true;
+    } else if (arg == "-nf" || arg == "--no-fallback") {
+        params.no_fallback = true;
+    } else if (arg == "-otxt" || arg == "--output-txt") {
+        params.output_txt = true;
+    } else if (arg == "-ovtt" || arg == "--output-vtt") {
+        params.output_vtt = true;
+    } else if (arg == "-osrt" || arg == "--output-srt") {
+        params.output_srt = true;
+    } else if (arg == "-owts" || arg == "--output-words") {
+        params.output_wts = true;
+    } else if (arg == "-olrc" || arg == "--output-lrc") {
+        params.output_lrc = true;
+    } else if (arg == "-fp" || arg == "--font-path") {
+        params.font_path = ARGV_NEXT;
+    } else if (arg == "-ocsv" || arg == "--output-csv") {
+        params.output_csv = true;
+    } else if (arg == "-oj" || arg == "--output-json") {
+        params.output_jsn = true;
+    } else if (arg == "-ojf" || arg == "--output-json-full") {
+        params.output_jsn_full = params.output_jsn = true;
+    } else if (arg == "-of" || arg == "--output-file") {
+        params.fname_out.emplace_back(ARGV_NEXT);
+    } else if (arg == "-np" || arg == "--no-prints") {
+        params.no_prints = true;
+    } else if (arg == "-v" || arg == "--verbose") {
+        params.verbose = true;
+#if defined(_WIN32)
+        _putenv_s("GGML_VK_PIPELINE_CACHE_DEBUG", "1");
+        _putenv_s("GGML_CUDA_DEBUG", "1");
+#else
+        setenv("GGML_VK_PIPELINE_CACHE_DEBUG", "1", /*overwrite=*/0);
+        setenv("GGML_CUDA_DEBUG", "1", /*overwrite=*/0);
+#endif
+    } else if (arg == "-ps" || arg == "--print-special") {
+        params.print_special = true;
+    } else if (arg == "-pc" || arg == "--print-colors") {
+        params.print_colors = true;
+    } else if (arg == "--print-confidence") {
+        params.print_confidence = true;
+    } else if (arg == "-pp" || arg == "--print-progress") {
+        params.print_progress = true;
+    } else if (arg == "-nt" || arg == "--no-timestamps") {
+        params.no_timestamps = true;
+    } else if (arg == "-l" || arg == "--language") {
+        params.language = whisper_param_turn_lowercase(ARGV_NEXT);
+    } else if (arg == "-dl" || arg == "--detect-language") {
+        params.detect_language = true;
+    } else if (arg == "--prompt") {
+        params.prompt = ARGV_NEXT;
+    } else if (arg == "--ask") {
+        params.ask = ARGV_NEXT;
+    } else if (arg == "--carry-initial-prompt") {
+        params.carry_initial_prompt = true;
+    } else if (arg == "-m" || arg == "--model") {
+        params.model = ARGV_NEXT;
+        std::string auto_base;
+        std::string auto_quant;
+        if (params.model_quant.empty() && parse_auto_quant_spec(params.model, auto_base, auto_quant)) {
+            params.model = auto_base;
+            params.model_quant = auto_quant;
+        }
+    } else if (arg == "--model-quant") {
+        params.model_quant = ARGV_NEXT;
+    } else if (arg == "-f" || arg == "--file") {
+        params.fname_inp.emplace_back(ARGV_NEXT);
+    } else if (arg == "-oved" || arg == "--ov-e-device") {
+        params.openvino_encode_device = ARGV_NEXT;
+    } else if (arg == "-dtw" || arg == "--dtw") {
+        params.dtw = ARGV_NEXT;
+    } else if (arg == "-ls" || arg == "--log-score") {
+        params.log_score = true;
+    } else if (arg == "-ng" || arg == "--no-gpu") {
+        params.use_gpu = false;
+    } else if (arg == "-dev" || arg == "--device") {
+        params.gpu_device = std::stoi(ARGV_NEXT);
+        {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%d", params.gpu_device);
+#if defined(_WIN32)
+            if (!std::getenv("GGML_VK_VISIBLE_DEVICES"))
+                _putenv_s("GGML_VK_VISIBLE_DEVICES", buf);
+            if (!std::getenv("CUDA_VISIBLE_DEVICES"))
+                _putenv_s("CUDA_VISIBLE_DEVICES", buf);
+#else
+            setenv("GGML_VK_VISIBLE_DEVICES", buf, 0);
+            setenv("CUDA_VISIBLE_DEVICES", buf, 0);
+#endif
+        }
+    } else if (arg == "--gpu-backend") {
+        params.gpu_backend = ARGV_NEXT;
+    } else if (arg == "-fa" || arg == "--flash-attn") {
+        params.flash_attn = true;
+    } else if (arg == "-nfa" || arg == "--no-flash-attn") {
+        params.flash_attn = false;
+    } else if (arg == "-sns" || arg == "--suppress-nst") {
+        params.suppress_nst = true;
+    } else if (arg == "--suppress-regex") {
+        params.suppress_regex = ARGV_NEXT;
+    } else if (arg == "--grammar") {
+        params.grammar = ARGV_NEXT;
+    } else if (arg == "--grammar-rule") {
+        params.grammar_rule = ARGV_NEXT;
+    } else if (arg == "--grammar-penalty") {
+        params.grammar_penalty = std::stof(ARGV_NEXT);
+    } else if (arg == "--backend") {
+        params.backend = ARGV_NEXT;
+    } else if (arg == "-sl" || arg == "--source-lang") {
+        params.source_lang = whisper_param_turn_lowercase(ARGV_NEXT);
+    } else if (arg == "-tl" || arg == "--target-lang") {
+        params.target_lang = whisper_param_turn_lowercase(ARGV_NEXT);
+    } else if (arg == "--no-punctuation") {
+        params.punctuation = false;
+    } else if (arg == "--punc-model") {
+        params.punc_model = ARGV_NEXT;
+    } else if (arg == "--flush-after") {
+        params.flush_after = std::stoi(ARGV_NEXT);
+    } else if (arg == "-am" || arg == "--aligner-model") {
+        params.aligner_model = ARGV_NEXT;
+    } else if (arg == "--force-aligner" || arg == "-falign") {
+        params.force_aligner = true;
+    } else if (arg == "--no-auto-aligner") {
+        params.no_auto_aligner = true;
+    } else if (arg == "-n" || arg == "--max-new-tokens") {
+        params.max_new_tokens = std::stoi(ARGV_NEXT);
+    } else if (arg == "-ck" || arg == "--chunk-seconds") {
+        params.chunk_seconds = std::stoi(ARGV_NEXT);
+    } else if (arg == "--lid-backend") {
+        params.lid_backend = ARGV_NEXT;
+    } else if (arg == "--lid-model") {
+        params.lid_model = ARGV_NEXT;
+    } else if (arg == "--diarize-method") {
+        params.diarize_method = ARGV_NEXT;
+    } else if (arg == "--sherpa-bin") {
+        params.sherpa_bin = ARGV_NEXT;
+    } else if (arg == "--sherpa-segment-model") {
+        params.sherpa_segment_model = ARGV_NEXT;
+    } else if (arg == "--sherpa-embedding-model") {
+        params.sherpa_embedding_model = ARGV_NEXT;
+    } else if (arg == "--sherpa-num-clusters") {
+        params.sherpa_num_clusters = std::stoi(ARGV_NEXT);
+    } else if (arg == "--cache-dir") {
+        params.cache_dir = ARGV_NEXT;
+    } else if (arg == "--alt") {
+        params.show_alternatives = true;
+    } else if (arg == "--alt-n") {
+        params.n_alternatives = std::stoi(ARGV_NEXT);
+    } else if (arg == "--stream") {
+        params.stream = true;
+    } else if (arg == "--mic") {
+        params.mic = true;
+        params.stream = true;
+    } else if (arg == "--live") {
+        params.mic = true;
+        params.stream = true;
+        params.stream_continuous = true;
+    } else if (arg == "--monitor") {
+        params.stream_monitor = true;
+    } else if (arg == "--tts") {
+        params.tts_text = ARGV_NEXT;
+    } else if (arg == "--tts-output") {
+        params.tts_output = ARGV_NEXT;
+    } else if (arg == "--voice") {
+        params.tts_voice = ARGV_NEXT;
+    } else if (arg == "--tts-steps") {
+        params.tts_steps = std::stoi(ARGV_NEXT);
+        if (params.tts_steps < 1)
+            params.tts_steps = 1;
+        if (params.tts_steps > 100)
+            params.tts_steps = 100;
+    } else if (arg == "--codec-model") {
+        params.tts_codec_model = ARGV_NEXT;
+        std::string auto_base;
+        std::string auto_quant;
+        if (params.tts_codec_quant.empty() && parse_auto_quant_spec(params.tts_codec_model, auto_base, auto_quant)) {
+            params.tts_codec_model = auto_base;
+            params.tts_codec_quant = auto_quant;
+        }
+    } else if (arg == "--codec-quant") {
+        params.tts_codec_quant = ARGV_NEXT;
+    } else if (arg == "--ref-text") {
+        params.tts_ref_text = ARGV_NEXT;
+    } else if (arg == "--instruct") {
+        params.tts_instruct = ARGV_NEXT;
+    } else if (arg == "--voice-dir") {
+        params.tts_voice_dir = ARGV_NEXT;
+    } else if (arg == "--tts-max-input-chars") {
+        params.tts_max_input_chars = std::stoi(ARGV_NEXT);
+    } else if (arg == "--cors-origin") {
+        params.server_cors_origin = ARGV_NEXT;
+    } else if (arg == "--tts-trim-silence") {
+        params.tts_trim_silence = true;
+    } else if (arg == "--text") {
+        params.text_input = ARGV_NEXT;
+    } else if (arg == "--translate-max-tokens") {
+        params.translate_max_tokens = std::stoi(ARGV_NEXT);
+    } else if (arg == "-trsl" || arg == "--tr-sl" || arg == "--translate-source-lang") {
+        params.translate_source_lang = whisper_param_turn_lowercase(ARGV_NEXT);
+    } else if (arg == "-trtl" || arg == "--tr-tl" || arg == "--translate-target-lang") {
+        params.translate_target_lang = whisper_param_turn_lowercase(ARGV_NEXT);
+    } else if (arg == "--auto-download") {
+        params.auto_download = true;
+    } else if (arg == "--dry-run-resolve") {
+        params.dry_run_resolve = true;
+    } else if (arg == "--dry-run-ignore-cache") {
+        params.dry_run_ignore_cache = true;
+    } else if (arg == "--server") {
+        params.server = true;
+    } else if (arg == "--host") {
+        params.server_host = ARGV_NEXT;
+    } else if (arg == "--port") {
+        params.server_port = std::stoi(ARGV_NEXT);
+    } else if (arg == "--api-keys") {
+        params.server_api_keys = ARGV_NEXT;
+    } else if (arg == "--stream-step") {
+        params.stream_step_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "--stream-length") {
+        params.stream_length_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "--stream-keep") {
+        params.stream_keep_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "--list-backends") {
+        crispasr_print_backend_matrix();
+        exit(0);
+    } else if (arg == "--list-backends-json") {
+        crispasr_print_backend_matrix_json();
+        exit(0);
+    } else if (arg == "--vad") {
+        params.vad = true;
+    } else if (arg == "-vm" || arg == "--vad-model") {
+        params.vad_model = ARGV_NEXT;
+    } else if (arg == "-vt" || arg == "--vad-threshold") {
+        params.vad_threshold = std::stof(ARGV_NEXT);
+    } else if (arg == "-vspd" || arg == "--vad-min-speech-duration-ms") {
+        params.vad_min_speech_duration_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "-vsd" || arg == "--vad-min-silence-duration-ms") {
+        params.vad_min_silence_duration_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "-vmsd" || arg == "--vad-max-speech-duration-s") {
+        params.vad_max_speech_duration_s = std::stof(ARGV_NEXT);
+    } else if (arg == "-vp" || arg == "--vad-speech-pad-ms") {
+        params.vad_speech_pad_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "-vo" || arg == "--vad-samples-overlap") {
+        params.vad_samples_overlap = std::stof(ARGV_NEXT);
+    } else if (arg == "--vad-stitch") {
+        params.vad_stitch = true;
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
 static bool whisper_params_parse(int argc, char** argv, whisper_params& params) {
     if (const char* env_device = std::getenv("CRISPASR_ARG_DEVICE")) {
         params.gpu_device = std::stoi(env_device);
@@ -209,350 +508,17 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             exit(0);
         }
 
-        // --version: just the build info, machine-grep-friendly. Used in
-        // bug reports — the very first thing to ask for in #31-style
-        // tickets is `crispasr --version`.
         if (arg == "--version") {
             crispasr_print_build_info(stdout);
             exit(0);
         }
 
-        // --diagnostics: full dump (build info + runtime env + ggml device
-        // enumeration). Triggers ggml_backend_load_all() so any CUDA
-        // bring-up failure is logged through GGML_LOG_ERROR before we
-        // exit, which gives users a complete capture for issue reports.
         if (arg == "--diagnostics" || arg == "--diag") {
             crispasr_print_full_diagnostics(stderr);
             exit(0);
         }
-#define ARGV_NEXT (((i + 1) < argc) ? argv[++i] : requires_value_error(arg))
-        else if (arg == "-t" || arg == "--threads") {
-            params.n_threads = std::stoi(ARGV_NEXT);
-        } else if (arg == "-p" || arg == "--processors") {
-            params.n_processors = std::stoi(ARGV_NEXT);
-        } else if (arg == "-ot" || arg == "--offset-t") {
-            params.offset_t_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "-on" || arg == "--offset-n") {
-            params.offset_n = std::stoi(ARGV_NEXT);
-        } else if (arg == "-d" || arg == "--duration") {
-            params.duration_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "-mc" || arg == "--max-context") {
-            params.max_context = std::stoi(ARGV_NEXT);
-        } else if (arg == "-ml" || arg == "--max-len") {
-            params.max_len = std::stoi(ARGV_NEXT);
-        } else if (arg == "-sp" || arg == "--split-on-punct") {
-            params.split_on_punct = true;
-        } else if (arg == "-bo" || arg == "--best-of") {
-            params.best_of = std::stoi(ARGV_NEXT);
-        } else if (arg == "-bs" || arg == "--beam-size") {
-            params.beam_size = std::stoi(ARGV_NEXT);
-        } else if (arg == "-ac" || arg == "--audio-ctx") {
-            params.audio_ctx = std::stoi(ARGV_NEXT);
-        } else if (arg == "-wt" || arg == "--word-thold") {
-            params.word_thold = std::stof(ARGV_NEXT);
-        } else if (arg == "-et" || arg == "--entropy-thold") {
-            params.entropy_thold = std::stof(ARGV_NEXT);
-        } else if (arg == "-lpt" || arg == "--logprob-thold") {
-            params.logprob_thold = std::stof(ARGV_NEXT);
-        } else if (arg == "-nth" || arg == "--no-speech-thold") {
-            params.no_speech_thold = std::stof(ARGV_NEXT);
-        } else if (arg == "-tp" || arg == "--temperature") {
-            params.temperature = std::stof(ARGV_NEXT);
-        } else if (arg == "-tpi" || arg == "--temperature-inc") {
-            params.temperature_inc = std::stof(ARGV_NEXT);
-        } else if (arg == "-debug" || arg == "--debug-mode") {
-            params.debug_mode = true;
-        } else if (arg == "-tr" || arg == "--translate") {
-            params.translate = true;
-        } else if (arg == "-di" || arg == "--diarize") {
-            params.diarize = true;
-        } else if (arg == "-tdrz" || arg == "--tinydiarize") {
-            params.tinydiarize = true;
-        } else if (arg == "-sow" || arg == "--split-on-word") {
-            params.split_on_word = true;
-        } else if (arg == "-nf" || arg == "--no-fallback") {
-            params.no_fallback = true;
-        } else if (arg == "-otxt" || arg == "--output-txt") {
-            params.output_txt = true;
-        } else if (arg == "-ovtt" || arg == "--output-vtt") {
-            params.output_vtt = true;
-        } else if (arg == "-osrt" || arg == "--output-srt") {
-            params.output_srt = true;
-        } else if (arg == "-owts" || arg == "--output-words") {
-            params.output_wts = true;
-        } else if (arg == "-olrc" || arg == "--output-lrc") {
-            params.output_lrc = true;
-        } else if (arg == "-fp" || arg == "--font-path") {
-            params.font_path = ARGV_NEXT;
-        } else if (arg == "-ocsv" || arg == "--output-csv") {
-            params.output_csv = true;
-        } else if (arg == "-oj" || arg == "--output-json") {
-            params.output_jsn = true;
-        } else if (arg == "-ojf" || arg == "--output-json-full") {
-            params.output_jsn_full = params.output_jsn = true;
-        } else if (arg == "-of" || arg == "--output-file") {
-            params.fname_out.emplace_back(ARGV_NEXT);
-        } else if (arg == "-np" || arg == "--no-prints") {
-            params.no_prints = true;
-        } else if (arg == "-v" || arg == "--verbose") {
-            // Turn on as many debug streams as we have today. Each branch
-            // is guarded so setting the var twice (e.g. via env + --verbose)
-            // doesn't clobber an explicit user setting.
-            params.verbose = true;
-#if defined(_WIN32)
-            // _putenv_s is the portable Win32 form; POSIX has setenv.
-            _putenv_s("GGML_VK_PIPELINE_CACHE_DEBUG", "1");
-            _putenv_s("GGML_CUDA_DEBUG", "1");
-#else
-            setenv("GGML_VK_PIPELINE_CACHE_DEBUG", "1", /*overwrite=*/0);
-            setenv("GGML_CUDA_DEBUG", "1", /*overwrite=*/0);
-#endif
-        } else if (arg == "-ps" || arg == "--print-special") {
-            params.print_special = true;
-        } else if (arg == "-pc" || arg == "--print-colors") {
-            params.print_colors = true;
-        } else if (arg == "--print-confidence") {
-            params.print_confidence = true;
-        } else if (arg == "-pp" || arg == "--print-progress") {
-            params.print_progress = true;
-        } else if (arg == "-nt" || arg == "--no-timestamps") {
-            params.no_timestamps = true;
-        } else if (arg == "-l" || arg == "--language") {
-            params.language = whisper_param_turn_lowercase(ARGV_NEXT);
-        } else if (arg == "-dl" || arg == "--detect-language") {
-            params.detect_language = true;
-        } else if (arg == "--prompt") {
-            params.prompt = ARGV_NEXT;
-        } else if (arg == "--ask") {
-            params.ask = ARGV_NEXT;
-        } else if (arg == "--carry-initial-prompt") {
-            params.carry_initial_prompt = true;
-        } else if (arg == "-m" || arg == "--model") {
-            params.model = ARGV_NEXT;
-            std::string auto_base;
-            std::string auto_quant;
-            if (params.model_quant.empty() && parse_auto_quant_spec(params.model, auto_base, auto_quant)) {
-                params.model = auto_base;
-                params.model_quant = auto_quant;
-            }
-        } else if (arg == "--model-quant") {
-            params.model_quant = ARGV_NEXT;
-        } else if (arg == "-f" || arg == "--file") {
-            params.fname_inp.emplace_back(ARGV_NEXT);
-        } else if (arg == "-oved" || arg == "--ov-e-device") {
-            params.openvino_encode_device = ARGV_NEXT;
-        } else if (arg == "-dtw" || arg == "--dtw") {
-            params.dtw = ARGV_NEXT;
-        } else if (arg == "-ls" || arg == "--log-score") {
-            params.log_score = true;
-        } else if (arg == "-ng" || arg == "--no-gpu") {
-            params.use_gpu = false;
-        } else if (arg == "-dev" || arg == "--device") {
-            params.gpu_device = std::stoi(ARGV_NEXT);
-            // Also steer ggml's Vulkan/CUDA backend enumeration so non-whisper
-            // backends (parakeet, cohere, voxtral, …) pick the same device
-            // without having to plumb gpu_device through each one. Set both
-            // vars defensively — whichever backend actually loads reads its
-            // matching var. Set only if the user hasn't already overridden.
-            {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "%d", params.gpu_device);
-#if defined(_WIN32)
-                if (!std::getenv("GGML_VK_VISIBLE_DEVICES"))
-                    _putenv_s("GGML_VK_VISIBLE_DEVICES", buf);
-                if (!std::getenv("CUDA_VISIBLE_DEVICES"))
-                    _putenv_s("CUDA_VISIBLE_DEVICES", buf);
-#else
-                setenv("GGML_VK_VISIBLE_DEVICES", buf, 0);
-                setenv("CUDA_VISIBLE_DEVICES", buf, 0);
-#endif
-            }
-        } else if (arg == "--gpu-backend") {
-            params.gpu_backend = ARGV_NEXT;
-        } else if (arg == "-fa" || arg == "--flash-attn") {
-            params.flash_attn = true;
-        } else if (arg == "-nfa" || arg == "--no-flash-attn") {
-            params.flash_attn = false;
-        } else if (arg == "-sns" || arg == "--suppress-nst") {
-            params.suppress_nst = true;
-        } else if (arg == "--suppress-regex") {
-            params.suppress_regex = ARGV_NEXT;
-        } else if (arg == "--grammar") {
-            params.grammar = ARGV_NEXT;
-        } else if (arg == "--grammar-rule") {
-            params.grammar_rule = ARGV_NEXT;
-        } else if (arg == "--grammar-penalty") {
-            params.grammar_penalty = std::stof(ARGV_NEXT);
-        }
-        // crispasr backend dispatch
-        else if (arg == "--backend") {
-            params.backend = ARGV_NEXT;
-        } else if (arg == "-sl" || arg == "--source-lang") {
-            params.source_lang = whisper_param_turn_lowercase(ARGV_NEXT);
-        } else if (arg == "-tl" || arg == "--target-lang") {
-            params.target_lang = whisper_param_turn_lowercase(ARGV_NEXT);
-        } else if (arg == "--no-punctuation") {
-            params.punctuation = false;
-        } else if (arg == "--punc-model") {
-            params.punc_model = ARGV_NEXT;
-        } else if (arg == "--flush-after") {
-            params.flush_after = std::stoi(ARGV_NEXT);
-        } else if (arg == "-am" || arg == "--aligner-model") {
-            params.aligner_model = ARGV_NEXT;
-        } else if (arg == "--force-aligner" || arg == "-falign") {
-            // Issue #62: run the CTC aligner even on backends that
-            // already produce native timestamps (overrides the
-            // "skip if seg.words is populated" guard). Implies the
-            // aligner runs regardless of CAP_TIMESTAMPS_CTC, since
-            // the user explicitly asked for it. Note: short alias is
-            // `-falign`, NOT `-fa` (already taken by `--flash-attn`).
-            params.force_aligner = true;
-        } else if (arg == "--no-auto-aligner") {
-            // SubtitleEdit #10775: opt out of the canary auto-aligner
-            // default (see crispasr_run.cpp for the implicit-enable
-            // logic). With this flag, --backend canary uses its
-            // cross-attn DTW timing (no aligner GGUF download, no
-            // second forward pass) — matches pre-v0.7.0 behaviour.
-            params.no_auto_aligner = true;
-        } else if (arg == "-n" || arg == "--max-new-tokens") {
-            params.max_new_tokens = std::stoi(ARGV_NEXT);
-        } else if (arg == "-ck" || arg == "--chunk-seconds") {
-            params.chunk_seconds = std::stoi(ARGV_NEXT);
-        } else if (arg == "--lid-backend") {
-            params.lid_backend = ARGV_NEXT;
-        } else if (arg == "--lid-model") {
-            params.lid_model = ARGV_NEXT;
-        } else if (arg == "--diarize-method") {
-            params.diarize_method = ARGV_NEXT;
-        } else if (arg == "--sherpa-bin") {
-            params.sherpa_bin = ARGV_NEXT;
-        } else if (arg == "--sherpa-segment-model") {
-            params.sherpa_segment_model = ARGV_NEXT;
-        } else if (arg == "--sherpa-embedding-model") {
-            params.sherpa_embedding_model = ARGV_NEXT;
-        } else if (arg == "--sherpa-num-clusters") {
-            params.sherpa_num_clusters = std::stoi(ARGV_NEXT);
-        } else if (arg == "--cache-dir") {
-            params.cache_dir = ARGV_NEXT;
-        } else if (arg == "--alt") {
-            params.show_alternatives = true;
-        } else if (arg == "--alt-n") {
-            params.n_alternatives = std::stoi(ARGV_NEXT);
-        } else if (arg == "--stream") {
-            params.stream = true;
-        } else if (arg == "--mic") {
-            params.mic = true;
-            params.stream = true;
-        } else if (arg == "--live") {
-            params.mic = true;
-            params.stream = true;
-            params.stream_continuous = true;
-        } else if (arg == "--monitor") {
-            params.stream_monitor = true;
-        } else if (arg == "--tts") {
-            params.tts_text = ARGV_NEXT;
-        } else if (arg == "--tts-output") {
-            params.tts_output = ARGV_NEXT;
-        } else if (arg == "--voice") {
-            params.tts_voice = ARGV_NEXT;
-        } else if (arg == "--tts-steps") {
-            params.tts_steps = std::stoi(ARGV_NEXT);
-            if (params.tts_steps < 1)
-                params.tts_steps = 1;
-            if (params.tts_steps > 100)
-                params.tts_steps = 100;
-        } else if (arg == "--codec-model") {
-            params.tts_codec_model = ARGV_NEXT;
-            std::string auto_base;
-            std::string auto_quant;
-            if (params.tts_codec_quant.empty() &&
-                parse_auto_quant_spec(params.tts_codec_model, auto_base, auto_quant)) {
-                params.tts_codec_model = auto_base;
-                params.tts_codec_quant = auto_quant;
-            }
-        } else if (arg == "--codec-quant") {
-            params.tts_codec_quant = ARGV_NEXT;
-        } else if (arg == "--ref-text") {
-            params.tts_ref_text = ARGV_NEXT;
-        } else if (arg == "--instruct") {
-            params.tts_instruct = ARGV_NEXT;
-        } else if (arg == "--voice-dir") {
-            // Server mode: directory of <name>.wav (+ <name>.txt) or
-            // <name>.gguf voice profiles. Used by POST /v1/audio/speech
-            // to resolve the request's "voice" field.
-            params.tts_voice_dir = ARGV_NEXT;
-        } else if (arg == "--tts-max-input-chars") {
-            // Server mode: cap on /v1/audio/speech `input` length.
-            // 0 disables (rely on the chunker / caller).
-            params.tts_max_input_chars = std::stoi(ARGV_NEXT);
-        } else if (arg == "--cors-origin") {
-            // Server mode: opt-in CORS support for browser clients.
-            // Use '*' to allow any origin, or a specific scheme://host[:port].
-            params.server_cors_origin = ARGV_NEXT;
-        } else if (arg == "--tts-trim-silence") {
-            params.tts_trim_silence = true;
-        } else if (arg == "--text") {
-            // Text-to-text translation input (m2m100). Source language
-            // via -sl / --source-lang (or --tr-sl for 2-stage pipes);
-            // target via -tl / --target-lang (or --tr-tl).
-            params.text_input = ARGV_NEXT;
-        } else if (arg == "--translate-max-tokens") {
-            params.translate_max_tokens = std::stoi(ARGV_NEXT);
-        } else if (arg == "-trsl" || arg == "--tr-sl" || arg == "--translate-source-lang") {
-            // Translator-stage source language. Falls back to -sl when
-            // unset. Only differs from -sl in 2-stage pipelines where
-            // the primary backend's -sl means something else (e.g.,
-            // ASR source on canary, then m2m100 src on the post-stage).
-            params.translate_source_lang = whisper_param_turn_lowercase(ARGV_NEXT);
-        } else if (arg == "-trtl" || arg == "--tr-tl" || arg == "--translate-target-lang") {
-            params.translate_target_lang = whisper_param_turn_lowercase(ARGV_NEXT);
-        } else if (arg == "--auto-download") {
-            params.auto_download = true;
-        } else if (arg == "--dry-run-resolve") {
-            params.dry_run_resolve = true;
-        } else if (arg == "--dry-run-ignore-cache") {
-            params.dry_run_ignore_cache = true;
-        } else if (arg == "--server") {
-            params.server = true;
-        } else if (arg == "--host") {
-            params.server_host = ARGV_NEXT;
-        } else if (arg == "--port") {
-            params.server_port = std::stoi(ARGV_NEXT);
-        } else if (arg == "--api-keys") {
-            params.server_api_keys = ARGV_NEXT;
-        } else if (arg == "--stream-step") {
-            params.stream_step_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "--stream-length") {
-            params.stream_length_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "--stream-keep") {
-            params.stream_keep_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "--list-backends") {
-            crispasr_print_backend_matrix();
-            exit(0);
-        } else if (arg == "--list-backends-json") {
-            crispasr_print_backend_matrix_json();
-            exit(0);
-        }
-        // Voice Activity Detection (VAD)
-        else if (arg == "--vad") {
-            params.vad = true;
-        } else if (arg == "-vm" || arg == "--vad-model") {
-            params.vad_model = ARGV_NEXT;
-        } else if (arg == "-vt" || arg == "--vad-threshold") {
-            params.vad_threshold = std::stof(ARGV_NEXT);
-        } else if (arg == "-vspd" || arg == "--vad-min-speech-duration-ms") {
-            params.vad_min_speech_duration_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "-vsd" || arg == "--vad-min-silence-duration-ms") {
-            params.vad_min_silence_duration_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "-vmsd" || arg == "--vad-max-speech-duration-s") {
-            params.vad_max_speech_duration_s = std::stof(ARGV_NEXT);
-        } else if (arg == "-vp" || arg == "--vad-speech-pad-ms") {
-            params.vad_speech_pad_ms = std::stoi(ARGV_NEXT);
-        } else if (arg == "-vo" || arg == "--vad-samples-overlap") {
-            params.vad_samples_overlap = std::stof(ARGV_NEXT);
-        } else if (arg == "--vad-stitch") {
-            params.vad_stitch = true;
-        } else {
+
+        if (!whisper_params_parse_arg(argc, argv, i, params)) {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             whisper_print_usage(argc, argv, params);
             exit(0);
