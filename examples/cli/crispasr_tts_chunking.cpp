@@ -122,6 +122,17 @@ std::vector<std::string> crispasr_tts_split_sentences(const std::string& text, s
     return result;
 }
 
+std::vector<std::string> crispasr_tts_plan_chunks_for_backend(const std::string& text, const std::string& backend_name,
+                                                              std::size_t max_chars) {
+    if (backend_name == "vibevoice")
+        return {text};
+
+    std::vector<std::string> result = crispasr_tts_split_sentences(text, max_chars);
+    if (result.empty())
+        result.push_back(text);
+    return result;
+}
+
 std::vector<float> crispasr_tts_concat_with_silence(const std::vector<std::vector<float>>& chunks,
                                                     int silence_samples) {
     if (chunks.empty())

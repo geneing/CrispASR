@@ -132,6 +132,25 @@ TEST_CASE("splitter pathological no-whitespace blob still splits at max_chars", 
         REQUIRE(chunk.size() <= 50);
 }
 
+TEST_CASE("server TTS policy keeps VibeVoice voice cloning single-shot", "[unit][chunking]") {
+    auto out = crispasr_tts_plan_chunks_for_backend("First sentence. Second sentence. Third sentence.", "vibevoice");
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0] == "First sentence. Second sentence. Third sentence.");
+}
+
+TEST_CASE("server TTS policy chunks non-VibeVoice backends", "[unit][chunking]") {
+    auto out = crispasr_tts_plan_chunks_for_backend("First sentence. Second sentence.", "qwen3-tts");
+    REQUIRE(out.size() == 2);
+    REQUIRE(out[0] == "First sentence.");
+    REQUIRE(out[1] == "Second sentence.");
+}
+
+TEST_CASE("server TTS policy preserves whitespace-only requests", "[unit][chunking]") {
+    auto out = crispasr_tts_plan_chunks_for_backend("   ", "qwen3-tts");
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0] == "   ");
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // crispasr_tts_concat_with_silence
 // ──────────────────────────────────────────────────────────────────────────

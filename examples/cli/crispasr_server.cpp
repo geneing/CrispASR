@@ -776,14 +776,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         // generated-text context to maintain speaker identity and prosody.
         // Chunking degrades it, so keep the request as one synthesis call.
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<std::string> sentences;
-        if (std::string(backend->name()) == "vibevoice") {
-            sentences.push_back(text);
-        } else {
-            sentences = crispasr_tts_split_sentences(text);
-            if (sentences.empty()) // input was whitespace-only
-                sentences.push_back(text);
-        }
+        const std::vector<std::string> sentences = crispasr_tts_plan_chunks_for_backend(text, backend->name());
 
         std::vector<std::vector<float>> chunks;
         chunks.reserve(sentences.size());

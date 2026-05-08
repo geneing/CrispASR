@@ -11,6 +11,7 @@
 #include "vibevoice.h"
 
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <sys/stat.h>
@@ -33,6 +34,14 @@ static bool ends_with_ci(const std::string& s, const std::string& suffix) {
 static bool file_exists(const std::string& path) {
     struct stat st;
     return stat(path.c_str(), &st) == 0;
+}
+
+static void set_env_overwrite(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
 }
 
 static std::vector<float> resample_16k_to_24k(const float* in, int n_in) {
@@ -199,7 +208,7 @@ public:
 
         // Expose --voice <path.wav> to vibevoice_synthesize via env var.
         if (!wav_ref_path_.empty())
-            setenv("VIBEVOICE_VOICE_AUDIO", wav_ref_path_.c_str(), 1);
+            set_env_overwrite("VIBEVOICE_VOICE_AUDIO", wav_ref_path_.c_str());
 
         int n_samples = 0;
         float* pcm = vibevoice_synthesize(ctx_, text.c_str(), &n_samples);

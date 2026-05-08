@@ -19,12 +19,12 @@ Quality-control flags supported in streaming mode:
 
 - `--vad`, `--vad-model`, `--vad-threshold`, `--vad-min-speech-duration-ms`, `--vad-min-silence-duration-ms`, `--vad-speech-pad-ms`
 - `--punc-model` and `--no-punctuation`
-- `--alt` and `--alt-n`
 
 Notes:
 
 - With VAD enabled, each streaming window is segmented before ASR. Silent windows are skipped instead of being decoded.
 - `--punc-model` applies after streamed chunk transcription, matching file-mode post-processing.
+- `--alt` / `--alt-n` are file-mode features. They currently do not print token alternatives from `--stream`, `--mic`, or `--live`.
 - File-oriented output flags such as `-osrt`, `-ovtt`, `-oj`, and `-of` do not apply to `--stream` / `--mic` / `--live`; streaming writes transcripts to stdout.
 
 ## Microphone (`--mic`)
@@ -57,7 +57,9 @@ crispasr -m model.gguf -f audio.wav --alt
 ```
 
 `--alt` prints alternative candidate tokens with probabilities — useful
-for filtering low-confidence transcriptions or for downstream rescoring.
+for filtering low-confidence file transcriptions or for downstream
+rescoring. Streaming modes do not currently emit this alternatives
+block.
 
 ## Tuning the sliding window
 

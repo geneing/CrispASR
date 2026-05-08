@@ -17,6 +17,7 @@
 #include "core/attention.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "vibevoice_wav_ref.h"
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -2579,51 +2580,7 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
                     if (fsize > 12 && fsize <= INT32_MAX) {
                         std::vector<uint8_t> buf((size_t)fsize);
                         const size_t rd = fread(buf.data(), 1, buf.size(), fv);
-                        auto rd_u16 = [&](size_t off) -> uint16_t {
-                            return (uint16_t)buf[off] | ((uint16_t)buf[off + 1] << 8);
-                        };
-                        auto rd_u32 = [&](size_t off) -> uint32_t {
-                            return (uint32_t)buf[off] | ((uint32_t)buf[off + 1] << 8) | ((uint32_t)buf[off + 2] << 16) |
-                                   ((uint32_t)buf[off + 3] << 24);
-                        };
-
-                        uint32_t audio_format = 0;
-                        uint32_t channels = 0;
-                        uint32_t bits_per_sample = 0;
-                        int data_offset = -1;
-                        uint32_t data_size = 0;
-
-                        if (rd == buf.size() && memcmp(buf.data(), "RIFF", 4) == 0 &&
-                            memcmp(buf.data() + 8, "WAVE", 4) == 0) {
-                            uint32_t offset = 12; // skip RIFF, size, WAVE
-                            while (offset + 8 <= buf.size()) {
-                                const uint32_t chunk_sz = rd_u32(offset + 4);
-                                const uint32_t chunk_data = offset + 8;
-                                if ((uint64_t)chunk_data + chunk_sz > buf.size())
-                                    break;
-                                if (memcmp(buf.data() + offset, "fmt ", 4) == 0 && chunk_sz >= 16) {
-                                    audio_format = rd_u16(chunk_data);
-                                    channels = rd_u16(chunk_data + 2);
-                                    bits_per_sample = rd_u16(chunk_data + 14);
-                                } else if (memcmp(buf.data() + offset, "data", 4) == 0) {
-                                    data_offset = (int)chunk_data;
-                                    data_size = chunk_sz;
-                                    break;
-                                }
-                                offset = chunk_data + chunk_sz + (chunk_sz & 1u);
-                            }
-                        }
-
-                        if (data_offset > 0 && audio_format == 1 && channels == 1 && bits_per_sample == 16 &&
-                            (uint64_t)data_offset + data_size <= buf.size()) {
-                            int n_samples_ref = (int)(data_size / 2);
-                            ref_pcm.resize(n_samples_ref);
-                            for (int i = 0; i < n_samples_ref; i++) {
-                                const size_t off = (size_t)data_offset + (size_t)i * 2;
-                                const int16_t s = (int16_t)rd_u16(off);
-                                ref_pcm[i] = (float)s / 32768.0f;
-                            }
-                        } else if (verbosity >= 1) {
+                        if (rd != buf.size() || !vibevoice_parse_mono_pcm16_wav(buf.data(), buf.size(), ref_pcm)) {
                             fprintf(stderr,
                                     "vibevoice TTS: voice WAV '%s' must be mono PCM16 with a RIFF/WAVE header\n",
                                     voice_wav);
@@ -2634,27 +2591,8 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
 
                 int n_samples_ref = ref_pcm.size();
                 if (n_samples_ref > 0) {
-                    // Normalize to -25 dB FS (matches Microsoft's default)
-                    float rms = 0.0f;
-                    for (int i = 0; i < n_samples_ref; i++)
-                        rms += ref_pcm[i] * ref_pcm[i];
-                    rms = sqrtf(rms / (float)n_samples_ref);
-                    float target_rms = powf(10.0f, -25.0f / 20.0f);
-                    float scalar = target_rms / (rms + 1e-6f);
-
-                    float max_val = 0.0f;
-                    for (int i = 0; i < n_samples_ref; i++) {
-                        ref_pcm[i] *= scalar;
-                        if (fabsf(ref_pcm[i]) > max_val)
-                            max_val = fabsf(ref_pcm[i]);
-                    }
-
-                    // Uniform scaling to prevent hard-clipping distortion
-                    if (max_val > 1.0f) {
-                        float clip_scalar = max_val + 1e-6f;
-                        for (int i = 0; i < n_samples_ref; i++)
-                            ref_pcm[i] /= clip_scalar;
-                    }
+                    // Normalize to -25 dB FS (matches Microsoft's default).
+                    vibevoice_normalize_ref_pcm(ref_pcm);
 
                     // TTS Voice Cloning uses ONLY the acoustic encoder and applies scaling
                     float sf = 0.196f, bf = -0.049f;

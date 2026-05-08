@@ -235,6 +235,20 @@ catch_discover_tests(test_server_chunking
     PROPERTIES LABELS "unit"
 )
 
+# ─── test_vibevoice_wav_ref — Catch2 unit tests for VibeVoice voice cloning
+# WAV reference parsing and normalization. Pure helper tests, no model load.
+add_executable(test_vibevoice_wav_ref test_vibevoice_wav_ref.cpp)
+target_include_directories(test_vibevoice_wav_ref PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test_vibevoice_wav_ref PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test_vibevoice_wav_ref
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
 # ─── test-core-decode — Catch2 unit tests for core_greedy_decode + core_beam_decode
 #
 # Tests the shared decode helpers in isolation with a mock LLM. No models

@@ -43,6 +43,13 @@
 //     ignores quote characters.
 std::vector<std::string> crispasr_tts_split_sentences(const std::string& text, std::size_t max_chars = 600);
 
+// Server policy wrapper around crispasr_tts_split_sentences. VibeVoice
+// voice cloning intentionally stays single-shot because chunking breaks
+// the continuous prompt + generated-text context that carries speaker
+// identity and prosody.
+std::vector<std::string> crispasr_tts_plan_chunks_for_backend(const std::string& text, const std::string& backend_name,
+                                                              std::size_t max_chars = 600);
+
 // Concatenate per-chunk PCM with `silence_samples` zeros inserted
 // BETWEEN chunks. No pad before the first chunk or after the last —
 // avoids audible click at output boundaries. silence_samples <= 0
