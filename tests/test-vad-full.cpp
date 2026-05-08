@@ -26,6 +26,7 @@ int main() {
     struct whisper_context * wctx = whisper_init_from_file_with_params(
             whisper_model_path.c_str(),
             cparams);
+    assert(wctx != nullptr);
 
     struct whisper_full_params wparams = whisper_full_default_params(CRISPASR_SAMPLING_BEAM_SEARCH);
     wparams.vad            = true;
@@ -42,9 +43,7 @@ int main() {
     const int n_segments = whisper_full_n_segments(wctx);
     assert(n_segments == 1);
 
-
-    printf("Segment text:\n%s", whisper_full_get_segment_text(wctx, 0));
-    assert(strcmp(" And so my fellow Americans, ask not what your country can do for you,"
+    assert(strcmp(" And so, my fellow Americans ask not what your country can do for you,"
                   " ask what you can do for your country.",
            whisper_full_get_segment_text(wctx, 0)) == 0);
     assert(whisper_full_get_segment_t0(wctx, 0) == 32);

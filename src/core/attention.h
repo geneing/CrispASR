@@ -580,8 +580,8 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
     Q = ggml_rope_ext(ctx0, Q, positions, p.rope_freq_factors, n_rot, p.rope_type, p.n_ctx_orig, p.rope_theta,
                       /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f,
                       /*attn_factor*/ 1.0f, p.rope_beta_fast, p.rope_beta_slow);
-    K = ggml_rope_ext(ctx0, K, positions, p.rope_freq_factors, n_rot, p.rope_type, p.n_ctx_orig, p.rope_theta, 1.0f, 0.0f, 1.0f,
-                      p.rope_beta_fast, p.rope_beta_slow);
+    K = ggml_rope_ext(ctx0, K, positions, p.rope_freq_factors, n_rot, p.rope_type, p.n_ctx_orig, p.rope_theta, 1.0f,
+                      0.0f, 1.0f, p.rope_beta_fast, p.rope_beta_slow);
 
     // ---- Permute new K/V to (hd, T, n_kv) for cache write ----
     ggml_tensor* K_new_perm = ggml_permute(ctx0, K, 0, 2, 1, 3);

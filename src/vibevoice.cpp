@@ -1074,22 +1074,28 @@ static char* vibevoice_transcribe_impl(struct vibevoice_context* ctx, const floa
     // 7. Allocate KV cache for Qwen2 decoder
     int max_gen = ctx->params.max_new_tokens > 0 ? ctx->params.max_new_tokens : 512;
     int max_ctx = prefix_len + max_gen;
-    if (!ctx->kv_k) {
+    const ggml_type asr_kv_type = GGML_TYPE_F16;
+    if (!ctx->kv_k || ctx->kv_max_ctx < max_ctx || ctx->kv_k->type != asr_kv_type) {
+        if (ctx->kv_ctx)
+            ggml_free(ctx->kv_ctx);
+        if (ctx->kv_buf)
+            ggml_backend_buffer_free(ctx->kv_buf);
+
         int hd = hp.head_dim;
         int nkv = hp.n_kv_heads;
         int nl = hp.n_lm_layers;
-        size_t k_size = (size_t)ggml_type_size(GGML_TYPE_F16) * hd * max_ctx * nkv * nl;
+        size_t k_size = (size_t)ggml_type_size(asr_kv_type) * hd * max_ctx * nkv * nl;
         ggml_init_params kp = {2 * ggml_tensor_overhead(), nullptr, true};
         ctx->kv_ctx = ggml_init(kp);
-        ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
-        ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, hd, max_ctx, nkv, nl);
+        ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, asr_kv_type, hd, max_ctx, nkv, nl);
+        ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, asr_kv_type, hd, max_ctx, nkv, nl);
         ctx->kv_buf = ggml_backend_alloc_buffer(ctx->backend, 2 * k_size);
         uint8_t* base = (uint8_t*)ggml_backend_buffer_get_base(ctx->kv_buf);
         ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base);
         ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_v, base + k_size);
         ctx->kv_max_ctx = max_ctx;
         if (ctx->params.verbosity >= 1)
-            fprintf(stderr, "vibevoice: KV cache: %d ctx, %zu MB\n", max_ctx, 2 * k_size / (1024 * 1024));
+            fprintf(stderr, "vibevoice: KV cache: %d ctx, %zu MB (reallocated)\n", max_ctx, 2 * k_size / (1024 * 1024));
     }
     ggml_backend_buffer_clear(ctx->kv_buf, 0);
     ctx->kv_n_used = 0;
@@ -2660,7 +2666,7 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
         // Allocate KV cache
         int max_gen = ctx->params.max_new_tokens > 0 ? ctx->params.max_new_tokens : 512;
         int max_ctx = prefix_len + max_gen;
-        if (!ctx->kv_k || ctx->kv_max_ctx < max_ctx) {
+        if (!ctx->kv_k || ctx->kv_max_ctx < max_ctx || ctx->kv_k->type != GGML_TYPE_F16) {
             if (ctx->kv_ctx)
                 ggml_free(ctx->kv_ctx);
             if (ctx->kv_buf)

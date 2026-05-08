@@ -50,6 +50,6 @@ TEST_CASE("whisper_params: use_gpu defaults to true", "[unit]") {
     REQUIRE(kDefaults.use_gpu == true);
 }
 
-TEST_CASE("whisper_params: language defaults to 'en'", "[unit]") {
-    REQUIRE(kDefaults.language == "en");
+TEST_CASE("whisper_params: language defaults to 'auto'", "[unit]") {
+    REQUIRE(kDefaults.language == "auto");
 }

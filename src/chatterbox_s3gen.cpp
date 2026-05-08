@@ -161,6 +161,7 @@ static std::vector<float> hift_pcm_from_conv_post_impl(const float* stft_cf, int
 
 // PyTorch-compatible MT19937 Gaussian fill. Matches the helper already used
 // by VibeVoice so diffusion noise follows the same CPU torch.randn path.
+namespace {
 struct mt19937_state {
     uint32_t mt[624];
     int mti = 624;
@@ -196,6 +197,7 @@ static uint32_t mt19937_next(mt19937_state& s) {
 static inline float mt_uniform_torch_float(mt19937_state& rng) {
     return (float)(mt19937_next(rng) & 0x00FFFFFFu) * (1.0f / 16777216.0f);
 }
+} // namespace
 
 static void torch_normal_fill_16(float* data) {
     for (int j = 0; j < 8; j++) {
