@@ -195,6 +195,8 @@ struct g4e_model {
     // Tokenizer
     std::vector<std::string> vocab;
     std::vector<std::string> merges;
+    std::unordered_map<std::string, int32_t> token_to_id;
+    std::unordered_map<std::string, int32_t> merge_rank;
 };
 
 // ── Context ─────────────────────────────────────────────────────────────────
@@ -253,6 +255,48 @@ struct gemma4_e2b_context {
     // graph reads this via the `ple_ids` input tensor.
     std::vector<int32_t> ple_token_ids;
 };
+
+static std::string g4e_lang_name(const std::string& lang, bool allow_original = false) {
+    if (lang.empty() || lang == "auto")
+        return allow_original ? std::string("its original language") : std::string("English");
+    if (lang == "en")
+        return "English";
+    if (lang == "de")
+        return "German";
+    if (lang == "fr")
+        return "French";
+    if (lang == "es")
+        return "Spanish";
+    if (lang == "it")
+        return "Italian";
+    if (lang == "pt")
+        return "Portuguese";
+    if (lang == "ru")
+        return "Russian";
+    if (lang == "ja")
+        return "Japanese";
+    if (lang == "zh")
+        return "Chinese";
+    if (lang == "nl")
+        return "Dutch";
+    if (lang == "ko")
+        return "Korean";
+    if (lang == "tr")
+        return "Turkish";
+    if (lang == "pl")
+        return "Polish";
+    if (lang == "uk")
+        return "Ukrainian";
+    if (lang == "vi")
+        return "Vietnamese";
+    if (lang == "hi")
+        return "Hindi";
+    return lang;
+}
+
+static std::vector<int32_t> g4e_tokenize_text(gemma4_e2b_context* ctx, const std::string& text) {
+    return core_bpe::tokenize_simple(ctx->model.token_to_id, ctx->model.merge_rank, text);
+}
 
 // ── Conformer encoder graph builder ─────────────────────────────────────────
 // Builds a single ggml graph for the full 12-layer USM Conformer encoder.
@@ -1343,6 +1387,212 @@ static float* g4e_embed_tokens(gemma4_e2b_context* ctx, const int32_t* ids, int 
     return result;
 }
 
+static int32_t g4e_find_token(const gemma4_e2b_context* ctx, const char* token) {
+    if (!ctx || !token)
+        return -1;
+    auto it = ctx->model.token_to_id.find(token);
+    return it == ctx->model.token_to_id.end() ? -1 : it->second;
+}
+
+static std::vector<int32_t> g4e_build_audio_prompt_ids(gemma4_e2b_context* ctx, const std::string& body, int n_audio,
+                                                       int* out_audio_insert_pos) {
+    std::vector<int32_t> ids;
+    const int bos_id = ctx->bos_id >= 0 ? ctx->bos_id : 2;
+    const int user_id = g4e_find_token(ctx, "user");
+    const int model_id = g4e_find_token(ctx, "model");
+    const int nl_id = g4e_find_token(ctx, "\n");
+    const int boa_id = g4e_find_token(ctx, "<|audio>");
+    const int eoa_id = g4e_find_token(ctx, "<audio|>");
+
+    ids.push_back(bos_id);
+    if (ctx->start_of_turn_id >= 0)
+        ids.push_back(ctx->start_of_turn_id);
+    if (user_id >= 0)
+        ids.push_back(user_id);
+    if (nl_id >= 0)
+        ids.push_back(nl_id);
+    if (boa_id >= 0)
+        ids.push_back(boa_id);
+
+    if (out_audio_insert_pos)
+        *out_audio_insert_pos = (int)ids.size();
+
+    if (n_audio > 0) {
+        const int audio_tok = ctx->audio_soft_token_id >= 0 ? ctx->audio_soft_token_id : ctx->pad_id;
+        ids.insert(ids.end(), (size_t)n_audio, audio_tok);
+    }
+
+    if (eoa_id >= 0)
+        ids.push_back(eoa_id);
+    auto body_ids = g4e_tokenize_text(ctx, body);
+    ids.insert(ids.end(), body_ids.begin(), body_ids.end());
+    if (ctx->end_of_turn_id >= 0)
+        ids.push_back(ctx->end_of_turn_id);
+    if (ctx->start_of_turn_id >= 0)
+        ids.push_back(ctx->start_of_turn_id);
+    if (model_id >= 0)
+        ids.push_back(model_id);
+    if (nl_id >= 0)
+        ids.push_back(nl_id);
+    return ids;
+}
+
+static std::vector<int32_t> g4e_build_text_prompt_ids(gemma4_e2b_context* ctx, const std::string& body) {
+    std::vector<int32_t> ids;
+    const int bos_id = ctx->bos_id >= 0 ? ctx->bos_id : 2;
+    const int user_id = g4e_find_token(ctx, "user");
+    const int model_id = g4e_find_token(ctx, "model");
+    const int nl_id = g4e_find_token(ctx, "\n");
+
+    ids.push_back(bos_id);
+    if (ctx->start_of_turn_id >= 0)
+        ids.push_back(ctx->start_of_turn_id);
+    if (user_id >= 0)
+        ids.push_back(user_id);
+    if (nl_id >= 0)
+        ids.push_back(nl_id);
+    auto body_ids = g4e_tokenize_text(ctx, body);
+    ids.insert(ids.end(), body_ids.begin(), body_ids.end());
+    if (ctx->end_of_turn_id >= 0)
+        ids.push_back(ctx->end_of_turn_id);
+    if (ctx->start_of_turn_id >= 0)
+        ids.push_back(ctx->start_of_turn_id);
+    if (model_id >= 0)
+        ids.push_back(model_id);
+    if (nl_id >= 0)
+        ids.push_back(nl_id);
+    return ids;
+}
+
+static char* g4e_run_prompt(gemma4_e2b_context* ctx, const std::vector<int32_t>& prompt_ids, int audio_insert_pos,
+                            int n_audio, const float* audio_emb, int audio_dim, std::vector<int32_t>* out_token_ids,
+                            std::vector<float>* out_token_probs) {
+    if (!ctx || prompt_ids.empty())
+        return nullptr;
+    auto& m = ctx->model;
+    auto& lhp = m.llm_hp;
+    const bool verbose = ctx->verbosity >= 2 || getenv("GEMMA4_E2B_BENCH");
+    const int d = (int)lhp.hidden_size;
+    const int total = (int)prompt_ids.size();
+
+    if (n_audio < 0 || audio_insert_pos < 0 || audio_insert_pos > total) {
+        fprintf(stderr, "gemma4_e2b: invalid prompt layout\n");
+        return nullptr;
+    }
+    if (n_audio > 0 && (!audio_emb || audio_dim <= 0)) {
+        fprintf(stderr, "gemma4_e2b: missing audio embeddings\n");
+        return nullptr;
+    }
+
+    int64_t t_llm0 = ggml_time_us();
+    float* prompt_emb = g4e_embed_tokens(ctx, prompt_ids.data(), total);
+    if (!prompt_emb) {
+        fprintf(stderr, "gemma4_e2b: failed to embed prompt tokens\n");
+        return nullptr;
+    }
+
+    std::vector<float> combined;
+    if (n_audio > 0) {
+        if (audio_dim != d) {
+            fprintf(stderr, "gemma4_e2b: audio dim %d != llm hidden %d — dimension mismatch\n", audio_dim, d);
+            free(prompt_emb);
+            return nullptr;
+        }
+        combined.resize((size_t)d * total);
+        const size_t prefix = (size_t)audio_insert_pos;
+        const size_t suffix = (size_t)(total - audio_insert_pos - n_audio);
+        if (prefix > 0)
+            std::memcpy(combined.data(), prompt_emb, prefix * (size_t)d * sizeof(float));
+        std::memcpy(combined.data() + prefix * (size_t)d, audio_emb, (size_t)n_audio * (size_t)d * sizeof(float));
+        if (suffix > 0) {
+            std::memcpy(combined.data() + (prefix + (size_t)n_audio) * (size_t)d,
+                        prompt_emb + (prefix + (size_t)n_audio) * (size_t)d, suffix * (size_t)d * sizeof(float));
+        }
+    } else {
+        combined.assign(prompt_emb, prompt_emb + (size_t)d * total);
+    }
+    free(prompt_emb);
+
+    if (verbose && n_audio > 0)
+        fprintf(stderr, "gemma4_e2b: prompt: %d tokens, %d audio placeholders\n", total, n_audio);
+
+    // Per-token IDs for the prefill PLE lookup.
+    ctx->ple_token_ids = prompt_ids;
+    if (n_audio > 0) {
+        for (int i = 0; i < n_audio; i++)
+            ctx->ple_token_ids[(size_t)audio_insert_pos + (size_t)i] = ctx->pad_id;
+    }
+
+    // KV cache + best-of-N decode.
+    int max_ctx = std::max(4096, total + 512);
+    if (!g4e_kv_init(ctx, max_ctx)) {
+        fprintf(stderr, "gemma4_e2b: kv init failed\n");
+        return nullptr;
+    }
+
+    float* prefill_logits = g4e_run_llm_kv(ctx, combined.data(), total, 0, nullptr, nullptr);
+    if (!prefill_logits) {
+        fprintf(stderr, "gemma4_e2b: prefill failed\n");
+        return nullptr;
+    }
+
+    int vocab = (int)lhp.vocab_size;
+    int first_token = core_greedy_decode::argmax(prefill_logits, vocab);
+    const float first_p =
+        core_greedy_decode::softmax_of(prefill_logits, vocab, first_token, prefill_logits[first_token]);
+    free(prefill_logits);
+
+    if (verbose)
+        fprintf(stderr, "gemma4_e2b: prefill done, first_token=%d (%.1f ms)\n", first_token,
+                (ggml_time_us() - t_llm0) / 1000.0);
+
+    core_greedy_decode::Config cfg;
+    cfg.max_new_tokens = 256;
+    cfg.eos_id = ctx->end_of_turn_id >= 0 ? ctx->end_of_turn_id : ctx->eos_id;
+    cfg.vocab_size = vocab;
+    cfg.temperature = ctx->temperature;
+
+    const bool capture_probs = (out_token_ids && out_token_probs);
+    auto dec =
+        core_greedy_decode::run_with_probs(ctx, first_token, first_p, total, g4e_embed_tokens, g4e_run_llm_kv, cfg);
+
+    if (verbose)
+        fprintf(stderr, "gemma4_e2b: decoded %d tokens (%.1f ms total)\n", (int)dec.tokens.size(),
+                (ggml_time_us() - t_llm0) / 1000.0);
+
+    std::string result;
+    for (size_t i = 0; i < dec.tokens.size(); i++) {
+        const int tid = dec.tokens[i];
+        if (tid == ctx->bos_id || tid == ctx->eos_id)
+            continue;
+        if (tid == ctx->start_of_turn_id || tid == ctx->end_of_turn_id)
+            continue;
+        if (tid >= 0 && tid < (int)m.vocab.size()) {
+            const std::string& piece = m.vocab[tid];
+            for (size_t ci = 0; ci < piece.size();) {
+                if (ci + 2 < piece.size() && (unsigned char)piece[ci] == 0xE2 && (unsigned char)piece[ci + 1] == 0x96 &&
+                    (unsigned char)piece[ci + 2] == 0x81) {
+                    result += ' ';
+                    ci += 3;
+                } else {
+                    result += piece[ci];
+                    ci++;
+                }
+            }
+        }
+        if (capture_probs) {
+            out_token_ids->push_back(tid);
+            out_token_probs->push_back(i < dec.probs.size() ? dec.probs[i] : 0.0f);
+        }
+    }
+
+    size_t s = result.find_first_not_of(" \n\t\r");
+    size_t e = result.find_last_not_of(" \n\t\r");
+    if (s != std::string::npos && e != std::string::npos)
+        result = result.substr(s, e - s + 1);
+    return strdup(result.c_str());
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────
 
 extern "C" struct gemma4_e2b_context_params gemma4_e2b_context_default_params(void) {
@@ -1433,10 +1683,26 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
     if (tok_key >= 0) {
         int n = gguf_get_arr_n(gctx, tok_key);
         m.vocab.resize(n);
+        m.token_to_id.reserve((size_t)n);
         for (int i = 0; i < n; i++) {
             const char* s = gguf_get_arr_str(gctx, tok_key, i);
-            if (s)
+            if (s) {
                 m.vocab[i] = s;
+                m.token_to_id.emplace(m.vocab[i], i);
+            }
+        }
+    }
+    int merges_key = gguf_find_key(gctx, "tokenizer.ggml.merges");
+    if (merges_key >= 0) {
+        int n = gguf_get_arr_n(gctx, merges_key);
+        m.merges.reserve((size_t)n);
+        m.merge_rank.reserve((size_t)n);
+        for (int i = 0; i < n; i++) {
+            const char* s = gguf_get_arr_str(gctx, merges_key, i);
+            if (s) {
+                m.merges.emplace_back(s);
+                m.merge_rank.emplace(m.merges.back(), i);
+            }
         }
     }
     gguf_free(gctx);
@@ -1753,7 +2019,8 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
 // Internal: shared implementation. When `out_token_ids` and `out_token_probs`
 // are non-null, both are populated in lock-step with the emitted (non-special)
 // tokens. The legacy `gemma4_e2b_transcribe` calls this with nullptr out.
-static char* gemma4_e2b_transcribe_impl(struct gemma4_e2b_context* ctx, const float* pcm, int n_samples,
+static char* gemma4_e2b_transcribe_impl(struct gemma4_e2b_context* ctx, const float* pcm, int n_samples, bool translate,
+                                        const char* source_lang, const char* target_lang,
                                         std::vector<int32_t>* out_token_ids, std::vector<float>* out_token_probs) {
     if (!ctx || !pcm || n_samples <= 0)
         return nullptr;
@@ -1992,215 +2259,44 @@ static char* gemma4_e2b_transcribe_impl(struct gemma4_e2b_context* ctx, const fl
         fprintf(stderr, "gemma4_e2b: encoder done: %dx%d (%.1f ms)\n", proj_dim, N_audio,
                 (ggml_time_us() - t_enc0) / 1000.0);
 
-    // ── Step 5: Build prompt + inject audio ─────────────────────────────
-    // Template: <bos><start_of_turn>user\n[audio_embeddings]Transcribe...<end_of_turn>\n<start_of_turn>model\n
-    int64_t t_llm0 = ggml_time_us();
-    const int d = (int)lhp.hidden_size;
-
-    // Build prompt token sequence
-    std::vector<int32_t> prompt_ids;
-    prompt_ids.push_back(ctx->bos_id);
-    if (ctx->start_of_turn_id >= 0)
-        prompt_ids.push_back(ctx->start_of_turn_id);
-
-    // Simple tokenization of "user\n" using vocab lookup
-    // For now, use basic character-level fallback + known token IDs
-    // TODO: proper BPE tokenization with core_bpe
-    auto find_token = [&](const std::string& s) -> int {
-        for (int i = 0; i < (int)m.vocab.size(); i++)
-            if (m.vocab[i] == s)
-                return i;
-        return -1;
-    };
-
-    int user_id = find_token("user");
-    int nl_id = find_token("\n");
-    if (user_id >= 0)
-        prompt_ids.push_back(user_id);
-    if (nl_id >= 0)
-        prompt_ids.push_back(nl_id);
-
-    // Optional audio-span markers. Gemma4 wraps audio embeddings with
-    // `<|audio>` (boa) and `<audio|>` (eoa); the soft tokens between
-    // them are the placeholders for the audio frames.
-    int boa_id = find_token("<|audio>");
-    int eoa_id = find_token("<audio|>");
-    if (boa_id >= 0)
-        prompt_ids.push_back(boa_id);
-
-    int audio_insert_pos = (int)prompt_ids.size(); // audio goes here
-
-    // "Transcribe the following audio clip into text."
-    // Simple approach: try to find common subword tokens
-    std::vector<std::string> text_tokens = {"Transcribe", " the",  " following", " audio",
-                                            " clip",      " into", " text",      "."};
-    if (eoa_id >= 0) {
-        // Push eoa AFTER the audio soft tokens — but the soft tokens are
-        // injected later via the prefix/suffix split, so we just remember
-        // to start the suffix with eoa. Easiest: push it now into the
-        // suffix-portion of prompt_ids (positions ≥ audio_insert_pos).
-        prompt_ids.push_back(eoa_id);
-    }
-    for (auto& w : text_tokens) {
-        int tid = find_token(w);
-        if (tid >= 0)
-            prompt_ids.push_back(tid);
-    }
-
-    if (ctx->end_of_turn_id >= 0)
-        prompt_ids.push_back(ctx->end_of_turn_id);
-    if (nl_id >= 0)
-        prompt_ids.push_back(nl_id);
-    if (ctx->start_of_turn_id >= 0)
-        prompt_ids.push_back(ctx->start_of_turn_id);
-    int model_id = find_token("model");
-    if (model_id >= 0)
-        prompt_ids.push_back(model_id);
-    if (nl_id >= 0)
-        prompt_ids.push_back(nl_id);
-
-    // Embed prompt tokens (with Gemma sqrt(d) scaling)
-    float* prompt_emb = g4e_embed_tokens(ctx, prompt_ids.data(), (int)prompt_ids.size());
-    if (!prompt_emb) {
-        fprintf(stderr, "gemma4_e2b: failed to embed prompt tokens\n");
-        return nullptr;
-    }
-
-    // Build combined embedding: [prefix_tokens | audio_embeddings | suffix_tokens]
-    int n_prefix = audio_insert_pos;
-    int n_suffix = (int)prompt_ids.size() - audio_insert_pos;
-    int T_total = n_prefix + N_audio + n_suffix;
-
-    std::vector<float> combined((size_t)d * T_total);
-
-    // Copy prefix embeddings
-    std::memcpy(combined.data(), prompt_emb, (size_t)d * n_prefix * sizeof(float));
-
-    // Copy audio embeddings (proj_dim should == d == 1536)
-    if (proj_dim == d) {
-        std::memcpy(combined.data() + (size_t)d * n_prefix, audio_emb.data(), (size_t)d * N_audio * sizeof(float));
+    std::string src = source_lang ? source_lang : "";
+    std::string tgt = target_lang ? target_lang : "";
+    std::string user_body;
+    if (translate) {
+        const std::string src_name = g4e_lang_name(src, true);
+        const std::string tgt_name = g4e_lang_name(!tgt.empty() ? tgt : std::string("en"), false);
+        user_body = "Transcribe the following speech segment in " + src_name + ", then translate it into " + tgt_name +
+                    ".\nWhen formatting the answer, first output the transcription in " + src_name +
+                    ", then one newline, then output the string '" + tgt_name + ": ', then the translation in " +
+                    tgt_name + ".";
     } else {
-        fprintf(stderr, "gemma4_e2b: proj_dim %d != llm_hidden %d — dimension mismatch\n", proj_dim, d);
-        std::free(prompt_emb);
-        return nullptr;
+        const std::string lang_name = g4e_lang_name(src, true);
+        user_body = "Transcribe the following speech segment in " + lang_name + " into " + lang_name +
+                    " text.\n\nFollow these specific instructions for formatting the answer:\n* Only output the "
+                    "transcription, with no newlines.\n* When transcribing numbers, write the digits, i.e. write 1.7 "
+                    "and not one point seven, and write 3 instead of three.";
     }
 
-    // Copy suffix embeddings
-    std::memcpy(combined.data() + (size_t)d * (n_prefix + N_audio), prompt_emb + (size_t)d * n_prefix,
-                (size_t)d * n_suffix * sizeof(float));
-    std::free(prompt_emb);
-
-    if (verbose)
-        fprintf(stderr, "gemma4_e2b: prompt: %d prefix + %d audio + %d suffix = %d total\n", n_prefix, N_audio,
-                n_suffix, T_total);
-
-    // ── Step 6: Init KV cache and run prefill ───────────────────────────
-    int max_ctx = std::max(4096, T_total + 512);
-    if (!g4e_kv_init(ctx, max_ctx)) {
-        fprintf(stderr, "gemma4_e2b: kv init failed\n");
-        return nullptr;
-    }
-
-    // Per-token IDs for the prefill PLE lookup. HF Gemma4Model.forward
-    // (line 2208-2221) replaces multimodal token ids with `pad_token_id`
-    // BEFORE the `embed_tokens_per_layer` lookup, then constructs the
-    // per_layer_inputs from those pad-replaced ids. So at audio
-    // positions we feed pad_id (0) into the lookup, NOT the audio
-    // soft-token id — even though the audio soft-token is what the
-    // tokenizer produces in the input ids before merging.
-    {
-        ctx->ple_token_ids.clear();
-        ctx->ple_token_ids.reserve((size_t)T_total);
-        for (int i = 0; i < n_prefix; i++)
-            ctx->ple_token_ids.push_back(prompt_ids[i]);
-        for (int i = 0; i < N_audio; i++)
-            ctx->ple_token_ids.push_back(ctx->pad_id);
-        for (int i = 0; i < n_suffix; i++)
-            ctx->ple_token_ids.push_back(prompt_ids[(size_t)n_prefix + i]);
-    }
-
-    // Prefill: run full prompt through LLM to fill KV cache
-    float* prefill_logits = g4e_run_llm_kv(ctx, combined.data(), T_total, 0, nullptr, nullptr);
-    if (!prefill_logits) {
-        fprintf(stderr, "gemma4_e2b: prefill failed\n");
-        return nullptr;
-    }
-
-    int vocab = (int)lhp.vocab_size;
-    int first_token = core_greedy_decode::argmax(prefill_logits, vocab);
-    const float first_p =
-        core_greedy_decode::softmax_of(prefill_logits, vocab, first_token, prefill_logits[first_token]);
-    std::free(prefill_logits);
-
-    if (verbose)
-        fprintf(stderr, "gemma4_e2b: prefill done, first_token=%d (%.1f ms)\n", first_token,
-                (ggml_time_us() - t_llm0) / 1000.0);
-
-    // ── Step 7: Greedy decode ───────────────────────────────────────────
-    core_greedy_decode::Config cfg;
-    cfg.max_new_tokens = 256;
-    cfg.eos_id = ctx->end_of_turn_id >= 0 ? ctx->end_of_turn_id : ctx->eos_id;
-    cfg.vocab_size = vocab;
-    cfg.temperature = ctx->temperature;
-
-    // Always run with probs — the helper threads through to the same KV /
-    // embedding callbacks; capturing the per-step softmax adds one O(V) pass
-    // per token (cheap at gemma4-e2b's vocab) and keeps the public greedy
-    // entry pristine for non-prob callers.
-    const bool capture_probs = (out_token_ids && out_token_probs);
-    auto dec =
-        core_greedy_decode::run_with_probs(ctx, first_token, first_p, T_total, g4e_embed_tokens, g4e_run_llm_kv, cfg);
-
-    if (verbose)
-        fprintf(stderr, "gemma4_e2b: decoded %d tokens (%.1f ms total)\n", (int)dec.tokens.size(),
-                (ggml_time_us() - t0) / 1000.0);
-
-    // ── Step 8: Detokenize ──────────────────────────────────────────────
-    std::string result;
-    for (size_t i = 0; i < dec.tokens.size(); i++) {
-        const int tid = dec.tokens[i];
-        if (tid == ctx->bos_id || tid == ctx->eos_id)
-            continue;
-        if (tid == ctx->start_of_turn_id || tid == ctx->end_of_turn_id)
-            continue;
-        if (tid >= 0 && tid < (int)m.vocab.size()) {
-            const std::string& piece = m.vocab[tid];
-            for (size_t ci = 0; ci < piece.size();) {
-                // Replace SentencePiece ▁ (U+2581, 3-byte UTF-8: E2 96 81) with space
-                if (ci + 2 < piece.size() && (unsigned char)piece[ci] == 0xE2 && (unsigned char)piece[ci + 1] == 0x96 &&
-                    (unsigned char)piece[ci + 2] == 0x81) {
-                    result += ' ';
-                    ci += 3;
-                } else {
-                    result += piece[ci];
-                    ci++;
-                }
-            }
-        }
-        if (capture_probs) {
-            out_token_ids->push_back(tid);
-            out_token_probs->push_back(i < dec.probs.size() ? dec.probs[i] : 0.0f);
-        }
-    }
-
-    // Strip leading/trailing whitespace
-    size_t s = result.find_first_not_of(" \n\t\r");
-    size_t e = result.find_last_not_of(" \n\t\r");
-    if (s != std::string::npos && e != std::string::npos)
-        result = result.substr(s, e - s + 1);
-
-    return strdup(result.c_str());
+    int audio_insert_pos = 0;
+    std::vector<int32_t> prompt_ids = g4e_build_audio_prompt_ids(ctx, user_body, N_audio, &audio_insert_pos);
+    return g4e_run_prompt(ctx, prompt_ids, audio_insert_pos, N_audio, audio_emb.data(), proj_dim, out_token_ids,
+                          out_token_probs);
 }
 
 extern "C" char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const float* pcm, int n_samples) {
-    return gemma4_e2b_transcribe_impl(ctx, pcm, n_samples, nullptr, nullptr);
+    return gemma4_e2b_transcribe_impl(ctx, pcm, n_samples, false, nullptr, nullptr, nullptr, nullptr);
+}
+
+extern "C" char* gemma4_e2b_transcribe_ex(struct gemma4_e2b_context* ctx, const float* pcm, int n_samples,
+                                          int translate, const char* source_lang, const char* target_lang) {
+    return gemma4_e2b_transcribe_impl(ctx, pcm, n_samples, translate != 0, source_lang, target_lang, nullptr, nullptr);
 }
 
 extern "C" struct gemma4_e2b_result* gemma4_e2b_transcribe_with_probs(struct gemma4_e2b_context* ctx, const float* pcm,
                                                                       int n_samples) {
     std::vector<int32_t> ids;
     std::vector<float> probs;
-    char* text = gemma4_e2b_transcribe_impl(ctx, pcm, n_samples, &ids, &probs);
+    char* text = gemma4_e2b_transcribe_impl(ctx, pcm, n_samples, false, nullptr, nullptr, &ids, &probs);
     if (!text)
         return nullptr;
     auto* r = (gemma4_e2b_result*)calloc(1, sizeof(gemma4_e2b_result));
@@ -2215,6 +2311,21 @@ extern "C" struct gemma4_e2b_result* gemma4_e2b_transcribe_with_probs(struct gem
         }
     }
     return r;
+}
+
+extern "C" char* gemma4_e2b_translate_text(struct gemma4_e2b_context* ctx, const char* text, const char* source_lang,
+                                           const char* target_lang) {
+    if (!ctx || !text || !*text)
+        return nullptr;
+
+    std::string src = source_lang ? source_lang : "";
+    std::string tgt = target_lang ? target_lang : "";
+    const std::string src_name = g4e_lang_name(src, true);
+    const std::string tgt_name = g4e_lang_name(!tgt.empty() ? tgt : std::string("en"), false);
+    const std::string body = "Translate the following text from " + src_name + " into " + tgt_name +
+                             ".\nOnly output the translation.\n\nText:\n" + std::string(text);
+    std::vector<int32_t> prompt_ids = g4e_build_text_prompt_ids(ctx, body);
+    return g4e_run_prompt(ctx, prompt_ids, 0, 0, nullptr, 0, nullptr, nullptr);
 }
 
 extern "C" void gemma4_e2b_result_free(struct gemma4_e2b_result* r) {

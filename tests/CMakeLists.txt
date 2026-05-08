@@ -1,10 +1,10 @@
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ─── Catch2 — unit-test framework (pytest analogue) ──────────────────────────
-# Fetched at configure time; pinned to a specific tag for reproducibility.
-# The resulting targets (Catch2::Catch2WithMain, Catch2::Catch2) are then
-# available for any test in this directory.
+# ─── Catch2 — unit - test framework(pytest analogue) ──────────────────────────
+#Fetched at configure time; pinned to a specific tag for reproducibility.
+#The resulting targets(Catch2::Catch2WithMain, Catch2::Catch2) are then
+#available for any test in this directory.
 include(FetchContent)
 FetchContent_Declare(
     Catch2
@@ -17,8 +17,8 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 
 if (EMSCRIPTEN)
-    #
-    # test-crispasr-js
+#
+#test - crispasr - js
 
     set(TEST_TARGET test-crispasr-js)
 
@@ -95,7 +95,7 @@ set_tests_properties(${TEST_TARGET} PROPERTIES LABELS "large")
 
 if (CRISPASR_FFMPEG)
     set(TEST_TARGET test-crispasr-cli-tiny-mp3)
-    # Check with reviewers: any way to check the output transcription via ctest (diff, ...)?
+#Check with reviewers : any way to check the output transcription via ctest(diff, ...) ?
     add_test(NAME ${TEST_TARGET}
       COMMAND $<TARGET_FILE:crispasr-cli>
       -m ${PROJECT_SOURCE_DIR}/models/for-tests-ggml-tiny.en.bin
@@ -103,7 +103,7 @@ if (CRISPASR_FFMPEG)
     set_tests_properties(${TEST_TARGET} PROPERTIES LABELS "tiny;mp3")
 endif()
 
-# VAD test tests VAD in isolation
+#VAD test tests VAD in isolation
 set(VAD_TEST test-vad)
 add_executable(${VAD_TEST} ${VAD_TEST}.cpp)
 target_include_directories(${VAD_TEST} PRIVATE ../include ../ggml/include ../examples)
@@ -114,7 +114,7 @@ target_compile_definitions(${VAD_TEST} PRIVATE
 add_test(NAME ${VAD_TEST} COMMAND ${VAD_TEST})
 set_tests_properties(${VAD_TEST} PROPERTIES LABELS "unit")
 
-# VAD test full uses crispasr_full with VAD enabled
+#VAD test full uses crispasr_full with VAD enabled
 set(VAD_TEST test-vad-full)
 add_executable(${VAD_TEST} ${VAD_TEST}.cpp)
 target_include_directories(${VAD_TEST} PRIVATE ../include ../ggml/include ../examples)
@@ -126,11 +126,23 @@ target_compile_definitions(${VAD_TEST} PRIVATE
 add_test(NAME ${VAD_TEST} COMMAND ${VAD_TEST})
 set_tests_properties(${VAD_TEST} PROPERTIES LABELS "base;en")
 
-# ─── test-crispasr-cache — Catch2 unit tests for download/cache helpers ───────
+# ─── test - vad - thresholds — Verify VAD behavior with different thresholds ────────
+set(VAD_TH_TEST test-vad-thresholds)
+add_executable(${VAD_TH_TEST} ${VAD_TH_TEST}.cpp)
+target_include_directories(${VAD_TH_TEST} PRIVATE ../include ../ggml/include ../examples)
+target_link_libraries(${VAD_TH_TEST} PRIVATE common)
+target_compile_definitions(${VAD_TH_TEST} PRIVATE
+    CRISPASR_MODEL_PATH="${PROJECT_SOURCE_DIR}/models/ggml-tiny.en.bin"
+    VAD_MODEL_PATH="${PROJECT_SOURCE_DIR}/models/for-tests-silero-v6.2.0-ggml.bin"
+    SAMPLE_PATH="${PROJECT_SOURCE_DIR}/samples/jfk.wav")
+add_test(NAME ${VAD_TH_TEST} COMMAND ${VAD_TH_TEST})
+set_tests_properties(${VAD_TH_TEST} PROPERTIES LABELS "base;en")
+
+# ─── test - crispasr - cache — Catch2 unit tests for download / cache helpers ───────
 #
-# Compiles crispasr_cache.cpp directly into the test binary so the test is
-# self-contained and does not depend on the full crispasr link closure.
-# Tests are pure filesystem operations — no network requests are made.
+#Compiles crispasr_cache.cpp directly into the test binary so the test is
+#self - contained and does not depend on the full crispasr link closure.
+#Tests are pure filesystem operations — no network requests are made.
 add_executable(test-crispasr-cache
     test-crispasr-cache.cpp
     ${PROJECT_SOURCE_DIR}/src/crispasr_cache.cpp
@@ -146,18 +158,18 @@ if (CRISPASR_CURL)
     target_compile_definitions(test-crispasr-cache PRIVATE CRISPASR_USE_LIBCURL)
     target_link_libraries(test-crispasr-cache PRIVATE CURL::libcurl)
 endif()
-# catch_discover_tests registers one CTest entry per Catch2 TEST_CASE.
+#catch_discover_tests registers one CTest entry per Catch2 TEST_CASE.
 catch_discover_tests(test-crispasr-cache
     TEST_SPEC "[unit]"
     PROPERTIES LABELS "unit"
 )
 
-# ─── test-params — Catch2 unit tests for crispasr_params struct defaults ────────
+# ─── test - params — Catch2 unit tests for crispasr_params struct defaults ────────
 #
-# Default-constructs crispasr_params and checks every crispasr-specific field
-# carries the right initial value.  Links crispasr + common because
-# crispasr_params inlines calls to crispasr_full_default_params() in its field
-# initialisers.
+#Default - constructs crispasr_params and checks every crispasr - specific field
+#carries the right initial value.Links crispasr + common because
+#crispasr_params inlines calls to crispasr_full_default_params() in its field
+#initialisers.
 add_executable(test-params
     test-params.cpp
 )
@@ -177,10 +189,105 @@ catch_discover_tests(test-params
     PROPERTIES LABELS "unit"
 )
 
-# ─── test-registry — Catch2 unit tests for crispasr_model_registry
+# ─── test - punctuation - policy — Catch2 unit tests for punctuation auto - enable
+#policy.Pure logic, no model load.
+add_executable(test-punctuation-policy
+    test_punctuation_policy.cpp
+)
+target_include_directories(test-punctuation-policy PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/ggml/include
+    ${PROJECT_SOURCE_DIR}/examples
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-punctuation-policy PRIVATE
+    Catch2::Catch2WithMain
+    common
+)
+catch_discover_tests(test-punctuation-policy
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
+# ─── test - windows - mic — regression test for Windows dshow mic selection
+add_executable(test-windows-mic
+    test_windows_mic.cpp
+)
+target_include_directories(test-windows-mic PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/examples
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-windows-mic PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-windows-mic
+    TEST_SPEC "[windows][mic]"
+    PROPERTIES LABELS "unit;windows"
+)
+
+# ─── test - chatterbox - params — Catch2 unit tests for chatterbox_context_params defaults ────────
+add_executable(test-chatterbox-params
+    test-chatterbox-params.cpp
+)
+target_include_directories(test-chatterbox-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-chatterbox-params PRIVATE
+    Catch2::Catch2WithMain
+    chatterbox
+)
+catch_discover_tests(test-chatterbox-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;chatterbox"
+)
+
+# ─── test - math - consistency — Catch2 unit tests for math constants ────────
+add_executable(test-math-consistency
+    test-math-consistency.cpp
+)
+target_link_libraries(test-math-consistency PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-math-consistency
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
+# ─── test - link - odr — Verify no ODR violations when linking multiple backends ────────
+add_executable(test-link-odr
+    test-link-odr.cpp
+)
+target_include_directories(test-link-odr PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-link-odr PRIVATE
+    Catch2::Catch2WithMain
+    chatterbox
+    vibevoice
+)
+catch_discover_tests(test-link-odr
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
+# ─── test - issue - 79 — Regression test for VibeVoice ASR KV cache resize ────────
+add_executable(test-issue-79
+    test-issue-79.cpp
+)
+target_include_directories(test-issue-79 PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-issue-79 PRIVATE
+    vibevoice
+)
+#Note : No add_test() here as it requires a large VibeVoice GGUF model path as an argument.
+#Usage :./ bin / test - issue - 79 / path / to / vibevoice - asr - 7b.gguf
+
+# ─── test - registry — Catch2 unit tests for crispasr_model_registry
 #
-# Verifies registry lookup by backend name, reverse lookup by filename,
-# and that all expected entries exist. No network, no models.
+#Verifies registry lookup by backend name, reverse lookup by filename,
+#and that all expected entries exist.No network, no models.
 add_executable(test-registry test-registry.cpp
     ${PROJECT_SOURCE_DIR}/src/crispasr_model_registry.cpp
     ${PROJECT_SOURCE_DIR}/src/crispasr_cache.cpp
@@ -192,7 +299,7 @@ target_link_libraries(test-registry PRIVATE
     Catch2::Catch2WithMain
 )
 if(WIN32)
-    # crispasr_cache.cpp uses WinHTTP for model downloads
+#crispasr_cache.cpp uses WinHTTP for model downloads
     target_link_libraries(test-registry PRIVATE winhttp)
 endif()
 catch_discover_tests(test-registry
@@ -202,9 +309,9 @@ catch_discover_tests(test-registry
 
 # ─── test_server_wav_writer — Catch2 unit tests for crispasr_make_wav_int16
 #
-# Header-only WAV serializer used by /v1/audio/speech and crispasr_diff.
-# Pure CPU, no model dependencies — sub-millisecond per case. Pins the
-# RIFF byte layout so OpenAI clients keep working.
+#Header - only WAV serializer used by / v1 / audio / speech and crispasr_diff.
+#Pure CPU, no model dependencies — sub - millisecond per case.Pins the
+#RIFF byte layout so OpenAI clients keep working.
 add_executable(test_server_wav_writer test_server_wav_writer.cpp)
 target_include_directories(test_server_wav_writer PRIVATE
     ${PROJECT_SOURCE_DIR}/examples/cli
@@ -218,8 +325,8 @@ catch_discover_tests(test_server_wav_writer
 )
 
 # ─── test_server_chunking — Catch2 unit tests for the sentence splitter
-# used by /v1/audio/speech long-form input (PLAN §75d / issue #66).
-# Pure functions, no backend dependency.
+#used by / v1 / audio / speech long - form input(PLAN §75d / issue #66).
+#Pure functions, no backend dependency.
 add_executable(test_server_chunking
     test_server_chunking.cpp
     ${PROJECT_SOURCE_DIR}/examples/cli/crispasr_tts_chunking.cpp
@@ -236,7 +343,7 @@ catch_discover_tests(test_server_chunking
 )
 
 # ─── test_vibevoice_wav_ref — Catch2 unit tests for VibeVoice voice cloning
-# WAV reference parsing and normalization. Pure helper tests, no model load.
+#WAV reference parsing and normalization.Pure helper tests, no model load.
 add_executable(test_vibevoice_wav_ref test_vibevoice_wav_ref.cpp)
 target_include_directories(test_vibevoice_wav_ref PRIVATE
     ${PROJECT_SOURCE_DIR}/src
@@ -249,12 +356,12 @@ catch_discover_tests(test_vibevoice_wav_ref
     PROPERTIES LABELS "unit"
 )
 
-# ─── test-core-decode — Catch2 unit tests for core_greedy_decode + core_beam_decode
+# ─── test - core - decode — Catch2 unit tests for core_greedy_decode + core_beam_decode
 #
-# Tests the shared decode helpers in isolation with a mock LLM. No models
-# loaded, no GPU — pure CPU, sub-millisecond. Covers: argmax, softmax_of,
-# greedy run_with_probs, beam run_with_probs (beam_size=1,4), max_new_tokens
-# cap, multi-EOS termination.
+#Tests the shared decode helpers in isolation with a mock LLM.No models
+#loaded, no GPU — pure CPU, sub - millisecond.Covers : argmax, softmax_of,
+#greedy run_with_probs, beam run_with_probs(beam_size = 1, 4), max_new_tokens
+#cap, multi - EOS termination.
 add_executable(test-core-decode test-core-decode.cpp)
 target_include_directories(test-core-decode PRIVATE
     ${PROJECT_SOURCE_DIR}/src
@@ -267,31 +374,30 @@ catch_discover_tests(test-core-decode
     PROPERTIES LABELS "unit"
 )
 
-# ─── test_qwen3_audio_tower — pre-refactor numeric baseline for the audio
-# tower. Captures sum/sum_sq/max_abs + first-32/last-32 windows on the encoder
-# output for a fixed PCM (jfk.raw) so that extracting the audio tower into the
-# CrispAudio shared library is verifiably non-disruptive. CPU-only — output
-# must be deterministic across machines.
+# ─── test_qwen3_audio_tower — pre - refactor numeric baseline for the audio
+#tower.Captures sum / sum_sq / max_abs + first - 32 / last - 32 windows on the encoder
+#output for a fixed PCM(jfk.raw) so that extracting the audio tower into the
+#CrispAudio shared library is verifiably non - disruptive.CPU - only — output
+#must be deterministic across machines.
 add_executable(test_qwen3_audio_tower test_qwen3_audio_tower.cpp)
 target_include_directories(test_qwen3_audio_tower PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_qwen3_audio_tower PRIVATE qwen3_asr)
 
-# ─── test_qwen3_tts_talker — sanity check the Qwen3-TTS talker forward.
-# Not auto-registered with add_test — needs a real GGUF on disk.
+# ─── test_qwen3_tts_talker — sanity check the Qwen3 - TTS talker forward.
+#Not auto - registered with add_test — needs a real GGUF on disk.
 add_executable(test_qwen3_tts_talker test_qwen3_tts_talker.cpp)
 target_include_directories(test_qwen3_tts_talker PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_qwen3_tts_talker PRIVATE qwen3_tts)
-# Not auto-registered with add_test — needs a model file + jfk.raw which the
-# test runner / dev produces locally. Run manually:
-#   ./build/tests/test_qwen3_audio_tower model.gguf samples/jfk.raw \
-#       > tests/fixtures/qwen3_audio_tower_jfk.txt
-#   ./build/tests/test_qwen3_audio_tower --check model.gguf samples/jfk.raw \
-#       tests/fixtures/qwen3_audio_tower_jfk.txt
+#Not auto - registered with add_test — needs a model file + jfk.raw which the
+#test runner / dev produces locally.Run manually:
+#./ build / tests / test_qwen3_audio_tower model.gguf samples / jfk.raw #> tests / fixtures / qwen3_audio_tower_jfk.txt
+#./ build / tests / test_qwen3_audio_tower -- check model.gguf samples / jfk.raw
+#> tests / fixtures / qwen3_audio_tower_jfk.txt
 
-# ─── test-backends — integration tests for all CrispASR backends ────────────
-# Requires network (downloads models). Not run in CI by default.
-# Usage: ctest -L integration --output-on-failure
-# Or:    ./tests/test-backends.sh [backend ...]
+# ─── test - backends — integration tests for all CrispASR backends ────────────
+#Requires network(downloads models).Not run in CI by default.
+#Usage : ctest - L integration-- output - on - failure
+#Or :./ tests / test - backends.sh[backend...]
 set(TEST_TARGET test-backends)
 add_test(NAME ${TEST_TARGET}
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test-backends.sh

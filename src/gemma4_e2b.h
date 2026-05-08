@@ -23,6 +23,12 @@ struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path_model, str
 // Transcribe PCM audio (16kHz mono float32). Returns malloc'd UTF-8 string (caller frees).
 char* gemma4_e2b_transcribe(struct gemma4_e2b_context* ctx, const float* pcm, int n_samples);
 
+// Transcribe or translate PCM audio (16kHz mono float32). When translate!=0,
+// source_lang / target_lang are used to build an AST prompt. Returns malloc'd
+// UTF-8 string (caller frees).
+char* gemma4_e2b_transcribe_ex(struct gemma4_e2b_context* ctx, const float* pcm, int n_samples, int translate,
+                               const char* source_lang, const char* target_lang);
+
 // Variant that additionally returns per-emitted-token ids + softmax probs.
 // Free with gemma4_e2b_result_free.
 struct gemma4_e2b_result {
@@ -35,6 +41,11 @@ struct gemma4_e2b_result {
 struct gemma4_e2b_result* gemma4_e2b_transcribe_with_probs(struct gemma4_e2b_context* ctx, const float* pcm,
                                                            int n_samples);
 void gemma4_e2b_result_free(struct gemma4_e2b_result* r);
+
+// Text-to-text translation using the same Gemma 4 E2B runtime. Returns
+// malloc'd UTF-8 string (caller frees).
+char* gemma4_e2b_translate_text(struct gemma4_e2b_context* ctx, const char* text, const char* source_lang,
+                                const char* target_lang);
 
 // Single-id detokenize. Returns the raw vocab piece (no Gemma byte-level
 // decode applied — caller may need to massage). Empty for out-of-range.

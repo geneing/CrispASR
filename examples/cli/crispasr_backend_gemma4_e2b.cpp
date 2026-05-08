@@ -31,14 +31,17 @@ public:
         // wanting LID would get nothing. With the cap absent, `-dl`
         // routes through the whisper-tiny pre-step.
         //
+        // Now declared:
+        //   CAP_TRANSLATE        audio AST + text translation path
+        //   CAP_SRC_TGT_LANGUAGE separate source/target language hints
+        //
         // Not yet declared (would need code changes elsewhere):
         //   CAP_TOKEN_CONFIDENCE — gemma4_e2b_transcribe_with_probs exists in
         //     the C-ABI but transcribe() below only calls the plain text variant
         //   CAP_BEAM_SEARCH      — not implemented in the gemma4_e2b decode loop
-        //   CAP_TRANSLATE        — no source/target plumbing
         //   CAP_PUNCTUATION_TOGGLE — no toggle exposed
         return CAP_AUTO_DOWNLOAD | CAP_DIARIZE | CAP_TIMESTAMPS_CTC | CAP_FLASH_ATTN | CAP_PARALLEL_PROCESSORS |
-               CAP_TEMPERATURE;
+               CAP_TEMPERATURE | CAP_TRANSLATE | CAP_SRC_TGT_LANGUAGE;
     }
 
     bool init(const whisper_params& params) override {
@@ -57,12 +60,16 @@ public:
     }
 
     std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
-                                             const whisper_params& /*params*/) override {
+                                             const whisper_params& params) override {
         std::vector<crispasr_segment> out;
         if (!ctx_)
             return out;
 
-        char* text = gemma4_e2b_transcribe(ctx_, samples, n_samples);
+        const std::string src =
+            !params.source_lang.empty() ? params.source_lang : (!params.language.empty() ? params.language : "");
+        const std::string tgt = !params.target_lang.empty() ? params.target_lang : std::string("en");
+        char* text =
+            gemma4_e2b_transcribe_ex(ctx_, samples, n_samples, params.translate ? 1 : 0, src.c_str(), tgt.c_str());
         if (!text || !text[0]) {
             free(text);
             return out;
@@ -82,6 +89,20 @@ public:
         if (!seg.text.empty())
             out.push_back(std::move(seg));
         return out;
+    }
+
+    std::string translate_text(const std::string& text, const std::string& src_lang, const std::string& tgt_lang,
+                               const whisper_params& /*params*/) override {
+        if (!ctx_ || text.empty())
+            return {};
+        char* out = gemma4_e2b_translate_text(ctx_, text.c_str(), src_lang.c_str(), tgt_lang.c_str());
+        if (!out || !out[0]) {
+            free(out);
+            return {};
+        }
+        std::string result(out);
+        free(out);
+        return result;
     }
 
     void shutdown() override {

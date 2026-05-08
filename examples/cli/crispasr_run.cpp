@@ -9,6 +9,7 @@
 
 #include "crispasr_backend.h"
 #include "crispasr_cache.h"
+#include "crispasr_mic_cli.h"
 #include "crispasr_vad_cli.h"
 #include "crispasr_output.h"
 #include "crispasr_punctuation_policy.h"
@@ -976,7 +977,11 @@ int crispasr_run_backend(const whisper_params& params_in) {
                              "ffmpeg -f avfoundation -i ':default' -f s16le -ar 16000 -ac 1 - 2>/dev/null",
                              "r");
 #elif defined(_WIN32)
-            mic_pipe = _popen("ffmpeg -f dshow -i audio=\"Microphone\" -f s16le -ar 16000 -ac 1 - 2>NUL", "rb");
+            {
+                std::string dshow_arg = crispasr_windows_dshow_audio_arg();
+                std::string cmd = "ffmpeg -f dshow -i " + dshow_arg + " -f s16le -ar 16000 -ac 1 - 2>NUL";
+                mic_pipe = _popen(cmd.c_str(), "rb");
+            }
 #else
             // Linux: try arecord first, then ffmpeg with pulseaudio
             mic_pipe = popen("arecord -q -f S16_LE -r 16000 -c 1 -t raw 2>/dev/null || "
