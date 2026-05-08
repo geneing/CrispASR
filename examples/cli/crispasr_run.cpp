@@ -11,6 +11,7 @@
 #include "crispasr_cache.h"
 #include "crispasr_vad_cli.h"
 #include "crispasr_output.h"
+#include "crispasr_punctuation_policy.h"
 #include "crispasr_model_mgr_cli.h"
 #include "crispasr_model_registry.h"
 #include "crispasr_aligner_cli.h"
@@ -916,7 +917,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
     // FireRedPunc. This gives CTC backends (fc-ctc, wav2vec2, firered-asr,
     // omniasr-ctc) punctuated output by default. Users can suppress with
     // --no-punctuation or --punc-model none.
-    if (params.punc_model.empty() && params.punctuation && !(backend->capabilities() & CAP_PUNCTUATION_TOGGLE)) {
+    if (crispasr_should_auto_enable_punctuation(backend->capabilities(), params)) {
         params.punc_model = "auto";
         if (!params.no_prints)
             fprintf(stderr, "crispasr: auto-enabling punctuation restoration for backend '%s'\n", backend->name());

@@ -84,6 +84,7 @@ enum crispasr_capability : uint32_t {
     CAP_VAD_INTERNAL = 1u << 15,        // backend handles VAD internally (whisper)
     CAP_TTS = 1u << 16,                 // text-to-speech synthesis
     CAP_VOICE_CLONING = 1u << 17,       // TTS: synthesise with --voice <reference.wav>
+    CAP_PUNCTUATION_NATIVE = 1u << 18,  // backend already emits punctuation by default
 };
 
 // ---------------------------------------------------------------------------
