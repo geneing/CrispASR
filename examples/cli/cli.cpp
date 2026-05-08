@@ -186,9 +186,8 @@ static void print_resolve_preview(const char* label, const CrispasrResolvePrevie
     fprintf(stderr, "  path:      %s\n", preview.resolved_path.c_str());
 }
 
-static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_params& params) {
+static bool whisper_params_parse_arg_general(int argc, char** argv, int& i, whisper_params& params) {
     std::string arg = argv[i];
-
 #define ARGV_NEXT (((i + 1) < argc) ? argv[++i] : requires_value_error(arg))
 
     if (arg == "-t" || arg == "--threads") {
@@ -237,7 +236,36 @@ static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_para
         params.split_on_word = true;
     } else if (arg == "-nf" || arg == "--no-fallback") {
         params.no_fallback = true;
-    } else if (arg == "-otxt" || arg == "--output-txt") {
+    } else if (arg == "-f" || arg == "--file") {
+        params.fname_inp.emplace_back(ARGV_NEXT);
+    } else if (arg == "-ng" || arg == "--no-gpu") {
+        params.use_gpu = false;
+    } else if (arg == "-fa" || arg == "--flash-attn") {
+        params.flash_attn = true;
+    } else if (arg == "-nfa" || arg == "--no-flash-attn") {
+        params.flash_attn = false;
+    } else if (arg == "-sns" || arg == "--suppress-nst") {
+        params.suppress_nst = true;
+    } else if (arg == "--suppress-regex") {
+        params.suppress_regex = ARGV_NEXT;
+    } else if (arg == "--grammar") {
+        params.grammar = ARGV_NEXT;
+    } else if (arg == "--grammar-rule") {
+        params.grammar_rule = ARGV_NEXT;
+    } else if (arg == "--grammar-penalty") {
+        params.grammar_penalty = std::stof(ARGV_NEXT);
+    } else {
+        return false;
+    }
+    return true;
+#undef ARGV_NEXT
+}
+
+static bool whisper_params_parse_arg_output(int argc, char** argv, int& i, whisper_params& params) {
+    std::string arg = argv[i];
+#define ARGV_NEXT (((i + 1) < argc) ? argv[++i] : requires_value_error(arg))
+
+    if (arg == "-otxt" || arg == "--output-txt") {
         params.output_txt = true;
     } else if (arg == "-ovtt" || arg == "--output-vtt") {
         params.output_vtt = true;
@@ -278,7 +306,18 @@ static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_para
         params.print_progress = true;
     } else if (arg == "-nt" || arg == "--no-timestamps") {
         params.no_timestamps = true;
-    } else if (arg == "-l" || arg == "--language") {
+    } else {
+        return false;
+    }
+    return true;
+#undef ARGV_NEXT
+}
+
+static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, whisper_params& params) {
+    std::string arg = argv[i];
+#define ARGV_NEXT (((i + 1) < argc) ? argv[++i] : requires_value_error(arg))
+
+    if (arg == "-l" || arg == "--language") {
         params.language = whisper_param_turn_lowercase(ARGV_NEXT);
     } else if (arg == "-dl" || arg == "--detect-language") {
         params.detect_language = true;
@@ -298,16 +337,12 @@ static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_para
         }
     } else if (arg == "--model-quant") {
         params.model_quant = ARGV_NEXT;
-    } else if (arg == "-f" || arg == "--file") {
-        params.fname_inp.emplace_back(ARGV_NEXT);
     } else if (arg == "-oved" || arg == "--ov-e-device") {
         params.openvino_encode_device = ARGV_NEXT;
     } else if (arg == "-dtw" || arg == "--dtw") {
         params.dtw = ARGV_NEXT;
     } else if (arg == "-ls" || arg == "--log-score") {
         params.log_score = true;
-    } else if (arg == "-ng" || arg == "--no-gpu") {
-        params.use_gpu = false;
     } else if (arg == "-dev" || arg == "--device") {
         params.gpu_device = std::stoi(ARGV_NEXT);
         {
@@ -325,20 +360,6 @@ static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_para
         }
     } else if (arg == "--gpu-backend") {
         params.gpu_backend = ARGV_NEXT;
-    } else if (arg == "-fa" || arg == "--flash-attn") {
-        params.flash_attn = true;
-    } else if (arg == "-nfa" || arg == "--no-flash-attn") {
-        params.flash_attn = false;
-    } else if (arg == "-sns" || arg == "--suppress-nst") {
-        params.suppress_nst = true;
-    } else if (arg == "--suppress-regex") {
-        params.suppress_regex = ARGV_NEXT;
-    } else if (arg == "--grammar") {
-        params.grammar = ARGV_NEXT;
-    } else if (arg == "--grammar-rule") {
-        params.grammar_rule = ARGV_NEXT;
-    } else if (arg == "--grammar-penalty") {
-        params.grammar_penalty = std::stof(ARGV_NEXT);
     } else if (arg == "--backend") {
         params.backend = ARGV_NEXT;
     } else if (arg == "-sl" || arg == "--source-lang") {
@@ -400,10 +421,8 @@ static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_para
         params.tts_voice = ARGV_NEXT;
     } else if (arg == "--tts-steps") {
         params.tts_steps = std::stoi(ARGV_NEXT);
-        if (params.tts_steps < 1)
-            params.tts_steps = 1;
-        if (params.tts_steps > 100)
-            params.tts_steps = 100;
+        if (params.tts_steps < 1) params.tts_steps = 1;
+        if (params.tts_steps > 100) params.tts_steps = 100;
     } else if (arg == "--codec-model") {
         params.tts_codec_model = ARGV_NEXT;
         std::string auto_base;
@@ -481,8 +500,8 @@ static bool whisper_params_parse_arg(int argc, char** argv, int& i, whisper_para
     } else {
         return false;
     }
-
     return true;
+#undef ARGV_NEXT
 }
 
 static bool whisper_params_parse(int argc, char** argv, whisper_params& params) {
@@ -518,11 +537,19 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             exit(0);
         }
 
-        if (!whisper_params_parse_arg(argc, argv, i, params)) {
-            fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
-            whisper_print_usage(argc, argv, params);
-            exit(0);
+        if (whisper_params_parse_arg_general(argc, argv, i, params)) {
+            continue;
         }
+        if (whisper_params_parse_arg_output(argc, argv, i, params)) {
+            continue;
+        }
+        if (whisper_params_parse_arg_backend_vad(argc, argv, i, params)) {
+            continue;
+        }
+
+        fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
+        whisper_print_usage(argc, argv, params);
+        exit(0);
     }
 
     return true;
