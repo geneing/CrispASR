@@ -3153,3 +3153,31 @@ code before the comma in `crispasr_lid.cpp`. Commit: `43f9015`.
 - #70 (streaming VAD+punc parity): confirmed fixed (cb198fa)
 - #74 (vibevoice-tts clone): structural prompt fix working
 - #76 (chatterbox-turbo distortion): turbo fixed; base still has multinomial parity gap
+
+#### parakeet-ctc-{0.6b,1.1b} — first-class support (re #81)
+`nvidia/parakeet-ctc-0.6b` (24L) and `nvidia/parakeet-ctc-1.1b` (42L)
+are architecturally identical to `stt_en_fastconformer_ctc_xlarge` —
+same FastConformer encoder + Conv1d CTC head, 80 mel bins, vocab
+1024+blank, xscaling. The existing
+`models/convert-stt-fastconformer-ctc-to-gguf.py` handles them
+unmodified. Wiring: filename auto-detect (`parakeet` + `ctc` + NOT
+`tdt` → `fastconformer-ctc`, with the "tdt" guard preserving the JA
+hybrid `parakeet-tdt_ctc-0.6b-ja` on the parakeet TDT path) and two
+new auto-download registry keys. Quantised variants (F16, Q8_0, Q5_0,
+Q4_K) at [`cstr/parakeet-ctc-0.6b-GGUF`](https://huggingface.co/cstr/parakeet-ctc-0.6b-GGUF)
+and [`cstr/parakeet-ctc-1.1b-GGUF`](https://huggingface.co/cstr/parakeet-ctc-1.1b-GGUF).
+Apple M1 Metal: 0.6b q4_k → 44.7× RT, 1.1b q4_k → 37.3× RT. All 8
+quants verified bit-identical English transcript on samples/jfk.wav.
+Commit: `369f3ff`.
+
+#### onnx-asr cross-comparison (re #81)
+Apples-to-apples bench against `istupakov/onnx-asr` 0.11.0 on M1.
+ONNX execution-provider availability table, TDT-vs-TDT and CTC-vs-CTC
+results in `PERFORMANCE.md`. Headline: crispasr Metal beats
+onnx-asr CPU EP by 1.32× on TDT and 1.58× on CTC at the same param
+count; CoreML EP isn't reachable for the upstream parakeet-tdt ONNX
+export (external-data + protobuf 2 GB ceiling, `onnxruntime#26355`,
+closed *not planned*); for the only export where CoreML *does* load
+(parakeet-ctc int8 single-file), it's *slower* than CPU EP on M1
+(1.28 s vs 0.72 s). Reframes the issue's 5×-slower claim as
+Windows-DirectML-specific rather than universal "GPU slow."
