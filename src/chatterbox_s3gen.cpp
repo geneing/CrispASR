@@ -16,6 +16,7 @@
 // models/convert-chatterbox-to-gguf.py. All tensor names are prefixed
 // with "s3." matching the converter's map_s3gen_name().
 
+#include "chatterbox_campplus.h"
 #include "chatterbox_s3gen.h"
 #include "chatterbox_s3tok.h"
 #include "core/gguf_loader.h"
@@ -2800,6 +2801,24 @@ extern "C" float* chatterbox_s3gen_dump_s3tok_proj_down(struct chatterbox_s3gen_
         return nullptr;
     std::memcpy(r, proj.data(), proj.size() * sizeof(float));
     *out_T_tok = T_tok;
+    return r;
+}
+
+extern "C" float* chatterbox_s3gen_dump_campplus_fbank(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
+                                                       int n_samples, int* out_T) {
+    if (!ctx || !pcm_16k || n_samples <= 0 || !out_T)
+        return nullptr;
+    int T = 0;
+    auto fb = chatterbox_campplus::compute_fbank(pcm_16k, n_samples, T);
+    if (fb.empty() || T <= 0) {
+        *out_T = 0;
+        return nullptr;
+    }
+    float* r = (float*)malloc(fb.size() * sizeof(float));
+    if (!r)
+        return nullptr;
+    std::memcpy(r, fb.data(), fb.size() * sizeof(float));
+    *out_T = T;
     return r;
 }
 

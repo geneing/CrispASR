@@ -2957,6 +2957,13 @@ extern "C" float* chatterbox_dump_s3tok_tokens(struct chatterbox_context* ctx, c
     return chatterbox_s3gen_dump_s3tok_tokens(ctx->s3gen_ctx, pcm_16k, n_samples, max_tokens, out_T_tok);
 }
 
+extern "C" float* chatterbox_dump_campplus_fbank(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                                 int* out_T) {
+    if (!ctx || !ctx->s3gen_ctx)
+        return nullptr;
+    return chatterbox_s3gen_dump_campplus_fbank(ctx->s3gen_ctx, pcm_16k, n_samples, out_T);
+}
+
 extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text, int* out_T,
                                                  int* out_D, int* out_cond_T) {
     if (!ctx || !text || !out_T || !out_D || !out_cond_T)

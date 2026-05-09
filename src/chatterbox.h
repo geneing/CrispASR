@@ -143,6 +143,11 @@ float* chatterbox_dump_s3tok_proj_down(struct chatterbox_context* ctx, const flo
 float* chatterbox_dump_s3tok_tokens(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples, int max_tokens,
                                     int* out_T_tok);
 
+// Diff/debug: CAMPPlus fbank front-end (Module 4 phase 1). Forwarder to
+// the s3gen sub-context. Returns (T_frames * 80) f32 row-major; caller
+// frees with `free()`.
+float* chatterbox_dump_campplus_fbank(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples, int* out_T);
+
 // Diff/debug: return the T3 prefill embeddings for the given text (output of
 // build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
 // Also sets *out_cond_T to the number of conditioning tokens (cond_len).

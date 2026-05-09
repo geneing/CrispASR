@@ -2857,6 +2857,72 @@ written into the runtime conds bundle yet.
 C++ ABI hooks in `chatterbox.h`. Threshold and reporting style
 mirror the existing chatterbox stages (cos_mean ≥ 0.95).
 
+## Chatterbox CAMPPlus phase 1 — Kaldi fbank front-end (May 2026)
+
+`src/core/kaldi_fbank.{h,cpp}` ports `torchaudio.compliance.kaldi.fbank()`
+with default args (powey window, HTK mel scale, log power,
+preemph=0.97, snip_edges=True, round_to_power_of_two=True). Promoted to
+a shared core helper since multiple speaker / VAD models consume Kaldi
+fbank — currently inline copies live in `firered_asr.cpp` and could be
+deduped in a follow-up; the new helper takes an `int16_scale` knob to
+cover the firered case where the trained CMVN expects int16-magnitude
+features.
+
+`src/chatterbox_campplus.{h,cpp}` is the chatterbox consumer (Module 4
+of the native voice clone path). Phase 1 of this module ships the
+fbank front-end + the per-utterance mean subtract that
+`xvector.extract_feature` does. Phase 2 (the actual CAMPPlus TDNN
+forward — FCM 2-D conv head + 12+24+16 dense TDNN layers + StatsPool +
+1024→192 dense) is deferred to a follow-up commit since it needs ~50
+BatchNorm-fold pairs and a non-trivial CAM seg_pooling op
+(`F.avg_pool1d(k=100, s=100, ceil_mode=True)` with broadcast-back) and
+is multi-hour focused work.
+
+### Stuff that mattered (phase 1)
+
+1. **Reuse, don't reinvent**. `firered_asr.cpp:compute_fbank` was
+   already a faithful Kaldi fbank — same povey window, same HTK mel
+   scale, same preemph-with-s[-1]=s[0] boundary, same FLT_EPSILON log
+   floor. Lift to a parameterised core helper (raw vs int16 scaling),
+   keep firered's inline copy unchanged for now to avoid churn.
+
+2. **Kaldi pre-emphasis boundary**: Kaldi's `feature-window.cc` uses
+   `s[-1] = s[0]` for the boundary, so the i=0 step becomes
+   `s[0] -= preemph * s[0]` → `s[0] *= (1 - preemph)`. Must walk the
+   array in REVERSE so each step reads the unmodified s[i-1].
+
+3. **Kaldi mel scale = HTK** (`mel = 1127 * log(1 + hz/700)`), and
+   filters are NOT Slaney-area-normalized — the bare triangles. This
+   is what every Kaldi-trained model (including CAMPPlus) expects;
+   feeding in a Slaney-normalized basis silently destroys downstream
+   accuracy. The librosa default normalization would have been wrong
+   here.
+
+4. **`round_to_power_of_two=True` is just zero-padding the windowed
+   frame to next_pow2(win)**. For win=400, n_fft=512. The energy at
+   the original 400 samples is what matters; the 112 zero-padded tail
+   contributes nothing to the FFT bins it produces.
+
+5. **`int16_scale=False` for CAMPPlus**. Despite torchaudio's docstring
+   saying "Kaldi typically uses 16-bit audio integers", chatterbox
+   feeds CAMPPlus float-[-1, 1] audio directly (see `xvector.py`'s
+   `Kaldi.fbank(au.unsqueeze(0), ...)` — `au` is normalized float).
+   The trained model adapted to that scaling. Setting `int16_scale`
+   on would shift the log floor by a constant +log(32768²) ≈ 20.8 per
+   bin and the CAMPPlus TDNN's BN running stats would no longer fit.
+
+6. **`use_energy=False` is the default**. Kaldi's convention is to
+   either include log-energy as the first bin (use_energy=True) or
+   keep just the mel bins. CAMPPlus's call doesn't pass use_energy →
+   defaults to False, so output is exactly num_mel_bins=80 columns.
+
+### Diff parity
+
+`tools/reference_backends/chatterbox.py` captures `campplus_fbank` via
+`torchaudio.compliance.kaldi.fbank` + the per-utterance mean subtract.
+`crispasr-diff chatterbox` on JFK 11 s gives `cos_min=0.999994
+cos_mean=0.999999` against torchaudio — fp32 rounding noise tight.
+
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 
 Bringing up the T5 encoder-decoder runtime (`src/t5_translate.cpp`)

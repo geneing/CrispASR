@@ -105,6 +105,13 @@ float* chatterbox_s3gen_dump_s3tok_proj_down(struct chatterbox_s3gen_context* ct
 float* chatterbox_s3gen_dump_s3tok_tokens(struct chatterbox_s3gen_context* ctx, const float* pcm_16k, int n_samples,
                                           int max_tokens, int* out_T_tok);
 
+// CAMPPlus fbank front-end (Module 4 phase 1). Computes 80-bin Kaldi-style
+// fbank features for the 16 kHz mono ref audio and applies the per-utterance
+// mean subtraction that `xvector.extract_feature` does. Returns a malloc'd
+// (T_frames * 80) f32 row-major buffer; caller frees with `free()`.
+float* chatterbox_s3gen_dump_campplus_fbank(struct chatterbox_s3gen_context* ctx, const float* pcm_16k, int n_samples,
+                                            int* out_T);
+
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);
 

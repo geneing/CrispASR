@@ -967,6 +967,22 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- CAMPPlus fbank (Module 4 phase 1) ----
+        if (!ref.shape("campplus_fbank").empty()) {
+            int cT = 0;
+            float* cf = chatterbox_dump_campplus_fbank(ctx, samples.data(), (int)samples.size(), &cT);
+            if (cf && cT > 0) {
+                auto rep = compare_with_row_width(ref, "campplus_fbank", cf, (size_t)cT * 80, 80);
+                print_row_mean("campplus_fbank", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  Kaldi fbank + per-utt mean subtract");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(cf);
+            } else {
+                printf("[ERR ] campplus_fbank          dump_campplus_fbank returned null\n");
+                n_fail++;
+            }
+        }
+
         // ---- t3_cond_emb + t3_prefill_emb (deterministic, compare before stochastic T3) ----
         {
             const char* syn_text = std::getenv("CHATTERBOX_SYN_TEXT");

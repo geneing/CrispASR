@@ -51,6 +51,9 @@ DEFAULT_STAGES = [
     "s3tok_proj_down",
     "s3tok_tokens",
     "s3tok_speech_prompt_tokens",
+    # CAMPPlus speaker encoder (Module 4 phase 1: fbank front-end only;
+    # the full xvector chain lands separately).
+    "campplus_fbank",
     "t3_cond_emb",
     "t3_prefill_emb",
     "t3_speech_tokens",
@@ -226,6 +229,18 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
                 toks, tok_lens = s3_tok([seg.squeeze(0)], max_len=150)
             t_arr = toks[0, : tok_lens[0]].cpu().numpy().astype(np.int32, copy=False)
             out["s3tok_speech_prompt_tokens"] = t_arr.astype(np.float32, copy=False)
+
+    # ── CAMPPlus fbank front-end (Module 4 phase 1) ──
+    if "campplus_fbank" in stages:
+        # `xvector.extract_feature` runs `Kaldi.fbank(au.unsqueeze(0),
+        # num_mel_bins=80)` then subtracts the per-utterance time mean.
+        # Audio is the same 16 kHz mono float that the dumper holds.
+        import torchaudio
+        wav_t = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
+        with torch.inference_mode():
+            fb = torchaudio.compliance.kaldi.fbank(wav_t, num_mel_bins=80)  # (T, 80)
+            fb = fb - fb.mean(dim=0, keepdim=True)
+        out["campplus_fbank"] = fb.cpu().numpy().astype(np.float32, copy=False)
 
     # ── T3 conditioning ──
     t3_cond = model.conds.t3

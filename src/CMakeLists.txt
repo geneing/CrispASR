@@ -316,6 +316,8 @@ add_library(crispasr-core STATIC
             core/gguf_loader.cpp
             core/rvq.h
             core/rvq.cpp
+            core/kaldi_fbank.h
+            core/kaldi_fbank.cpp
             )
 target_include_directories(crispasr-core PUBLIC . ../include)
 # PLAN #51a: gguf_loader uses ggml_backend_buffer_init from
@@ -602,7 +604,8 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(chatterbox STATIC chatterbox.h chatterbox.cpp chatterbox_s3gen.h chatterbox_s3gen.cpp
             chatterbox_ve.h chatterbox_ve.cpp
-            chatterbox_s3tok.h chatterbox_s3tok.cpp)
+            chatterbox_s3tok.h chatterbox_s3tok.cpp
+            chatterbox_campplus.h chatterbox_campplus.cpp)
 set_target_properties(chatterbox PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(chatterbox PUBLIC .)
 target_compile_features   (chatterbox PUBLIC cxx_std_17)
