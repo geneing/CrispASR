@@ -433,7 +433,7 @@ static std::vector<float> compute_ecapa_mel(const float* pcm, int n_samples, int
     p.n_mels = n_mels;
     p.log_base = core_mel::LogBase::Ln;
     p.log_guard = core_mel::LogGuard::MaxClip;
-    p.log_eps = 1e-5f;
+    p.log_eps = 1e-7f;
     p.spec_kind = core_mel::SpecKind::Magnitude;
     p.norm = core_mel::Normalization::None;
     p.layout = core_mel::Layout::TimeMels;
