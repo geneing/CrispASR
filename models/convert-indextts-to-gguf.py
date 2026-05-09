@@ -235,6 +235,22 @@ _SKIP_SUFFIXES = (
 )
 
 
+def _shorten_bvg(name: str) -> str:
+    """Shorten BigVGAN tensor names to fit the 64-char GGUF limit."""
+    name = name.replace("speaker_encoder.", "se.")
+    name = name.replace("res2net_block.", "r2n.")
+    name = name.replace("resblocks.", "resb.")
+    name = name.replace("blocks.", "b.")
+    name = name.replace("conv.conv.", "c.")
+    name = name.replace("norm.norm.", "n.")
+    name = name.replace("activations.", "act.")
+    name = name.replace("downsample.lowpass.", "ds.")
+    name = name.replace("upsample.", "us.")
+    name = name.replace("running_mean", "rm")
+    name = name.replace("running_var", "rv")
+    return name
+
+
 def convert_bigvgan(bvg_pth: Path, out_path: Path, outtype: str) -> None:
     print(f"\n=== BigVGAN: {bvg_pth.name} → {out_path.name} ===", file=sys.stderr)
     raw = torch.load(str(bvg_pth), map_location="cpu", weights_only=False)
@@ -280,7 +296,14 @@ def convert_bigvgan(bvg_pth: Path, out_path: Path, outtype: str) -> None:
         if any(name.endswith(s) for s in _SKIP_SUFFIXES):
             skipped += 1
             continue
-        write_tensor(w, name, tensor, out_dtype, qt)
+        short = _shorten_bvg(name)
+        # Keep biases, norms, alphas, betas, and 1D tensors as F32
+        if tensor.ndim <= 1 or name.endswith(".bias") or "norm" in name \
+                or "alpha" in name or "beta" in name or "filter" in name \
+                or "running_mean" in name or "running_var" in name:
+            write_tensor(w, short, tensor, np.float32, GGMLQuantizationType.F32)
+        else:
+            write_tensor(w, short, tensor, out_dtype, qt)
         written += 1
 
     w.write_header_to_file()

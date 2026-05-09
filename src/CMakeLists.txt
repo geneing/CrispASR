@@ -613,7 +613,7 @@ endif()
 # ---------------------------------------------------------------------------
 # indextts — IndexTeam/IndexTTS-1.5 (GPT-2 AR + BigVGAN vocoder)
 # ---------------------------------------------------------------------------
-add_library(indextts STATIC indextts.h indextts.cpp)
+add_library(indextts STATIC indextts.h indextts.cpp indextts_voc.h indextts_voc.cpp)
 set_target_properties(indextts PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(indextts PUBLIC .)
 target_compile_features   (indextts PUBLIC cxx_std_17)

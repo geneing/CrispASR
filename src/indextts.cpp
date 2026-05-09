@@ -1,11 +1,15 @@
-// indextts.cpp -- IndexTTS-1.5 TTS backend (GPT-2 AR model).
+// indextts.cpp -- IndexTTS-1.5 TTS backend (GPT-2 AR + BigVGAN vocoder).
 //
 // Phase 1: GPT-2 autoregressive decoder with KV cache.
 //   - Loads the GPT GGUF (Conformer + Perceiver + GPT-2 + tokenizer)
 //   - Builds the GPT forward pass graph
 //   - Generates mel codes via AR decode
 //   - Conformer/Perceiver conditioning is scaffolded but uses dummy zeros for now
-//   - BigVGAN vocoder is loaded but not wired up yet (Phase 2)
+//
+// Phase 2: BigVGAN vocoder + latent extraction.
+//   - Second GPT forward pass extracts hidden states (return_latent)
+//   - BigVGAN vocoder converts hidden states to 24kHz waveform
+//   - Speaker conditioning uses zero embedding (ECAPA-TDNN deferred)
 //
 // Architecture (from actual checkpoint analysis):
 //   GPT-2: 24L, d=1280, 20 heads, head_dim=64, FFN=5120, GELU(tanh)
@@ -15,6 +19,7 @@
 //   Conditioning: Conformer(6L, d=512) → Perceiver(2L, 32 latents, d=1280)
 
 #include "indextts.h"
+#include "indextts_voc.h"
 #include "core/gguf_loader.h"
 
 #include "ggml-backend.h"
@@ -133,35 +138,72 @@ static std::vector<int32_t> tokenize_fallback(const indextts_tokenizer& /*tok*/,
     return result;
 }
 
-// SentencePiece BPE tokenizer (greedy longest match when vocab is loaded).
+// SentencePiece BPE tokenizer — iterative pair merging using vocab scores.
 static std::vector<int32_t> tokenize_bpe(const indextts_tokenizer& tok, const std::string& text) {
-    if (!tok.loaded || tok.id_to_token.empty()) {
+    if (!tok.loaded || tok.id_to_token.empty())
         return tokenize_fallback(tok, text, 12000);
+
+    // SentencePiece: leading space → ▁ (U+2581)
+    std::string proc;
+    proc += "\xe2\x96\x81";
+    for (char c : text)
+        proc += (c == ' ') ? std::string("\xe2\x96\x81") : std::string(1, c);
+
+    // Split into UTF-8 characters
+    struct piece {
+        size_t start, len;
+    };
+    std::vector<piece> pieces;
+    for (size_t i = 0; i < proc.size();) {
+        size_t cl = 1;
+        unsigned char c = proc[i];
+        if ((c & 0xE0) == 0xC0)
+            cl = 2;
+        else if ((c & 0xF0) == 0xE0)
+            cl = 3;
+        else if ((c & 0xF8) == 0xF0)
+            cl = 4;
+        if (i + cl > proc.size())
+            cl = 1;
+        pieces.push_back({i, cl});
+        i += cl;
     }
 
-    // Greedy longest-prefix tokenization.
-    std::vector<int32_t> result;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        int best_len = 0;
-        int32_t best_id = 0;
-        // Try longest prefix first
-        for (size_t len = std::min(text.size() - pos, (size_t)32); len >= 1; --len) {
-            std::string sub = text.substr(pos, len);
-            auto it = tok.token_to_id.find(sub);
+    // Iterative merge: find pair with highest score, merge, repeat
+    while (pieces.size() > 1) {
+        float best_s = -1e30f;
+        size_t best_j = SIZE_MAX;
+        for (size_t j = 0; j + 1 < pieces.size(); j++) {
+            std::string m = proc.substr(pieces[j].start, pieces[j].len + pieces[j + 1].len);
+            auto it = tok.token_to_id.find(m);
             if (it != tok.token_to_id.end()) {
-                best_len = (int)len;
-                best_id = it->second;
-                break;
+                float s = (it->second < (int32_t)tok.scores.size()) ? tok.scores[it->second] : -1e20f;
+                if (s > best_s) {
+                    best_s = s;
+                    best_j = j;
+                }
             }
         }
-        if (best_len == 0) {
-            // Unknown character — try single byte
-            best_len = 1;
-            best_id = 0; // UNK
+        if (best_j == SIZE_MAX)
+            break;
+        pieces[best_j].len += pieces[best_j + 1].len;
+        pieces.erase(pieces.begin() + (long)best_j + 1);
+    }
+
+    // Convert pieces to IDs, merging consecutive unknowns into single <unk>=2
+    std::vector<int32_t> result;
+    bool prev_unk = false;
+    for (const auto& p : pieces) {
+        std::string s = proc.substr(p.start, p.len);
+        auto it = tok.token_to_id.find(s);
+        if (it != tok.token_to_id.end()) {
+            result.push_back(it->second);
+            prev_unk = false;
+        } else {
+            if (!prev_unk)
+                result.push_back(2); // <unk>
+            prev_unk = true;
         }
-        result.push_back(best_id);
-        pos += best_len;
     }
     return result;
 }
@@ -327,13 +369,17 @@ struct indextts_context {
     ggml_tensor* kv_v = nullptr;
     int kv_max_ctx = 0;
 
-    // BigVGAN vocoder (Phase 2 — lazy-loaded)
+    // BigVGAN vocoder (Phase 2)
     std::string vocoder_path;
+    indextts_voc_context* voc = nullptr;
 
     // RNG
     uint64_t rng_state = 0xdeadbeefcafebabeULL;
 
     ~indextts_context() {
+        if (voc) {
+            indextts_voc_free(voc);
+        }
         if (sched) {
             ggml_backend_sched_free(sched);
         }
@@ -385,12 +431,18 @@ static void load_metadata(indextts_context* c, gguf_context* g) {
     hp.perceiver_n_layers = core_gguf::kv_u32(g, "indextts.perceiver_n_layers", hp.perceiver_n_layers);
     hp.perceiver_n_latents = core_gguf::kv_u32(g, "indextts.perceiver_n_latents", hp.perceiver_n_latents);
 
-    // Load tokenizer vocab if present
+    // Load tokenizer vocab + scores if present
     std::vector<std::string> tokens = core_gguf::kv_str_array(g, "tokenizer.ggml.tokens");
     if (!tokens.empty()) {
         c->tokenizer.id_to_token = std::move(tokens);
         for (size_t i = 0; i < c->tokenizer.id_to_token.size(); i++) {
             c->tokenizer.token_to_id[c->tokenizer.id_to_token[i]] = (int32_t)i;
+        }
+        int scores_key = gguf_find_key(g, "tokenizer.ggml.scores");
+        if (scores_key >= 0) {
+            int n = (int)gguf_get_arr_n(g, scores_key);
+            const float* sd = (const float*)gguf_get_arr_data(g, scores_key);
+            c->tokenizer.scores.assign(sd, sd + n);
         }
         c->tokenizer.loaded = true;
     }
@@ -683,6 +735,227 @@ static float* run_gpt2_kv(indextts_context* c, const float* embeds, int n_tokens
     return r;
 }
 
+// ── GPT-2 latent extraction (return_latent pass) ────────────────
+//
+// Build a full-prefill graph that processes ALL tokens (conditioning +
+// text + mel codes) in a single forward pass and returns the hidden
+// states after final_norm for the mel code positions only. This is the
+// "return_latent" second pass from IndexTTS Python: instead of going
+// through mel_head to get logits, we extract the raw normalized hidden
+// states that the BigVGAN vocoder needs.
+//
+// Returns a float vector of shape [n_mel_codes, d_model].
+
+static ggml_cgraph* build_gpt2_latent_graph(indextts_context* c, int n_total, int n_mel_codes) {
+    const auto& hp = c->hp;
+    const int D = (int)hp.d_model;
+    const int n_h = (int)hp.n_heads;
+    const int hd = (int)hp.head_dim;
+    const float attn_scale = 1.0f / std::sqrt((float)hd);
+    const float ln_eps = 1e-5f;
+    const int T = n_total;
+
+    ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, D, T);
+    ggml_set_name(embeds, "latent_embeds");
+    ggml_set_input(embeds);
+
+    // Full causal mask
+    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T, T);
+    ggml_set_name(causal_mask, "latent_mask");
+    ggml_set_input(causal_mask);
+
+    ggml_tensor* cur = embeds;
+
+    for (uint32_t il = 0; il < hp.n_layers; il++) {
+        const auto& b = c->model.blocks[il];
+        ggml_tensor* residual = cur;
+
+        // Pre-attention LayerNorm
+        ggml_tensor* x = ggml_norm(ctx0, cur, ln_eps);
+        x = ggml_mul(ctx0, x, b.attn_norm_w);
+        x = ggml_add(ctx0, x, b.attn_norm_b);
+
+        // Fused QKV
+        ggml_tensor* qkv = ggml_mul_mat(ctx0, b.attn_qkv_w, x);
+        qkv = ggml_add(ctx0, qkv, b.attn_qkv_b);
+
+        const size_t ts = ggml_type_size(qkv->type);
+        ggml_tensor* Q = ggml_view_2d(ctx0, qkv, D, T, qkv->nb[1], 0);
+        ggml_tensor* K = ggml_view_2d(ctx0, qkv, D, T, qkv->nb[1], D * ts);
+        ggml_tensor* V = ggml_view_2d(ctx0, qkv, D, T, qkv->nb[1], 2 * D * ts);
+        Q = ggml_cont(ctx0, Q);
+        K = ggml_cont(ctx0, K);
+        V = ggml_cont(ctx0, V);
+
+        Q = ggml_reshape_3d(ctx0, Q, hd, n_h, T);
+        K = ggml_reshape_3d(ctx0, K, hd, n_h, T);
+        V = ggml_reshape_3d(ctx0, V, hd, n_h, T);
+
+        // Permute to (hd, T, n_h) for flash attention
+        Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
+        K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
+        V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
+
+        ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, causal_mask, attn_scale, 0.0f, 0.0f);
+        attn = ggml_reshape_2d(ctx0, attn, D, T);
+
+        attn = ggml_mul_mat(ctx0, b.attn_proj_w, attn);
+        attn = ggml_add(ctx0, attn, b.attn_proj_b);
+        cur = ggml_add(ctx0, residual, attn);
+
+        // FFN
+        residual = cur;
+        x = ggml_norm(ctx0, cur, ln_eps);
+        x = ggml_mul(ctx0, x, b.ffn_norm_w);
+        x = ggml_add(ctx0, x, b.ffn_norm_b);
+
+        ggml_tensor* mlp = ggml_mul_mat(ctx0, b.ffn_fc_w, x);
+        mlp = ggml_add(ctx0, mlp, b.ffn_fc_b);
+        mlp = ggml_gelu(ctx0, mlp);
+        mlp = ggml_mul_mat(ctx0, b.ffn_proj_w, mlp);
+        mlp = ggml_add(ctx0, mlp, b.ffn_proj_b);
+
+        cur = ggml_add(ctx0, residual, mlp);
+    }
+
+    // Final LayerNorm
+    cur = ggml_norm(ctx0, cur, ln_eps);
+    cur = ggml_mul(ctx0, cur, c->model.final_norm_w);
+    cur = ggml_add(ctx0, cur, c->model.final_norm_b);
+
+    // Extract hidden states for mel code positions only (last n_mel_codes tokens).
+    // The full sequence is [cond(32) | text(N) | start_mel(1) | mel_codes(M)].
+    // We want the hidden states at the mel code positions, which are the last
+    // n_mel_codes entries.
+    int mel_start = T - n_mel_codes;
+    cur = ggml_view_2d(ctx0, cur, D, n_mel_codes, cur->nb[1], (size_t)mel_start * cur->nb[1]);
+    cur = ggml_cont(ctx0, cur);
+
+    ggml_set_name(cur, "latent_out");
+    ggml_set_output(cur);
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
+// Run the second GPT forward pass to extract hidden states for vocoder.
+// Takes the full token sequence including the generated mel codes and returns
+// normalized hidden states for the mel code positions.
+// Returns a malloc'd float array of shape [n_mel_codes, d_model].
+static float* run_gpt_latent(indextts_context* c, const std::vector<int32_t>& text_tokens,
+                             const std::vector<int32_t>& mel_codes) {
+    const int D = (int)c->hp.d_model;
+    const int cond_len = (int)c->hp.perceiver_n_latents;
+    const int text_len = (int)text_tokens.size();
+    const int n_mel = (int)mel_codes.size();
+    // Full sequence: [cond(32)] [text(N)] [start_mel(1)] [mel_codes(M)]
+    const int total_len = cond_len + text_len + 1 + n_mel;
+
+    if (c->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: latent pass: total=%d (cond=%d text=%d start=1 mel=%d)\n", total_len, cond_len,
+                text_len, n_mel);
+    }
+
+    // Build full embedding sequence
+    std::vector<float> text_emb_table((size_t)c->hp.text_vocab_size * D);
+    tensor_get_f32(c->model.text_emb_w, text_emb_table.data(), text_emb_table.size());
+
+    std::vector<float> text_pos_table((size_t)c->hp.text_pos_size * D);
+    tensor_get_f32(c->model.text_pos_emb_w, text_pos_table.data(), text_pos_table.size());
+
+    std::vector<float> mel_emb_table((size_t)c->hp.mel_vocab_size * D);
+    tensor_get_f32(c->model.mel_emb_w, mel_emb_table.data(), mel_emb_table.size());
+
+    std::vector<float> mel_pos_table((size_t)c->hp.mel_pos_size * D);
+    tensor_get_f32(c->model.mel_pos_emb_w, mel_pos_table.data(), mel_pos_table.size());
+
+    std::vector<float> embeds((size_t)total_len * D, 0.0f);
+    int pos = 0;
+
+    // 1. Conditioning latents — zeros (Phase 1)
+    pos += cond_len;
+
+    // 2. Text embeddings
+    for (int i = 0; i < text_len; i++) {
+        int tok = text_tokens[i];
+        if (tok < 0 || tok >= (int)c->hp.text_vocab_size)
+            tok = 0;
+        int tpi = std::min(i, (int)c->hp.text_pos_size - 1);
+        for (int j = 0; j < D; j++) {
+            embeds[(pos + i) * D + j] = text_emb_table[(size_t)tok * D + j] + text_pos_table[(size_t)tpi * D + j];
+        }
+    }
+    pos += text_len;
+
+    // 3. Start mel token + mel pos 0
+    {
+        int start_tok = (int)c->hp.start_mel_token;
+        if (start_tok >= (int)c->hp.mel_vocab_size)
+            start_tok = 0;
+        for (int j = 0; j < D; j++) {
+            embeds[pos * D + j] = mel_emb_table[(size_t)start_tok * D + j] + mel_pos_table[j];
+        }
+        pos++;
+    }
+
+    // 4. Mel code tokens
+    for (int i = 0; i < n_mel; i++) {
+        int tok = mel_codes[i];
+        if (tok < 0 || tok >= (int)c->hp.mel_vocab_size)
+            tok = 0;
+        int mpi = std::min(i + 1, (int)c->hp.mel_pos_size - 1);
+        for (int j = 0; j < D; j++) {
+            embeds[(pos + i) * D + j] = mel_emb_table[(size_t)tok * D + j] + mel_pos_table[(size_t)mpi * D + j];
+        }
+    }
+
+    // Build causal mask
+    std::vector<ggml_fp16_t> mask((size_t)total_len * total_len, ggml_fp32_to_fp16(0.0f));
+    const ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+    for (int q = 0; q < total_len; q++) {
+        for (int k = q + 1; k < total_len; k++) {
+            mask[(size_t)q * total_len + k] = neg_inf;
+        }
+    }
+
+    // Build and run the latent extraction graph (no KV cache — single prefill)
+    ggml_cgraph* gf = build_gpt2_latent_graph(c, total_len, n_mel);
+    ggml_backend_sched_reset(c->sched);
+    if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
+        fprintf(stderr, "indextts: failed to alloc latent graph\n");
+        return nullptr;
+    }
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "latent_embeds"), embeds.data(), 0,
+                            (size_t)total_len * D * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "latent_mask"), mask.data(), 0,
+                            mask.size() * sizeof(ggml_fp16_t));
+
+    if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "indextts: latent compute failed\n");
+        return nullptr;
+    }
+
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "latent_out");
+    if (!out) {
+        fprintf(stderr, "indextts: latent_out tensor not found\n");
+        return nullptr;
+    }
+
+    float* result = (float*)malloc((size_t)n_mel * D * sizeof(float));
+    ggml_backend_tensor_get(out, result, 0, (size_t)n_mel * D * sizeof(float));
+
+    if (c->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: latent extraction done: [%d, %d]\n", n_mel, D);
+    }
+
+    return result;
+}
+
 // ── Build prefill embeddings ─────────────────────────────────────
 
 // Build the embedding sequence: [cond_latents(32)] [text_embs+text_pos] [start_mel+mel_pos_0]
@@ -863,9 +1136,21 @@ extern "C" int indextts_set_vocoder_path(struct indextts_context* ctx, const cha
         return -1;
     }
     ctx->vocoder_path = path;
-    // Phase 2: load BigVGAN GGUF here
+
+    // Free existing vocoder if reloading
+    if (ctx->voc) {
+        indextts_voc_free(ctx->voc);
+        ctx->voc = nullptr;
+    }
+
+    ctx->voc = indextts_voc_init(path, ctx->n_threads, ctx->params.use_gpu);
+    if (!ctx->voc) {
+        fprintf(stderr, "indextts: failed to load BigVGAN vocoder from '%s'\n", path);
+        return -1;
+    }
+
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: vocoder path set to '%s' (loading deferred to Phase 2)\n", path);
+        fprintf(stderr, "indextts: BigVGAN vocoder loaded from '%s'\n", path);
     }
     return 0;
 }
@@ -992,20 +1277,59 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
     }
     *out_n_samples = 0;
 
-    // Phase 1: generate mel codes only (BigVGAN vocoder not yet implemented)
+    // Step 1: Generate mel codes via AR decode
     int n_codes = 0;
     int32_t* codes = indextts_generate_mel_codes(ctx, text, ref_pcm, ref_n_samples, &n_codes);
     if (!codes || n_codes == 0) {
         return nullptr;
     }
 
-    fprintf(stderr,
-            "indextts: synthesize() generated %d mel codes but BigVGAN vocoder is not implemented yet "
-            "(Phase 2). Use indextts_generate_mel_codes() to verify GPT output.\n",
-            n_codes);
+    // Check if vocoder is loaded
+    if (!ctx->voc) {
+        fprintf(stderr,
+                "indextts: synthesize() generated %d mel codes but no BigVGAN vocoder loaded.\n"
+                "         Pass --codec-model PATH or place indextts-bigvgan.gguf next to the GPT model.\n",
+                n_codes);
+        indextts_codes_free(codes);
+        return nullptr;
+    }
 
+    // Step 2: Re-tokenize text to rebuild the full sequence for latent pass
+    std::vector<int32_t> text_tokens;
+    if (ctx->tokenizer.loaded) {
+        text_tokens = tokenize_bpe(ctx->tokenizer, text);
+    } else {
+        text_tokens = tokenize_fallback(ctx->tokenizer, text, ctx->hp.text_vocab_size);
+    }
+
+    std::vector<int32_t> mel_codes_vec(codes, codes + n_codes);
     indextts_codes_free(codes);
-    return nullptr;
+    codes = nullptr;
+
+    // Step 3: Run GPT latent extraction (second forward pass)
+    float* latent = run_gpt_latent(ctx, text_tokens, mel_codes_vec);
+    if (!latent) {
+        fprintf(stderr, "indextts: latent extraction failed\n");
+        return nullptr;
+    }
+
+    // Step 4: Run BigVGAN vocoder
+    // latent is [n_codes, 1280] — the vocoder expects this as-is.
+    int n_audio = 0;
+    float* pcm = indextts_voc_generate(ctx->voc, latent, n_codes, nullptr, &n_audio);
+    free(latent);
+
+    if (!pcm || n_audio <= 0) {
+        fprintf(stderr, "indextts: BigVGAN vocoder failed\n");
+        return nullptr;
+    }
+
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: synthesized %d samples (%.2f sec @ 24kHz)\n", n_audio, (float)n_audio / 24000.0f);
+    }
+
+    *out_n_samples = n_audio;
+    return pcm;
 }
 
 extern "C" void indextts_codes_free(int32_t* codes) {

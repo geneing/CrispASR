@@ -231,14 +231,7 @@ public:
         int n = 0;
         float* pcm = indextts_synthesize(ctx_, text.c_str(), ref_pcm, ref_n_samples, &n);
         if (!pcm || n <= 0) {
-            // Phase 1: synthesize returns nullptr (BigVGAN not implemented yet).
-            // Fall back to dumping mel codes for debugging.
-            int n_codes = 0;
-            int32_t* codes = indextts_generate_mel_codes(ctx_, text.c_str(), ref_pcm, ref_n_samples, &n_codes);
-            if (codes && n_codes > 0) {
-                fprintf(stderr, "crispasr[indextts]: generated %d mel codes (no waveform yet — Phase 1)\n", n_codes);
-                indextts_codes_free(codes);
-            }
+            fprintf(stderr, "crispasr[indextts]: synthesis failed\n");
             return {};
         }
         std::vector<float> out(pcm, pcm + n);
