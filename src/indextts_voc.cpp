@@ -536,9 +536,32 @@ static ggml_cgraph* build_ecapa_graph(indextts_voc_context* c, int T_mel) {
 // Compute 100-band mel spectrogram for ECAPA-TDNN.
 // Input: mono float32 PCM at 24kHz.
 // Output: (T, 100) row-major float32 mel, T written to *T_out.
+// Simple linear interpolation resampler (16kHz → 24kHz)
+static std::vector<float> resample_16k_to_24k_voc(const float* pcm, int n_samples) {
+    const double ratio = 24000.0 / 16000.0;
+    int n_out = (int)(n_samples * ratio);
+    std::vector<float> out(n_out);
+    for (int i = 0; i < n_out; i++) {
+        double src_pos = i / ratio;
+        int idx = (int)src_pos;
+        double frac = src_pos - idx;
+        if (idx + 1 < n_samples)
+            out[i] = (float)((1.0 - frac) * pcm[idx] + frac * pcm[idx + 1]);
+        else if (idx < n_samples)
+            out[i] = pcm[idx];
+    }
+    return out;
+}
+
 static std::vector<float> compute_ecapa_mel(const float* pcm, int n_samples, int* T_out) {
     const int n_fft = 1024, hop = 256, n_mels = 100, sr = 24000;
     const float fmin = 0.0f, fmax = 12000.0f;
+
+    // Resample 16kHz input to 24kHz
+    auto pcm_24k = resample_16k_to_24k_voc(pcm, n_samples);
+    pcm = pcm_24k.data();
+    n_samples = (int)pcm_24k.size();
+
     const int pad = (n_fft - hop) / 2; // 384
 
     // Reflect-pad audio

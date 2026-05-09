@@ -523,10 +523,34 @@ static bool bind_model(indextts_context* c) {
 // Compute 100-band log-mel spectrogram from reference audio for the
 // conditioning encoder. The Python reference uses torchaudio's
 // mel spectrogram with 24kHz sample rate, 100 bands, hop=256, n_fft=1024.
+// Input audio is expected at 16kHz — upsampled to 24kHz internally.
+
+// Simple linear interpolation resampler (16kHz → 24kHz = ratio 3:2)
+static std::vector<float> resample_16k_to_24k(const float* pcm, int n_samples) {
+    const double ratio = 24000.0 / 16000.0; // 1.5
+    int n_out = (int)(n_samples * ratio);
+    std::vector<float> out(n_out);
+    for (int i = 0; i < n_out; i++) {
+        double src_pos = i / ratio;
+        int idx = (int)src_pos;
+        double frac = src_pos - idx;
+        if (idx + 1 < n_samples) {
+            out[i] = (float)((1.0 - frac) * pcm[idx] + frac * pcm[idx + 1]);
+        } else if (idx < n_samples) {
+            out[i] = pcm[idx];
+        }
+    }
+    return out;
+}
 
 static std::vector<float> compute_ref_mel(const float* pcm, int n_samples, int* T_out) {
     const int n_fft = 1024, hop = 256, n_mels = 100, sr = 24000;
     const float fmin = 0.0f, fmax = 12000.0f;
+
+    // Resample 16kHz input to 24kHz
+    auto pcm_24k = resample_16k_to_24k(pcm, n_samples);
+    const float* audio_ptr = pcm_24k.data();
+    n_samples = (int)pcm_24k.size();
     const int pad = (n_fft - hop) / 2; // 384
 
     // Reflect-pad audio
