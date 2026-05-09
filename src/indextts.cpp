@@ -1547,7 +1547,7 @@ static std::vector<float> build_prefill_embeds(indextts_context* c, const std::v
 
     const int cond_len = (int)c->hp.perceiver_n_latents;
     const int text_len = (int)text_tokens.size();
-    const int total_len = cond_len + text_len + 1; // +1 for start_mel
+    const int total_len = cond_len + text_len + 2 + 1; // +2 for start/stop_text, +1 for start_mel
 
     std::vector<float> embeds((size_t)total_len * D, 0.0f);
 
@@ -1564,22 +1564,33 @@ static std::vector<float> build_prefill_embeds(indextts_context* c, const std::v
     }
     pos += cond_len;
 
-    // 2. Text embeddings: text_emb(tok) + text_pos_emb(i)
-    for (int i = 0; i < text_len; i++) {
-        int tok = text_tokens[i];
-        if (tok < 0 || tok >= (int)c->hp.text_vocab_size) {
-            tok = 0;
+    // 2. Text embeddings: [start_text(0), t1..tn, stop_text(1)]
+    // Matches Python's build_aligned_inputs_and_targets + F.pad(stop_text)
+    {
+        int start_text = 0, stop_text = 1;
+
+        // Start text
+        for (int j = 0; j < D; j++)
+            embeds[pos * D + j] = text_emb_table[(size_t)start_text * D + j] + text_pos_table[j];
+        pos++;
+
+        // Text tokens
+        for (int i = 0; i < text_len; i++) {
+            int tok = text_tokens[i];
+            if (tok < 0 || tok >= (int)c->hp.text_vocab_size)
+                tok = 0;
+            int tpi = std::min(i + 1, (int)c->hp.text_pos_size - 1);
+            for (int j = 0; j < D; j++)
+                embeds[(pos + i) * D + j] = text_emb_table[(size_t)tok * D + j] + text_pos_table[(size_t)tpi * D + j];
         }
-        int text_pos_idx = i;
-        if (text_pos_idx >= (int)c->hp.text_pos_size) {
-            text_pos_idx = (int)c->hp.text_pos_size - 1;
-        }
-        for (int j = 0; j < D; j++) {
-            embeds[(pos + i) * D + j] =
-                text_emb_table[(size_t)tok * D + j] + text_pos_table[(size_t)text_pos_idx * D + j];
-        }
+        pos += text_len;
+
+        // Stop text
+        int tpi = std::min(text_len + 1, (int)c->hp.text_pos_size - 1);
+        for (int j = 0; j < D; j++)
+            embeds[pos * D + j] = text_emb_table[(size_t)stop_text * D + j] + text_pos_table[(size_t)tpi * D + j];
+        pos++;
     }
-    pos += text_len;
 
     // 3. Start mel token: mel_emb(start_mel) + mel_pos_emb(0)
     {
@@ -1921,6 +1932,26 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
                 norm += spk_emb[i] * spk_emb[i];
             }
             fprintf(stderr, "indextts: speaker embedding norm = %.4f\n", sqrtf(norm));
+        }
+    }
+
+    // Debug: override latent from file if INDEXTTS_LATENT_FILE is set
+    const char* lat_file = getenv("INDEXTTS_LATENT_FILE");
+    if (lat_file && lat_file[0]) {
+        FILE* f = fopen(lat_file, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            int n_elem = (int)(sz / sizeof(float));
+            int D = 1280;
+            int T = n_elem / D;
+            free(latent);
+            n_codes = T;
+            latent = (float*)malloc(sz);
+            fread(latent, 1, sz, f);
+            fclose(f);
+            fprintf(stderr, "indextts: DEBUG loaded latent from %s: [%d, %d]\n", lat_file, T, D);
         }
     }
 
