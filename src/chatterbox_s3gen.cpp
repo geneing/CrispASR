@@ -17,6 +17,7 @@
 // with "s3." matching the converter's map_s3gen_name().
 
 #include "chatterbox_s3gen.h"
+#include "chatterbox_s3tok.h"
 #include "core/gguf_loader.h"
 
 #include "ggml-backend.h"
@@ -257,6 +258,10 @@ struct chatterbox_s3gen_context {
     mt19937_state noise_rng{};
     uint32_t noise_seed = 0;
 
+    // S3Tokenizer (module 3 of native voice clone). Bound from the s3.tok.*
+    // tensors after weight load. See chatterbox_s3tok.{h,cpp}.
+    cb_s3tok_model s3tok;
+
     ~chatterbox_s3gen_context() {
         if (sched)
             ggml_backend_sched_free(sched);
@@ -349,6 +354,52 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
             backends[n_be++] = c->backend_cpu;
         c->sched = ggml_backend_sched_new(backends, nullptr, n_be, 32768, false, false);
         c->compute_meta.resize(ggml_tensor_overhead() * 32768 + ggml_graph_overhead_custom(32768, false));
+    }
+
+    // S3Tokenizer V2 — bind from `s3.tok.*` (optional; the field stays
+    // empty if the GGUF was produced before module-3 support landed).
+    {
+        auto& tok = c->s3tok;
+        tok.mel_filters = T(c, "s3.tok._mel_filters");
+        tok.conv1_w = T(c, "s3.tok.encoder.conv1.weight");
+        tok.conv1_b = T(c, "s3.tok.encoder.conv1.bias");
+        tok.conv2_w = T(c, "s3.tok.encoder.conv2.weight");
+        tok.conv2_b = T(c, "s3.tok.encoder.conv2.bias");
+        tok.quant_pd_w = T(c, "s3.tok.quant.cb.pd.weight");
+        tok.quant_pd_b = T(c, "s3.tok.quant.cb.pd.bias");
+
+        tok.blocks.assign(6, cb_s3tok_block{});
+        for (int il = 0; il < 6; il++) {
+            char key[80];
+            auto& b = tok.blocks[il];
+#define S3TOK_BIND(field, suffix)                                                                                      \
+    do {                                                                                                               \
+        std::snprintf(key, sizeof(key), "s3.tok.enc.b.%d." suffix, il);                                                \
+        b.field = T(c, key);                                                                                           \
+    } while (0)
+            S3TOK_BIND(attn_ln_w, "attn_ln.weight");
+            S3TOK_BIND(attn_ln_b, "attn_ln.bias");
+            S3TOK_BIND(attn_q_w, "attn.query.weight");
+            S3TOK_BIND(attn_q_b, "attn.query.bias");
+            S3TOK_BIND(attn_k_w, "attn.key.weight");
+            S3TOK_BIND(attn_k_b, "attn.key.bias");
+            S3TOK_BIND(attn_v_w, "attn.value.weight");
+            S3TOK_BIND(attn_v_b, "attn.value.bias");
+            S3TOK_BIND(attn_out_w, "attn.out.weight");
+            S3TOK_BIND(attn_out_b, "attn.out.bias");
+            S3TOK_BIND(attn_fsmn_w, "attn.fsmn.weight");
+            S3TOK_BIND(mlp_ln_w, "mlp_ln.weight");
+            S3TOK_BIND(mlp_ln_b, "mlp_ln.bias");
+            S3TOK_BIND(mlp_up_w, "mlp.0.weight");
+            S3TOK_BIND(mlp_up_b, "mlp.0.bias");
+            S3TOK_BIND(mlp_dn_w, "mlp.2.weight");
+            S3TOK_BIND(mlp_dn_b, "mlp.2.bias");
+#undef S3TOK_BIND
+        }
+        if (verbosity >= 2) {
+            const bool full = tok.conv1_w && tok.conv2_w && tok.quant_pd_w && tok.blocks[0].attn_q_w;
+            fprintf(stderr, "s3gen: s3tok %s\n", full ? "bound" : "tensors absent (older GGUF)");
+        }
     }
 
     return c;
@@ -2681,4 +2732,92 @@ extern "C" void chatterbox_s3gen_pcm_free(float* pcm) {
 
 extern "C" void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx) {
     delete ctx;
+}
+
+// ---------------------------------------------------------------------------
+// S3Tokenizer V2 — public C ABI (module 3 of native voice clone).
+// ---------------------------------------------------------------------------
+
+extern "C" int32_t* chatterbox_s3gen_tokenize_pcm(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
+                                                  int n_samples, int max_tokens, int* out_n_tokens) {
+    if (!ctx || !pcm_16k || n_samples <= 0 || !out_n_tokens) {
+        if (out_n_tokens)
+            *out_n_tokens = 0;
+        return nullptr;
+    }
+    auto toks = chatterbox_s3tok::tokenize(ctx->s3tok, ctx->sched, ctx->compute_meta, pcm_16k, n_samples, max_tokens);
+    if (toks.empty()) {
+        *out_n_tokens = 0;
+        return nullptr;
+    }
+    int32_t* r = (int32_t*)malloc(toks.size() * sizeof(int32_t));
+    if (!r) {
+        *out_n_tokens = 0;
+        return nullptr;
+    }
+    std::memcpy(r, toks.data(), toks.size() * sizeof(int32_t));
+    *out_n_tokens = (int)toks.size();
+    return r;
+}
+
+extern "C" float* chatterbox_s3gen_dump_s3tok_log_mel(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
+                                                      int n_samples, int* out_T) {
+    if (!ctx || !pcm_16k || n_samples <= 0 || !out_T)
+        return nullptr;
+    int T = 0;
+    auto mel = chatterbox_s3tok::compute_log_mel(pcm_16k, n_samples, T);
+    if (mel.empty() || T <= 0) {
+        *out_T = 0;
+        return nullptr;
+    }
+    float* r = (float*)malloc(mel.size() * sizeof(float));
+    if (!r)
+        return nullptr;
+    std::memcpy(r, mel.data(), mel.size() * sizeof(float));
+    *out_T = T;
+    return r;
+}
+
+extern "C" float* chatterbox_s3gen_dump_s3tok_proj_down(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
+                                                        int n_samples, int max_tokens, int* out_T_tok) {
+    if (!ctx || !pcm_16k || n_samples <= 0 || !out_T_tok)
+        return nullptr;
+    int T = 0;
+    auto mel = chatterbox_s3tok::compute_log_mel(pcm_16k, n_samples, T);
+    if (mel.empty() || T <= 0) {
+        *out_T_tok = 0;
+        return nullptr;
+    }
+    int T_tok = 0;
+    auto proj =
+        chatterbox_s3tok::encode_to_proj(ctx->s3tok, ctx->sched, ctx->compute_meta, mel.data(), T, max_tokens, T_tok);
+    if (proj.empty() || T_tok <= 0) {
+        *out_T_tok = 0;
+        return nullptr;
+    }
+    float* r = (float*)malloc(proj.size() * sizeof(float));
+    if (!r)
+        return nullptr;
+    std::memcpy(r, proj.data(), proj.size() * sizeof(float));
+    *out_T_tok = T_tok;
+    return r;
+}
+
+extern "C" float* chatterbox_s3gen_dump_s3tok_tokens(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
+                                                     int n_samples, int max_tokens, int* out_T_tok) {
+    if (!ctx || !pcm_16k || n_samples <= 0 || !out_T_tok)
+        return nullptr;
+    auto toks = chatterbox_s3tok::tokenize(ctx->s3tok, ctx->sched, ctx->compute_meta, pcm_16k, n_samples, max_tokens);
+    if (toks.empty()) {
+        *out_T_tok = 0;
+        return nullptr;
+    }
+    // F32 output to match the GGUF reference archive's single-dtype contract.
+    float* r = (float*)malloc(toks.size() * sizeof(float));
+    if (!r)
+        return nullptr;
+    for (size_t i = 0; i < toks.size(); i++)
+        r[i] = (float)toks[i];
+    *out_T_tok = (int)toks.size();
+    return r;
 }

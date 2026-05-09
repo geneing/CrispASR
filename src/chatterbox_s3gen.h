@@ -79,6 +79,32 @@ float* chatterbox_s3gen_vocode_dump_with_source_stft(struct chatterbox_s3gen_con
 // matching the dumped "voc_conv_post" reference layout.
 float* chatterbox_s3gen_hift_from_conv_post(const float* stft_cf, int T_stft, int T_mel, int* out_n_samples);
 
+// S3Tokenizer V2 — module 3 of the native voice clone path. Encodes a
+// 16 kHz mono float32 PCM buffer into 25 Hz speech tokens (codebook
+// size = 3^8 = 6561) using the FSMN-augmented Whisper encoder + FSQ
+// codebook stored in the S3Gen GGUF. `max_tokens > 0` truncates the
+// output (matches `S3Tokenizer.forward(..., max_len=...)`); pass 0 / a
+// negative value for the full token stream. On success returns a malloc'd
+// int32 buffer of `*out_n_tokens` entries; caller frees with `free()`.
+int32_t* chatterbox_s3gen_tokenize_pcm(struct chatterbox_s3gen_context* ctx, const float* pcm_16k, int n_samples,
+                                       int max_tokens, int* out_n_tokens);
+
+// Diff/debug: each stage of the S3Tokenizer pipeline. Reference dumper
+// stages: `s3tok_log_mel`, `s3tok_proj_down`, `s3tok_tokens`. Each
+// function returns a malloc'd buffer the caller releases with `free()`.
+//   - s3tok_log_mel    → (n_mels=128 * T) f32, channel-first
+//   - s3tok_proj_down  → (T_tok * 8) f32 row-major, post-FSQ-projdown
+//                        pre-tanh/round (the float input to the codebook)
+//   - s3tok_tokens     → (T_tok,) f32 holding int values in [0, 6561)
+//                        — float32 for the GGUF reference archive's
+//                        single-dtype contract
+float* chatterbox_s3gen_dump_s3tok_log_mel(struct chatterbox_s3gen_context* ctx, const float* pcm_16k, int n_samples,
+                                           int* out_T);
+float* chatterbox_s3gen_dump_s3tok_proj_down(struct chatterbox_s3gen_context* ctx, const float* pcm_16k, int n_samples,
+                                             int max_tokens, int* out_T_tok);
+float* chatterbox_s3gen_dump_s3tok_tokens(struct chatterbox_s3gen_context* ctx, const float* pcm_16k, int n_samples,
+                                          int max_tokens, int* out_T_tok);
+
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);
 

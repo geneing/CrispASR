@@ -2754,6 +2754,109 @@ mel cos_mean is 0.999913 (cos_min 0.905 in low-energy frames where
 fp32 directions are unstable; downstream LSTM filters this out and
 ve_partial_emb / ve_speaker_emb are essentially bit-perfect).
 
+## Chatterbox S3Tokenizer V2 native port — module 3 of voice cloning (May 2026)
+
+`src/chatterbox_s3tok.{h,cpp}` ports `S3TokenizerV2.quantize` —
+the FSMN-augmented Whisper-style encoder + FSQ codebook that
+turns a 16 kHz reference WAV into 25 Hz speech tokens
+(codebook size = 3⁸ = 6561). Lives next to chatterbox_ve (module 2)
+and is bound on the s3gen sub-context's tensor map (the `s3.tok.*`
+weights ride in the chatterbox-s3gen GGUF, not the T3 GGUF).
+
+### Stuff that mattered
+
+1. **The K projection has no bias**. S3Tokenizer follows Whisper's
+   `MultiHeadAttention` where `query` and `value` are biased but
+   `key` is `Linear(... bias=False)`. So
+   `s3.tok.enc.b.<l>.attn.key.bias` is absent from the GGUF, and
+   the bind step gets `nullptr`. First implementation called
+   `ggml_add(K, b.attn_k_b)` unconditionally — segfault inside
+   `ggml_add_impl`. Fix is the same pattern voxtral / qwen3 use:
+   gate every Q/K/V/O bias add on a non-null pointer.
+
+2. **FSMN side branch on V, computed BEFORE the attention head
+   reshape**. The python's `FSMNMultiHeadAttention.qkv_attention`
+   reshapes V to `(B, T, n_head, head_dim)` then immediately
+   collapses it back to `(B, T, D)` for the depthwise Conv1d. So
+   we can equivalently compute FSMN on the post-projection V
+   tensor directly (still `(D, T)` in our ggml layout) — transpose
+   to `(T, D)` for `ggml_conv_1d_dw`, run the depthwise k=31 conv,
+   add the residual V back, transpose back to `(D, T)`. The
+   attention output projection's result is then `+ fsmn_memory`
+   before the residual add. `attn_fsmn_w` is `(31, 1, 1280)` F16 —
+   ggml_conv_1d_dw consumes it as-is.
+
+3. **Periodic Hann via `torch.hann_window`** — same as VE, but the
+   STFT path here is post-log so a missing or off-by-one Hann
+   shows up in `s3tok_log_mel`'s cosine before the encoder ever
+   runs.
+
+4. **`magnitudes = stft[..., :-1].abs()**2`** drops the last STFT
+   frame. core_mel exposes this as `Params::drop_last_frame`, set
+   true to match. On JFK 11 s @ 16 kHz this gives T=1100 (not 1101
+   like VE's mel that keeps all frames).
+
+5. **Conv1d strides are both 2**. AudioEncoderV2's `__init__`
+   passes `stride=stride` (the constructor arg, set to 2 for the
+   tokenizer) to conv1, and conv2 hardcodes `stride=2`. Total
+   downsample is 4× → T mel frames at 100 Hz become T/4 tokens at
+   25 Hz. For a 6 s prompt: 600 mel frames → 150 tokens, exactly
+   the `speech_cond_prompt_len = 150` the t3 prompt expects.
+
+6. **RoPE n_dims = head_dim, not n_state**. The model_v2
+   `precompute_freqs_cis(64, 1024*2)` uses 64 (the head_dim) for
+   the rotation dim, not 1280 (n_state). Pass `head_dim` (=64) as
+   the `n_dims` arg to `ggml_rope_ext`. n_ctx_orig at 2048 covers
+   the upstream max position (`1024 * 2`).
+
+7. **NEOX RoPE matches the python's `apply_rotary_emb`**. The
+   python's `cat((freqs_cis, freqs_cis), dim=-1)` doubling and the
+   `(half_l, half_r)` split / `(-half_r, half_l)` rotation is the
+   GPT-NeoX form: pairs `(i, i+head_dim/2)` rotated by `θ_i`.
+   `GGML_ROPE_TYPE_NEOX` is the right enum.
+
+8. **`s3tok_tokens` cosine is below 0.999 — by design**. FSQ is a
+   discrete quantization: `tanh(h)*0.999 → round → +1`. Tiny float
+   drift in the encoder pushes a few logits across the {-0.5, 0.5}
+   rounding boundary, which flips a base-3 digit and changes the
+   integer code. Cosine on the integer stream then reflects the
+   per-token mismatch rate, not the underlying float drift. JFK
+   11 s gives `cos_min=0.997`; the parity-quality metric is
+   `s3tok_proj_down` (the pre-FSQ floats) which is comfortably
+   `cos_mean=0.99993`.
+
+### Voice clone wiring discipline
+
+When wiring module 3 outputs into `chatterbox_set_voice_from_wav`
+the .wav branch, **do NOT update `gen.prompt_token` alone** — it has
+to stay in lockstep with `gen.prompt_feat` (the 24 kHz prompt mel)
+and `gen.embedding` (the CAMPPlus x-vector). All three describe the
+same reference audio for S3Gen's flow matcher; cross-mixing
+prompt_token from the new ref with prompt_feat / embedding from the
+default ref makes the vocoder collapse to ~0.0003 RMS silence
+(verified on JFK clone). The right partial-clone state is:
+
+  - Module 2 only:     speaker_emb NEW, all gen.* DEFAULT
+  - Module 2+3:        speaker_emb + speech_prompt_tokens NEW (both
+                       T3-side); all gen.* DEFAULT
+  - Module 2+3+4:      everything NEW (atomic)
+
+Module 3 only updates the T3 side (`speech_prompt_tokens`); the
+S3Tokenizer's full-audio token stream is exposed via
+`chatterbox_dump_s3tok_tokens` for parity testing but isn't
+written into the runtime conds bundle yet.
+
+### Diff stages
+
+`tools/reference_backends/chatterbox.py`:
+- `s3tok_log_mel`             — (128, T) log10 mel after clip-and-scale
+- `s3tok_proj_down`           — (T_tok, 8) pre-FSQ projdown floats
+- `s3tok_tokens`              — (T_tok,) full-audio int32 tokens
+- `s3tok_speech_prompt_tokens` — (≤150,) first-6 s int32 tokens
+
+C++ ABI hooks in `chatterbox.h`. Threshold and reporting style
+mirror the existing chatterbox stages (cos_mean ≥ 0.95).
+
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 
 Bringing up the T5 encoder-decoder runtime (`src/t5_translate.cpp`)

@@ -2679,13 +2679,19 @@ static bool chatterbox_decode_wav_16k_mono(const char* path, std::vector<float>&
     return true;
 }
 
-// Replace ctx->conds.speaker_emb with a fresh (1, 256) tensor whose contents
-// are `emb` (256 f32). The previous voice_ctx/buf are freed. Other conds
-// (gen_prompt_token / gen_prompt_feat / gen_embedding) stay pointing at the
-// model's default-voice tensors so S3Gen still sounds like the default voice
-// — that's the Module-2-only contract; modules 3 (S3Tokenizer) and 4
-// (CAMPPlus) will fill in the rest.
-static int chatterbox_install_speaker_emb(chatterbox_context* ctx, const float emb[256]) {
+// Replace ctx->conds.* tensors from a freshly-computed native bundle.
+// `emb` is the 256-d speaker embedding (Module 2 / VE), `prompt_tokens`
+// and `speech_prompt_tokens` are the int32 token streams from
+// S3Tokenizer V2 (Module 3, full audio + first 6 s respectively).
+// The remaining conds (`gen_prompt_feat` 24 kHz mel, `gen_embedding`
+// 192-d CAMPPlus x-vector) keep pointing at the default voice's baked-in
+// tensors until module 4 lands, so S3Gen will still render with the
+// default voice's timbre — but T3 sees the new speaker_emb AND speech
+// prompt tokens, and S3Gen sees the new prompt_token, so the rendered
+// prosody is the cloned speaker's even if the timbre lags.
+static int chatterbox_install_native_voice(chatterbox_context* ctx, const float emb[256], const int32_t* prompt_tokens,
+                                           int n_prompt_tokens, const int32_t* speech_prompt_tokens,
+                                           int n_speech_prompt_tokens) {
     if (!ctx || !emb)
         return -1;
 
@@ -2700,15 +2706,29 @@ static int chatterbox_install_speaker_emb(chatterbox_context* ctx, const float e
     }
     ctx->voice_tensors.clear();
 
-    ggml_init_params ip = {ggml_tensor_overhead() * 4, nullptr, true};
+    // Up to 4 tensors: speaker_emb + maybe prompt_token + maybe
+    // speech_prompt_tokens (gen.prompt_feat / gen.embedding stay at defaults).
+    ggml_init_params ip = {ggml_tensor_overhead() * 8, nullptr, true};
     ggml_context* vctx = ggml_init(ip);
     if (!vctx) {
         fprintf(stderr, "chatterbox: ggml_init failed for native voice\n");
         return -1;
     }
-    // Speaker emb is (1, 256) row-major in PyTorch / GGUF. ggml ne=(256, 1).
+
+    // Speaker emb (1, 256) row-major.
     ggml_tensor* spkr = ggml_new_tensor_2d(vctx, GGML_TYPE_F32, 256, 1);
     ggml_set_name(spkr, "conds.t3.speaker_emb");
+
+    ggml_tensor* prompt_t = nullptr;
+    if (prompt_tokens && n_prompt_tokens > 0) {
+        prompt_t = ggml_new_tensor_1d(vctx, GGML_TYPE_I32, n_prompt_tokens);
+        ggml_set_name(prompt_t, "conds.gen.prompt_token");
+    }
+    ggml_tensor* speech_prompt_t = nullptr;
+    if (speech_prompt_tokens && n_speech_prompt_tokens > 0) {
+        speech_prompt_t = ggml_new_tensor_1d(vctx, GGML_TYPE_I32, n_speech_prompt_tokens);
+        ggml_set_name(speech_prompt_t, "conds.t3.speech_prompt_tokens");
+    }
 
     ggml_backend_buffer_t vbuf = ggml_backend_alloc_ctx_tensors(vctx, ctx->backend);
     if (!vbuf) {
@@ -2717,11 +2737,25 @@ static int chatterbox_install_speaker_emb(chatterbox_context* ctx, const float e
         return -1;
     }
     ggml_backend_tensor_set(spkr, emb, 0, 256 * sizeof(float));
+    if (prompt_t)
+        ggml_backend_tensor_set(prompt_t, prompt_tokens, 0, (size_t)n_prompt_tokens * sizeof(int32_t));
+    if (speech_prompt_t)
+        ggml_backend_tensor_set(speech_prompt_t, speech_prompt_tokens, 0,
+                                (size_t)n_speech_prompt_tokens * sizeof(int32_t));
 
     ctx->voice_ctx_w = vctx;
     ctx->voice_buf_w = vbuf;
     ctx->voice_tensors["conds.t3.speaker_emb"] = spkr;
     ctx->conds.speaker_emb = spkr;
+    if (prompt_t) {
+        ctx->voice_tensors["conds.gen.prompt_token"] = prompt_t;
+        ctx->conds.gen_prompt_token = prompt_t;
+        ctx->conds.gen_prompt_token_len = (uint32_t)n_prompt_tokens;
+    }
+    if (speech_prompt_t) {
+        ctx->voice_tensors["conds.t3.speech_prompt_tokens"] = speech_prompt_t;
+        ctx->conds.speech_prompt_tokens = speech_prompt_t;
+    }
     ctx->conds.loaded = true;
     return 0;
 }
@@ -2742,11 +2776,12 @@ extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, con
         return chatterbox_load_voice_gguf(ctx, wav_path);
     }
 
-    // Native WAV → speaker_emb (Module 2). The other conds (gen.prompt_token,
-    // gen.prompt_feat, gen.embedding) keep pointing at the default voice's
-    // baked-in tensors until modules 3 and 4 (S3Tokenizer, CAMPPlus) land —
-    // so synthesis will speak the new T3 prosody but with default S3Gen
-    // timbre. Warn the user once so the partial cloning is explicit.
+    // Native WAV cloning. Modules 2 (VE) and 3 (S3Tokenizer) populate
+    // speaker_emb + speech prompt tokens + S3Gen prompt tokens. Module 4
+    // (CAMPPlus + 24 kHz prompt mel) is still pending, so gen.prompt_feat
+    // and gen.embedding stay at the default voice's tensors — S3Gen
+    // renders with the cloned speaker's prosody but the default voice's
+    // timbre/x-vector. Warn the user so the partial cloning is explicit.
     std::vector<float> pcm;
     std::string err;
     if (!chatterbox_decode_wav_16k_mono(wav_path, pcm, err)) {
@@ -2758,22 +2793,50 @@ extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, con
                 err.c_str(), wav_path, wav_path);
         return -1;
     }
+    const int n_samples = (int)pcm.size();
 
     float emb[256];
-    if (!chatterbox_ve::compute_speaker_emb(ctx->ve, ctx->sched, ctx->compute_meta, pcm.data(), (int)pcm.size(), emb)) {
+    if (!chatterbox_ve::compute_speaker_emb(ctx->ve, ctx->sched, ctx->compute_meta, pcm.data(), n_samples, emb)) {
         fprintf(stderr, "chatterbox: VoiceEncoder forward failed for '%s'\n", wav_path);
         return -1;
     }
 
-    if (chatterbox_install_speaker_emb(ctx, emb) != 0) {
-        return -1;
+    // S3Tokenizer V2 — first 6 s capped at 150 tokens for the T3-side
+    // `conds.t3.speech_prompt_tokens`. We do NOT update `gen.prompt_token`
+    // here even though we could, because S3Gen requires the (prompt_token,
+    // prompt_feat, embedding) triple to be mutually consistent — describing
+    // the same reference audio. Until module 4 lands and we can also
+    // produce the matching 24 kHz prompt mel and CAMPPlus x-vector, swapping
+    // only one of the three would feed S3Gen's flow matcher inconsistent
+    // conditioning and silence the output. Instead, T3 sees the cloned
+    // speaker_emb + speech_prompt_tokens (driving the new speaker's
+    // prosody) while S3Gen keeps using the default voice's full conds
+    // bundle — so the rendered timbre is still the default voice but with
+    // the new speaker's intent in the token stream.
+    std::vector<int32_t> speech_prompt_tokens;
+    if (ctx->s3gen_ctx) {
+        const int n6 = std::min(n_samples, 6 * 16000);
+        int n_tok6 = 0;
+        int32_t* tk6 = chatterbox_s3gen_tokenize_pcm(ctx->s3gen_ctx, pcm.data(), n6, /*max_tokens*/ 150, &n_tok6);
+        if (tk6 && n_tok6 > 0) {
+            speech_prompt_tokens.assign(tk6, tk6 + n_tok6);
+            std::free(tk6);
+        }
     }
 
+    int rc = chatterbox_install_native_voice(ctx, emb, /*prompt_tokens*/ nullptr, /*n_prompt_tokens*/ 0,
+                                             speech_prompt_tokens.data(), (int)speech_prompt_tokens.size());
+    if (rc != 0)
+        return rc;
+
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr,
-                "chatterbox: native WAV clone (%s, %zu samples). speaker_emb cloned; S3Gen voice "
-                "(prompt_token / prompt_feat / embedding) still defaults until modules 3+4 land.\n",
-                wav_path, pcm.size());
+        fprintf(stderr, "chatterbox: native WAV clone (%s, %d samples) — speaker_emb cloned (Module 2)", wav_path,
+                n_samples);
+        if (!speech_prompt_tokens.empty())
+            fprintf(stderr, "; %zu speech_prompt_tokens (Module 3)", speech_prompt_tokens.size());
+        fprintf(stderr, ". S3Gen prompt (gen.prompt_token + gen.prompt_feat + gen.embedding) still defaults until "
+                        "Module 4 (CAMPPlus + 24 kHz mel) lands — needs all three updated together to stay "
+                        "consistent.\n");
     }
     return 0;
 }
@@ -2870,6 +2933,28 @@ extern "C" float* chatterbox_dump_ve_speaker_emb(struct chatterbox_context* ctx,
         return nullptr;
     }
     return r;
+}
+
+// S3Tokenizer V2 (module 3) — forwarders to the s3gen sub-context.
+extern "C" float* chatterbox_dump_s3tok_log_mel(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                                int* out_T) {
+    if (!ctx || !ctx->s3gen_ctx)
+        return nullptr;
+    return chatterbox_s3gen_dump_s3tok_log_mel(ctx->s3gen_ctx, pcm_16k, n_samples, out_T);
+}
+
+extern "C" float* chatterbox_dump_s3tok_proj_down(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                                  int max_tokens, int* out_T_tok) {
+    if (!ctx || !ctx->s3gen_ctx)
+        return nullptr;
+    return chatterbox_s3gen_dump_s3tok_proj_down(ctx->s3gen_ctx, pcm_16k, n_samples, max_tokens, out_T_tok);
+}
+
+extern "C" float* chatterbox_dump_s3tok_tokens(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                               int max_tokens, int* out_T_tok) {
+    if (!ctx || !ctx->s3gen_ctx)
+        return nullptr;
+    return chatterbox_s3gen_dump_s3tok_tokens(ctx->s3gen_ctx, pcm_16k, n_samples, max_tokens, out_T_tok);
 }
 
 extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text, int* out_T,

@@ -601,7 +601,8 @@ endif()
 # chatterbox — ResembleAI/chatterbox (MIT, 520M Llama AR + CFM + HiFTNet)
 # ---------------------------------------------------------------------------
 add_library(chatterbox STATIC chatterbox.h chatterbox.cpp chatterbox_s3gen.h chatterbox_s3gen.cpp
-            chatterbox_ve.h chatterbox_ve.cpp)
+            chatterbox_ve.h chatterbox_ve.cpp
+            chatterbox_s3tok.h chatterbox_s3tok.cpp)
 set_target_properties(chatterbox PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(chatterbox PUBLIC .)
 target_compile_features   (chatterbox PUBLIC cxx_std_17)

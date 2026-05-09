@@ -42,6 +42,15 @@ DEFAULT_STAGES = [
     "ve_mel",
     "ve_partial_emb",
     "ve_speaker_emb",
+    # S3Tokenizer V2 pipeline (Module 3 of native voice clone). Dumps the
+    # log-mel features, the post-projdown pre-FSQ floats, and the final
+    # int32 tokens. Both `prompt_token` (full audio, no max_len) and
+    # `speech_prompt_tokens` (first 6 s @ 16 kHz, max_len=150) are
+    # captured.
+    "s3tok_log_mel",
+    "s3tok_proj_down",
+    "s3tok_tokens",
+    "s3tok_speech_prompt_tokens",
     "t3_cond_emb",
     "t3_prefill_emb",
     "t3_speech_tokens",
@@ -173,6 +182,50 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         spk_emb = raw / torch.linalg.norm(raw, dim=1, keepdim=True)
         if "ve_speaker_emb" in stages:
             out["ve_speaker_emb"] = spk_emb.cpu().numpy().astype(np.float32, copy=False)  # (1, 256)
+
+    # ── S3Tokenizer V2 (Module 3 of native voice clone) ──
+    # Dumps log-mel + post-projdown floats + the final int32 tokens for
+    # both the full-audio `prompt_token` (no max_len) and the 6-second
+    # `speech_prompt_tokens` (max_len=plen=150). C++ side reproduces both
+    # via `chatterbox_s3gen_dump_s3tok_*`.
+    s3tok_stages = {"s3tok_log_mel", "s3tok_proj_down", "s3tok_tokens", "s3tok_speech_prompt_tokens"}
+    if s3tok_stages & stages:
+        s3_tok = model.s3gen.tokenizer
+        # Audio in: 16 kHz mono float32 (already loaded that way).
+        wav_t = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
+
+        if "s3tok_log_mel" in stages:
+            with torch.inference_mode():
+                lm = s3_tok.log_mel_spectrogram(wav_t.squeeze(0))  # (n_mels=128, T)
+            out["s3tok_log_mel"] = lm.cpu().numpy().astype(np.float32, copy=False)
+
+        if "s3tok_proj_down" in stages:
+            # Run encoder + project_down, capture pre-FSQ floats. We don't
+            # have a public hook, so reach into the model.
+            with torch.inference_mode():
+                lm = s3_tok.log_mel_spectrogram(wav_t.squeeze(0)).unsqueeze(0)
+                lm_len = torch.tensor([lm.size(2)], device=lm.device)
+                hidden, code_len = s3_tok.encoder(lm, lm_len)  # (B=1, T_tok, 1280)
+                quantizer = s3_tok.quantizer._codebook
+                proj = quantizer.project_down(hidden.float())  # (B=1, T_tok, 8)
+            out["s3tok_proj_down"] = proj.squeeze(0).cpu().numpy().astype(np.float32, copy=False)
+
+        if "s3tok_tokens" in stages:
+            with torch.inference_mode():
+                toks, tok_lens = s3_tok([wav_t.squeeze(0)])  # full audio, no max_len
+            t_arr = toks[0, : tok_lens[0]].cpu().numpy().astype(np.int32, copy=False)
+            # Cast to f32 for the GGUF archive's single-dtype contract.
+            out["s3tok_tokens"] = t_arr.astype(np.float32, copy=False)
+
+        if "s3tok_speech_prompt_tokens" in stages:
+            # First 6 s @ 16 kHz, capped at 150 tokens — this is what
+            # `prepare_conditionals` feeds into `t3.cond_prompt_speech_tokens`.
+            ENC_COND_LEN = 6 * 16000
+            seg = wav_t[:, :ENC_COND_LEN]
+            with torch.inference_mode():
+                toks, tok_lens = s3_tok([seg.squeeze(0)], max_len=150)
+            t_arr = toks[0, : tok_lens[0]].cpu().numpy().astype(np.int32, copy=False)
+            out["s3tok_speech_prompt_tokens"] = t_arr.astype(np.float32, copy=False)
 
     # ── T3 conditioning ──
     t3_cond = model.conds.t3

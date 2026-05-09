@@ -133,6 +133,16 @@ float* chatterbox_dump_ve_partial_emb(struct chatterbox_context* ctx, const floa
                                       int* out_n_partials);
 float* chatterbox_dump_ve_speaker_emb(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples);
 
+// Diff/debug: S3Tokenizer V2 stages (Module 3 of native voice clone).
+// Forwarders to the same hooks on the underlying s3gen context — keeps the
+// diff harness pointed at the chatterbox handle rather than reaching for
+// the s3gen sub-context directly.
+float* chatterbox_dump_s3tok_log_mel(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples, int* out_T);
+float* chatterbox_dump_s3tok_proj_down(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                       int max_tokens, int* out_T_tok);
+float* chatterbox_dump_s3tok_tokens(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples, int max_tokens,
+                                    int* out_T_tok);
+
 // Diff/debug: return the T3 prefill embeddings for the given text (output of
 // build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
 // Also sets *out_cond_T to the number of conditioning tokens (cond_len).

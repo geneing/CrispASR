@@ -303,20 +303,23 @@ size is ~150-200 KB regardless of reference WAV length.
 `--voice` is per-call cached, so server callers (`--server` mode) can
 switch voices between requests without reloading on every synthesise.
 
-**Direct `--voice <path>.wav` (Module 2 — partial native cloning)**:
-the C++ runtime now does the VoiceEncoder forward in-process and
-clones the 256-d speaker embedding from a 16 kHz mono WAV (PCM16 or
-F32) without python. Modules 3 (S3Tokenizer for `gen.prompt_token`
-and `t3.speech_prompt_tokens`) and 4 (CAMPPlus for `gen.embedding`)
-are not yet ported, so S3Gen still uses the default voice's prompt
-mel + speaker x-vector — the synthesised audio carries the new
-speaker_emb's prosody but not its full timbre. The runtime prints
-a one-line warning when this partial path is taken. For full-quality
-cloning today, keep using the python baker workflow above; it
-populates all five `conds.*` tensors. The native path is bit-equivalent
-to upstream's VE forward (cos ≥ 1 - fp32-rounding) verified via
-`crispasr-diff chatterbox` on the `ve_mel`, `ve_partial_emb`,
-`ve_speaker_emb` stages.
+**Direct `--voice <path>.wav` (partial native cloning, Modules 2+3)**:
+the C++ runtime now runs the VoiceEncoder + S3Tokenizer V2 forwards
+in-process and clones the T3-side conds (the 256-d speaker embedding
++ the 150-token speech prompt) from a 16 kHz mono WAV (PCM16 or F32)
+without python. Module 4 (CAMPPlus 192-d x-vector + 24 kHz prompt
+mel for `gen.embedding` / `gen.prompt_feat` / `gen.prompt_token`) is
+still pending — until it lands the S3Gen side keeps using the default
+voice's bundle (those three describe the same reference audio for
+S3Gen's flow matcher and have to be updated atomically; partial
+cloning of one of them silences the output). The synthesis therefore
+carries the new speaker's prosody but renders with the default voice's
+timbre. The runtime prints a one-line warning when this partial path
+is taken. For full-quality cloning today, keep using the python baker
+workflow above. The native path is bit-equivalent to upstream on the
+parity-quality stages (`ve_mel`, `ve_partial_emb`, `ve_speaker_emb`,
+`s3tok_log_mel`, `s3tok_proj_down`, `s3tok_speech_prompt_tokens`,
+`s3tok_tokens`) — verified via `crispasr-diff chatterbox`.
 
 If the WAV is not 16 kHz mono PCM16/F32, the runtime falls back to
 the same hint-then-error path as before, pointing at the baker or

@@ -908,6 +908,65 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- S3Tokenizer V2 stages (Module 3 of native voice clone) ----
+        if (!ref.shape("s3tok_log_mel").empty() || !ref.shape("s3tok_proj_down").empty() ||
+            !ref.shape("s3tok_tokens").empty() || !ref.shape("s3tok_speech_prompt_tokens").empty()) {
+            int s_T = 0;
+            float* s_lm = chatterbox_dump_s3tok_log_mel(ctx, samples.data(), (int)samples.size(), &s_T);
+            if (s_lm && s_T > 0) {
+                auto rep = compare_with_row_width(ref, "s3tok_log_mel", s_lm, (size_t)128 * s_T, s_T);
+                print_row_mean("s3tok_log_mel", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  log10 mel + clip-and-scale");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(s_lm);
+            } else if (!ref.shape("s3tok_log_mel").empty()) {
+                printf("[ERR ] s3tok_log_mel          dump_s3tok_log_mel returned null\n");
+                n_fail++;
+            }
+
+            int s_Tt = 0;
+            float* s_pd = chatterbox_dump_s3tok_proj_down(ctx, samples.data(), (int)samples.size(),
+                                                          /*max_tokens*/ 0, &s_Tt);
+            if (s_pd && s_Tt > 0) {
+                auto rep = compare_with_row_width(ref, "s3tok_proj_down", s_pd, (size_t)s_Tt * 8, 8);
+                print_row_mean("s3tok_proj_down", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  pre-FSQ projdown floats");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(s_pd);
+            } else if (!ref.shape("s3tok_proj_down").empty()) {
+                printf("[ERR ] s3tok_proj_down        dump_s3tok_proj_down returned null\n");
+                n_fail++;
+            }
+
+            int s_Tk = 0;
+            float* s_tk = chatterbox_dump_s3tok_tokens(ctx, samples.data(), (int)samples.size(),
+                                                       /*max_tokens*/ 0, &s_Tk);
+            if (s_tk && s_Tk > 0) {
+                auto rep = ref.compare("s3tok_tokens", s_tk, (size_t)s_Tk);
+                print_row_mean("s3tok_tokens", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  full-audio token stream");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(s_tk);
+            } else if (!ref.shape("s3tok_tokens").empty()) {
+                printf("[ERR ] s3tok_tokens           dump_s3tok_tokens returned null\n");
+                n_fail++;
+            }
+
+            int s_Tk6 = 0;
+            const int n6 = std::min((int)samples.size(), 6 * 16000);
+            float* s_tk6 = chatterbox_dump_s3tok_tokens(ctx, samples.data(), n6, /*max_tokens*/ 150, &s_Tk6);
+            if (s_tk6 && s_Tk6 > 0) {
+                auto rep = ref.compare("s3tok_speech_prompt_tokens", s_tk6, (size_t)s_Tk6);
+                print_row_mean("s3tok_speech_prompt_tokens", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  first 6 s, max 150 tokens");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(s_tk6);
+            } else if (!ref.shape("s3tok_speech_prompt_tokens").empty()) {
+                printf("[ERR ] s3tok_speech_prompt_tokens dump_s3tok_tokens returned null\n");
+                n_fail++;
+            }
+        }
+
         // ---- t3_cond_emb + t3_prefill_emb (deterministic, compare before stochastic T3) ----
         {
             const char* syn_text = std::getenv("CHATTERBOX_SYN_TEXT");
