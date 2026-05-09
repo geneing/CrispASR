@@ -1205,6 +1205,22 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
     }
     n_past += prefill_len;
 
+    // Debug: compare prefill logits against Python reference
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: prefill logits[0:5] = [%.3f, %.3f, %.3f, %.3f, %.3f]\n", logits[0], logits[1],
+                logits[2], logits[3], logits[4]);
+        // Find top-5
+        std::vector<std::pair<float, int>> scored;
+        for (int i = 0; i < (int)ctx->hp.mel_vocab_size; i++)
+            scored.push_back({logits[i], i});
+        std::partial_sort(scored.begin(), scored.begin() + 5, scored.end(),
+                          [](auto& a, auto& b) { return a.first > b.first; });
+        fprintf(stderr, "indextts: prefill top5:");
+        for (int i = 0; i < 5; i++)
+            fprintf(stderr, " %d(%.3f)", scored[i].second, scored[i].first);
+        fprintf(stderr, "\n");
+    }
+
     // 5. AR decode loop
     std::vector<int32_t> mel_codes;
     const int mel_vocab = (int)ctx->hp.mel_vocab_size;

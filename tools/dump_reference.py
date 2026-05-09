@@ -153,6 +153,8 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # audio arg is a reference voice WAV for cloning (16 kHz); when conds.pt
     # exists the built-in voice is used and audio is ignored.
     "chatterbox": "reference_backends.chatterbox",
+    # IndexTTS-1.5: GPT-2 AR → BigVGAN vocoder. Text from INDEXTTS_TEXT env.
+    "indextts":   "reference_backends.indextts",
     # Chatterbox Turbo (GPT-2 T3 + meanflow S3Gen). Per-layer encoder
     # dumps for element-wise conformer attention validation.
     "chatterbox_turbo": "reference_backends.chatterbox_turbo",
