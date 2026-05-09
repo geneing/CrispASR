@@ -27,7 +27,9 @@
 // Anti-aliased up/downsampling in AMPBlock1 is skipped for now.
 
 #include "indextts_voc.h"
+#include "core/fft.h"
 #include "core/gguf_loader.h"
+#include "core/mel.h"
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -146,6 +148,365 @@ static ggml_tensor* snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor* l
     ggml_tensor* sin2 = ggml_mul(ctx, sin_ax, sin_ax);
     ggml_tensor* term = ggml_div(ctx, sin2, beta);
     return ggml_add(ctx, x, term);
+}
+
+// ── ECAPA-TDNN speaker encoder ──────────────────────────────────
+//
+// Architecture mirrors the qwen3_tts ECAPA-TDNN (SE-Res2Net blocks,
+// ASP pooling, final FC → 512d). The key difference is that IndexTTS
+// ships BatchNorm tensors unfused, so we apply BN explicitly:
+//   y = gamma * (x - running_mean) / sqrt(running_var + eps) + beta
+//
+// Tensor naming in the GGUF:
+//   se.b.0.c.{weight,bias}           — initial TDNN conv
+//   se.b.0.n.{weight,bias,rm,rv}     — BatchNorm
+//   se.b.{1,2,3}.tdnn{1,2}.*         — SE-Res2Net TDNNs
+//   se.b.{1,2,3}.r2n.b.{0-6}.*       — Res2Net internal
+//   se.b.{1,2,3}.se_block.conv{1,2}.*— SE squeeze/excite
+//   se.mfa.*                          — multi-frame aggregation
+//   se.asp.*                          — attentive stat pooling
+//   se.asp_bn.*                       — ASP BatchNorm
+//   se.fc.*                           — final linear
+
+// BatchNorm: y = gamma * (x - rm) / sqrt(rv + eps) + beta
+// x is [C, T] channels-first. gamma/beta/rm/rv are [C].
+//
+// Since rv + eps is done in graph-compute context (which is no-alloc),
+// we use ggml_clamp to floor rv at eps rather than adding a scalar.
+// This is safe because rv (running_variance) is always >= 0 and we just
+// need to avoid division by zero.
+static ggml_tensor* ecapa_bn(ggml_context* ctx, ggml_tensor* x, ggml_tensor* gamma, ggml_tensor* beta, ggml_tensor* rm,
+                             ggml_tensor* rv) {
+    if (!gamma || !beta || !rm || !rv) {
+        return x;
+    }
+    const int C = (int)x->ne[0];
+    ggml_tensor* mean = ggml_reshape_2d(ctx, rm, C, 1);
+    ggml_tensor* var = ggml_reshape_2d(ctx, rv, C, 1);
+    ggml_tensor* g = ggml_reshape_2d(ctx, gamma, C, 1);
+    ggml_tensor* b = ggml_reshape_2d(ctx, beta, C, 1);
+
+    x = ggml_sub(ctx, x, mean);
+    // rv + eps: clamp rv at eps to avoid sqrt(0), then add eps via scale trick:
+    // sqrt(rv + eps) ≈ sqrt(max(rv, eps)) for rv >= 0.
+    // More precisely: use ggml_clamp to ensure minimum of eps.
+    ggml_tensor* var_safe = ggml_clamp(ctx, var, 1e-5f, 1e30f);
+    ggml_tensor* denom = ggml_sqrt(ctx, var_safe);
+    x = ggml_div(ctx, x, denom);
+    x = ggml_add(ctx, ggml_mul(ctx, x, g), b);
+    return x;
+}
+
+// Conv1d with reflect padding + BatchNorm + ReLU.
+// Input/output: [C, T] channels-first.
+static ggml_tensor* ecapa_tdnn_bn_relu(ggml_context* ctx, ggml_tensor* x, ggml_tensor* cw, ggml_tensor* cb,
+                                       ggml_tensor* nw, ggml_tensor* nb, ggml_tensor* nrm, ggml_tensor* nrv,
+                                       int dilation) {
+    const int K = (int)cw->ne[0];
+    const int pad = (K - 1) * dilation / 2;
+    // [C, T] → [T, C] for ggml_pad_reflect_1d / ggml_conv_1d
+    x = ggml_cont(ctx, ggml_transpose(ctx, x));
+    if (pad > 0) {
+        x = ggml_pad_reflect_1d(ctx, x, pad, pad);
+    }
+    x = ggml_conv_1d(ctx, cw, x, 1, 0, dilation);
+    x = ggml_cont(ctx, ggml_transpose(ctx, x)); // back to [C, T]
+    if (cb) {
+        x = ggml_add(ctx, x, cb);
+    }
+    x = ecapa_bn(ctx, x, nw, nb, nrm, nrv);
+    x = ggml_relu(ctx, x);
+    return x;
+}
+
+// SE block: global mean pool → linear → ReLU → linear → sigmoid → scale
+static ggml_tensor* ecapa_se(ggml_context* ctx, ggml_tensor* x, ggml_tensor* c1w, ggml_tensor* c1b, ggml_tensor* c2w,
+                             ggml_tensor* c2b) {
+    const int T_se = (int)x->ne[1];
+    // Global mean: [C, T] → mean → [C, 1]
+    ggml_tensor* m = ggml_cont(
+        ctx,
+        ggml_transpose(ctx, ggml_scale(ctx, ggml_sum_rows(ctx, ggml_cont(ctx, ggml_transpose(ctx, x))), 1.0f / T_se)));
+    auto w1 = ggml_reshape_2d(ctx, c1w, c1w->ne[1], c1w->ne[2]);
+    ggml_tensor* h = ggml_relu(ctx, ggml_add(ctx, ggml_mul_mat(ctx, w1, m), c1b));
+    auto w2 = ggml_reshape_2d(ctx, c2w, c2w->ne[1], c2w->ne[2]);
+    ggml_tensor* sc = ggml_sigmoid(ctx, ggml_add(ctx, ggml_mul_mat(ctx, w2, h), c2b));
+    return ggml_mul(ctx, x, ggml_repeat(ctx, sc, x));
+}
+
+// Res2Net block: split into 8 chunks, pass through 7 TDNNs with dilation.
+static ggml_tensor* ecapa_res2net(ggml_context* ctx, ggml_tensor* x, const std::map<std::string, ggml_tensor*>& ts,
+                                  const std::string& prefix, int dilation) {
+    const int T_r2n = (int)x->ne[1];
+    const int chunk = 64; // 512 / 8
+    ggml_tensor* outs[8];
+    for (int i = 0; i < 8; i++) {
+        ggml_tensor* ci =
+            ggml_cont(ctx, ggml_view_2d(ctx, x, chunk, T_r2n, x->nb[1], (size_t)i * chunk * sizeof(float)));
+        if (i == 0) {
+            outs[i] = ci;
+            continue;
+        }
+        ggml_tensor* in = (i == 1) ? ci : ggml_add(ctx, ci, outs[i - 1]);
+        // TDNN with BN for Res2Net internal block (i-1)
+        char key[128];
+        std::snprintf(key, sizeof(key), "%s.%d.c.weight", prefix.c_str(), i - 1);
+        ggml_tensor* cw = T(ts, key);
+        std::snprintf(key, sizeof(key), "%s.%d.c.bias", prefix.c_str(), i - 1);
+        ggml_tensor* cb = T(ts, key);
+        std::snprintf(key, sizeof(key), "%s.%d.n.weight", prefix.c_str(), i - 1);
+        ggml_tensor* nw = T(ts, key);
+        std::snprintf(key, sizeof(key), "%s.%d.n.bias", prefix.c_str(), i - 1);
+        ggml_tensor* nb = T(ts, key);
+        std::snprintf(key, sizeof(key), "%s.%d.n.rm", prefix.c_str(), i - 1);
+        ggml_tensor* nrm = T(ts, key);
+        std::snprintf(key, sizeof(key), "%s.%d.n.rv", prefix.c_str(), i - 1);
+        ggml_tensor* nrv = T(ts, key);
+        outs[i] = ecapa_tdnn_bn_relu(ctx, in, cw, cb, nw, nb, nrm, nrv, dilation);
+    }
+    ggml_tensor* out = outs[0];
+    for (int i = 1; i < 8; i++) {
+        out = ggml_concat(ctx, out, outs[i], 0);
+    }
+    return out;
+}
+
+// SE-Res2Net block: TDNN1 → Res2Net → TDNN2 → SE → residual
+static ggml_tensor* ecapa_se_res2net(ggml_context* ctx, ggml_tensor* x, const std::map<std::string, ggml_tensor*>& ts,
+                                     int blk_idx, int dilation) {
+    ggml_tensor* res = x;
+    char prefix[64];
+
+    // TDNN1
+    std::snprintf(prefix, sizeof(prefix), "se.b.%d.tdnn1", blk_idx);
+    x = ecapa_tdnn_bn_relu(ctx, x, T(ts, std::string(prefix) + ".c.weight"), T(ts, std::string(prefix) + ".c.bias"),
+                           T(ts, std::string(prefix) + ".n.weight"), T(ts, std::string(prefix) + ".n.bias"),
+                           T(ts, std::string(prefix) + ".n.rm"), T(ts, std::string(prefix) + ".n.rv"), 1);
+
+    // Res2Net
+    std::snprintf(prefix, sizeof(prefix), "se.b.%d.r2n.b", blk_idx);
+    x = ecapa_res2net(ctx, x, ts, prefix, dilation);
+
+    // TDNN2
+    std::snprintf(prefix, sizeof(prefix), "se.b.%d.tdnn2", blk_idx);
+    x = ecapa_tdnn_bn_relu(ctx, x, T(ts, std::string(prefix) + ".c.weight"), T(ts, std::string(prefix) + ".c.bias"),
+                           T(ts, std::string(prefix) + ".n.weight"), T(ts, std::string(prefix) + ".n.bias"),
+                           T(ts, std::string(prefix) + ".n.rm"), T(ts, std::string(prefix) + ".n.rv"), 1);
+
+    // SE
+    std::snprintf(prefix, sizeof(prefix), "se.b.%d.se_block", blk_idx);
+    x = ecapa_se(ctx, x, T(ts, std::string(prefix) + ".conv1.conv.weight"),
+                 T(ts, std::string(prefix) + ".conv1.conv.bias"), T(ts, std::string(prefix) + ".conv2.conv.weight"),
+                 T(ts, std::string(prefix) + ".conv2.conv.bias"));
+
+    return ggml_add(ctx, x, res);
+}
+
+// ASP: Attentive Statistics Pooling → [2*C, 1]
+static ggml_tensor* ecapa_asp(ggml_context* ctx, ggml_tensor* x, const std::map<std::string, ggml_tensor*>& ts) {
+    const int T_asp = (int)x->ne[1];
+    // Global statistics
+    ggml_tensor* xT = ggml_cont(ctx, ggml_transpose(ctx, x));
+    ggml_tensor* m1C = ggml_scale(ctx, ggml_sum_rows(ctx, xT), 1.0f / T_asp);
+    ggml_tensor* mC1 = ggml_cont(ctx, ggml_transpose(ctx, m1C));
+    ggml_tensor* mCT = ggml_repeat(ctx, mC1, x);
+    ggml_tensor* d2 = ggml_mul(ctx, ggml_sub(ctx, x, mCT), ggml_sub(ctx, x, mCT));
+    ggml_tensor* s1C =
+        ggml_sqrt(ctx, ggml_scale(ctx, ggml_sum_rows(ctx, ggml_cont(ctx, ggml_transpose(ctx, d2))), 1.0f / T_asp));
+    ggml_tensor* sCT = ggml_repeat(ctx, ggml_cont(ctx, ggml_transpose(ctx, s1C)), x);
+
+    // [x, mean, std] → TDNN (with BN + ReLU) → tanh → conv → softmax
+    ggml_tensor* att = ggml_concat(ctx, ggml_concat(ctx, x, mCT, 0), sCT, 0);
+    att = ecapa_tdnn_bn_relu(ctx, att, T(ts, "se.asp.tdnn.c.weight"), T(ts, "se.asp.tdnn.c.bias"),
+                             T(ts, "se.asp.tdnn.n.weight"), T(ts, "se.asp.tdnn.n.bias"), T(ts, "se.asp.tdnn.n.rm"),
+                             T(ts, "se.asp.tdnn.n.rv"), 1);
+    att = ggml_tanh(ctx, att);
+
+    ggml_tensor* asp_cw = T(ts, "se.asp.c.weight");
+    ggml_tensor* asp_cb = T(ts, "se.asp.c.bias");
+    auto cw2d = ggml_reshape_2d(ctx, asp_cw, asp_cw->ne[1], asp_cw->ne[2]);
+    att = ggml_add(ctx, ggml_mul_mat(ctx, cw2d, att), asp_cb);
+    att = ggml_cont(ctx, ggml_transpose(ctx, att));
+    att = ggml_soft_max(ctx, att);
+    att = ggml_cont(ctx, ggml_transpose(ctx, att));
+
+    // Weighted mean and std → [2C, 1]
+    ggml_tensor* wx = ggml_mul(ctx, att, x);
+    ggml_tensor* wm = ggml_cont(ctx, ggml_transpose(ctx, ggml_sum_rows(ctx, ggml_cont(ctx, ggml_transpose(ctx, wx)))));
+    ggml_tensor* wmCT = ggml_repeat(ctx, wm, x);
+    ggml_tensor* dd = ggml_sub(ctx, x, wmCT);
+    ggml_tensor* ws = ggml_sqrt(
+        ctx,
+        ggml_cont(ctx,
+                  ggml_transpose(
+                      ctx, ggml_sum_rows(
+                               ctx, ggml_cont(ctx, ggml_transpose(ctx, ggml_mul(ctx, att, ggml_mul(ctx, dd, dd))))))));
+    return ggml_concat(ctx, wm, ws, 0); // [2C, 1]
+}
+
+// Build the full ECAPA-TDNN graph. Input: [n_mels=100, T] mel spectrogram.
+// Output: [512] speaker embedding.
+static ggml_cgraph* build_ecapa_graph(indextts_voc_context* c, int T_mel) {
+    auto& ts = c->tensors;
+    const size_t n_nodes = 8192;
+    std::vector<uint8_t> meta(ggml_tensor_overhead() * n_nodes + ggml_graph_overhead_custom(n_nodes, false));
+    ggml_init_params ip = {meta.size(), meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, n_nodes, false);
+
+    // Input: [100, T]
+    ggml_tensor* h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 100, T_mel);
+    ggml_set_name(h, "ecapa_mel");
+    ggml_set_input(h);
+
+    // Block 0: initial TDNN (100→512, k=5)
+    h = ecapa_tdnn_bn_relu(ctx0, h, T(ts, "se.b.0.c.weight"), T(ts, "se.b.0.c.bias"), T(ts, "se.b.0.n.weight"),
+                           T(ts, "se.b.0.n.bias"), T(ts, "se.b.0.n.rm"), T(ts, "se.b.0.n.rv"), 1);
+
+    // 3 SE-Res2Net blocks with dilations 2, 3, 4
+    static const int dilations[3] = {2, 3, 4};
+    ggml_tensor* blk_outs[3];
+    for (int i = 0; i < 3; i++) {
+        h = ecapa_se_res2net(ctx0, h, ts, i + 1, dilations[i]);
+        blk_outs[i] = h;
+    }
+
+    // MFA: concatenate outputs of 3 blocks → TDNN (1536→1536, k=1)
+    ggml_tensor* mfa_in = ggml_concat(ctx0, ggml_concat(ctx0, blk_outs[0], blk_outs[1], 0), blk_outs[2], 0);
+    h = ecapa_tdnn_bn_relu(ctx0, mfa_in, T(ts, "se.mfa.c.weight"), T(ts, "se.mfa.c.bias"), T(ts, "se.mfa.n.weight"),
+                           T(ts, "se.mfa.n.bias"), T(ts, "se.mfa.n.rm"), T(ts, "se.mfa.n.rv"), 1);
+
+    // ASP: attentive stat pooling → [3072, 1]
+    h = ecapa_asp(ctx0, h, ts);
+
+    // ASP BatchNorm
+    h = ecapa_bn(ctx0, h, T(ts, "se.asp_bn.norm.weight"), T(ts, "se.asp_bn.norm.bias"), T(ts, "se.asp_bn.norm.rm"),
+                 T(ts, "se.asp_bn.norm.rv"));
+
+    // Final FC: [3072] → [512]
+    ggml_tensor* fcw = T(ts, "se.fc.conv.weight");
+    ggml_tensor* fcb = T(ts, "se.fc.conv.bias");
+    auto fc2d = ggml_reshape_2d(ctx0, fcw, fcw->ne[1], fcw->ne[2]);
+    h = ggml_add(ctx0, ggml_mul_mat(ctx0, fc2d, h), fcb);
+    h = ggml_reshape_1d(ctx0, h, 512);
+
+    ggml_set_name(h, "spk_emb_out");
+    ggml_set_output(h);
+    ggml_build_forward_expand(gf, h);
+    ggml_free(ctx0);
+    return gf;
+}
+
+// Compute 100-band mel spectrogram for ECAPA-TDNN.
+// Input: mono float32 PCM at 24kHz.
+// Output: (T, 100) row-major float32 mel, T written to *T_out.
+static std::vector<float> compute_ecapa_mel(const float* pcm, int n_samples, int* T_out) {
+    const int n_fft = 1024, hop = 256, n_mels = 100, sr = 24000;
+    const float fmin = 0.0f, fmax = 12000.0f;
+    const int pad = (n_fft - hop) / 2; // 384
+
+    // Reflect-pad audio
+    std::vector<float> audio_p(n_samples + 2 * pad, 0.0f);
+    for (int i = 0; i < pad; i++) {
+        audio_p[i] = pcm[std::min(pad - i, n_samples - 1)];
+    }
+    for (int i = 0; i < n_samples; i++) {
+        audio_p[pad + i] = pcm[i];
+    }
+    for (int i = 0; i < pad; i++) {
+        audio_p[pad + n_samples + i] = pcm[std::max(n_samples - 2 - i, 0)];
+    }
+
+    // Periodic Hann window
+    std::vector<float> hann(n_fft);
+    for (int i = 0; i < n_fft; i++) {
+        hann[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (float)n_fft));
+    }
+
+    const int n_freqs = n_fft / 2 + 1;
+    auto mel_fb = core_mel::build_slaney_fb(sr, n_fft, n_mels, fmin, fmax);
+
+    core_mel::Params p;
+    p.n_fft = n_fft;
+    p.hop_length = hop;
+    p.win_length = n_fft;
+    p.n_mels = n_mels;
+    p.log_base = core_mel::LogBase::Ln;
+    p.log_guard = core_mel::LogGuard::MaxClip;
+    p.log_eps = 1e-5f;
+    p.spec_kind = core_mel::SpecKind::Magnitude;
+    p.norm = core_mel::Normalization::None;
+    p.layout = core_mel::Layout::TimeMels;
+    p.fb_layout = core_mel::FbLayout::MelsFreqs;
+    p.matmul = core_mel::MatmulPrecision::Double;
+    p.center_pad = false; // already reflect-padded
+
+    int T = 0;
+    auto mel = core_mel::compute(audio_p.data(), (int)audio_p.size(), hann.data(), n_fft, mel_fb.data(), n_freqs,
+                                 core_fft::fft_radix2_wrapper, p, T);
+    if (T_out) {
+        *T_out = T;
+    }
+    return mel;
+}
+
+// Run ECAPA-TDNN: PCM → 512d speaker embedding.
+static std::vector<float> run_ecapa_tdnn(indextts_voc_context* c, const float* ref_pcm, int ref_n_samples) {
+    // Check if ECAPA weights exist
+    if (!T(c->tensors, "se.b.0.c.weight")) {
+        if (c->verbosity >= 1) {
+            fprintf(stderr, "indextts-voc: ECAPA-TDNN weights not found, using zero speaker embedding\n");
+        }
+        return std::vector<float>(512, 0.0f);
+    }
+
+    // Compute mel
+    int T_mel = 0;
+    auto mel = compute_ecapa_mel(ref_pcm, ref_n_samples, &T_mel);
+    if (mel.empty() || T_mel <= 0) {
+        fprintf(stderr, "indextts-voc: failed to compute mel for ECAPA\n");
+        return std::vector<float>(512, 0.0f);
+    }
+
+    if (c->verbosity >= 1) {
+        fprintf(stderr, "indextts-voc: ECAPA mel: %d frames x 100 bands\n", T_mel);
+    }
+
+    // Convert mel (T, 100) row-major → ggml [C=100, T] flat layout
+    std::vector<float> mel_CT((size_t)100 * T_mel);
+    for (int t = 0; t < T_mel; t++) {
+        for (int ch = 0; ch < 100; ch++) {
+            mel_CT[(size_t)ch + (size_t)t * 100] = mel[(size_t)t * 100 + ch];
+        }
+    }
+
+    // Build and run graph
+    ggml_cgraph* gf = build_ecapa_graph(c, T_mel);
+    ggml_backend_sched_reset(c->sched);
+    if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
+        fprintf(stderr, "indextts-voc: failed to alloc ECAPA graph\n");
+        return std::vector<float>(512, 0.0f);
+    }
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "ecapa_mel"), mel_CT.data(), 0, mel_CT.size() * sizeof(float));
+
+    if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "indextts-voc: ECAPA compute failed\n");
+        return std::vector<float>(512, 0.0f);
+    }
+
+    std::vector<float> emb(512);
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "spk_emb_out"), emb.data(), 0, 512 * sizeof(float));
+
+    if (c->verbosity >= 1) {
+        float norm = 0.0f;
+        for (float v : emb) {
+            norm += v * v;
+        }
+        fprintf(stderr, "indextts-voc: ECAPA speaker embedding norm = %.4f\n", sqrtf(norm));
+    }
+
+    return emb;
 }
 
 // ── Build BigVGAN graph ─────────────────────────────────────────
@@ -602,6 +963,19 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
                 (float)n_samples / hp.sampling_rate, hp.sampling_rate);
     }
 
+    return result;
+}
+
+extern "C" float* indextts_voc_speaker_embed(struct indextts_voc_context* ctx, const float* ref_pcm, int n_samples) {
+    if (!ctx || !ref_pcm || n_samples <= 0) {
+        return nullptr;
+    }
+    auto emb = run_ecapa_tdnn(ctx, ref_pcm, n_samples);
+    if (emb.empty()) {
+        return nullptr;
+    }
+    float* result = (float*)malloc(emb.size() * sizeof(float));
+    std::memcpy(result, emb.data(), emb.size() * sizeof(float));
     return result;
 }
 

@@ -20,7 +20,10 @@
 
 #include "indextts.h"
 #include "indextts_voc.h"
+#include "core/fastconformer.h"
+#include "core/fft.h"
 #include "core/gguf_loader.h"
+#include "core/mel.h"
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -373,6 +376,13 @@ struct indextts_context {
     std::string vocoder_path;
     indextts_voc_context* voc = nullptr;
 
+    // Conditioning (ref audio → conditioning latents + speaker embedding)
+    std::vector<float> cond_latents; // [perceiver_n_latents * d_model] from Conformer+Perceiver
+    std::vector<float> spk_emb;      // [512] from ECAPA-TDNN
+
+    // Compute metadata for conditioning graph (separate from GPT graph)
+    std::vector<uint8_t> cond_compute_meta;
+
     // RNG
     uint64_t rng_state = 0xdeadbeefcafebabeULL;
 
@@ -504,6 +514,529 @@ static bool bind_model(indextts_context* c) {
     fprintf(stderr, "indextts: c_attn.w ne=(%lld,%lld) text_emb ne=(%lld,%lld) mel_head ne=(%lld,%lld)\n",
             (long long)b0.attn_qkv_w->ne[0], (long long)b0.attn_qkv_w->ne[1], (long long)m.text_emb_w->ne[0],
             (long long)m.text_emb_w->ne[1], (long long)m.mel_head_w->ne[0], (long long)m.mel_head_w->ne[1]);
+
+    return true;
+}
+
+// ── Reference mel computation ───────────────────────────────────
+//
+// Compute 100-band log-mel spectrogram from reference audio for the
+// conditioning encoder. The Python reference uses torchaudio's
+// mel spectrogram with 24kHz sample rate, 100 bands, hop=256, n_fft=1024.
+
+static std::vector<float> compute_ref_mel(const float* pcm, int n_samples, int* T_out) {
+    const int n_fft = 1024, hop = 256, n_mels = 100, sr = 24000;
+    const float fmin = 0.0f, fmax = 12000.0f;
+    const int pad = (n_fft - hop) / 2; // 384
+
+    // Reflect-pad audio
+    std::vector<float> audio_p(n_samples + 2 * pad, 0.0f);
+    for (int i = 0; i < pad; i++) {
+        audio_p[i] = pcm[std::min(pad - i, n_samples - 1)];
+    }
+    for (int i = 0; i < n_samples; i++) {
+        audio_p[pad + i] = pcm[i];
+    }
+    for (int i = 0; i < pad; i++) {
+        audio_p[pad + n_samples + i] = pcm[std::max(n_samples - 2 - i, 0)];
+    }
+
+    // Periodic Hann window
+    std::vector<float> hann(n_fft);
+    for (int i = 0; i < n_fft; i++) {
+        hann[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (float)n_fft));
+    }
+
+    const int n_freqs = n_fft / 2 + 1;
+    auto mel_fb = core_mel::build_slaney_fb(sr, n_fft, n_mels, fmin, fmax);
+
+    core_mel::Params p;
+    p.n_fft = n_fft;
+    p.hop_length = hop;
+    p.win_length = n_fft;
+    p.n_mels = n_mels;
+    p.log_base = core_mel::LogBase::Ln;
+    p.log_guard = core_mel::LogGuard::MaxClip;
+    p.log_eps = 1e-5f;
+    p.spec_kind = core_mel::SpecKind::Power;
+    p.norm = core_mel::Normalization::None;
+    // MelsTime layout: [n_mels, T] — needed for Conv2d subsampling
+    p.layout = core_mel::Layout::MelsTime;
+    p.fb_layout = core_mel::FbLayout::MelsFreqs;
+    p.matmul = core_mel::MatmulPrecision::Double;
+    p.center_pad = false;
+
+    int T = 0;
+    auto mel = core_mel::compute(audio_p.data(), (int)audio_p.size(), hann.data(), n_fft, mel_fb.data(), n_freqs,
+                                 core_fft::fft_radix2_wrapper, p, T);
+    if (T_out) {
+        *T_out = T;
+    }
+    return mel;
+}
+
+// ── Conformer conditioning encoder ─────────────────────────────
+//
+// Conv2d(1→512, 3x3, stride=2, padding=0) subsampling
+// → Linear(49*512 → 512)
+// → add sinusoidal pos_enc
+// → 6× Conformer blocks (no macaron FFN, single FFN per block)
+// → after_norm LayerNorm
+//
+// The Conformer block ordering follows IndexTTS Python (Espnet style):
+//   1. Self-attention (with rel-pos + untied biases)
+//   2. Conv module (pw1 → GLU → dw conv → BN → SiLU → pw2)
+//   3. FFN (up → ReLU → down)
+//   4. Final LN
+
+static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
+    const auto& hp = c->hp;
+    const int d = (int)hp.cond_d_model;         // 512
+    const int n_heads = (int)hp.cond_n_heads;   // 8
+    const int head_dim = d / n_heads;           // 64
+    const int n_layers = (int)hp.cond_n_layers; // 6
+    const float ln_eps = 1e-5f;
+    auto& ts = c->tensors;
+
+    const size_t n_nodes = 16384;
+    ggml_init_params ip = {c->cond_compute_meta.size(), c->cond_compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, n_nodes, false);
+
+    // Input: mel [n_mels=100, T_mel] as a 4D tensor [T_mel, 100, 1, 1]
+    // Conv2d expects [W, H, C_in, batch]
+    ggml_tensor* mel = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, T_mel, 100, 1, 1);
+    ggml_set_name(mel, "cond_mel");
+    ggml_set_input(mel);
+
+    // Conv2d(1→512, 3x3, stride=2, padding=0)
+    ggml_tensor* conv_w = core_gguf::try_get(ts, "cond_enc.embed.conv.0.weight");
+    ggml_tensor* conv_b = core_gguf::try_get(ts, "cond_enc.embed.conv.0.bias");
+    ggml_tensor* cur = ggml_conv_2d(ctx0, conv_w, mel, 2, 2, 0, 0, 1, 1);
+    if (conv_b) {
+        ggml_tensor* bias_4d = ggml_cast(ctx0, ggml_reshape_4d(ctx0, conv_b, 1, 1, conv_b->ne[0], 1), GGML_TYPE_F32);
+        cur = ggml_add(ctx0, cur, bias_4d);
+    }
+
+    // T_enc = floor((T_mel - 3) / 2) + 1, H_enc = floor((100 - 3) / 2) + 1 = 49
+    int T_enc = ((T_mel - 3) / 2) + 1;
+    int H_enc = 49; // (100 - 3) / 2 + 1
+
+    // Reshape to [H_enc * 512, T_enc] then linear → [512, T_enc]
+    // cur is [W=T_enc, H=H_enc, C=512, batch=1]
+    // Permute to [W, C, H, batch] → reshape to [H*C, T_enc]
+    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3)); // [T_enc, 512, H_enc, 1]
+    cur = ggml_reshape_2d(ctx0, cur, H_enc * 512, T_enc);       // [25088, T_enc]
+
+    ggml_tensor* lin_w = core_gguf::try_get(ts, "cond_enc.embed.out.0.weight");
+    ggml_tensor* lin_b = core_gguf::try_get(ts, "cond_enc.embed.out.0.bias");
+    cur = ggml_mul_mat(ctx0, lin_w, cur); // [512, T_enc]
+    if (lin_b) {
+        cur = ggml_add(ctx0, cur, lin_b);
+    }
+
+    // Add sinusoidal positional encoding (stored as [512, 5000, 1], F16)
+    ggml_tensor* pe_full = core_gguf::try_get(ts, "cond_enc.embed.pos_enc.pe");
+    if (pe_full && T_enc > 0) {
+        // pe_full is [512, 5000, 1], we need [512, T_enc]
+        ggml_tensor* pe = ggml_view_2d(ctx0, pe_full, d, T_enc, pe_full->nb[1], 0);
+        pe = ggml_cast(ctx0, pe, GGML_TYPE_F32);
+        cur = ggml_add(ctx0, cur, pe);
+    }
+
+    // Build relative position sinusoidal table for self-attention
+    auto pos_data = core_conformer::make_pos_enc(d, T_enc);
+    ggml_tensor* pos_enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, 2 * T_enc - 1);
+    ggml_set_name(pos_enc, "cond_pos_enc");
+    ggml_set_input(pos_enc);
+
+    // 6 Conformer blocks
+    for (int il = 0; il < n_layers; il++) {
+        auto fmt = [&](const char* s) -> std::string {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "cond_enc.enc.%d.%s", il, s);
+            return buf;
+        };
+
+        auto mm_bias = [&](ggml_tensor* w, ggml_tensor* x, ggml_tensor* b) {
+            ggml_tensor* y = ggml_mul_mat(ctx0, w, x);
+            return b ? ggml_add(ctx0, y, b) : y;
+        };
+
+        ggml_tensor* inpL = cur;
+
+        // ---- Self-Attention with rel-pos (Shaw-style with untied biases) ----
+        ggml_tensor* x = ggml_norm(ctx0, cur, ln_eps);
+        x = ggml_mul(ctx0, x, core_gguf::try_get(ts, fmt("norm_mha.weight").c_str()));
+        x = ggml_add(ctx0, x, core_gguf::try_get(ts, fmt("norm_mha.bias").c_str()));
+
+        ggml_tensor* Q = mm_bias(core_gguf::try_get(ts, fmt("sa.linear_q.weight").c_str()), x,
+                                 core_gguf::try_get(ts, fmt("sa.linear_q.bias").c_str()));
+        ggml_tensor* K_ = mm_bias(core_gguf::try_get(ts, fmt("sa.linear_k.weight").c_str()), x,
+                                  core_gguf::try_get(ts, fmt("sa.linear_k.bias").c_str()));
+        ggml_tensor* V = mm_bias(core_gguf::try_get(ts, fmt("sa.linear_v.weight").c_str()), x,
+                                 core_gguf::try_get(ts, fmt("sa.linear_v.bias").c_str()));
+        ggml_tensor* R = ggml_mul_mat(ctx0, core_gguf::try_get(ts, fmt("sa.linear_pos.weight").c_str()), pos_enc);
+
+        ggml_tensor* pos_u = core_gguf::try_get(ts, fmt("sa.pos_bias_u").c_str());
+        ggml_tensor* pos_v = core_gguf::try_get(ts, fmt("sa.pos_bias_v").c_str());
+        // Cast F16 pos biases to F32
+        ggml_tensor* pos_u_f32 = ggml_cast(ctx0, ggml_reshape_1d(ctx0, pos_u, d), GGML_TYPE_F32);
+        ggml_tensor* pos_v_f32 = ggml_cast(ctx0, ggml_reshape_1d(ctx0, pos_v, d), GGML_TYPE_F32);
+        ggml_tensor* Q_u = ggml_add(ctx0, Q, pos_u_f32);
+        ggml_tensor* Q_v = ggml_add(ctx0, Q, pos_v_f32);
+
+        Q_u = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q_u, head_dim, n_heads, T_enc), 0, 2, 1, 3);
+        Q_v = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q_v, head_dim, n_heads, T_enc), 0, 2, 1, 3);
+        K_ = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K_, head_dim, n_heads, T_enc), 0, 2, 1, 3);
+        R = ggml_permute(ctx0, ggml_reshape_3d(ctx0, R, head_dim, n_heads, 2 * T_enc - 1), 0, 2, 1, 3);
+
+        ggml_tensor* BD_raw = ggml_mul_mat(ctx0, ggml_cont(ctx0, R), Q_v);
+        ggml_tensor* BD = core_conformer::rel_shift(ctx0, BD_raw);
+
+        const float scale = 1.0f / sqrtf((float)head_dim);
+        ggml_tensor* BD_c = ggml_cont(ctx0, BD);
+        ggml_tensor* BD_scaled = ggml_scale(ctx0, BD_c, scale);
+        ggml_tensor* BD_mask = ggml_cast(ctx0, BD_scaled, GGML_TYPE_F16);
+
+        ggml_tensor* V_ =
+            ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, V, head_dim, n_heads, T_enc), 0, 2, 1, 3));
+
+        ggml_tensor* attn_out =
+            ggml_flash_attn_ext(ctx0, ggml_cont(ctx0, Q_u), ggml_cont(ctx0, K_), V_, BD_mask, scale, 0.0f, 0.0f);
+        attn_out = ggml_reshape_2d(ctx0, attn_out, d, T_enc);
+        attn_out = mm_bias(core_gguf::try_get(ts, fmt("sa.linear_out.weight").c_str()), attn_out,
+                           core_gguf::try_get(ts, fmt("sa.linear_out.bias").c_str()));
+        cur = ggml_add(ctx0, inpL, attn_out);
+
+        // ---- Conformer convolution module ----
+        ggml_tensor* inpConv = cur;
+        x = ggml_norm(ctx0, cur, ln_eps);
+        x = ggml_mul(ctx0, x, core_gguf::try_get(ts, fmt("norm_conv.weight").c_str()));
+        x = ggml_add(ctx0, x, core_gguf::try_get(ts, fmt("norm_conv.bias").c_str()));
+
+        // pw1: (512 → 1024), then GLU
+        ggml_tensor* pw1_w = core_gguf::try_get(ts, fmt("conv.pw1.weight").c_str());
+        ggml_tensor* pw1_b = core_gguf::try_get(ts, fmt("conv.pw1.bias").c_str());
+        ggml_tensor* pw1_w2d = ggml_reshape_2d(ctx0, pw1_w, d, 2 * d);
+        ggml_tensor* cnv = mm_bias(pw1_w2d, x, pw1_b);
+        ggml_tensor* cnv_gate = ggml_view_2d(ctx0, cnv, d, T_enc, cnv->nb[1], d * sizeof(float));
+        cnv = ggml_mul(ctx0, ggml_view_2d(ctx0, cnv, d, T_enc, cnv->nb[1], 0), ggml_sigmoid(ctx0, cnv_gate));
+
+        // dw conv (k=15, padding=7)
+        const int K_conv = 15;
+        ggml_tensor* dw_w = core_gguf::try_get(ts, fmt("conv.dw.weight").c_str());
+        ggml_tensor* dw_b = core_gguf::try_get(ts, fmt("conv.dw.bias").c_str());
+        ggml_tensor* dw_w_f32 = ggml_cast(ctx0, dw_w, GGML_TYPE_F32);
+        ggml_tensor* dw_w_4d = ggml_reshape_4d(ctx0, dw_w_f32, K_conv, 1, 1, d);
+        cnv = ggml_cont(ctx0, ggml_transpose(ctx0, cnv)); // (d, T_enc) → (T_enc, d)
+        cnv = ggml_reshape_4d(ctx0, cnv, T_enc, 1, d, 1);
+        cnv = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, cnv, 1, 1, (K_conv - 1) / 2, 0, 1, 1);
+        cnv = ggml_cont(ctx0, ggml_permute(ctx0, cnv, 1, 2, 0, 3));
+        cnv = ggml_reshape_2d(ctx0, cnv, d, T_enc);
+        if (dw_b) {
+            cnv = ggml_add(ctx0, cnv, ggml_reshape_2d(ctx0, dw_b, d, 1));
+        }
+
+        // BatchNorm in conv module
+        ggml_tensor* conv_norm_w = core_gguf::try_get(ts, fmt("conv.norm.weight").c_str());
+        ggml_tensor* conv_norm_b = core_gguf::try_get(ts, fmt("conv.norm.bias").c_str());
+        if (conv_norm_w && conv_norm_b) {
+            // This is a LayerNorm (not BatchNorm) in the Conformer conv module
+            cnv = ggml_norm(ctx0, cnv, ln_eps);
+            cnv = ggml_mul(ctx0, cnv, conv_norm_w);
+            cnv = ggml_add(ctx0, cnv, conv_norm_b);
+        }
+        cnv = ggml_silu(ctx0, cnv);
+
+        // pw2: (512 → 512)
+        ggml_tensor* pw2_w = core_gguf::try_get(ts, fmt("conv.pw2.weight").c_str());
+        ggml_tensor* pw2_b = core_gguf::try_get(ts, fmt("conv.pw2.bias").c_str());
+        ggml_tensor* pw2_w2d = ggml_reshape_2d(ctx0, pw2_w, d, d);
+        cnv = mm_bias(pw2_w2d, cnv, pw2_b);
+        cur = ggml_add(ctx0, inpConv, cnv);
+
+        // ---- FFN ----
+        ggml_tensor* inpFF = cur;
+        x = ggml_norm(ctx0, cur, ln_eps);
+        x = ggml_mul(ctx0, x, core_gguf::try_get(ts, fmt("norm_ff.weight").c_str()));
+        x = ggml_add(ctx0, x, core_gguf::try_get(ts, fmt("norm_ff.bias").c_str()));
+
+        x = mm_bias(core_gguf::try_get(ts, fmt("ff.w_1.weight").c_str()), x,
+                    core_gguf::try_get(ts, fmt("ff.w_1.bias").c_str()));
+        x = ggml_silu(ctx0, x);
+        x = mm_bias(core_gguf::try_get(ts, fmt("ff.w_2.weight").c_str()), x,
+                    core_gguf::try_get(ts, fmt("ff.w_2.bias").c_str()));
+        cur = ggml_add(ctx0, inpFF, x);
+
+        // ---- Final LN ----
+        cur = ggml_norm(ctx0, cur, ln_eps);
+        cur = ggml_mul(ctx0, cur, core_gguf::try_get(ts, fmt("norm_final.weight").c_str()));
+        cur = ggml_add(ctx0, cur, core_gguf::try_get(ts, fmt("norm_final.bias").c_str()));
+    }
+
+    // After-norm
+    ggml_tensor* after_w = core_gguf::try_get(ts, "cond_enc.after_norm.weight");
+    ggml_tensor* after_b = core_gguf::try_get(ts, "cond_enc.after_norm.bias");
+    if (after_w && after_b) {
+        cur = ggml_norm(ctx0, cur, ln_eps);
+        cur = ggml_mul(ctx0, cur, after_w);
+        cur = ggml_add(ctx0, cur, after_b);
+    }
+
+    // cur is [512, T_enc] — the conformer output
+    ggml_set_name(cur, "conformer_out");
+    ggml_set_output(cur);
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
+// ── Perceiver resampler ────────────────────────────────────────
+//
+// Takes conformer output (512, T_enc) and produces (d_model=1280, 32)
+// conditioning latents via cross-attention.
+//
+// Architecture:
+//   latents: [1280, 32] learned queries
+//   proj_context: Linear(512→1280) projects conformer output
+//   2 layers: cross-attn + GEGLU FFN
+//   Final RMSNorm
+
+static ggml_cgraph* build_perceiver_graph(indextts_context* c, int T_enc) {
+    auto& ts = c->tensors;
+    const int d_perc = (int)c->hp.perceiver_d_model;      // 1280
+    const int n_latents = (int)c->hp.perceiver_n_latents; // 32
+    const int n_layers_p = (int)c->hp.perceiver_n_layers; // 2
+
+    // Cross-attention dimensions from weight shapes
+    // to_q: [1280, 512] — d_q = 512
+    // to_kv: [1280, 1024] — d_k = d_v = 512 each
+    // to_out: [512, 1280] — back to 1280
+    const int d_q = 512;
+    // Number of heads: d_q / head_dim. The Python model uses 8 heads.
+    const int n_heads_p = 8;
+    const int head_dim_p = d_q / n_heads_p; // 64
+
+    const size_t n_nodes = 4096;
+    ggml_init_params ip = {c->cond_compute_meta.size(), c->cond_compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, n_nodes, false);
+
+    // Input: conformer output [512, T_enc]
+    ggml_tensor* context = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, (int)c->hp.cond_d_model, T_enc);
+    ggml_set_name(context, "perc_context");
+    ggml_set_input(context);
+
+    // Project context: 512 → 1280
+    ggml_tensor* proj_w = core_gguf::try_get(ts, "perc.proj_context.weight");
+    ggml_tensor* proj_b = core_gguf::try_get(ts, "perc.proj_context.bias");
+    ggml_tensor* proj_ctx = ggml_mul_mat(ctx0, proj_w, context); // [1280, T_enc]
+    if (proj_b) {
+        proj_ctx = ggml_add(ctx0, proj_ctx, proj_b);
+    }
+
+    // Learned latent queries: [1280, 32]
+    ggml_tensor* latents_w = core_gguf::try_get(ts, "perc.latents");
+    // Copy latents to a compute tensor
+    ggml_tensor* latents = ggml_cast(ctx0, latents_w, GGML_TYPE_F32); // [1280, 32]
+
+    for (int il = 0; il < n_layers_p; il++) {
+        char key[128];
+
+        // ---- Cross-attention ----
+        // Q from latents only
+        snprintf(key, sizeof(key), "perc.layers.%d.0.to_q.weight", il);
+        ggml_tensor* q_w = core_gguf::try_get(ts, key);
+        ggml_tensor* Q = ggml_mul_mat(ctx0, q_w, latents); // [512, 32]
+
+        // KV from [latents; projected_context] (cross_attn_include_queries=True)
+        // Concatenate along sequence dimension: [1280, 32+T_enc]
+        ggml_tensor* kv_input = ggml_concat(ctx0, latents, proj_ctx, 1); // [1280, 32+T_enc]
+        int T_kv = n_latents + T_enc;
+
+        snprintf(key, sizeof(key), "perc.layers.%d.0.to_kv.weight", il);
+        ggml_tensor* kv_w = core_gguf::try_get(ts, key);
+        ggml_tensor* KV = ggml_mul_mat(ctx0, kv_w, kv_input); // [1024, T_kv]
+
+        // Split KV into K and V, each [512, T_kv]
+        ggml_tensor* K_p = ggml_view_2d(ctx0, KV, d_q, T_kv, KV->nb[1], 0);
+        ggml_tensor* V_p = ggml_view_2d(ctx0, KV, d_q, T_kv, KV->nb[1], d_q * sizeof(float));
+        K_p = ggml_cont(ctx0, K_p);
+        V_p = ggml_cont(ctx0, V_p);
+
+        // Reshape for multi-head attention
+        // Q: [512, 32] → [head_dim, n_heads, 32] → permute to [head_dim, 32, n_heads]
+        Q = ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q, head_dim_p, n_heads_p, n_latents), 0, 2, 1, 3);
+        K_p = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K_p, head_dim_p, n_heads_p, T_kv), 0, 2, 1, 3);
+        V_p = ggml_permute(ctx0, ggml_reshape_3d(ctx0, V_p, head_dim_p, n_heads_p, T_kv), 0, 2, 1, 3);
+
+        // Flash attention (no causal mask for cross-attention)
+        const float scale_p = 1.0f / sqrtf((float)head_dim_p);
+        ggml_tensor* attn = ggml_flash_attn_ext(ctx0, ggml_cont(ctx0, Q), ggml_cont(ctx0, K_p), ggml_cont(ctx0, V_p),
+                                                nullptr, scale_p, 0.0f, 0.0f);
+        attn = ggml_reshape_2d(ctx0, attn, d_q, n_latents); // [512, 32]
+
+        // Output projection: [512, 32] → [1280, 32]
+        snprintf(key, sizeof(key), "perc.layers.%d.0.to_out.weight", il);
+        ggml_tensor* out_w = core_gguf::try_get(ts, key);
+        attn = ggml_mul_mat(ctx0, out_w, attn); // [1280, 32]
+
+        latents = ggml_add(ctx0, latents, attn);
+
+        // ---- GEGLU FFN ----
+        // gate+up: [1280, 32] → [3412, 32]
+        snprintf(key, sizeof(key), "perc.layers.%d.1.0.weight", il);
+        ggml_tensor* ffn_up_w = core_gguf::try_get(ts, key);
+        snprintf(key, sizeof(key), "perc.layers.%d.1.0.bias", il);
+        ggml_tensor* ffn_up_b = core_gguf::try_get(ts, key);
+        ggml_tensor* ffn_h = ggml_mul_mat(ctx0, ffn_up_w, latents);
+        if (ffn_up_b) {
+            ffn_h = ggml_add(ctx0, ffn_h, ffn_up_b);
+        }
+        // Split at midpoint: 3412/2 = 1706
+        const int inner = 1706;
+        ggml_tensor* ffn_gate = ggml_view_2d(ctx0, ffn_h, inner, n_latents, ffn_h->nb[1], 0);
+        ggml_tensor* ffn_up = ggml_view_2d(ctx0, ffn_h, inner, n_latents, ffn_h->nb[1], inner * sizeof(float));
+        ffn_gate = ggml_cont(ctx0, ffn_gate);
+        ffn_up = ggml_cont(ctx0, ffn_up);
+        ggml_tensor* ffn_act = ggml_mul(ctx0, ggml_gelu(ctx0, ffn_gate), ffn_up);
+
+        // down: [1706, 32] → [1280, 32]
+        snprintf(key, sizeof(key), "perc.layers.%d.1.2.weight", il);
+        ggml_tensor* ffn_down_w = core_gguf::try_get(ts, key);
+        snprintf(key, sizeof(key), "perc.layers.%d.1.2.bias", il);
+        ggml_tensor* ffn_down_b = core_gguf::try_get(ts, key);
+        ggml_tensor* ffn_out = ggml_mul_mat(ctx0, ffn_down_w, ffn_act);
+        if (ffn_down_b) {
+            ffn_out = ggml_add(ctx0, ffn_out, ffn_down_b);
+        }
+
+        latents = ggml_add(ctx0, latents, ffn_out);
+    }
+
+    // Final RMSNorm
+    ggml_tensor* norm_gamma = core_gguf::try_get(ts, "perc.norm.gamma");
+    if (norm_gamma) {
+        latents = ggml_rms_norm(ctx0, latents, 1e-8f);
+        latents = ggml_mul(ctx0, latents, norm_gamma);
+    }
+
+    // Output: [1280, 32] = [d_model, n_latents]
+    ggml_set_name(latents, "perceiver_out");
+    ggml_set_output(latents);
+    ggml_build_forward_expand(gf, latents);
+    ggml_free(ctx0);
+    return gf;
+}
+
+// ── Run conditioning pipeline ───────────────────────────────────
+//
+// ref_pcm → mel → Conformer → Perceiver → 32 latent vectors [1280, 32]
+//
+// Returns the 32 conditioning latent vectors as a flat float array of
+// size (perceiver_n_latents * d_model). Stored in indextts_context for
+// reuse across prefill and latent passes.
+
+static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_n_samples) {
+    const int D = (int)c->hp.d_model;
+    const int n_latents = (int)c->hp.perceiver_n_latents;
+    const int cond_d = (int)c->hp.cond_d_model;
+
+    // Check if conditioning tensors exist
+    if (!core_gguf::try_get(c->tensors, "cond_enc.embed.conv.0.weight")) {
+        if (c->params.verbosity >= 1) {
+            fprintf(stderr, "indextts: conditioning encoder tensors not found, using zero latents\n");
+        }
+        c->cond_latents.assign((size_t)n_latents * D, 0.0f);
+        return true;
+    }
+
+    // Allocate conditioning compute metadata if needed
+    if (c->cond_compute_meta.empty()) {
+        c->cond_compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
+    }
+
+    // Step 1: Compute reference mel spectrogram
+    int T_mel = 0;
+    auto mel = compute_ref_mel(ref_pcm, ref_n_samples, &T_mel);
+    if (mel.empty() || T_mel <= 0) {
+        fprintf(stderr, "indextts: failed to compute reference mel\n");
+        c->cond_latents.assign((size_t)n_latents * D, 0.0f);
+        return true;
+    }
+
+    if (c->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: ref mel: %d frames x 100 bands\n", T_mel);
+    }
+
+    // Step 2: Run Conformer encoder
+    int T_enc = ((T_mel - 3) / 2) + 1;
+    {
+        ggml_cgraph* gf = build_cond_enc_graph(c, T_mel);
+        ggml_backend_sched_reset(c->sched);
+        if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
+            fprintf(stderr, "indextts: failed to alloc Conformer graph\n");
+            c->cond_latents.assign((size_t)n_latents * D, 0.0f);
+            return true;
+        }
+
+        // mel is [n_mels, T_mel] in MelsTime layout — set as 4D [T_mel, 100, 1, 1]
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "cond_mel"), mel.data(), 0, mel.size() * sizeof(float));
+
+        // Set positional encoding
+        auto pos_data = core_conformer::make_pos_enc(cond_d, T_enc);
+        ggml_tensor* pos_t = ggml_graph_get_tensor(gf, "cond_pos_enc");
+        if (pos_t) {
+            ggml_backend_tensor_set(pos_t, pos_data.data(), 0, pos_data.size() * sizeof(float));
+        }
+
+        if (ggml_backend_sched_graph_compute(c->sched, gf) != GGML_STATUS_SUCCESS) {
+            fprintf(stderr, "indextts: Conformer compute failed\n");
+            c->cond_latents.assign((size_t)n_latents * D, 0.0f);
+            return true;
+        }
+
+        // Read conformer output: [512, T_enc]
+        ggml_tensor* out = ggml_graph_get_tensor(gf, "conformer_out");
+        std::vector<float> conf_out((size_t)cond_d * T_enc);
+        ggml_backend_tensor_get(out, conf_out.data(), 0, conf_out.size() * sizeof(float));
+
+        if (c->params.verbosity >= 1) {
+            fprintf(stderr, "indextts: Conformer output: [%d, %d]\n", cond_d, T_enc);
+        }
+
+        // Step 3: Run Perceiver resampler
+        ggml_cgraph* pgf = build_perceiver_graph(c, T_enc);
+        ggml_backend_sched_reset(c->sched);
+        if (!ggml_backend_sched_alloc_graph(c->sched, pgf)) {
+            fprintf(stderr, "indextts: failed to alloc Perceiver graph\n");
+            c->cond_latents.assign((size_t)n_latents * D, 0.0f);
+            return true;
+        }
+
+        ggml_backend_tensor_set(ggml_graph_get_tensor(pgf, "perc_context"), conf_out.data(), 0,
+                                conf_out.size() * sizeof(float));
+
+        if (ggml_backend_sched_graph_compute(c->sched, pgf) != GGML_STATUS_SUCCESS) {
+            fprintf(stderr, "indextts: Perceiver compute failed\n");
+            c->cond_latents.assign((size_t)n_latents * D, 0.0f);
+            return true;
+        }
+
+        // Read perceiver output: [1280, 32]
+        ggml_tensor* perc_out = ggml_graph_get_tensor(pgf, "perceiver_out");
+        c->cond_latents.resize((size_t)n_latents * D);
+        ggml_backend_tensor_get(perc_out, c->cond_latents.data(), 0, c->cond_latents.size() * sizeof(float));
+
+        if (c->params.verbosity >= 1) {
+            float norm = 0.0f;
+            for (float v : c->cond_latents) {
+                norm += v * v;
+            }
+            fprintf(stderr, "indextts: Perceiver output: [%d, %d] norm=%.4f\n", D, n_latents, sqrtf(norm));
+        }
+    }
 
     return true;
 }
@@ -876,7 +1409,10 @@ static float* run_gpt_latent(indextts_context* c, const std::vector<int32_t>& te
     std::vector<float> embeds((size_t)total_len * D, 0.0f);
     int pos = 0;
 
-    // 1. Conditioning latents — zeros (Phase 1)
+    // 1. Conditioning latents from Conformer+Perceiver (or zeros)
+    if (!c->cond_latents.empty() && (int)c->cond_latents.size() == cond_len * D) {
+        std::memcpy(embeds.data(), c->cond_latents.data(), (size_t)cond_len * D * sizeof(float));
+    }
     pos += cond_len;
 
     // 2. Text embeddings
@@ -977,7 +1513,6 @@ static std::vector<float> build_prefill_embeds(indextts_context* c, const std::v
     std::vector<float> mel_pos_table((size_t)c->hp.mel_pos_size * D);
     tensor_get_f32(m.mel_pos_emb_w, mel_pos_table.data(), mel_pos_table.size());
 
-    // Conditioning: 32 dummy zero latents (Phase 1)
     const int cond_len = (int)c->hp.perceiver_n_latents;
     const int text_len = (int)text_tokens.size();
     const int total_len = cond_len + text_len + 1; // +1 for start_mel
@@ -986,8 +1521,15 @@ static std::vector<float> build_prefill_embeds(indextts_context* c, const std::v
 
     int pos = 0;
 
-    // 1. Conditioning latents — zeros for now (Phase 1)
-    // When Conformer/Perceiver are wired up, this will be filled with actual latents
+    // 1. Conditioning latents from Conformer+Perceiver (or zeros if not computed)
+    if (!c->cond_latents.empty() && (int)c->cond_latents.size() == cond_len * D) {
+        // cond_latents is [D, n_latents] in ggml layout (ne[0]=D, ne[1]=n_latents)
+        // i.e. flat: latent[i][j] = cond_latents[j + i*D] — already row-major per-latent
+        // embeds wants [total_len, D] row-major, so embeds[pos*D..pos*D+D-1] = latent[pos]
+        // ggml [D, N] memory: element(d, n) = data[d + n*D]
+        // So latent n is at cond_latents[n*D .. n*D+D-1] — matches row-major per-latent
+        std::memcpy(embeds.data(), c->cond_latents.data(), (size_t)cond_len * D * sizeof(float));
+    }
     pos += cond_len;
 
     // 2. Text embeddings: text_emb(tok) + text_pos_emb(i)
@@ -1162,9 +1704,17 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
     }
     *out_n = 0;
 
-    // Suppress unused parameter warnings (Phase 1: ref audio not processed yet)
-    (void)ref_pcm;
-    (void)ref_n_samples;
+    // Run conditioning pipeline if reference audio is provided
+    if (ref_pcm && ref_n_samples > 0) {
+        if (!run_conditioning(ctx, ref_pcm, ref_n_samples)) {
+            fprintf(stderr, "indextts: conditioning pipeline failed\n");
+        }
+    } else {
+        // No reference audio — use zero conditioning
+        const int D = (int)ctx->hp.d_model;
+        const int n_lat = (int)ctx->hp.perceiver_n_latents;
+        ctx->cond_latents.assign((size_t)n_lat * D, 0.0f);
+    }
 
     // 1. Tokenize text
     std::vector<int32_t> text_tokens;
@@ -1329,11 +1879,25 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
         return nullptr;
     }
 
-    // Step 4: Run BigVGAN vocoder
+    // Step 4: Compute speaker embedding from reference audio via ECAPA-TDNN
+    float* spk_emb = nullptr;
+    if (ref_pcm && ref_n_samples > 0 && ctx->voc) {
+        spk_emb = indextts_voc_speaker_embed(ctx->voc, ref_pcm, ref_n_samples);
+        if (spk_emb && ctx->params.verbosity >= 1) {
+            float norm = 0.0f;
+            for (int i = 0; i < 512; i++) {
+                norm += spk_emb[i] * spk_emb[i];
+            }
+            fprintf(stderr, "indextts: speaker embedding norm = %.4f\n", sqrtf(norm));
+        }
+    }
+
+    // Step 5: Run BigVGAN vocoder
     // latent is [n_codes, 1280] — the vocoder expects this as-is.
     int n_audio = 0;
-    float* pcm = indextts_voc_generate(ctx->voc, latent, n_codes, nullptr, &n_audio);
+    float* pcm = indextts_voc_generate(ctx->voc, latent, n_codes, spk_emb, &n_audio);
     free(latent);
+    free(spk_emb);
 
     if (!pcm || n_audio <= 0) {
         fprintf(stderr, "indextts: BigVGAN vocoder failed\n");

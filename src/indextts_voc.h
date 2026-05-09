@@ -25,6 +25,10 @@ struct indextts_voc_context* indextts_voc_init(const char* path, int n_threads, 
 float* indextts_voc_generate(struct indextts_voc_context* ctx, const float* latent, int T, const float* spk_emb,
                              int* out_n);
 
+// Compute ECAPA-TDNN speaker embedding from reference PCM (24kHz mono float32).
+// Returns malloc'd float[512], caller frees with free(). Returns nullptr on error.
+float* indextts_voc_speaker_embed(struct indextts_voc_context* ctx, const float* ref_pcm, int n_samples);
+
 void indextts_voc_free(struct indextts_voc_context* ctx);
 
 #ifdef __cplusplus
