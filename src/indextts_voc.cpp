@@ -80,6 +80,15 @@ static ggml_tensor* T(const std::map<std::string, ggml_tensor*>& m, const std::s
 
 } // namespace
 
+// Anti-aliased SnakeBeta params — defined here so the context can hold them
+struct aa_snake_params {
+    std::vector<float> alpha;     // exp(log_alpha), per channel
+    std::vector<float> beta;      // exp(log_beta), per channel
+    std::vector<float> us_filter; // upsample filter [12]
+    std::vector<float> ds_filter; // downsample filter [12]
+    int C;
+};
+
 // ── Context ─────────────────────────────────────────────────────
 
 struct indextts_voc_context {
@@ -98,7 +107,17 @@ struct indextts_voc_context {
     int n_threads = 4;
     int verbosity = 1;
 
+    // Anti-aliased SnakeBeta params (freed after each graph compute)
+    std::vector<aa_snake_params*> aa_params;
+
+    void clear_aa_params() {
+        for (auto* p : aa_params)
+            delete p;
+        aa_params.clear();
+    }
+
     ~indextts_voc_context() {
+        clear_aa_params();
         if (sched) {
             ggml_backend_sched_free(sched);
         }
@@ -119,30 +138,147 @@ struct indextts_voc_context {
 
 namespace {
 
-// ── SnakeBeta as ggml ops ───────────────────────────────────────
+// ── Anti-aliased SnakeBeta activation ──────────────────────────
 //
-// SnakeBeta(x, log_alpha, log_beta):
-//   alpha = exp(log_alpha)  -- per channel
-//   beta  = exp(log_beta)   -- per channel
-//   x_out = x + (1/beta) * sin(alpha * x)^2
+// Activation1d wraps SnakeBeta with 2x anti-aliased resampling:
+//   1. Upsample 2x: replicate-pad(5) → conv_transpose1d(filter, stride=2) * 2 → crop
+//   2. Apply SnakeBeta: x + (1/exp(log_beta)) * sin(exp(log_alpha) * x)^2
+//   3. Downsample 2x: replicate-pad(5,6) → conv1d(filter, stride=2)
 //
-// In ggml: alpha/beta are reshaped to (1, C) for broadcasting over (T, C).
-// We use ggml_exp on the log params, then:
-//   ax = x * alpha
-//   sin_ax = sin(ax)
-//   sin2 = sin_ax * sin_ax
-//   out = x + sin2 / beta
+// The filter is a 12-tap Kaiser-windowed sinc, shared across all channels.
+// Since ggml lacks grouped conv, this is implemented as a custom CPU op.
 
-static ggml_tensor* snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor* log_alpha, ggml_tensor* log_beta) {
+// Anti-aliased SnakeBeta as a custom ggml op.
+// Input x: [T, C] (time-first). Output: same shape.
+static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* src, int /*ith*/, int /*nth*/,
+                             void* userdata) {
+    const auto* p = (const aa_snake_params*)userdata;
+    const int T = (int)src->ne[0];
+    const int C = (int)src->ne[1];
+    const float* x_in = (const float*)src->data;
+    float* x_out = (float*)dst->data;
+    const int K = (int)p->us_filter.size();                // 12
+    const int up_pad = K / 2 - 1;                          // 5
+    const int up_pad_left = up_pad * 2 + (K - 2) / 2;      // 15
+    const int up_pad_right = up_pad * 2 + (K - 2 + 1) / 2; // 15
+    const int ds_pad_left = K / 2 - 1;                     // 5
+    const int ds_pad_right = K / 2;                        // 6
+
+    for (int c = 0; c < C; c++) {
+        float alpha_c = (c < p->C) ? p->alpha[c] : 1.0f;
+        float inv_beta_c = (c < p->C) ? (1.0f / p->beta[c]) : 1.0f;
+
+        // 1. Replicate-pad the channel: pad by up_pad on each side
+        int T_padded = T + 2 * up_pad;
+        std::vector<float> padded(T_padded);
+        for (int t = 0; t < up_pad; t++)
+            padded[t] = x_in[0 * C + c]; // replicate first
+        for (int t = 0; t < T; t++)
+            padded[up_pad + t] = x_in[t * C + c]; // ne[0]=T stride
+        for (int t = 0; t < up_pad; t++)
+            padded[up_pad + T + t] = x_in[(T - 1) * C + c]; // replicate last
+
+        // 2. Conv_transpose1d with filter at stride=2, then scale by 2
+        int T_up = (T_padded - 1) * 2 + K;
+        std::vector<float> upsampled(T_up, 0.0f);
+        for (int t = 0; t < T_padded; t++) {
+            for (int k = 0; k < K; k++) {
+                upsampled[t * 2 + k] += padded[t] * p->us_filter[k] * 2.0f;
+            }
+        }
+
+        // 3. Crop: remove up_pad_left from start, up_pad_right from end
+        int T_cropped = T_up - up_pad_left - up_pad_right;
+        float* cropped = upsampled.data() + up_pad_left;
+
+        // 4. Apply SnakeBeta: x + (1/beta) * sin(alpha * x)^2
+        for (int t = 0; t < T_cropped; t++) {
+            float v = cropped[t];
+            float s = sinf(alpha_c * v);
+            cropped[t] = v + inv_beta_c * s * s;
+        }
+
+        // 5. Downsample: replicate-pad(ds_pad_left, ds_pad_right) → conv1d(filter, stride=2)
+        int T_ds_padded = T_cropped + ds_pad_left + ds_pad_right;
+        std::vector<float> ds_padded(T_ds_padded);
+        for (int t = 0; t < ds_pad_left; t++)
+            ds_padded[t] = cropped[0];
+        for (int t = 0; t < T_cropped; t++)
+            ds_padded[ds_pad_left + t] = cropped[t];
+        for (int t = 0; t < ds_pad_right; t++)
+            ds_padded[ds_pad_left + T_cropped + t] = cropped[T_cropped - 1];
+
+        int T_out_ds = (T_ds_padded - K) / 2 + 1;
+        // We expect T_out_ds == T (anti-aliased activation preserves length)
+        int T_final = std::min(T_out_ds, T);
+        for (int t = 0; t < T_final; t++) {
+            float sum = 0;
+            for (int k = 0; k < K; k++) {
+                sum += ds_padded[t * 2 + k] * p->ds_filter[k];
+            }
+            x_out[t * C + c] = sum;
+        }
+        // Zero-fill any remaining (shouldn't happen if padding is correct)
+        for (int t = T_final; t < T; t++) {
+            x_out[t * C + c] = 0.0f;
+        }
+    }
+}
+
+// Create an anti-aliased SnakeBeta node in the graph.
+// Reads log_alpha/log_beta/filter tensors from the loaded GGUF at init time,
+// precomputes exp(log_alpha) and exp(log_beta), and stores them in a persistent
+// params struct. The custom op applies the full Activation1d pipeline.
+static ggml_tensor* aa_snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor* log_alpha, ggml_tensor* log_beta,
+                                  ggml_tensor* us_filter_t, ggml_tensor* ds_filter_t,
+                                  std::vector<aa_snake_params*>& params_storage) {
     if (!log_alpha || !log_beta) {
         return x;
     }
-    int C = (int)log_alpha->ne[0];
 
-    // Reshape to (1, C) for broadcasting over x which is (T, C)
+    auto* p = new aa_snake_params();
+    params_storage.push_back(p); // ownership transferred, freed after graph compute
+
+    int C = (int)log_alpha->ne[0];
+    p->C = C;
+    p->alpha.resize(C);
+    p->beta.resize(C);
+
+    // Read log params from weight tensors (they're in the loaded buffer)
+    std::vector<float> la(C), lb(C);
+    ggml_backend_tensor_get(log_alpha, la.data(), 0, C * sizeof(float));
+    ggml_backend_tensor_get(log_beta, lb.data(), 0, C * sizeof(float));
+    for (int i = 0; i < C; i++) {
+        p->alpha[i] = expf(la[i]);
+        p->beta[i] = expf(lb[i]);
+    }
+
+    // Read filters
+    if (us_filter_t) {
+        int flen = (int)ggml_nelements(us_filter_t);
+        p->us_filter.resize(flen);
+        ggml_backend_tensor_get(us_filter_t, p->us_filter.data(), 0, flen * sizeof(float));
+    } else {
+        p->us_filter.assign(12, 1.0f / 12.0f); // fallback: uniform
+    }
+    if (ds_filter_t) {
+        int flen = (int)ggml_nelements(ds_filter_t);
+        p->ds_filter.resize(flen);
+        ggml_backend_tensor_get(ds_filter_t, p->ds_filter.data(), 0, flen * sizeof(float));
+    } else {
+        p->ds_filter = p->us_filter;
+    }
+
+    return ggml_map_custom1(ctx, x, aa_snake_beta_op, 1, p);
+}
+
+// Raw SnakeBeta without anti-aliasing (kept for reference / fallback)
+static ggml_tensor* snake_beta_raw(ggml_context* ctx, ggml_tensor* x, ggml_tensor* log_alpha, ggml_tensor* log_beta) {
+    if (!log_alpha || !log_beta)
+        return x;
+    int C = (int)log_alpha->ne[0];
     ggml_tensor* alpha = ggml_exp(ctx, ggml_reshape_2d(ctx, log_alpha, 1, C));
     ggml_tensor* beta = ggml_exp(ctx, ggml_reshape_2d(ctx, log_beta, 1, C));
-
     ggml_tensor* ax = ggml_mul(ctx, x, alpha);
     ggml_tensor* sin_ax = ggml_sin(ctx, ax);
     ggml_tensor* sin2 = ggml_mul(ctx, sin_ax, sin_ax);
@@ -665,12 +801,16 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
 
                 char key[80];
 
-                // SnakeBeta activation 1
+                // Anti-aliased SnakeBeta activation 1
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.alpha", rb_idx, act_idx_1);
                 ggml_tensor* alpha1 = T(ts, key);
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.beta", rb_idx, act_idx_1);
                 ggml_tensor* beta1 = T(ts, key);
-                x = snake_beta(ctx0, x, alpha1, beta1);
+                std::snprintf(key, sizeof(key), "resb.%d.act.%d.us.filter", rb_idx, act_idx_1);
+                ggml_tensor* usf1 = T(ts, key);
+                std::snprintf(key, sizeof(key), "resb.%d.act.%d.ds.filter", rb_idx, act_idx_1);
+                ggml_tensor* dsf1 = T(ts, key);
+                x = aa_snake_beta(ctx0, x, alpha1, beta1, usf1, dsf1, c->aa_params);
 
                 // Conv1d with dilation
                 int pad1 = (rb_k * dil - dil) / 2;
@@ -685,12 +825,16 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
                     }
                 }
 
-                // SnakeBeta activation 2
+                // Anti-aliased SnakeBeta activation 2
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.alpha", rb_idx, act_idx_2);
                 ggml_tensor* alpha2 = T(ts, key);
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.beta", rb_idx, act_idx_2);
                 ggml_tensor* beta2 = T(ts, key);
-                x = snake_beta(ctx0, x, alpha2, beta2);
+                std::snprintf(key, sizeof(key), "resb.%d.act.%d.us.filter", rb_idx, act_idx_2);
+                ggml_tensor* usf2 = T(ts, key);
+                std::snprintf(key, sizeof(key), "resb.%d.act.%d.ds.filter", rb_idx, act_idx_2);
+                ggml_tensor* dsf2 = T(ts, key);
+                x = aa_snake_beta(ctx0, x, alpha2, beta2, usf2, dsf2, c->aa_params);
 
                 // Conv2d (dilation=1)
                 int pad2 = (rb_k - 1) / 2;
@@ -723,11 +867,13 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
         ch = ch_out;
     }
 
-    // Final SnakeBeta activation
+    // Final anti-aliased SnakeBeta activation
     {
         ggml_tensor* alpha_post = T(ts, "activation_post.act.alpha");
         ggml_tensor* beta_post = T(ts, "activation_post.act.beta");
-        x = snake_beta(ctx0, x, alpha_post, beta_post);
+        ggml_tensor* usf_post = T(ts, "activation_post.us.filter");
+        ggml_tensor* dsf_post = T(ts, "activation_post.ds.filter");
+        x = aa_snake_beta(ctx0, x, alpha_post, beta_post, usf_post, dsf_post, c->aa_params);
     }
 
     // conv_post: Conv1d(24, 1, k=7, pad=3)
@@ -943,8 +1089,10 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
     // Compute
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "indextts-voc: BigVGAN compute failed\n");
+        ctx->clear_aa_params();
         return nullptr;
     }
+    ctx->clear_aa_params();
 
     // Debug: read conv_pre output
     if (ctx->verbosity >= 1) {
