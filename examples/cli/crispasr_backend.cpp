@@ -22,6 +22,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_vibevoice_1p5b_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_orpheus_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_chatterbox_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_indextts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_m2m100_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_t5_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_kokoro_backend();
@@ -89,6 +90,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         name == "kartoffelbox_turbo" || name == "lahgtna" || name == "lahgtna-chatterbox" ||
         name == "lahgtna-chatterbox-v1")
         return crispasr_make_chatterbox_backend();
+    if (name == "indextts" || name == "indextts-1.5" || name == "indextts1.5" || name == "index-tts")
+        return crispasr_make_indextts_backend();
     if (name == "kokoro" || name == "styletts2" || name == "styletts2-ljspeech" || name == "kokoro-tts")
         return crispasr_make_kokoro_backend();
     if (name == "m2m100" || name == "m2m-100" || name == "translate" || name == "m2m100-wmt21" || name == "wmt21" ||
@@ -149,6 +152,7 @@ std::vector<std::string> crispasr_list_backends() {
         "chatterbox-turbo",
         "kartoffelbox-turbo",
         "lahgtna-chatterbox",
+        "indextts",
         "kokoro",
         "m2m100",
         "m2m100-wmt21",
@@ -372,6 +376,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "qwen3-tts";
     if (contains_ci("orpheus") || contains_ci("kartoffel-orpheus") || contains_ci("kartoffel_orpheus"))
         return "orpheus";
+    if (contains_ci("indextts"))
+        return "indextts";
     if (contains_ci("chatterbox") || contains_ci("kartoffelbox") || contains_ci("lahgtna"))
         return "chatterbox";
     if (contains_ci("m2m100") || (contains_ci("m2m") && contains_ci("100")) || contains_ci("wmt21"))
@@ -482,6 +488,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "fireredpunc";
             else if (a == "mimo_asr" || a == "mimo-asr")
                 result = "mimo-asr";
+            else if (a == "indextts" || a == "indextts-1.5" || a == "indextts_1_5")
+                result = "indextts";
         }
     }
     gguf_free(gctx);

@@ -97,11 +97,33 @@ def fuse_weight_norm(sd: dict) -> dict:
 
 def write_tensor(writer: GGUFWriter, name: str, t: torch.Tensor,
                  out_dtype: np.dtype, qt: GGMLQuantizationType) -> None:
-    # Convert to float32 first (handles integer dtypes like int64 scalars),
-    # then to the target dtype.  clamp_(-65504, 65504) prevents silent inf
-    # when the target is F16 — only needed for pathological tensors.
     arr = t.to(torch.float32).clamp_(-65504.0, 65504.0).detach().numpy().astype(out_dtype)
     writer.add_tensor(name, arr, raw_dtype=qt)
+
+
+# GPT-2 Conv1D stores weights as [in, out] instead of nn.Linear's [out, in].
+# ggml_mul_mat(w, x) needs ne[0]=in_dim (after GGUF's NumPy→ne reversal,
+# that means the NumPy array should be [out, in]). So we transpose Conv1D
+# weights to match the convention.
+_GPT2_CONV1D_SUFFIXES = (
+    ".attn.c_attn.weight",
+    ".attn.c_proj.weight",
+    ".mlp.c_fc.weight",
+    ".mlp.c_proj.weight",
+)
+
+
+def write_tensor_gpt(writer: GGUFWriter, name: str, t: torch.Tensor,
+                     out_dtype: np.dtype, qt: GGMLQuantizationType) -> None:
+    """Write GPT tensor, transposing Conv1D weights to nn.Linear convention.
+    Biases, norms, and 1D tensors are kept as F32 for ggml type compatibility."""
+    if any(name.endswith(s) for s in _GPT2_CONV1D_SUFFIXES):
+        t = t.t().contiguous()
+    # Keep biases, norms, and small tensors as F32
+    if t.ndim <= 1 or name.endswith(".bias") or "norm" in name or "gamma" in name:
+        write_tensor(writer, name, t, np.float32, GGMLQuantizationType.F32)
+    else:
+        write_tensor(writer, name, t, out_dtype, qt)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +137,24 @@ _GPT_SKIP = {
 }
 
 
-def convert_gpt(gpt_pth: Path, out_path: Path, outtype: str) -> None:
+def _shorten_gpt(name: str) -> str:
+    """Shorten tensor names to fit the 64-char GGUF limit."""
+    name = name.replace("conditioning_encoder.", "cond_enc.")
+    name = name.replace("encoders.", "enc.")
+    name = name.replace("conv_module.", "conv.")
+    name = name.replace("depthwise_conv.", "dw.")
+    name = name.replace("pointwise_conv1.", "pw1.")
+    name = name.replace("pointwise_conv2.", "pw2.")
+    name = name.replace("self_attn.", "sa.")
+    name = name.replace("feed_forward.", "ff.")
+    name = name.replace("perceiver_encoder.", "perc.")
+    name = name.replace("text_pos_embedding.emb.", "text_pos.")
+    name = name.replace("mel_pos_embedding.emb.", "mel_pos.")
+    return name
+
+
+def convert_gpt(gpt_pth: Path, out_path: Path, outtype: str,
+                bpe_model_path: Path | None = None) -> None:
     print(f"\n=== GPT: {gpt_pth.name} → {out_path.name} ===", file=sys.stderr)
     sd = torch.load(str(gpt_pth), map_location="cpu", weights_only=False)
     # gpt.pth may be a raw state dict or wrapped
@@ -129,6 +168,19 @@ def convert_gpt(gpt_pth: Path, out_path: Path, outtype: str) -> None:
 
     w = GGUFWriter(str(out_path), arch="indextts.gpt", use_temp_file=True)
     w.add_name("indextts-gpt")
+
+    # Embed SentencePiece vocabulary for runtime tokenization
+    if bpe_model_path and bpe_model_path.is_file():
+        import sentencepiece as spm
+        sp = spm.SentencePieceProcessor()
+        sp.Load(str(bpe_model_path))
+        vocab = [sp.IdToPiece(i) for i in range(sp.GetPieceSize())]
+        scores = [sp.GetScore(i) for i in range(sp.GetPieceSize())]
+        w.add_array("tokenizer.ggml.tokens", vocab)
+        w.add_array("tokenizer.ggml.scores", scores)
+        w.add_string("tokenizer.ggml.model", "bpe")
+        print(f"  embedded {len(vocab)} BPE tokens from {bpe_model_path.name}",
+              file=sys.stderr)
 
     # Hyperparameters (from config.yaml, confirmed against tensor shapes)
     def u32(k, v): w.add_uint32(k, int(v))
@@ -157,7 +209,8 @@ def convert_gpt(gpt_pth: Path, out_path: Path, outtype: str) -> None:
         if name in _GPT_SKIP:
             skipped += 1
             continue
-        write_tensor(w, name, tensor, out_dtype, qt)
+        short = _shorten_gpt(name)
+        write_tensor_gpt(w, short, tensor, out_dtype, qt)
         written += 1
 
     w.write_header_to_file()
@@ -279,8 +332,11 @@ def main():
         if not p.is_file():
             sys.exit(f"not found: {p}")
 
+    bpe_path = model_dir / "bpe.model"
+
     if not args.bigvgan_only:
-        convert_gpt(gpt_pth, out_dir / "indextts-gpt.gguf", args.outtype)
+        convert_gpt(gpt_pth, out_dir / "indextts-gpt.gguf", args.outtype,
+                    bpe_model_path=bpe_path if bpe_path.is_file() else None)
 
     if not args.gpt_only:
         convert_bigvgan(bvg_pth, out_dir / "indextts-bigvgan.gguf", args.outtype)

@@ -611,6 +611,18 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# indextts — IndexTeam/IndexTTS-1.5 (GPT-2 AR + BigVGAN vocoder)
+# ---------------------------------------------------------------------------
+add_library(indextts STATIC indextts.h indextts.cpp)
+set_target_properties(indextts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(indextts PUBLIC .)
+target_compile_features   (indextts PUBLIC cxx_std_17)
+target_link_libraries     (indextts PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(indextts PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # m2m100 — Facebook M2M-100 multilingual machine translation
 # ---------------------------------------------------------------------------
 add_library(m2m100 STATIC m2m100.h m2m100.cpp)
@@ -935,6 +947,9 @@ if (TARGET orpheus)
 endif()
 if (TARGET chatterbox)
     target_link_libraries(crispasr PUBLIC chatterbox)
+endif()
+if (TARGET indextts)
+    target_link_libraries(crispasr PUBLIC indextts)
 endif()
 if (TARGET m2m100)
     target_link_libraries(crispasr PUBLIC m2m100)
