@@ -56,6 +56,12 @@ DEFAULT_STAGES = [
     # 1024→192 dense projection).
     "campplus_fbank",
     "campplus_xvector",
+    # 24 kHz Matcha-TTS prompt mel (Module 4 phase 3) — fed to S3Gen as
+    # `gen.prompt_feat`. Captured along with the upsampled `audio_24k_input`
+    # so the C++ diff harness can feed identical 24 kHz bytes to its mel
+    # (bypasses the kaiser_fast vs simple-resampler parity question).
+    "prompt_feat_24k",
+    "audio_24k_input",
     "t3_cond_emb",
     "t3_prefill_emb",
     "t3_speech_tokens",
@@ -253,6 +259,32 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         with torch.inference_mode():
             xv = model.s3gen.speaker_encoder.inference([wav_t])  # (1, 192)
         out["campplus_xvector"] = xv.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    # ── 24 kHz Matcha-TTS prompt mel (Module 4 phase 3) ──
+    if "prompt_feat_24k" in stages or "audio_24k_input" in stages:
+        # `prepare_conditionals` loads the audio at 24 kHz natively and
+        # truncates to DEC_COND_LEN = 10 * S3GEN_SR before computing the
+        # mel. We start from the 16 kHz audio the dumper already loaded;
+        # resample to 24 kHz via librosa kaiser_fast (the same resampler
+        # `prepare_conditionals` uses transitively via `librosa.load`),
+        # truncate, then run the upstream `mel_spectrogram`.
+        from chatterbox.models.s3gen import S3GEN_SR
+        from chatterbox.models.s3gen.utils.mel import mel_spectrogram
+        import librosa as _lr
+        DEC_COND_LEN = 10 * S3GEN_SR
+        audio_24k_full = _lr.resample(audio.astype(np.float32, copy=False), orig_sr=16000, target_sr=S3GEN_SR,
+                                       res_type="kaiser_fast")
+        audio_24k = audio_24k_full[:DEC_COND_LEN].astype(np.float32, copy=False)
+        if "audio_24k_input" in stages:
+            out["audio_24k_input"] = audio_24k.copy()
+        if "prompt_feat_24k" in stages:
+            with torch.inference_mode():
+                wav24_t = torch.from_numpy(audio_24k).unsqueeze(0)
+                pmel = mel_spectrogram(wav24_t)  # (1, 80, T)
+            # Transpose to (T, 80) — matches the shape `s3gen.embed_ref`
+            # stores into `prompt_feat`.
+            pmel_tn = pmel.squeeze(0).transpose(0, 1).contiguous().cpu().numpy()
+            out["prompt_feat_24k"] = pmel_tn.astype(np.float32, copy=False)
 
     # ── T3 conditioning ──
     t3_cond = model.conds.t3

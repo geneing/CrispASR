@@ -6,7 +6,9 @@
 
 #include "chatterbox_campplus.h"
 
+#include "core/fft.h"
 #include "core/kaldi_fbank.h"
+#include "core/mel.h"
 
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -880,6 +882,131 @@ std::vector<float> embed_speaker(const cb_campplus_model& m, cb_campplus_runtime
     if (fb.empty() || T <= 0)
         return {};
     return compute_xvector(m, cache, fb.data(), T);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — 24 kHz Matcha-TTS prompt mel for `gen.prompt_feat`
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Periodic Hann window — `torch.hann_window(N)` default `periodic=True`.
+static void make_hann_periodic_24k(int N, std::vector<float>& out) {
+    out.resize((size_t)N);
+    const float twopi = 2.0f * (float)M_PI;
+    for (int i = 0; i < N; i++)
+        out[(size_t)i] = 0.5f * (1.0f - std::cos(twopi * (float)i / (float)N));
+}
+
+// Reflect-pad a (n,) buffer to (n + 2*pad,) — matches
+// `F.pad(y.unsqueeze(1), (pad, pad), mode="reflect")` in mel.py.
+// PyTorch reflect mirrors around the EDGE samples (excludes the edge),
+// so for input [a, b, c, d] with pad=2 → [c, b, a, b, c, d, c, b].
+static std::vector<float> reflect_pad(const float* x, int n, int pad) {
+    std::vector<float> out((size_t)n + 2 * (size_t)pad, 0.0f);
+    if (n <= 0)
+        return out;
+    for (int i = 0; i < pad; i++) {
+        // Index `pad - 1 - i` in the output is `i + 1` in input (PyTorch reflect).
+        const int src = std::min(i + 1, n - 1);
+        out[(size_t)(pad - 1 - i)] = x[src];
+    }
+    std::memcpy(out.data() + pad, x, (size_t)n * sizeof(float));
+    for (int i = 0; i < pad; i++) {
+        const int src = std::max(n - 2 - i, 0);
+        out[(size_t)(pad + n + i)] = x[src];
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<float> compute_prompt_feat_24k(const float* pcm_24k, int n_samples, int max_samples, int& T_mel_out) {
+    T_mel_out = 0;
+    if (!pcm_24k || n_samples <= 0)
+        return {};
+
+    constexpr int kSr = 24000;
+    constexpr int kNFft = 1920;
+    constexpr int kHop = 480;
+    constexpr int kWin = 1920;
+    constexpr int kNMels = 80;
+    constexpr float kFmin = 0.0f;
+    constexpr float kFmax = 8000.0f;
+    constexpr float kClipVal = 1e-5f;
+    constexpr float kStftEps = 1e-9f;
+
+    // Truncate to max_samples (= DEC_COND_LEN = 10 * 24000 = 240000 in
+    // `prepare_conditionals`) — `s3gen_ref_wav = s3gen_ref_wav[:DEC_COND_LEN]`.
+    if (max_samples > 0 && n_samples > max_samples)
+        n_samples = max_samples;
+
+    // Manual reflect pad of (n_fft - hop) / 2 = 720 samples each side
+    // BEFORE the STFT (since the upstream `mel_spectrogram` passes
+    // `center=False` to `torch.stft`).
+    const int outer_pad = (kNFft - kHop) / 2;
+    auto padded = reflect_pad(pcm_24k, n_samples, outer_pad);
+
+    // Hann window.
+    static thread_local std::vector<float> hann;
+    if ((int)hann.size() != kWin)
+        make_hann_periodic_24k(kWin, hann);
+
+    // librosa Slaney mel basis (htk=False default, norm='slaney').
+    static thread_local std::vector<float> mel_fb;
+    if (mel_fb.empty()) {
+        mel_fb = core_mel::build_slaney_fb(kSr, kNFft, kNMels, kFmin, kFmax, core_mel::FbLayout::MelsFreqs);
+    }
+
+    // STFT parameters: stride kHop, win kWin == n_fft so no inner zero-padding.
+    // Frame count = (padded.size() - kNFft) / kHop + 1 — center=False
+    // semantics applied to the already-reflect-padded input.
+    const int n_padded = (int)padded.size();
+    if (n_padded < kNFft) {
+        return {};
+    }
+    const int T = (n_padded - kNFft) / kHop + 1;
+    if (T <= 0)
+        return {};
+
+    // STFT + magnitude + mel projection + log compression. core_mel
+    // doesn't quite fit the Matcha shape (which uses sqrt(power+1e-9)
+    // — magnitude with an additive eps inside the sqrt — and natural
+    // log with a clip-min of 1e-5, NOT log10 + max-clip(max-8) +
+    // (x+4)/4). So we do it inline, reusing core_fft for the FFT and
+    // core_mel::build_slaney_fb for the basis.
+    const int n_freqs = kNFft / 2 + 1;
+    std::vector<float> features((size_t)T * (size_t)kNMels, 0.0f);
+    std::vector<float> frame((size_t)kNFft, 0.0f);
+    std::vector<float> spec((size_t)2 * kNFft, 0.0f);
+    std::vector<float> mag((size_t)n_freqs, 0.0f);
+
+    for (int t = 0; t < T; t++) {
+        const int offset = t * kHop;
+        for (int i = 0; i < kNFft; i++)
+            frame[(size_t)i] = padded[(size_t)(offset + i)] * hann[(size_t)i];
+        core_fft::fft_radix2_wrapper(frame.data(), kNFft, spec.data());
+        for (int k = 0; k < n_freqs; k++) {
+            const float re = spec[(size_t)2 * k];
+            const float im = spec[(size_t)2 * k + 1];
+            // sqrt(power + 1e-9) — matches `torch.sqrt(spec.pow(2).sum(-1) + 1e-9)`.
+            mag[(size_t)k] = std::sqrt(re * re + im * im + kStftEps);
+        }
+        // mel projection: mel_basis @ magnitudes. mel_fb is row-major
+        // (n_mels × n_freqs), so each mel bin is a contiguous row.
+        for (int m = 0; m < kNMels; m++) {
+            const float* row = mel_fb.data() + (size_t)m * (size_t)n_freqs;
+            double s = 0.0;
+            for (int k = 0; k < n_freqs; k++)
+                s += (double)row[(size_t)k] * (double)mag[(size_t)k];
+            // log(clamp(mel, 1e-5)) — natural log, NOT log10.
+            const float v = (float)s;
+            features[(size_t)t * (size_t)kNMels + (size_t)m] = std::log(std::max(v, kClipVal));
+        }
+    }
+
+    T_mel_out = T;
+    return features;
 }
 
 } // namespace chatterbox_campplus

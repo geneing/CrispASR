@@ -2992,6 +2992,24 @@ extern "C" float* chatterbox_s3gen_dump_campplus_xvector(struct chatterbox_s3gen
     return r;
 }
 
+extern "C" float* chatterbox_s3gen_dump_prompt_feat_24k(struct chatterbox_s3gen_context* ctx, const float* pcm_24k,
+                                                        int n_samples, int max_samples, int* out_T_mel) {
+    if (!ctx || !pcm_24k || n_samples <= 0 || !out_T_mel)
+        return nullptr;
+    int T_mel = 0;
+    auto mel = chatterbox_campplus::compute_prompt_feat_24k(pcm_24k, n_samples, max_samples, T_mel);
+    if (mel.empty() || T_mel <= 0) {
+        *out_T_mel = 0;
+        return nullptr;
+    }
+    float* r = (float*)malloc(mel.size() * sizeof(float));
+    if (!r)
+        return nullptr;
+    std::memcpy(r, mel.data(), mel.size() * sizeof(float));
+    *out_T_mel = T_mel;
+    return r;
+}
+
 extern "C" float* chatterbox_s3gen_dump_s3tok_tokens(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
                                                      int n_samples, int max_tokens, int* out_T_tok) {
     if (!ctx || !pcm_16k || n_samples <= 0 || !out_T_tok)

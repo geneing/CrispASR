@@ -998,6 +998,32 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- 24 kHz prompt mel for gen.prompt_feat (Module 4 phase 3) ----
+        // The reference dumper saves the 24 kHz audio it computed the mel
+        // from as `audio_24k_input` so the C++ side feeds identical bytes
+        // to its mel — bypasses the resampler-parity question entirely.
+        if (!ref.shape("prompt_feat_24k").empty()) {
+            auto audio24_pair = ref.get_f32("audio_24k_input");
+            if (audio24_pair.first && audio24_pair.second > 0) {
+                int T_pmel = 0;
+                float* pmel = chatterbox_dump_prompt_feat_24k(ctx, audio24_pair.first, (int)audio24_pair.second,
+                                                              /*max_samples*/ 0, &T_pmel);
+                if (pmel && T_pmel > 0) {
+                    auto rep = compare_with_row_width(ref, "prompt_feat_24k", pmel, (size_t)T_pmel * 80, 80);
+                    print_row_mean("prompt_feat_24k", rep, CHATTERBOX_MEAN_THRESHOLD,
+                                   "criterion=cos_mean>=0.95  Matcha-TTS 24 kHz mel");
+                    record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                    free(pmel);
+                } else {
+                    printf("[ERR ] prompt_feat_24k        dump_prompt_feat_24k returned null\n");
+                    n_fail++;
+                }
+            } else {
+                printf("[SKIP] prompt_feat_24k        audio_24k_input missing from reference archive\n");
+                n_skip++;
+            }
+        }
+
         // ---- t3_cond_emb + t3_prefill_emb (deterministic, compare before stochastic T3) ----
         {
             const char* syn_text = std::getenv("CHATTERBOX_SYN_TEXT");

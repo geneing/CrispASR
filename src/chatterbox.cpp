@@ -2971,6 +2971,13 @@ extern "C" float* chatterbox_dump_campplus_xvector(struct chatterbox_context* ct
     return chatterbox_s3gen_dump_campplus_xvector(ctx->s3gen_ctx, pcm_16k, n_samples);
 }
 
+extern "C" float* chatterbox_dump_prompt_feat_24k(struct chatterbox_context* ctx, const float* pcm_24k, int n_samples,
+                                                  int max_samples, int* out_T_mel) {
+    if (!ctx || !ctx->s3gen_ctx)
+        return nullptr;
+    return chatterbox_s3gen_dump_prompt_feat_24k(ctx->s3gen_ctx, pcm_24k, n_samples, max_samples, out_T_mel);
+}
+
 extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text, int* out_T,
                                                  int* out_D, int* out_cond_T) {
     if (!ctx || !text || !out_T || !out_D || !out_cond_T)

@@ -197,4 +197,17 @@ std::vector<float> compute_xvector(const cb_campplus_model& m, cb_campplus_runti
 std::vector<float> embed_speaker(const cb_campplus_model& m, cb_campplus_runtime& cache, const float* pcm_16k,
                                  int n_samples);
 
+// Module 4 phase 3 — 24 kHz Matcha-TTS prompt mel for `gen.prompt_feat`.
+// Mirrors `chatterbox.models.s3gen.utils.mel.mel_spectrogram` with
+// CosyVoice's defaults: n_fft=1920, hop=480, win=1920, n_mels=80,
+// fmin=0, fmax=8000, sampling_rate=24000, center=False (manual reflect
+// pad of (n_fft - hop)/2 = 720 samples each side), magnitude (NOT
+// power), librosa Slaney mel, log compression `log(clamp(mel, 1e-5))`.
+//
+// Returns row-major (T_mel, n_mels=80) — the layout S3Gen consumes.
+// Truncates the input audio to `max_samples` if non-zero
+// (`prepare_conditionals` truncates to DEC_COND_LEN = 10 * S3GEN_SR =
+// 240000 samples before computing the mel).
+std::vector<float> compute_prompt_feat_24k(const float* pcm_24k, int n_samples, int max_samples, int& T_mel_out);
+
 } // namespace chatterbox_campplus

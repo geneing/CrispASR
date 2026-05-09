@@ -119,6 +119,16 @@ float* chatterbox_s3gen_dump_campplus_fbank(struct chatterbox_s3gen_context* ctx
 float* chatterbox_s3gen_dump_campplus_xvector(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
                                               int n_samples);
 
+// 24 kHz Matcha-TTS prompt mel (Module 4 phase 3). Computes the
+// (T_mel, 80) row-major mel spectrogram for the 24 kHz mono ref audio
+// — the `gen.prompt_feat` cond S3Gen's CFM denoiser consumes. Truncates
+// the input to `max_samples` if non-zero (set to 240000 = 10 * 24 kHz
+// to match `prepare_conditionals.DEC_COND_LEN`; pass 0 for no
+// truncation). Returns a malloc'd (T_mel * 80) f32 buffer; caller
+// frees with `free()`.
+float* chatterbox_s3gen_dump_prompt_feat_24k(struct chatterbox_s3gen_context* ctx, const float* pcm_24k, int n_samples,
+                                             int max_samples, int* out_T_mel);
+
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);
 

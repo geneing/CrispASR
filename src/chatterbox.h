@@ -153,6 +153,12 @@ float* chatterbox_dump_campplus_fbank(struct chatterbox_context* ctx, const floa
 // caller frees with `free()`.
 float* chatterbox_dump_campplus_xvector(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples);
 
+// Diff/debug: 24 kHz Matcha-TTS prompt mel for `gen.prompt_feat`
+// (Module 4 phase 3). Forwarder to the s3gen sub-context. Returns a
+// malloc'd (T_mel * 80) f32 row-major buffer; caller frees with `free()`.
+float* chatterbox_dump_prompt_feat_24k(struct chatterbox_context* ctx, const float* pcm_24k, int n_samples,
+                                       int max_samples, int* out_T_mel);
+
 // Diff/debug: return the T3 prefill embeddings for the given text (output of
 // build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
 // Also sets *out_cond_T to the number of conditioning tokens (cond_len).

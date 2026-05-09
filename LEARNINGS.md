@@ -2998,6 +2998,65 @@ instead of PyTorch's BLAS GEMM accumulation order. For voice cloning
 (downstream consumer is S3Gen's CFM cross-attention), this is
 imperceptible — the speaker direction is preserved.
 
+## Chatterbox 24 kHz prompt mel — module 4 phase 3 (May 2026)
+
+`chatterbox_campplus.cpp:compute_prompt_feat_24k` ports
+`chatterbox.models.s3gen.utils.mel.mel_spectrogram` for the
+`gen.prompt_feat` cond. Sits next to CAMPPlus rather than its own file
+since both modules consume / emit S3Gen-side conditioning in the
+voice-clone path. ~80 lines, pure CPU, uses `core_fft` + the
+`core_mel::build_slaney_fb` basis already shared with VE / S3Tokenizer.
+
+### Stuff that mattered
+
+1. **Magnitude (with eps inside the sqrt), not power**. The Matcha
+   formulation is `sqrt(re² + im² + 1e-9)` — adding the eps INSIDE the
+   sqrt rather than power-then-clamp. `core_mel::SpecKind::Magnitude`
+   doesn't take an eps inside the sqrt, so the parity-correct path is
+   to write the STFT loop inline with `std::sqrt(re² + im² + 1e-9)`.
+
+2. **Natural log + clip-min, NOT log10 + max-clip(max-8) + (x+4)/4**.
+   `dynamic_range_compression_torch(x) = log(clamp(x, 1e-5))`. Plain
+   `std::log(std::max(v, 1e-5f))`. Different from S3Tokenizer's mel
+   (log10 + Whisper-style normalisation) and from CAMPPlus's Kaldi
+   fbank (log on power + epsilon).
+
+3. **`center=False` with manual reflect-pad of `(n_fft - hop) / 2`
+   each side, applied via `F.pad(..., mode="reflect")`**. PyTorch's
+   reflect mirror EXCLUDES the edge sample (so for `[a, b, c, d]` with
+   pad=2 the prefix is `[c, b]`, not `[b, a]`). Got this right by
+   walking input indices `1..pad` for the prefix and `n-2..n-1-pad`
+   for the suffix.
+
+4. **Reference dump captures both `prompt_feat_24k` AND
+   `audio_24k_input`**. The 16 → 24 kHz resample in `prepare_conditionals`
+   uses `librosa.resample(res_type="kaiser_fast")` which we don't have
+   in C++ yet. Saving the 24 kHz audio bytes alongside the mel lets
+   the diff harness feed identical input to its mel — bypasses the
+   resampler-parity question entirely. Diff harness reads
+   `audio_24k_input` from the reference GGUF and pipes it into
+   `chatterbox_dump_prompt_feat_24k`.
+
+### Diff parity
+
+`crispasr-diff chatterbox` on a 3.2 s pre-loaded 24 kHz prompt:
+
+  prompt_feat_24k  shape=[80,160]  cos_min=1.000000  cos_mean=1.000000
+                   max_abs=3.69e-04  rms=1.36e-05
+
+Bit-perfect against `mel_spectrogram` for the full mel grid.
+
+### What's left
+
+Atomic native voice clone — the .wav branch of
+`chatterbox_set_voice_from_wav` still installs only T3-side conds
+(`speaker_emb`, `speech_prompt_tokens`). To install the gen.* triple
+atomically (`prompt_token`, `prompt_feat`, `embedding` all from the
+same ref audio) the runtime needs a 16 ↔ 24 kHz resampler — librosa's
+kaiser_fast for parity, or a "good enough" polyphase that documents
+the small drift. This is the last piece; the parity-quality compute
+modules (M2/M3/M4) are all in place and verified.
+
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 
 Bringing up the T5 encoder-decoder runtime (`src/t5_translate.cpp`)
