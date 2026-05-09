@@ -2816,3 +2816,32 @@ EOS. Results are concatenated.
 **Critical**: The 476 extra vocab tokens (9812→10287) are NOT segment tokens —
 they are additional text tokens in the v2 tokenizer. The 3 segment protocol
 tokens sit above the full vocab at indices 10288–10290.
+
+### FastConformer: flash attention with Shaw RPE
+
+The FastConformer self-attention uses Shaw-style relative position
+encoding with untied biases:
+```
+scores = (Q + pos_bias_u) × K^T + rel_shift((Q + pos_bias_v) × R^T)
+```
+
+This looks incompatible with `ggml_flash_attn_ext` since the position
+bias is query-dependent. However, it CAN be decomposed:
+- Precompute BD = rel_shift(Q_v × R^T) — one matmul, unavoidable
+- Pass BD × scale as the additive mask to flash_attn_ext
+- flash_attn_ext then computes: softmax(Q_u × K^T × scale + mask) × V
+
+This replaces 2 matmuls + add + softmax + 1 matmul with 1 matmul + 
+flash_attn_ext. On GPU (CUDA/Vulkan/Metal) the fused kernel avoids
+materializing the T×T attention matrix and reduces kernel launches
+from 96 to 32 per encoder pass.
+
+Key pitfall: rel_shift returns a strided view — must `ggml_cont` before
+`ggml_cast` to F16 for the mask, otherwise `ggml_is_padded_1d` asserts.
+
+### Silero LID label format
+
+Silero LID's `lang_dict_95.json` maps indices to "xx, Name" strings
+(e.g. "de, German", "en, English"). The GGUF stores these verbatim in
+`silero_lid.lang_strs`. Downstream backends expect bare ISO codes.
+Must extract the part before the comma.

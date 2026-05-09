@@ -3122,3 +3122,34 @@ Additional improvements:
 
 Final metrics: encoder_out rms=0.4602 (exact match to Python), all per-stage
 values match Python reference to 2+ decimal places.
+
+---
+
+### §81 — OmniASR Unlimited streaming + conformer flash-attn + Silero LID fix (2026-05-09)
+
+#### OmniASR-LLM-Unlimited segment-token protocol
+The "Unlimited" variant of OmniASR-LLM uses a streaming decode protocol
+with 3 special tokens above vocab_size: `streaming_lang`, `last_segment`,
+`regular_segment`. Without the segment marker in the prefix the decoder
+never sees the input shape it was trained on and generates until
+max_new_tokens. Fix: auto-detect from tok_emb shape, insert segment
+marker, multi-segment decode for >15s audio. Commits: `05290e5`, `762777f`.
+
+#### FastConformer flash attention (re #81)
+The FastConformer encoder (parakeet, canary, canary_ctc) used 3 separate
+matmuls + add + softmax for Shaw relative-position attention.
+Restructured to precompute the BD position bias and pass it as additive
+mask to `ggml_flash_attn_ext`, fusing Q_u×K^T + BD + softmax + ×V into
+one kernel. CPU: ~10% faster; GPU: expected much larger gain. Output
+bit-identical. Commit: `c242331`.
+
+#### Silero LID ISO code fix (#82)
+`silero_lid_detect` returns labels like "de, German" but downstream
+backends (canary, cohere, etc.) expect bare ISO codes. Extracted the
+code before the comma in `crispasr_lid.cpp`. Commit: `43f9015`.
+
+#### Issue verification sweep
+- #69 (Silero VAD load): confirmed fixed since v0.6.0 (144d5578)
+- #70 (streaming VAD+punc parity): confirmed fixed (cb198fa)
+- #74 (vibevoice-tts clone): structural prompt fix working
+- #76 (chatterbox-turbo distortion): turbo fixed; base still has multinomial parity gap
