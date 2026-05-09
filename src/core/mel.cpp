@@ -312,4 +312,61 @@ std::vector<float> build_htk_fb(int sr, int n_fft, int n_mels, float fmin, float
     return fb;
 }
 
+std::vector<float> build_slaney_fb(int sr, int n_fft, int n_mels, float fmin, float fmax, FbLayout layout) {
+    const int n_freqs = n_fft / 2 + 1;
+    if (fmax <= 0.0f)
+        fmax = (float)sr * 0.5f;
+
+    // Slaney mel scale: linear below 1 kHz at f_sp = 200/3 Hz/mel, log
+    // above 1 kHz with logstep = ln(6.4)/27. Matches librosa's
+    // `mel_to_hz(..., htk=False)` exactly.
+    const float f_sp = 200.0f / 3.0f;
+    const float min_log_hz = 1000.0f;
+    const float min_log_mel = min_log_hz / f_sp; // = 15
+    const float logstep = std::log(6.4f) / 27.0f;
+    auto hz2mel = [&](float hz) -> float {
+        if (hz >= min_log_hz)
+            return min_log_mel + std::log(hz / min_log_hz) / logstep;
+        return hz / f_sp;
+    };
+    auto mel2hz = [&](float m) -> float {
+        if (m >= min_log_mel)
+            return min_log_hz * std::exp(logstep * (m - min_log_mel));
+        return f_sp * m;
+    };
+
+    const float ml = hz2mel(fmin);
+    const float mh = hz2mel(fmax);
+    std::vector<float> centers((size_t)n_mels + 2);
+    for (int i = 0; i < n_mels + 2; i++)
+        centers[i] = mel2hz(ml + (mh - ml) * (float)i / (float)(n_mels + 1));
+
+    std::vector<float> fb((size_t)n_mels * n_freqs, 0.0f);
+    for (int m = 0; m < n_mels; m++) {
+        const float lo = centers[m];
+        const float md = centers[m + 1];
+        const float hi = centers[m + 2];
+        // Slaney area normalization: 2 / (f_hi - f_lo). Each triangle's
+        // weights get scaled so its integral is approximately constant.
+        // librosa applies this when norm='slaney' (its default).
+        const float enorm = (hi > lo) ? (2.0f / (hi - lo)) : 0.0f;
+        for (int k = 0; k < n_freqs; k++) {
+            const float f = (float)k * (float)sr / (float)n_fft;
+            float w = 0.0f;
+            if (f >= lo && f <= md && md > lo)
+                w = (f - lo) / (md - lo);
+            else if (f >= md && f <= hi && hi > md)
+                w = (hi - f) / (hi - md);
+            if (w < 0.0f)
+                w = 0.0f;
+            w *= enorm;
+            if (layout == FbLayout::MelsFreqs)
+                fb[(size_t)m * n_freqs + k] = w;
+            else
+                fb[(size_t)k * n_mels + m] = w;
+        }
+    }
+    return fb;
+}
+
 } // namespace core_mel

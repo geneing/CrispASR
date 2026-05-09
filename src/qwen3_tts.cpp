@@ -4508,54 +4508,10 @@ static void spk_fft_r2c(const float* in, int N, float* out) {
     }
 }
 
-// Slaney-normalized librosa-default mel filterbank (Slaney scale, htk=False).
-// Layout: [n_mels, n_freqs] row-major (FbLayout::MelsFreqs).
-// The Slaney mel scale is LINEAR below 1 kHz and LOG above, matching librosa's default.
-static std::vector<float> build_slaney_mel_fb(int n_mels, int n_fft, int sr, float fmin, float fmax) {
-    const int n_freqs = n_fft / 2 + 1;
-    // Slaney mel scale (librosa htk=False default)
-    const float f_sp = 200.0f / 3.0f; // linear spacing: ~66.67 Hz
-    const float min_log_hz = 1000.0f;
-    const float min_log_mel = min_log_hz / f_sp;
-    const float logstep = logf(6.4f) / 27.0f;
-    auto hz_to_mel = [&](float hz) -> float {
-        if (hz >= min_log_hz) {
-            return min_log_mel + logf(hz / min_log_hz) / logstep;
-        }
-        return hz / f_sp;
-    };
-    auto mel_to_hz = [&](float mel) -> float {
-        if (mel >= min_log_mel) {
-            return min_log_hz * expf(logstep * (mel - min_log_mel));
-        }
-        return mel * f_sp;
-    };
-    const float mel_lo = hz_to_mel(fmin);
-    const float mel_hi = hz_to_mel(fmax > 0.0f ? fmax : (float)sr / 2.0f);
-    std::vector<float> mel_pts(n_mels + 2), hz_pts(n_mels + 2);
-    for (int i = 0; i <= n_mels + 1; i++) {
-        hz_pts[i] = mel_to_hz(mel_lo + (mel_hi - mel_lo) * i / (n_mels + 1));
-    }
-    std::vector<float> freq_bins(n_freqs);
-    for (int k = 0; k < n_freqs; k++) {
-        freq_bins[k] = (float)sr * k / (float)n_fft;
-    }
-    std::vector<float> fb((size_t)n_mels * n_freqs, 0.0f);
-    for (int m = 0; m < n_mels; m++) {
-        float lo = hz_pts[m], ctr = hz_pts[m + 1], hi = hz_pts[m + 2];
-        float enorm = (hi > lo) ? 2.0f / (hi - lo) : 1.0f;
-        for (int k = 0; k < n_freqs; k++) {
-            float f = freq_bins[k], w = 0.0f;
-            if (f >= lo && f < ctr && ctr > lo) {
-                w = (f - lo) / (ctr - lo);
-            } else if (f >= ctr && f <= hi && hi > ctr) {
-                w = (hi - f) / (hi - ctr);
-            }
-            fb[(size_t)m * n_freqs + k] = w * enorm;
-        }
-    }
-    return fb;
-}
+// (build_slaney_mel_fb removed — was a verbatim duplicate of
+// `core_mel::build_slaney_fb` in src/core/mel.cpp. Call sites below now go
+// through the shared helper. Same algorithm, same constants, same Slaney
+// area normalization, same FbLayout::MelsFreqs default — bit-identical.)
 
 // 128-mel spectrogram for the speaker encoder: reflect-pad + Hann STFT + slaney mel.
 // Returns (T, 128) row-major float32.
@@ -4584,7 +4540,7 @@ static std::vector<float> compute_spk_mel(const float* audio, int n_samples, int
     }
 
     const int n_freqs = n_fft / 2 + 1;
-    auto mel_fb = build_slaney_mel_fb(n_mels, n_fft, sr, fmin, fmax);
+    auto mel_fb = core_mel::build_slaney_fb(sr, n_fft, n_mels, fmin, fmax);
 
     core_mel::Params p;
     p.n_fft = n_fft;

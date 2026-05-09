@@ -207,4 +207,24 @@ std::vector<float> compute(const float* samples, int n_samples,
 std::vector<float> build_htk_fb(int sr, int n_fft, int n_mels, float fmin, float fmax,
                                 FbLayout layout = FbLayout::MelsFreqs);
 
+// Slaney-mel-scale triangular filterbank builder with Slaney area
+// normalization. Matches `librosa.filters.mel(htk=False, norm='slaney')`
+// — the librosa default — used by Chatterbox's 24 kHz prompt-mel
+// (`chatterbox/models/s3gen/utils/mel.py:56`), the S3Tokenizer mel
+// (16 kHz, 128 bins), and any other model that takes its mel basis
+// from librosa without overriding the defaults.
+//
+// Differs from build_htk_fb() in two ways:
+//   1. Mel scale is the piecewise Slaney curve (linear below 1 kHz at
+//      200/3 Hz per mel, log above 1 kHz with logstep = ln(6.4)/27).
+//      vs HTK's single-formula 2595 * log10(1 + f/700).
+//   2. Slaney norm scales each triangular filter by 2/(f_hi - f_lo),
+//      so each filter has roughly equal area regardless of bandwidth.
+//      Without this, the higher-frequency wider filters would dominate
+//      the projection.
+//
+// Same arg semantics as build_htk_fb. Returns the same flat shape.
+std::vector<float> build_slaney_fb(int sr, int n_fft, int n_mels, float fmin, float fmax,
+                                   FbLayout layout = FbLayout::MelsFreqs);
+
 } // namespace core_mel
