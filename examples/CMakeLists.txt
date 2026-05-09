@@ -57,6 +57,14 @@ include(DefaultTargetOptions)
 
 target_link_libraries(${TARGET} PRIVATE crispasr ${COMMON_EXTRA_LIBS} ${CMAKE_DL_LIBS})
 
+# miniaudio implementation lives in both common-crispasr.cpp (MA_NO_DEVICE_IO
+# subset) and crispasr_audio.cpp (full, with device IO). On MSVC duplicate
+# symbols silently collapse; on GCC/MinGW the linker errors out. Allow the
+# duplication — the linker picks whichever copy it sees first.
+if (MINGW)
+    target_link_options(${TARGET} INTERFACE -Wl,--allow-multiple-definition)
+endif()
+
 set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set_target_properties(${TARGET} PROPERTIES FOLDER "libs")
 
