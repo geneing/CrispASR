@@ -3046,16 +3046,91 @@ voice-clone path. ~80 lines, pure CPU, uses `core_fft` + the
 
 Bit-perfect against `mel_spectrogram` for the full mel grid.
 
-### What's left
+## Chatterbox atomic native voice clone — the resampler + 5-cond install (May 2026)
 
-Atomic native voice clone — the .wav branch of
-`chatterbox_set_voice_from_wav` still installs only T3-side conds
-(`speaker_emb`, `speech_prompt_tokens`). To install the gen.* triple
-atomically (`prompt_token`, `prompt_feat`, `embedding` all from the
-same ref audio) the runtime needs a 16 ↔ 24 kHz resampler — librosa's
-kaiser_fast for parity, or a "good enough" polyphase that documents
-the small drift. This is the last piece; the parity-quality compute
-modules (M2/M3/M4) are all in place and verified.
+`src/core/audio_resample.{h,cpp}` adds a polyphase Kaiser-windowed
+sinc resampler (β=8.6, num_zeros=14 — same parameters
+`librosa.resample(res_type='kaiser_fast')` uses). Output is NOT
+bit-equivalent to librosa (resampy uses a precomputed polyphase
+table with a different precision knob), but acoustically very close.
+Sized for any L:M reduction; chatterbox uses 16 ↔ 24 kHz
+(L:M = 3:2 / 2:3) but the helper is general.
+
+`chatterbox_set_voice_from_wav` now forks on the input rate:
+
+  - **24 kHz mono PCM16/F32 WAV** — atomic path. Resamples 24 → 16 kHz
+    once, then runs ALL FIVE compute modules from a single source:
+      - VE (16 kHz) → speaker_emb
+      - S3Tokenizer V2 (16 kHz) → speech_prompt_tokens (first 6 s, max 150)
+                                  + prompt_token (full audio)
+      - CAMPPlus (16 kHz) → gen.embedding (192-d)
+      - 24 kHz Matcha mel (24 kHz, truncated to 10 s) → prompt_feat
+    All five tensors get installed into the same fresh
+    `voice_ctx_w` / `voice_buf_w` slot — atomic, mutually consistent.
+  - **16 kHz mono PCM16/F32 WAV** — partial path (existing behaviour).
+    Only T3-side conds (speaker_emb, speech_prompt_tokens) get
+    installed; gen.* stay at the default voice's tensors. The
+    runtime warns that 24 kHz input enables full atomic cloning.
+
+### Stuff that mattered
+
+1. **`embed_ref` enforces `T_mel = 2 * T_speech_tokens`**. If our
+   prompt mel comes out shorter than `2 * len(prompt_token)` (e.g.
+   because the 24 kHz audio is shorter than 10 s), `s3gen.flow_inference`
+   raises a shape-mismatch warning and trims the tokens. We mirror
+   the trim in `chatterbox_set_voice_from_wav` so install_native_voice
+   sees a consistent (token, mel) pair.
+
+2. **`gen.prompt_feat` ggml shape is (80, T_mel, 1)** — ne[0]=80 is
+   the fastest axis, ne[1]=T_mel, ne[2]=1 (the singleton batch). Our
+   compute_prompt_feat_24k returns row-major (T_mel, 80), which in
+   ggml is exactly ne=(80, T_mel) — copy directly into a
+   `ggml_new_tensor_3d(F32, 80, T_mel, 1)`.
+
+3. **`gen.embedding` ggml shape is (192, 1)** — same convention. Our
+   CAMPPlus xvector is a flat 192-d vector; ggml_new_tensor_2d(F32,
+   192, 1) + ggml_backend_tensor_set with 192 floats covers it.
+
+### Quality assessment
+
+End-to-end on a 24 kHz JFK clip (jfk.wav librosa-resampled to 24 kHz):
+  - Atomic native: rms=0.043, peak=0.60, intelligible English speech
+    in the cloned voice. Whisper roundtrip transcribes the synthesis,
+    though the text drifts more than the python baker — stochastic
+    T3 sampling amplifies the small per-cond drift (our resampler
+    differs slightly from librosa kaiser_fast, so VE / S3Tokenizer /
+    CAMPPlus see slightly different 16 kHz audio than the baker
+    would have used).
+  - Python baker (same WAV): rms=0.088, peak=0.81, speech tracks the
+    prompt text more reliably.
+
+Both produce real speech in the cloned voice; the baker is acoustically
+cleaner. For full library-grade parity, drop in a librosa kaiser_fast
+match (resampy port) — a future improvement; the current resampler is
+"production functional" with the documented quality gap. The
+parity-quality compute kernels (VE / S3Tok / CAMPPlus / 24 kHz mel)
+all remain bit- or fp32-rounding-tight against PyTorch when fed
+identical bytes via the diff harness's `audio_24k_input` bypass.
+
+### CLI
+
+```bash
+# Full atomic native clone — 24 kHz mono PCM16/F32 WAV input.
+./build/bin/crispasr --backend chatterbox -m auto \
+    --voice ref_24k.wav \
+    --tts "Hello there, this is the cloned voice." \
+    --tts-output cloned.wav
+
+# Partial T3-side-only clone — 16 kHz mono WAV input.
+./build/bin/crispasr --backend chatterbox -m auto \
+    --voice ref_16k.wav \
+    --tts "..." --tts-output ...
+```
+
+The runtime prints exactly which conds are installed at verbosity ≥ 1.
+For perfect parity with the python baker (full quality), the existing
+`models/bake-chatterbox-voice-from-wav.py` workflow remains
+recommended; the native path is the no-python-required alternative.
 
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 

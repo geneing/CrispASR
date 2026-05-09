@@ -15,10 +15,11 @@
 #include "chatterbox.h"
 #include "chatterbox_s3gen.h"
 #include "chatterbox_ve.h"
+#include "core/attention.h"
+#include "core/audio_resample.h"
 #include "core/bpe.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
-#include "core/attention.h"
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -2556,14 +2557,19 @@ static int chatterbox_load_voice_gguf(chatterbox_context* ctx, const char* path)
 // averaged. Anything else returns false with a clear error.
 //
 // The chatterbox runtime reaches for this only on the .wav branch of
-// chatterbox_set_voice_from_wav — there's no re-sampler here yet, by
-// design: we don't want to ship a polyphase resampler whose output is a
-// different number of samples than librosa's `kaiser_fast` (which would
-// silently break VE parity). For non-16 kHz inputs the user can pre-convert
-// (`ffmpeg -i in.* -ar 16000 -ac 1 out.wav`) or fall back to the python
-// baker (`models/bake-chatterbox-voice-from-wav.py`), which uses
-// librosa.resample.
-static bool chatterbox_decode_wav_16k_mono(const char* path, std::vector<float>& out_pcm, std::string& err) {
+// chatterbox_decode_wav_mono — decodes a small WAV (PCM16 / IEEE-float)
+// at exactly `expected_sr` (16000 OR 24000 supported in this caller's
+// flow). Stereo is averaged to mono. Anything else returns false with a
+// clear error and the caller can either point the user at ffmpeg or
+// fall back to the python baker.
+//
+// 24 kHz input enables the atomic native voice-clone path: the runtime
+// resamples to 16 kHz (via `core_audio::resample_polyphase`, kaiser-
+// windowed sinc) for VE / S3Tokenizer / CAMPPlus, and uses the original
+// 24 kHz directly for the prompt mel. 16 kHz input keeps the older
+// partial-clone behaviour (T3-side conds only).
+static bool chatterbox_decode_wav_mono(const char* path, int expected_sr, std::vector<float>& out_pcm,
+                                       std::string& err) {
     out_pcm.clear();
     err.clear();
     FILE* fp = std::fopen(path, "rb");
@@ -2619,10 +2625,10 @@ static bool chatterbox_decode_wav_16k_mono(const char* path, std::vector<float>&
         err = "no data chunk";
         return false;
     }
-    if (sr != 16000) {
-        char tmp[128];
-        std::snprintf(tmp, sizeof(tmp),
-                      "sample rate %u not supported (need 16000); pre-convert or use the python baker", sr);
+    if ((int)sr != expected_sr) {
+        char tmp[160];
+        std::snprintf(tmp, sizeof(tmp), "sample rate %u not supported (need %d); pre-convert or use the python baker",
+                      sr, expected_sr);
         err = tmp;
         return false;
     }
@@ -2691,7 +2697,8 @@ static bool chatterbox_decode_wav_16k_mono(const char* path, std::vector<float>&
 // prosody is the cloned speaker's even if the timbre lags.
 static int chatterbox_install_native_voice(chatterbox_context* ctx, const float emb[256], const int32_t* prompt_tokens,
                                            int n_prompt_tokens, const int32_t* speech_prompt_tokens,
-                                           int n_speech_prompt_tokens) {
+                                           int n_speech_prompt_tokens, const float* prompt_feat, int T_prompt_feat,
+                                           const float* gen_embedding) {
     if (!ctx || !emb)
         return -1;
 
@@ -2706,16 +2713,17 @@ static int chatterbox_install_native_voice(chatterbox_context* ctx, const float 
     }
     ctx->voice_tensors.clear();
 
-    // Up to 4 tensors: speaker_emb + maybe prompt_token + maybe
-    // speech_prompt_tokens (gen.prompt_feat / gen.embedding stay at defaults).
-    ggml_init_params ip = {ggml_tensor_overhead() * 8, nullptr, true};
+    // Up to 5 tensors: speaker_emb + speech_prompt_tokens + prompt_token
+    // + prompt_feat + gen.embedding. The atomic install only fires when
+    // all five are available — partial fills are still supported for
+    // earlier-module-only flows (M2-only, M2+M3-only).
+    ggml_init_params ip = {ggml_tensor_overhead() * 12, nullptr, true};
     ggml_context* vctx = ggml_init(ip);
     if (!vctx) {
         fprintf(stderr, "chatterbox: ggml_init failed for native voice\n");
         return -1;
     }
 
-    // Speaker emb (1, 256) row-major.
     ggml_tensor* spkr = ggml_new_tensor_2d(vctx, GGML_TYPE_F32, 256, 1);
     ggml_set_name(spkr, "conds.t3.speaker_emb");
 
@@ -2728,6 +2736,19 @@ static int chatterbox_install_native_voice(chatterbox_context* ctx, const float 
     if (speech_prompt_tokens && n_speech_prompt_tokens > 0) {
         speech_prompt_t = ggml_new_tensor_1d(vctx, GGML_TYPE_I32, n_speech_prompt_tokens);
         ggml_set_name(speech_prompt_t, "conds.t3.speech_prompt_tokens");
+    }
+    // prompt_feat: (1, T, 80) row-major in the converter / baker; in
+    // ggml ne=(80, T, 1) (ne[0]=80 fastest, ne[1]=T, ne[2]=1).
+    ggml_tensor* prompt_feat_t = nullptr;
+    if (prompt_feat && T_prompt_feat > 0) {
+        prompt_feat_t = ggml_new_tensor_3d(vctx, GGML_TYPE_F32, 80, T_prompt_feat, 1);
+        ggml_set_name(prompt_feat_t, "conds.gen.prompt_feat");
+    }
+    // gen.embedding: (1, 192) — ggml ne=(192, 1).
+    ggml_tensor* gen_emb_t = nullptr;
+    if (gen_embedding) {
+        gen_emb_t = ggml_new_tensor_2d(vctx, GGML_TYPE_F32, 192, 1);
+        ggml_set_name(gen_emb_t, "conds.gen.embedding");
     }
 
     ggml_backend_buffer_t vbuf = ggml_backend_alloc_ctx_tensors(vctx, ctx->backend);
@@ -2742,6 +2763,10 @@ static int chatterbox_install_native_voice(chatterbox_context* ctx, const float 
     if (speech_prompt_t)
         ggml_backend_tensor_set(speech_prompt_t, speech_prompt_tokens, 0,
                                 (size_t)n_speech_prompt_tokens * sizeof(int32_t));
+    if (prompt_feat_t)
+        ggml_backend_tensor_set(prompt_feat_t, prompt_feat, 0, (size_t)T_prompt_feat * 80 * sizeof(float));
+    if (gen_emb_t)
+        ggml_backend_tensor_set(gen_emb_t, gen_embedding, 0, 192 * sizeof(float));
 
     ctx->voice_ctx_w = vctx;
     ctx->voice_buf_w = vbuf;
@@ -2755,6 +2780,14 @@ static int chatterbox_install_native_voice(chatterbox_context* ctx, const float 
     if (speech_prompt_t) {
         ctx->voice_tensors["conds.t3.speech_prompt_tokens"] = speech_prompt_t;
         ctx->conds.speech_prompt_tokens = speech_prompt_t;
+    }
+    if (prompt_feat_t) {
+        ctx->voice_tensors["conds.gen.prompt_feat"] = prompt_feat_t;
+        ctx->conds.gen_prompt_feat = prompt_feat_t;
+    }
+    if (gen_emb_t) {
+        ctx->voice_tensors["conds.gen.embedding"] = gen_emb_t;
+        ctx->conds.gen_embedding = gen_emb_t;
     }
     ctx->conds.loaded = true;
     return 0;
@@ -2776,67 +2809,143 @@ extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, con
         return chatterbox_load_voice_gguf(ctx, wav_path);
     }
 
-    // Native WAV cloning. Modules 2 (VE) and 3 (S3Tokenizer) populate
-    // speaker_emb + speech prompt tokens + S3Gen prompt tokens. Module 4
-    // (CAMPPlus + 24 kHz prompt mel) is still pending, so gen.prompt_feat
-    // and gen.embedding stay at the default voice's tensors — S3Gen
-    // renders with the cloned speaker's prosody but the default voice's
-    // timbre/x-vector. Warn the user so the partial cloning is explicit.
-    std::vector<float> pcm;
-    std::string err;
-    if (!chatterbox_decode_wav_16k_mono(wav_path, pcm, err)) {
-        fprintf(stderr,
-                "chatterbox: native WAV cloning failed: %s\n"
-                "  Re-encode the reference (`ffmpeg -i %s -ar 16000 -ac 1 ref.wav`) or\n"
-                "  bake a voice GGUF instead (`python models/bake-chatterbox-voice-from-wav.py "
-                "--input %s --output my_voice.gguf`).\n",
-                err.c_str(), wav_path, wav_path);
-        return -1;
-    }
-    const int n_samples = (int)pcm.size();
+    // Native WAV cloning. The path forks on the input sample rate:
+    //   - 24 kHz mono WAV: full atomic clone — all 5 conds are derived
+    //     from the same reference audio and installed together. The 16 kHz
+    //     versions used by VE / S3Tokenizer / CAMPPlus come from a
+    //     core_audio polyphase resampler (kaiser-windowed sinc, β=8.6).
+    //   - 16 kHz mono WAV: partial M2+M3 clone (T3-side conds only) —
+    //     gen.{prompt_token, prompt_feat, embedding} stay at default
+    //     voice values. Updating gen.prompt_token alone without the
+    //     matching prompt_feat / embedding feeds S3Gen's flow matcher
+    //     inconsistent conditioning and silences the output (verified).
+    std::vector<float> pcm_24k;
+    std::vector<float> pcm_16k_owner; // owns the 16 k buffer when it's
+                                      // resampled from 24 kHz
+    const float* pcm_16k = nullptr;
+    int n_16k = 0;
+    int n_24k = 0;
+    bool atomic_path = false;
 
+    {
+        std::vector<float> pcm_native;
+        std::string err24;
+        // Try 24 kHz first — atomic path needs it.
+        if (chatterbox_decode_wav_mono(wav_path, 24000, pcm_native, err24)) {
+            pcm_24k = std::move(pcm_native);
+            n_24k = (int)pcm_24k.size();
+            // Resample 24 → 16 kHz for VE / S3Tokenizer / CAMPPlus.
+            pcm_16k_owner = core_audio::resample_polyphase(pcm_24k.data(), n_24k, 24000, 16000);
+            pcm_16k = pcm_16k_owner.data();
+            n_16k = (int)pcm_16k_owner.size();
+            atomic_path = true;
+        } else {
+            std::string err16;
+            std::vector<float> pcm_16k_native;
+            if (!chatterbox_decode_wav_mono(wav_path, 16000, pcm_16k_native, err16)) {
+                fprintf(
+                    stderr,
+                    "chatterbox: native WAV cloning failed.\n"
+                    "  Tried 24 kHz: %s\n  Tried 16 kHz: %s\n"
+                    "  Re-encode the reference (`ffmpeg -i %s -ar 24000 -ac 1 ref.wav`) — 24 kHz mono PCM16/F32 "
+                    "enables full atomic cloning, 16 kHz keeps the partial M2+M3 path. Or fall back to the python "
+                    "baker (`python models/bake-chatterbox-voice-from-wav.py --input %s --output my_voice.gguf`).\n",
+                    err24.c_str(), err16.c_str(), wav_path, wav_path);
+                return -1;
+            }
+            pcm_16k_owner = std::move(pcm_16k_native);
+            pcm_16k = pcm_16k_owner.data();
+            n_16k = (int)pcm_16k_owner.size();
+        }
+    }
+
+    // VE — 256-d speaker embedding from the 16 kHz audio.
     float emb[256];
-    if (!chatterbox_ve::compute_speaker_emb(ctx->ve, ctx->sched, ctx->compute_meta, pcm.data(), n_samples, emb)) {
+    if (!chatterbox_ve::compute_speaker_emb(ctx->ve, ctx->sched, ctx->compute_meta, pcm_16k, n_16k, emb)) {
         fprintf(stderr, "chatterbox: VoiceEncoder forward failed for '%s'\n", wav_path);
         return -1;
     }
 
     // S3Tokenizer V2 — first 6 s capped at 150 tokens for the T3-side
-    // `conds.t3.speech_prompt_tokens`. We do NOT update `gen.prompt_token`
-    // here even though we could, because S3Gen requires the (prompt_token,
-    // prompt_feat, embedding) triple to be mutually consistent — describing
-    // the same reference audio. Until module 4 lands and we can also
-    // produce the matching 24 kHz prompt mel and CAMPPlus x-vector, swapping
-    // only one of the three would feed S3Gen's flow matcher inconsistent
-    // conditioning and silence the output. Instead, T3 sees the cloned
-    // speaker_emb + speech_prompt_tokens (driving the new speaker's
-    // prosody) while S3Gen keeps using the default voice's full conds
-    // bundle — so the rendered timbre is still the default voice but with
-    // the new speaker's intent in the token stream.
+    // `conds.t3.speech_prompt_tokens`.
     std::vector<int32_t> speech_prompt_tokens;
+    std::vector<int32_t> prompt_tokens;
     if (ctx->s3gen_ctx) {
-        const int n6 = std::min(n_samples, 6 * 16000);
+        const int n6 = std::min(n_16k, 6 * 16000);
         int n_tok6 = 0;
-        int32_t* tk6 = chatterbox_s3gen_tokenize_pcm(ctx->s3gen_ctx, pcm.data(), n6, /*max_tokens*/ 150, &n_tok6);
+        int32_t* tk6 = chatterbox_s3gen_tokenize_pcm(ctx->s3gen_ctx, pcm_16k, n6, /*max_tokens*/ 150, &n_tok6);
         if (tk6 && n_tok6 > 0) {
             speech_prompt_tokens.assign(tk6, tk6 + n_tok6);
             std::free(tk6);
         }
+        // gen.prompt_token: full audio, no max_len. ONLY install when we
+        // also have the matching prompt_feat + embedding (atomic path).
+        if (atomic_path) {
+            int n_tok_full = 0;
+            int32_t* tkf = chatterbox_s3gen_tokenize_pcm(ctx->s3gen_ctx, pcm_16k, n_16k, /*max_tokens*/ 0, &n_tok_full);
+            if (tkf && n_tok_full > 0) {
+                prompt_tokens.assign(tkf, tkf + n_tok_full);
+                std::free(tkf);
+            }
+        }
     }
 
-    int rc = chatterbox_install_native_voice(ctx, emb, /*prompt_tokens*/ nullptr, /*n_prompt_tokens*/ 0,
-                                             speech_prompt_tokens.data(), (int)speech_prompt_tokens.size());
+    // CAMPPlus + 24 kHz prompt mel — only on the atomic (24 kHz input) path.
+    // Both go through the s3gen sub-context's public C ABI hooks (the
+    // campplus weights live there). Returned buffers are malloc'd; copy
+    // into stable std::vectors and free.
+    std::vector<float> gen_emb;     // 192-d
+    std::vector<float> prompt_feat; // (T_mel, 80)
+    int T_prompt_feat = 0;
+    if (atomic_path && ctx->s3gen_ctx) {
+        float* xv = chatterbox_s3gen_dump_campplus_xvector(ctx->s3gen_ctx, pcm_16k, n_16k);
+        if (!xv) {
+            fprintf(stderr, "chatterbox: CAMPPlus xvector failed\n");
+            return -1;
+        }
+        gen_emb.assign(xv, xv + 192);
+        std::free(xv);
+
+        constexpr int kDecCondLen = 10 * 24000;
+        float* pf =
+            chatterbox_s3gen_dump_prompt_feat_24k(ctx->s3gen_ctx, pcm_24k.data(), n_24k, kDecCondLen, &T_prompt_feat);
+        if (!pf || T_prompt_feat <= 0) {
+            if (pf)
+                std::free(pf);
+            fprintf(stderr, "chatterbox: 24 kHz prompt mel failed\n");
+            return -1;
+        }
+        prompt_feat.assign(pf, pf + (size_t)T_prompt_feat * 80);
+        std::free(pf);
+
+        // Match `embed_ref`'s sanity clamp: gen.prompt_feat covers
+        // 2 * gen.prompt_token frames; trim tokens if the mel is shorter.
+        if (!prompt_tokens.empty() && (int)prompt_tokens.size() > T_prompt_feat / 2) {
+            prompt_tokens.resize((size_t)(T_prompt_feat / 2));
+        }
+    }
+
+    int rc = chatterbox_install_native_voice(
+        ctx, emb, atomic_path ? prompt_tokens.data() : nullptr, atomic_path ? (int)prompt_tokens.size() : 0,
+        speech_prompt_tokens.data(), (int)speech_prompt_tokens.size(), atomic_path ? prompt_feat.data() : nullptr,
+        atomic_path ? T_prompt_feat : 0, atomic_path ? gen_emb.data() : nullptr);
     if (rc != 0)
         return rc;
 
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "chatterbox: native WAV clone (%s, %d samples) — speaker_emb cloned (Module 2)", wav_path,
-                n_samples);
-        if (!speech_prompt_tokens.empty())
-            fprintf(stderr, "; %zu speech_prompt_tokens (Module 3)", speech_prompt_tokens.size());
-        fprintf(stderr, ". S3Gen prompt (gen.prompt_token + gen.prompt_feat + gen.embedding) still defaults until "
-                        "Module 4 (CAMPPlus + 24 kHz mel) lands — needs all three updated together to stay "
-                        "consistent.\n");
+        if (atomic_path) {
+            fprintf(stderr,
+                    "chatterbox: atomic native WAV clone (%s, %d samples @ 24 kHz, %d @ 16 kHz) — all 5 conds "
+                    "(speaker_emb, %zu speech_prompt_tokens, %zu prompt_token, prompt_feat (T_mel=%d), "
+                    "gen.embedding (192-d)) installed.\n",
+                    wav_path, n_24k, n_16k, speech_prompt_tokens.size(), prompt_tokens.size(), T_prompt_feat);
+        } else {
+            fprintf(stderr,
+                    "chatterbox: partial native WAV clone (%s, %d samples @ 16 kHz) — T3-side conds cloned "
+                    "(speaker_emb, %zu speech_prompt_tokens). S3Gen prompt (gen.{prompt_token, prompt_feat, "
+                    "embedding}) still defaults; re-encode at 24 kHz mono for full atomic cloning.\n",
+                    wav_path, n_16k, speech_prompt_tokens.size());
+        }
     }
     return 0;
 }

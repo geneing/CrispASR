@@ -318,6 +318,8 @@ add_library(crispasr-core STATIC
             core/rvq.cpp
             core/kaldi_fbank.h
             core/kaldi_fbank.cpp
+            core/audio_resample.h
+            core/audio_resample.cpp
             )
 target_include_directories(crispasr-core PUBLIC . ../include)
 # PLAN #51a: gguf_loader uses ggml_backend_buffer_init from

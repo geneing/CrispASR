@@ -314,21 +314,22 @@ already accepts for the built-in voice. `--voice <voice.gguf>` then
 loads it via `chatterbox_load_voice_gguf` into a separate
 `voice_ctx_w` / `voice_buf_w` and rebinds `ctx->conds.*` pointers,
 leaving the original baked-in default-voice tensors allocated but
-unreferenced. In-process WAV → cond extraction is partly ported. **Module 2**
-(`src/chatterbox_ve.cpp`) ports the VoiceEncoder (mel + 3-layer LSTM
-+ projection + L2-norm) and **Module 3** (`src/chatterbox_s3tok.cpp`)
-ports the S3Tokenizer V2 (Whisper-style encoder with FSMN-augmented
-attention + FSQ codebook). Both are verified bit-equivalent to
-upstream via `crispasr-diff chatterbox` on the `ve_*` and `s3tok_*`
-stages. The runtime now clones the T3-side conds (`speaker_emb` +
-`speech_prompt_tokens`) in-process when `--voice` is a `.wav` path.
-**Module 4 (CAMPPlus + 24 kHz prompt mel) is still pending** —
-S3Gen's three gen.* conds (`prompt_token`, `prompt_feat`, `embedding`)
-describe the same reference audio for the flow matcher and have to
-be updated atomically, so they stay at the default voice's tensors
-until module 4 lands. Native WAV cloning therefore carries the new
-speaker's prosody but renders with the default voice's timbre. For
-complete cloning today, use the python baker workflow.
+unreferenced. In-process WAV → cond extraction is fully ported across four
+modules: VE (`src/chatterbox_ve.cpp`), S3Tokenizer V2
+(`src/chatterbox_s3tok.cpp`), CAMPPlus + Kaldi fbank
+(`src/chatterbox_campplus.cpp` + `src/core/kaldi_fbank.{h,cpp}`),
+and 24 kHz Matcha mel (in `chatterbox_campplus.cpp`). All are
+verified bit- or fp32-rounding-tight against PyTorch via
+`crispasr-diff chatterbox`. A polyphase Kaiser-windowed sinc
+resampler (`src/core/audio_resample.{h,cpp}`) handles the 16 ↔
+24 kHz conversion. The runtime forks on the input rate when
+`--voice` is a `.wav` path: 24 kHz input triggers atomic cloning
+(all five conds derived from one source); 16 kHz input keeps the
+T3-side-only partial path (the S3Gen-side `gen.*` triple stays at
+default to avoid the inconsistent-conditioning silence trap).
+Output may drift from the python baker due to the resampler
+differing slightly from librosa kaiser_fast; for perfect parity
+the python baker workflow remains recommended.
 S3Gen GGUF is auto-discovered next to T3 or passed via `--codec-model`.
 See [`docs/tts.md`](tts.md#voice-cloning) for the workflow.
 
