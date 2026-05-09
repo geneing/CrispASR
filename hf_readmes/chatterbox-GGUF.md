@@ -50,9 +50,31 @@ cmake --build build -j --target chatterbox
 huggingface-cli download cstr/chatterbox-GGUF chatterbox-t3-q8_0.gguf --local-dir .
 huggingface-cli download cstr/chatterbox-GGUF chatterbox-s3gen-q8_0.gguf --local-dir .
 
-# 3. Synthesise (C API / test binary — CLI adapter in progress)
-# See tests/test_voc_wav.cpp for vocoder-only usage
+# 3. Synthesise with the built-in default voice
+./build/bin/crispasr --backend chatterbox \
+    -m chatterbox-t3-q8_0.gguf \
+    --codec-model chatterbox-s3gen-q8_0.gguf \
+    --tts "Hello there, this is chatterbox speaking." \
+    --tts-output out.wav
+
+# 4. (Optional) clone a different speaker — bake a small voice GGUF
+# from a reference WAV, then pass it via --voice. Requires the upstream
+# python pkg: pip install chatterbox-tts
+python models/bake-chatterbox-voice-from-wav.py \
+    --input /path/to/reference.wav \
+    --output my_voice.gguf
+
+./build/bin/crispasr --backend chatterbox \
+    -m chatterbox-t3-q8_0.gguf \
+    --codec-model chatterbox-s3gen-q8_0.gguf \
+    --voice my_voice.gguf \
+    --tts "Cloned voice synthesising arbitrary text." \
+    --tts-output cloned.wav
 ```
+
+See [`docs/tts.md`](https://github.com/CrispStrobe/CrispASR/blob/main/docs/tts.md#voice-cloning)
+for the full Chatterbox voice-clone reference, including the
+per-call cache used by `--server` mode.
 
 ## Architecture
 

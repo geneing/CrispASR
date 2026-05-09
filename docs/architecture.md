@@ -304,9 +304,22 @@ turbo/kartoffelbox-turbo.
 
 **S3Gen (Tokens-to-Speech)**: UpsampleConformerEncoder + UNet1D CFM +
 HiFTGenerator vocoder. Turbo uses 2-step meanflow CFM (vs 10-step cosine
-for base). Default voice baked into T3 (`conds.*`); `--voice <wav>`
-switches to clone mode via VoiceEncoder LSTM + CAMPPlus x-vector. S3Gen
-GGUF auto-discovered next to T3 or passed via `--codec-model`.
+for base). Default voice baked into T3 (`conds.*`); voice cloning
+goes through `models/bake-chatterbox-voice-from-wav.py`, which runs
+upstream `prepare_conditionals(wav)` (VoiceEncoder LSTM →
+256-d speaker emb, CAMPPlus TDNN → 192-d x-vector, S3Tokenizer →
+prompt tokens, 24 kHz mel extractor → prompt mel) and writes a small
+voice GGUF (~150-200 KB) using the same tensor names the runtime
+already accepts for the built-in voice. `--voice <voice.gguf>` then
+loads it via `chatterbox_load_voice_gguf` into a separate
+`voice_ctx_w` / `voice_buf_w` and rebinds `ctx->conds.*` pointers,
+leaving the original baked-in default-voice tensors allocated but
+unreferenced. In-process WAV → cond extraction in C++ is deferred —
+the VE/CAMPPlus/S3Tokenizer weights ARE in the S3Gen GGUF
+(`s3.se.xv`, `s3.se.head`, `s3.tok.*`) but the forward passes haven't
+been ported to ggml yet. S3Gen GGUF is auto-discovered next to T3
+or passed via `--codec-model`. See [`docs/tts.md`](tts.md#voice-cloning)
+for the workflow.
 
 Variants:
 - [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) — base, English

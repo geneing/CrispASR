@@ -11,7 +11,7 @@ trade-off:
 | **`vibevoice-tts`** | Lowest-latency streaming TTS, designed for realtime. | Preset voice packs | ~636 MB via `-m auto` |
 | **`vibevoice-1.5b`** | Base VibeVoice TTS model with WAV cloning. | Yes (`VIBEVOICE_VOICE_AUDIO=<wav>` or `--voice <wav>`) | ~1.6 GB via `-m auto` |
 | **`orpheus`** | Llama-3.2-3B talker + SNAC 24 kHz codec. 8 baked English speakers; expressive output. Greedy loops — pass `--temperature 0.6`. | Preset names via `--voice tara/leah/...` | ~3.5 GB via `-m auto` (talker Q8 + 26 MB SNAC) |
-| **`chatterbox`** | T3 AR + S3Gen flow-matching + HiFTGenerator. Built-in voice baked into the T3 GGUF; clones from a reference WAV. EN/AR/DE variants share runtime. | Yes (`--voice <wav>` via VE/CAMPPlus) | ~880 MB via `-m auto` (T3 Q8 + S3Gen Q8) |
+| **`chatterbox`** | T3 AR + S3Gen flow-matching + HiFTGenerator. Built-in voice baked into the T3 GGUF; clones via a baked voice GGUF (see workflow below). EN/AR/DE variants share runtime. | Yes (`--voice <voice.gguf>`, baked from a WAV with `models/bake-chatterbox-voice-from-wav.py`) | ~880 MB via `-m auto` (T3 Q8 + S3Gen Q8) |
 
 All six write 24 kHz mono WAV via `--tts-output`.
 
@@ -260,14 +260,65 @@ and the GPT-2-T3 path (turbo/kartoffelbox-turbo):
     --tts "مرحباً" -ow out-ar.wav
 ```
 
-Voice cloning from a reference WAV (24 kHz mono, ~5–10 s):
+### Voice cloning
+
+Voice cloning is a **two-step workflow**: bake a reference WAV into a
+small voice GGUF (~150-200 KB) once, then feed that GGUF to
+`--voice` at synthesis time. This mirrors the
+`models/convert-vibevoice-voice-to-gguf.py` pattern and avoids
+shipping the VoiceEncoder LSTM, CAMPPlus TDNN, and S3Tokenizer
+forwards inside the C++ runtime — they all live in the python baker.
+
+**Step 1 — bake the voice GGUF (one-time per reference speaker):**
+
+```bash
+# Requires the upstream chatterbox-tts python package (pip install
+# chatterbox-tts) or RESEMBLE_CHATTERBOX_SRC=/path/to/clone/src for a
+# local source checkout. The model loads on CPU by default; pass
+# --device mps / cuda for faster baking. Reference WAV can be any
+# sample rate / channel count — the baker resamples to 16 kHz for
+# the VoiceEncoder + S3Tokenizer paths and 24 kHz for the prompt mel.
+python models/bake-chatterbox-voice-from-wav.py \
+    --input samples/jfk.wav \
+    --output my_voice.gguf
+```
+
+The baker runs upstream `ChatterboxTTS.prepare_conditionals(wav)` and
+writes five tensors plus two scalar metadata keys, using the same
+names the runtime already accepts for the built-in default voice
+(`conds.t3.{speaker_emb, speech_prompt_tokens}`,
+`conds.gen.{prompt_token, prompt_feat, embedding}`,
+`chatterbox.conds.{emotion_adv, gen_prompt_token_len}`). Output
+size is ~150-200 KB regardless of reference WAV length.
+
+**Step 2 — synthesise with the baked voice:**
 
 ```bash
 ./build/bin/crispasr --backend chatterbox -m auto \
-    --voice samples/jfk.wav \
-    --tts "Cloned voice synthesizing arbitrary text." \
+    --voice my_voice.gguf \
+    --tts "Cloned voice synthesising arbitrary text." \
     --tts-output cloned.wav
 ```
+
+`--voice` is per-call cached, so server callers (`--server` mode) can
+switch voices between requests without reloading on every synthesise.
+Passing a `.wav` directly to `--voice` currently prints a hint
+pointing at the baker — in-process WAV → cond extraction in C++ is
+deferred (the VE/CAMPPlus/S3Tokenizer weights are already in the
+S3Gen GGUF as `s3.se.xv`, `s3.se.head`, `s3.tok.*`, but the forward
+passes haven't been ported to ggml yet). Track this in the
+project's PLAN.
+
+The same `my_voice.gguf` works across all four chatterbox variants
+(`chatterbox`, `chatterbox-turbo`, `kartoffelbox-turbo`,
+`lahgtna-chatterbox`) since the cond tensor contract is shared.
+
+**Optional: `--exaggeration`** is baked into the voice at conversion
+time via `--exaggeration <float>` (default `0.5`); pass a different
+value to the baker to produce a more / less expressive variant of
+the same speaker. The C++ runtime reads
+`chatterbox.conds.emotion_adv` from the loaded voice GGUF, so the
+flag is honored without further wiring.
 
 Companion sharing — the registry deliberately points multiple variants
 at the same S3Gen file to avoid redundant downloads. Kartoffelbox-turbo
