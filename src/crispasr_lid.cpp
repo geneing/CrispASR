@@ -142,7 +142,7 @@ bool detect_silero(const float* samples, int n_samples, const CrispasrLidOptions
     // Silero labels are "xx, Name" (e.g. "de, German") — extract ISO code only.
     auto comma = code.find(',');
     if (comma != std::string::npos)
-        code = code.substr(0, comma);
+        code.resize(comma);
 
     out.lang_code = code;
     out.confidence = conf;

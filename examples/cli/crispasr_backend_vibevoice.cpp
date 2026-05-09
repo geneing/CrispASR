@@ -76,8 +76,8 @@ public:
 
     uint32_t capabilities() const override {
         // ASR mode produces segments → framework -am + --diarize work.
-        uint32_t caps = CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_TTS |
-                        CAP_DIARIZE;
+        uint32_t caps =
+            CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_TTS | CAP_DIARIZE;
         if (allow_generic_no_voice_)
             caps |= CAP_VOICE_CLONING;
         return caps;
@@ -192,8 +192,9 @@ public:
                 if (params.tts_voice.empty() || params.tts_voice != voice_path)
                     fprintf(stderr, "crispasr[%s]: voice loaded '%s'\n", backend_name_.c_str(), voice_path.c_str());
             } else {
-                fprintf(stderr, "crispasr[%s]: voice '%s' could not be loaded; refusing to synthesise without a "
-                                "voice prompt.\n",
+                fprintf(stderr,
+                        "crispasr[%s]: voice '%s' could not be loaded; refusing to synthesise without a "
+                        "voice prompt.\n",
                         backend_name_.c_str(), voice_path.c_str());
                 return {};
             }
@@ -204,9 +205,10 @@ public:
         if (!allow_generic_no_voice_ && last_voice_key_.empty() && wav_ref_path_.empty()) {
             const char* voice_wav_env = getenv("VIBEVOICE_VOICE_AUDIO");
             if (!voice_wav_env || !voice_wav_env[0]) {
-                fprintf(stderr, "crispasr[%s]: no voice prompt resolved (pass --voice <path.gguf>, --voice <path.wav>, "
-                                "drop a <name>.gguf into --voice-dir, set VIBEVOICE_VOICE_AUDIO=<wav>, or place a "
-                                "vibevoice-voice-*.gguf next to the model).\n",
+                fprintf(stderr,
+                        "crispasr[%s]: no voice prompt resolved (pass --voice <path.gguf>, --voice <path.wav>, "
+                        "drop a <name>.gguf into --voice-dir, set VIBEVOICE_VOICE_AUDIO=<wav>, or place a "
+                        "vibevoice-voice-*.gguf next to the model).\n",
                         backend_name_.c_str());
                 return {};
             }
@@ -238,10 +240,10 @@ public:
 
 private:
     vibevoice_context* ctx_ = nullptr;
-        std::string last_voice_key_;
-        std::string wav_ref_path_; // set when --voice <path.wav> is used (1.5B WAV cloning)
-        std::string backend_name_ = "vibevoice";
-        bool allow_generic_no_voice_ = false;
+    std::string last_voice_key_;
+    std::string wav_ref_path_; // set when --voice <path.wav> is used (1.5B WAV cloning)
+    std::string backend_name_ = "vibevoice";
+    bool allow_generic_no_voice_ = false;
 };
 
 } // namespace

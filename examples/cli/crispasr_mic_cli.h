@@ -20,4 +20,3 @@ inline std::string crispasr_windows_dshow_audio_arg() {
     return crispasr_windows_dshow_audio_arg_from_name(crispasr_mic_default_device_name());
 }
 #endif
-
