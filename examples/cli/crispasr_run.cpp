@@ -1068,12 +1068,8 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 }
             }
 
-            if (params.stream_monitor) {
-                if (segs.empty()) {
-                    fprintf(stderr, "\xC2\xB7"); // · = silence
-                } else {
-                    fprintf(stderr, "\xE2\x9C\x93"); // ✓ = got text
-                }
+            if (params.stream_monitor && segs.empty()) {
+                fprintf(stderr, "\xC2\xB7"); // · = silence
                 fflush(stderr);
             }
 
@@ -1095,10 +1091,23 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 }
             } else {
                 if (!text.empty() && text != prev_text) {
-                    fprintf(stdout, "\33[2K\r%s", text.c_str());
+                    // When --monitor is active, use newlines instead of
+                    // in-place overwrite so the ✓ on stderr isn't erased
+                    // by the \33[2K\r on stdout (they share one cursor).
+                    if (params.stream_monitor) {
+                        fprintf(stdout, "%s\n", text.c_str());
+                    } else {
+                        fprintf(stdout, "\33[2K\r%s", text.c_str());
+                    }
                     fflush(stdout);
                     prev_text = text;
                 }
+            }
+
+            // Print ✓ AFTER the stdout text so it isn't erased.
+            if (params.stream_monitor) {
+                fprintf(stderr, "\xE2\x9C\x93"); // ✓ = got text
+                fflush(stderr);
             }
         }
         fprintf(stdout, "\n");
