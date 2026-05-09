@@ -1360,11 +1360,12 @@ static ggml_cgraph* build_gpt2_latent_graph(indextts_context* c, int n_total, in
     cur = ggml_mul(ctx0, cur, c->model.final_norm_w);
     cur = ggml_add(ctx0, cur, c->model.final_norm_b);
 
-    // Extract hidden states for mel code positions only (last n_mel_codes tokens).
-    // The full sequence is [cond(32) | text(N) | start_mel(1) | mel_codes(M)].
-    // We want the hidden states at the mel code positions, which are the last
-    // n_mel_codes entries.
-    int mel_start = T - n_mel_codes;
+    // Extract hidden states for mel positions: start_mel through the second-to-last
+    // mel code. Python returns mel_logits[:, :-2] on mel_emb which has (k+2) tokens
+    // [start_mel, m1..mk, stop_mel], so the latent has k positions starting at start_mel.
+    // These are the positions [start_mel, m1, ..., mk-1] — the hidden state at each
+    // position predicts the next mel code, which the vocoder uses as its input.
+    int mel_start = T - n_mel_codes - 1; // -1 to include start_mel position
     cur = ggml_view_2d(ctx0, cur, D, n_mel_codes, cur->nb[1], (size_t)mel_start * cur->nb[1]);
     cur = ggml_cont(ctx0, cur);
 
@@ -1383,14 +1384,19 @@ static float* run_gpt_latent(indextts_context* c, const std::vector<int32_t>& te
                              const std::vector<int32_t>& mel_codes) {
     const int D = (int)c->hp.d_model;
     const int cond_len = (int)c->hp.perceiver_n_latents;
-    const int text_len = (int)text_tokens.size();
+    // Python wraps text with start_text(0) + stop_text(1)
+    const int text_len = (int)text_tokens.size() + 2; // +start_text +stop_text
     const int n_mel = (int)mel_codes.size();
-    // Full sequence: [cond(32)] [text(N)] [start_mel(1)] [mel_codes(M)]
+    // Full sequence: [cond(32)] [start_text, t1..tn, stop_text] [start_mel, m1..mk]
+    // (no stop_mel appended — Python strips it via :-2)
     const int total_len = cond_len + text_len + 1 + n_mel;
+    // Latent: extract from start_mel position through mk-1 = n_mel positions
+    // (hidden state at start_mel predicts m1, at m1 predicts m2, etc.)
+    const int n_latent = n_mel; // matches Python's mel_emb.shape[1] - 2
 
     if (c->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: latent pass: total=%d (cond=%d text=%d start=1 mel=%d)\n", total_len, cond_len,
-                text_len, n_mel);
+        fprintf(stderr, "indextts: latent pass: total=%d (cond=%d text=%d mel=%d+1) n_latent=%d\n", total_len, cond_len,
+                text_len, n_mel, n_latent);
     }
 
     // Build full embedding sequence
@@ -1415,17 +1421,36 @@ static float* run_gpt_latent(indextts_context* c, const std::vector<int32_t>& te
     }
     pos += cond_len;
 
-    // 2. Text embeddings
-    for (int i = 0; i < text_len; i++) {
-        int tok = text_tokens[i];
-        if (tok < 0 || tok >= (int)c->hp.text_vocab_size)
-            tok = 0;
-        int tpi = std::min(i, (int)c->hp.text_pos_size - 1);
-        for (int j = 0; j < D; j++) {
-            embeds[(pos + i) * D + j] = text_emb_table[(size_t)tok * D + j] + text_pos_table[(size_t)tpi * D + j];
+    // 2. Text embeddings: [start_text, t1..tn, stop_text]
+    // Python: build_aligned_inputs_and_targets prepends start_text_token=0
+    // and the text_inputs already has stop_text_token=1 appended via F.pad
+    {
+        int start_text = 0; // GPT config: start_text_token=0
+        int stop_text = 1;  // GPT config: stop_text_token=1
+
+        // Start text token
+        int tpi = 0;
+        for (int j = 0; j < D; j++)
+            embeds[pos * D + j] = text_emb_table[(size_t)start_text * D + j] + text_pos_table[(size_t)tpi * D + j];
+        pos++;
+
+        // Text tokens
+        for (int i = 0; i < (int)text_tokens.size(); i++) {
+            int tok = text_tokens[i];
+            if (tok < 0 || tok >= (int)c->hp.text_vocab_size)
+                tok = 0;
+            tpi = std::min(i + 1, (int)c->hp.text_pos_size - 1);
+            for (int j = 0; j < D; j++)
+                embeds[(pos + i) * D + j] = text_emb_table[(size_t)tok * D + j] + text_pos_table[(size_t)tpi * D + j];
         }
+        pos += (int)text_tokens.size();
+
+        // Stop text token
+        tpi = std::min((int)text_tokens.size() + 1, (int)c->hp.text_pos_size - 1);
+        for (int j = 0; j < D; j++)
+            embeds[pos * D + j] = text_emb_table[(size_t)stop_text * D + j] + text_pos_table[(size_t)tpi * D + j];
+        pos++;
     }
-    pos += text_len;
 
     // 3. Start mel token + mel pos 0
     {
@@ -1459,7 +1484,7 @@ static float* run_gpt_latent(indextts_context* c, const std::vector<int32_t>& te
     }
 
     // Build and run the latent extraction graph (no KV cache — single prefill)
-    ggml_cgraph* gf = build_gpt2_latent_graph(c, total_len, n_mel);
+    ggml_cgraph* gf = build_gpt2_latent_graph(c, total_len, n_latent);
     ggml_backend_sched_reset(c->sched);
     if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
         fprintf(stderr, "indextts: failed to alloc latent graph\n");
@@ -1482,11 +1507,18 @@ static float* run_gpt_latent(indextts_context* c, const std::vector<int32_t>& te
         return nullptr;
     }
 
-    float* result = (float*)malloc((size_t)n_mel * D * sizeof(float));
-    ggml_backend_tensor_get(out, result, 0, (size_t)n_mel * D * sizeof(float));
+    float* result = (float*)malloc((size_t)n_latent * D * sizeof(float));
+    ggml_backend_tensor_get(out, result, 0, (size_t)n_latent * D * sizeof(float));
+
+    // Compute latent RMS for debugging
+    float sum2 = 0;
+    for (int i = 0; i < n_latent * D; i++)
+        sum2 += result[i] * result[i];
+    float lat_rms = sqrtf(sum2 / (float)(n_latent * D));
 
     if (c->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: latent extraction done: [%d, %d]\n", n_mel, D);
+        fprintf(stderr, "indextts: latent extraction done: [%d, %d] rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                n_latent, D, lat_rms, result[0], result[1], result[2], result[3], result[4]);
     }
 
     return result;

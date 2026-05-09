@@ -540,6 +540,8 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
         if (cpre_b) {
             x = ggml_add(ctx0, x, ggml_reshape_2d(ctx0, cpre_b, 1, (int)cpre_b->ne[0]));
         }
+        ggml_set_name(x, "dbg_conv_pre");
+        ggml_set_output(x);
     }
 
     // Speaker conditioning: x += cond_layer(spk_emb)
@@ -597,12 +599,11 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
             //           ...ConvTranspose1d...
             //       ]))
             //
-            // But in IndexTTS fork, the ups activation might be stored differently.
-            // Since we don't see explicit ups activation tensors in GGUF,
-            // use LeakyReLU as fallback (the original HiFi-GAN pattern).
+            // IndexTTS BigVGAN has NO activation before upsample — self.ups[i]
+            // contains only ConvTranspose1d. The SnakeBeta activations are all
+            // inside the AMPBlock1 resblocks.
             (void)aname;
             (void)bname;
-            x = ggml_leaky_relu(ctx0, x, 0.1f, false);
         }
 
         // ConvTranspose1d upsample
@@ -724,8 +725,8 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
 
     // Final SnakeBeta activation
     {
-        ggml_tensor* alpha_post = T(ts, "act_post.act.alpha");
-        ggml_tensor* beta_post = T(ts, "act_post.act.beta");
+        ggml_tensor* alpha_post = T(ts, "activation_post.act.alpha");
+        ggml_tensor* beta_post = T(ts, "activation_post.act.beta");
         x = snake_beta(ctx0, x, alpha_post, beta_post);
     }
 
@@ -943,6 +944,21 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "indextts-voc: BigVGAN compute failed\n");
         return nullptr;
+    }
+
+    // Debug: read conv_pre output
+    if (ctx->verbosity >= 1) {
+        ggml_tensor* dbg = ggml_graph_get_tensor(gf, "dbg_conv_pre");
+        if (dbg) {
+            int n = (int)ggml_nelements(dbg);
+            std::vector<float> d(n);
+            ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+            float s2 = 0;
+            for (float v : d)
+                s2 += v * v;
+            fprintf(stderr, "indextts-voc: conv_pre rms=%.4f ne=(%lld,%lld) first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                    sqrtf(s2 / n), (long long)dbg->ne[0], (long long)dbg->ne[1], d[0], d[1], d[2], d[3], d[4]);
+        }
     }
 
     // Read output
