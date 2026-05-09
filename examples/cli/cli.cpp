@@ -413,7 +413,25 @@ static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, 
         params.stream_continuous = true;
     } else if (arg == "--monitor") {
         params.stream_monitor = true;
-    } else if (arg == "--tts") {
+    } else {
+        return false;
+    }
+    return true;
+#undef ARGV_NEXT
+}
+
+// Continuation of whisper_params_parse_arg_backend_vad — split off so the
+// `else if` chain doesn't trip MSVC's C1061 "blocks nested too deeply"
+// limit. MSVC parses `else if` as `else { if ... }`, so each branch adds
+// +2 to the cumulative nesting depth tracked across the function; with
+// 70+ branches the depth exceeds the 128-level limit. Two ~35-branch
+// functions stay comfortably under it. The dispatch loop in
+// `whisper_params_parse` calls both in sequence.
+static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i, whisper_params& params) {
+    std::string arg = argv[i];
+#define ARGV_NEXT (((i + 1) < argc) ? argv[++i] : requires_value_error(arg))
+
+    if (arg == "--tts") {
         params.tts_text = ARGV_NEXT;
     } else if (arg == "--tts-output") {
         params.tts_output = ARGV_NEXT;
@@ -546,6 +564,9 @@ static bool whisper_params_parse(int argc, char** argv, whisper_params& params) 
             continue;
         }
         if (whisper_params_parse_arg_backend_vad(argc, argv, i, params)) {
+            continue;
+        }
+        if (whisper_params_parse_arg_streaming_tts(argc, argv, i, params)) {
             continue;
         }
 
