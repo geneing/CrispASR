@@ -3197,3 +3197,98 @@ closed *not planned*); for the only export where CoreML *does* load
 (parakeet-ctc int8 single-file), it's *slower* than CPU EP on M1
 (1.28 s vs 0.72 s). Reframes the issue's 5×-slower claim as
 Windows-DirectML-specific rather than universal "GPU slow."
+
+
+### §82 — Chatterbox native voice clone — modules 2/3/4 + atomic install (2026-05-09)
+
+Closes the `--voice <ref>.wav` arc started in `8a44fe2b`. Six commits
+across one session sprint port the four upstream cond-extractor models
+(VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel) to
+native C++, add a Kaiser-windowed sinc resampler, and wire the
+atomic-5-cond install into `chatterbox_set_voice_from_wav`'s `.wav`
+branch. End result: `--voice ref_24k.wav` produces real cloned speech
+without any python.
+
+Per-stage parity vs PyTorch (verified via `crispasr-diff chatterbox`
+on JFK 11 s):
+
+| Module | Stage | cos_mean | Commit |
+|---|---|---|---|
+| 2 | VoiceEncoder LSTM | 1.000000 | `8a44fe2b` |
+| 3 | S3Tokenizer V2 (proj_down) | 0.999928 | `201c5bc5` |
+| 4-1 | Kaldi fbank | 0.999999 | `1744869c` |
+| 4-2 | CAMPPlus xvector | 0.998070 | `f106c1f6` |
+| 4-3 | 24 kHz Matcha mel | 1.000000 | `f387f1b6` |
+| 4-final | resampler + atomic install | end-to-end | `847d29aa` |
+
+Five parity-quality compute kernels are bit- or fp32-rounding-tight
+when fed identical bytes via the diff harness's `audio_24k_input`
+bypass. The atomic install closes the loop: 24 kHz mono PCM16/F32
+WAV input → resample 24→16 once → run all five modules from one
+source → install all 5 conds in a fresh `voice_ctx_w` slot,
+mutually consistent. The `.wav` branch falls back to the partial
+M2+M3 path on 16 kHz input (gen.* triple stays at default to avoid
+the inconsistent-conditioning silence trap documented in the
+S3Tokenizer port).
+
+New shared infrastructure that other backends can consume:
+- `src/core/kaldi_fbank.{h,cpp}` — `torchaudio.compliance.kaldi.fbank()`
+  with default args (povey window, HTK mel, no Slaney norm,
+  preemph=0.97 with kaldi's `s[-1]=s[0]` boundary, snip_edges=True,
+  round_to_power_of_two=True). Covers any speaker / VAD encoder
+  trained against Kaldi's `fbank` pipeline. firered_asr.cpp keeps
+  its inline copy (different int16-magnitude scaling for its CMVN
+  baseline) — could dedupe to this helper in a follow-up.
+- `src/core/audio_resample.{h,cpp}` — generic Kaiser-windowed sinc
+  polyphase resampler (β=8.6, num_zeros=14, same parameters as
+  librosa kaiser_fast). NOT bit-equivalent to librosa (resampy uses
+  a precomputed table with a different precision knob), but
+  acoustically very close. Source of the small text drift between
+  native cloning and the python baker observed end-to-end.
+
+End-to-end on a 24 kHz JFK clip: atomic native clone produces real
+intelligible English speech in the cloned voice. Whisper roundtrip
+transcribes the synthesis; text drifts more than the python baker
+because resampler differences propagate through stochastic T3
+sampling, but the speaker direction is preserved and the conds are
+mutually consistent (no silence collapse). For full library-grade
+parity, the python baker workflow remains recommended; the native
+path is the no-python-required alternative.
+
+Key gotchas captured in `LEARNINGS.md`:
+- `embeds_from_wavs` default `rate=1.3` (NOT `overlap=0.5` as the
+  outer-level keyword suggests); affects partial frame_step.
+- `mel_type='amp'` skips the log step entirely (added
+  `core_mel::LogBase::None` for this).
+- S3Tokenizer K projection has no bias (Whisper convention) — guard
+  every `attn_k_b` add.
+- S3Tokenizer FSMN side branch operates on V before the head
+  reshape (depthwise k=31 conv on V, residual-added back, summed
+  into the post-O-proj attention output).
+- CAMPPlus `out_nl.bn.*` lives directly under `out_nl.*` (bare
+  `get_nonlinear`), NOT `out_nl.nl.bn.*` like the wrapped units.
+- TransitLayer / DenseLayer order is BN→ReLU→Linear (BN sized for
+  input, not output).
+- `F.avg_pool1d(ceil_mode=True)` divides by `kernel_size`, not the
+  actual frame count (count_include_pad default).
+- `torch.std` defaults to `unbiased=True` (divide by `n-1`).
+- 24 kHz Matcha mel uses magnitude with `+1e-9` INSIDE the sqrt
+  (NOT power) and natural log + `clamp(mel, 1e-5)` (NOT
+  log10 + Whisper-style clip-and-scale).
+- `gen.{prompt_token, prompt_feat, embedding}` must be installed
+  atomically — partially updating one of the three feeds S3Gen's
+  flow matcher inconsistent conditioning and silences the output
+  (verified: rms drops to ~0.0003).
+
+Module 2 only needed the existing `core_lstm` and `core_mel` infra.
+Module 3 reused `core_fft`, `core_mel`, and `ggml_conv_1d_dw`.
+Module 4 introduced two new shared helpers (`core_kaldi`,
+`core_audio`) and pure-CPU forward kernels for the 815-tensor
+CAMPPlus TDNN — the BN-fold + per-channel scale pattern is mechanical
+enough to skip ggml graph integration without losing perf (CAMPPlus
+runs ~2 s for an 11 s clip on M1, one-shot at voice-clone time).
+
+Files added: 6 new sources / 2 new headers
+(`chatterbox_ve.{h,cpp}`, `chatterbox_s3tok.{h,cpp}`,
+`chatterbox_campplus.{h,cpp}`, `core/kaldi_fbank.{h,cpp}`,
+`core/audio_resample.{h,cpp}`).
