@@ -898,6 +898,42 @@ int main(int argc, char** argv) {
                     print_row_mean("t3_prefill_emb[0]", rep, CHATTERBOX_MEAN_THRESHOLD,
                                    "criterion=cos_mean>=0.95  deterministic  batch=cond");
                     record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+
+                    // Per-row cosine for diagnostics — gated on CHATTERBOX_DEBUG
+                    // (the same backend-DEBUG env-var convention used by
+                    // fireredpunc, parakeet, vibevoice, orpheus, cohere etc.).
+                    if (std::getenv("CHATTERBOX_DEBUG")) {
+                        auto pr = ref.get_f32("t3_prefill_emb");
+                        if (pr.first) {
+                            printf("[PER-ROW t3_prefill_emb[0]] (cond=0..%d, text=%d..%d, speech_start=%d):\n",
+                                   pCondT - 1, pCondT, pT - 2, pT - 1);
+                            for (int t = 0; t < pT; ++t) {
+                                double dot = 0, na = 0, nb = 0;
+                                double rms_a = 0, rms_b = 0;
+                                for (int k = 0; k < pD; ++k) {
+                                    float a = pemb[(size_t)t * pD + (size_t)k];
+                                    float b = pr.first[(size_t)t * pD + (size_t)k];
+                                    dot += (double)a * b;
+                                    na += (double)a * a;
+                                    nb += (double)b * b;
+                                    rms_a += (double)a * a;
+                                    rms_b += (double)b * b;
+                                }
+                                double cos = (na > 0 && nb > 0) ? dot / std::sqrt(na * nb) : 0;
+                                rms_a = std::sqrt(rms_a / pD);
+                                rms_b = std::sqrt(rms_b / pD);
+                                const char* tag = "    ";
+                                if (t < pCondT)
+                                    tag = "cond";
+                                else if (t == pT - 1)
+                                    tag = "spch";
+                                else
+                                    tag = "text";
+                                printf("  row %2d %s  cos=%.6f  rms(c++)=%.4f  rms(py)=%.4f\n", t, tag, cos, rms_a,
+                                       rms_b);
+                            }
+                        }
+                    }
                 }
                 free(pemb);
             }
@@ -997,6 +1033,45 @@ int main(int argc, char** argv) {
                                                               s.row_width);
                             print_row_mean(s.name, rep, CHATTERBOX_MEAN_THRESHOLD, "criterion=cos_mean>=0.95");
                             record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+
+                            // Per-row cosine dump for the worst-K rows + boundary rows. Gated on
+                            // CHATTERBOX_DEBUG so the normal diff output stays compact. Helps localize
+                            // which time-steps drift in the upsample/resblock chain.
+                            if (std::getenv("CHATTERBOX_DEBUG") && rep.found && rep.cos_mean < 0.999f) {
+                                auto pr = ref.get_f32(s.name);
+                                if (pr.first) {
+                                    const size_t n_total = std::min((size_t)stage_r.data.size(), pr.second);
+                                    const int rw = s.row_width;
+                                    const size_t n_rows = n_total / (size_t)rw;
+                                    std::vector<std::pair<float, size_t>> per_row;
+                                    per_row.reserve(n_rows);
+                                    for (size_t i = 0; i < n_rows; ++i) {
+                                        double dot = 0, na = 0, nb = 0;
+                                        for (int k = 0; k < rw; ++k) {
+                                            float a = stage_r.data[i * (size_t)rw + (size_t)k];
+                                            float b = pr.first[i * (size_t)rw + (size_t)k];
+                                            dot += (double)a * b;
+                                            na += (double)a * a;
+                                            nb += (double)b * b;
+                                        }
+                                        float cs = (na > 0 && nb > 0) ? (float)(dot / std::sqrt(na * nb)) : 1.0f;
+                                        per_row.emplace_back(cs, i);
+                                    }
+                                    auto sorted = per_row;
+                                    std::sort(sorted.begin(), sorted.end(),
+                                              [](const auto& a, const auto& b) { return a.first < b.first; });
+                                    printf("  worst 5 rows in %s (T_index, cos):", s.name);
+                                    for (int q = 0; q < 5 && q < (int)sorted.size(); ++q) {
+                                        printf(" (%zu, %.4f)", sorted[q].second, sorted[q].first);
+                                    }
+                                    printf("\n");
+                                    printf("  boundary rows: t=0 cos=%.4f  t=1 cos=%.4f  t=last-1 cos=%.4f  t=last "
+                                           "cos=%.4f\n",
+                                           per_row[0].first, per_row.size() > 1 ? per_row[1].first : 1.0f,
+                                           per_row[per_row.size() > 1 ? per_row.size() - 2 : 0].first,
+                                           per_row.back().first);
+                                }
+                            }
                         }
                     } else {
                         printf("[SKIP] hift_source_stft      not in reference archive; re-dump with latest "

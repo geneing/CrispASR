@@ -1814,7 +1814,13 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     ggml_tensor* a = ggml_reshape_2d(ctx0, sa1, 1, (int)sa1->ne[0]);
                     ggml_tensor* ax = ggml_mul(ctx0, si, a);
                     ggml_tensor* s_ax = ggml_sin(ctx0, ax);
-                    si = ggml_add(ctx0, si, ggml_div(ctx0, ggml_mul(ctx0, s_ax, s_ax), a));
+                    // Snake: x + sin^2(α x) / (α + ε). Python applies ε = 1e-9 inside the
+                    // divisor (chatterbox/models/s3gen/transformer/activation.py:71,82) to
+                    // tame the trained-α-near-zero case; we must match it bit-for-bit, since
+                    // small post-training α values at specific channels otherwise blow up
+                    // the source-resblock branch and contaminate the late upsample stages.
+                    ggml_tensor* a_safe = ggml_scale_bias(ctx0, a, 1.0f, 1e-9f);
+                    si = ggml_add(ctx0, si, ggml_div(ctx0, ggml_mul(ctx0, s_ax, s_ax), a_safe));
                 }
                 std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.c1.%d.weight", stage, d);
                 ggml_tensor* sc1w = T(c, key2);
@@ -1831,7 +1837,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     ggml_tensor* a2 = ggml_reshape_2d(ctx0, sa2, 1, (int)sa2->ne[0]);
                     ggml_tensor* ax2 = ggml_mul(ctx0, si, a2);
                     ggml_tensor* s_ax2 = ggml_sin(ctx0, ax2);
-                    si = ggml_add(ctx0, si, ggml_div(ctx0, ggml_mul(ctx0, s_ax2, s_ax2), a2));
+                    ggml_tensor* a2_safe = ggml_scale_bias(ctx0, a2, 1.0f, 1e-9f);
+                    si = ggml_add(ctx0, si, ggml_div(ctx0, ggml_mul(ctx0, s_ax2, s_ax2), a2_safe));
                 }
                 std::snprintf(key2, sizeof(key2), "s3.v.srb.%d.c2.%d.weight", stage, d);
                 ggml_tensor* sc2w = T(c, key2);
@@ -1885,7 +1892,10 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     ggml_tensor* ax = ggml_mul(ctx0, x, a);
                     ggml_tensor* sin_ax = ggml_sin(ctx0, ax);
                     ggml_tensor* sin2 = ggml_mul(ctx0, sin_ax, sin_ax);
-                    ggml_tensor* sin2_over_a = ggml_div(ctx0, sin2, a);
+                    // ε = 1e-9 to match Python's Snake.no_div_by_zero
+                    // (s3gen/transformer/activation.py:71). Same fix as in source-resblock above.
+                    ggml_tensor* a_safe = ggml_scale_bias(ctx0, a, 1.0f, 1e-9f);
+                    ggml_tensor* sin2_over_a = ggml_div(ctx0, sin2, a_safe);
                     x = ggml_add(ctx0, x, sin2_over_a);
                 }
                 // Debug markers for sub-operations within snake1
@@ -1929,7 +1939,8 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
                     ggml_tensor* ax2 = ggml_mul(ctx0, x, a2);
                     ggml_tensor* sin_ax2 = ggml_sin(ctx0, ax2);
                     ggml_tensor* sin2_2 = ggml_mul(ctx0, sin_ax2, sin_ax2);
-                    ggml_tensor* sin2_over_a2 = ggml_div(ctx0, sin2_2, a2);
+                    ggml_tensor* a2_safe = ggml_scale_bias(ctx0, a2, 1.0f, 1e-9f);
+                    ggml_tensor* sin2_over_a2 = ggml_div(ctx0, sin2_2, a2_safe);
                     x = ggml_add(ctx0, x, sin2_over_a2);
                 }
                 if (stage_dump && stage == 0 && rb == 0) {
@@ -1983,8 +1994,14 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
         }
     }
 
-    // LeakyReLU
-    x = ggml_leaky_relu(ctx0, x, 0.1f, false);
+    // LeakyReLU before conv_post: Python's hifigan.py:437 calls
+    // F.leaky_relu(x) with NO slope argument, so it uses PyTorch's default
+    // negative_slope=0.01 (NOT the lrelu_slope=0.1 used at lines 418 / 422
+    // inside the upsample loop). Using 0.1 here lets ~10× more negative-side
+    // signal through into conv_post, which compounds with the resblock-Snake
+    // amplification at small-α channels into the cumulative
+    // hift_pcm(ref_mel) cos drift to ~0.89.
+    x = ggml_leaky_relu(ctx0, x, 0.01f, false);
 
     // conv_post: Conv1d(64→18, k=7, padding=3)
     ggml_tensor* cpost_w = T(c, "s3.v.cpost.weight");

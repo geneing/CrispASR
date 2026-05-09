@@ -144,12 +144,30 @@ public:
         return true;
     }
 
-    std::vector<float> synthesize(const std::string& text, const whisper_params& /*params*/) override {
+    std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
         if (!ctx_ || text.empty())
             return {};
         if (!s3gen_loaded_) {
             fprintf(stderr, "crispasr[chatterbox]: S3Gen not loaded. Pass --codec-model <s3gen.gguf>\n");
             return {};
+        }
+        // --voice: load a baked voice GGUF (or a WAV — currently routed to
+        // the baker hint, see chatterbox_set_voice_from_wav). Per-call key
+        // cache so server callers can switch voice between requests without
+        // reloading on every synthesise.
+        if (!params.tts_voice.empty() && params.tts_voice != last_voice_key_) {
+            if (chatterbox_set_voice_from_wav(ctx_, params.tts_voice.c_str()) == 0) {
+                last_voice_key_ = params.tts_voice;
+                if (!params.no_prints) {
+                    fprintf(stderr, "crispasr[chatterbox]: voice '%s' loaded\n", params.tts_voice.c_str());
+                }
+            } else {
+                // chatterbox_set_voice_from_wav already printed a precise
+                // diagnostic; surface it as a synthesis-blocker to mirror
+                // vibevoice's posture and avoid silently falling back to
+                // the default baked-in voice (which would mask the error).
+                return {};
+            }
         }
         int n = 0;
         float* pcm = chatterbox_synthesize(ctx_, text.c_str(), &n);
@@ -166,9 +184,11 @@ public:
             ctx_ = nullptr;
         }
         s3gen_loaded_ = false;
+        last_voice_key_.clear();
     }
 
 private:
+    std::string last_voice_key_;
     chatterbox_context* ctx_ = nullptr;
     bool s3gen_loaded_ = false;
 };

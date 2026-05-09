@@ -538,28 +538,63 @@ static int32_t sample_token(const float* logits, int vocab_size, float temperatu
         probs[i] /= sum;
     }
 
-    // Closest empirical match so far for CPU torch.multinomial on the
-    // Chatterbox path: sample argmax(p_i / e_i) with e_i ~ Exp(1), using
-    // MT19937 full-32-bit uniforms and consuming draws only for live tokens.
-    int32_t best_idx = 0;
-    float best_score = -1.0f;
-    for (int i = 0; i < vocab_size; i++) {
-        const float p = probs[i];
-        if (p <= 0.0f) {
-            continue;
+    // Faithful CPU torch.multinomial(probs, num_samples=1) port:
+    //   1. cum_dist[j] = sum_{i<=j} probs[i] in float32 (matches scalar_t in
+    //      aten/src/ATen/native/cpu/MultinomialKernel.cpp).
+    //   2. cum_dist[j] /= cum_dist[V-1]; cum_dist[V-1] = 1.0f (the upstream
+    //      kernel snaps the last bucket to exactly 1 to defend against
+    //      float-precision shortfall on the right edge of the CDF).
+    //   3. uniform_real_distribution<double>(0,1)(gen) is two MT19937 32-bit
+    //      draws combined as random64 = (r1 << 32) | r2, masked to 53 bits,
+    //      divided by 2^53 (aten/src/ATen/core/DistributionsHelper.h).
+    //   4. lower_bound: find smallest j with cum_dist[j] >= u.
+    //
+    // Replaces an earlier Gumbel-max implementation. Gumbel-max samples the
+    // same distribution but consumes V uniforms per token and accumulates a
+    // tiny pointwise bias from float32 -log1p(-u) at the right tail; on long
+    // chatterbox prompts the cumulative effect is mis-pronounced syllables
+    // (issue #76: "titan at dawn" → "titanette dawn"). The lower_bound path
+    // matches torch.multinomial bit-for-bit when the MT19937 state agrees,
+    // and statistically when it doesn't.
+    {
+        std::vector<float> cum_dist((size_t)vocab_size);
+        float run = 0.0f;
+        for (int i = 0; i < vocab_size; i++) {
+            run += probs[i];
+            cum_dist[(size_t)i] = run;
         }
-        float u = (float)rand_uniform_torch_u32(rng);
-        if (u >= 1.0f) {
-            u = std::nextafter(1.0f, 0.0f);
+        if (run <= 0.0f) {
+            // Pathological: all probs zero after filtering. Fall back to
+            // argmax of the original logits.
+            return (int32_t)(std::max_element(logits, logits + vocab_size) - logits);
         }
-        const float e = -std::log1pf(-u);
-        const float score = p / e;
-        if (score > best_score) {
-            best_score = score;
-            best_idx = i;
+        for (int i = 0; i < vocab_size; i++) {
+            cum_dist[(size_t)i] /= run;
         }
+        cum_dist[(size_t)(vocab_size - 1)] = 1.0f;
+
+        const uint32_t r1 = mt19937_next(rng);
+        const uint32_t r2 = mt19937_next(rng);
+        const uint64_t v = ((uint64_t)r1 << 32) | (uint64_t)r2;
+        const uint64_t mask53 = ((uint64_t)1 << 53) - 1;
+        const double divisor = 1.0 / (double)((uint64_t)1 << 53);
+        const double u = (double)(v & mask53) * divisor;
+
+        int left = 0;
+        int right = vocab_size;
+        while (right - left > 0) {
+            const int mid = left + (right - left) / 2;
+            if ((double)cum_dist[(size_t)mid] < u) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        if (left >= vocab_size) {
+            left = vocab_size - 1;
+        }
+        return (int32_t)left;
     }
-    return best_idx;
 }
 
 // ── Bind T3 tensors ─────────────────────────────────────────────
@@ -589,6 +624,15 @@ struct chatterbox_context {
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
+
+    // Voice clone — separate WeightLoad for runtime-loaded conds bundle.
+    // Replaces conds.* pointers in `conds` while leaving the original
+    // baked-in default voice tensors in `ctx_w`/`buf_w` untouched (they
+    // become unreferenced but free with the model context). Lifecycle:
+    // freed in dtor. nullptr when no voice GGUF has been loaded.
+    ggml_context* voice_ctx_w = nullptr;
+    ggml_backend_buffer_t voice_buf_w = nullptr;
+    std::map<std::string, ggml_tensor*> voice_tensors;
 
     // Compute scheduler
     ggml_backend_sched_t sched = nullptr;
@@ -629,6 +673,10 @@ struct chatterbox_context {
             ggml_backend_buffer_free(kv_buf);
         if (kv_ctx)
             ggml_free(kv_ctx);
+        if (voice_ctx_w)
+            ggml_free(voice_ctx_w);
+        if (voice_buf_w)
+            ggml_backend_buffer_free(voice_buf_w);
         if (ctx_w)
             ggml_free(ctx_w);
         if (buf_w)
@@ -1950,6 +1998,14 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
     text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
     text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
 
+    if (ctx->params.verbosity >= 2 || std::getenv("CHATTERBOX_DEBUG")) {
+        fprintf(stderr, "chatterbox: text_tokens(%zu) [SOT,...,EOT] = [", text_tokens.size());
+        for (size_t i = 0; i < text_tokens.size(); ++i) {
+            fprintf(stderr, "%d%s", (int)text_tokens[i], i + 1 == text_tokens.size() ? "" : ", ");
+        }
+        fprintf(stderr, "]\n");
+    }
+
     // 3. Allocate KV cache
     const int max_speech = ctx->params.max_speech_tokens;
     int max_ctx = (int)text_tokens.size() + max_speech + 64; // generous padding
@@ -2407,10 +2463,122 @@ extern "C" float* chatterbox_hift_from_conv_post(const float* stft_cf, int T_stf
     return chatterbox_s3gen_hift_from_conv_post(stft_cf, T_stft, T_mel, out_n_samples);
 }
 
+// Internal: replace the precomputed-conds tensor pointers from a freshly-loaded
+// voice GGUF (baked by tools/bake-chatterbox-voice-from-wav.py). Tensor names
+// match the ones the converter writes for the built-in voice
+// (see chatterbox.cpp:846-851 and convert-chatterbox-to-gguf.py:521-548):
+//   conds.t3.speaker_emb           f32  (1, 256)
+//   conds.t3.speech_prompt_tokens  i32  (T_prompt,)
+//   conds.gen.prompt_token         i32  (T_speech_tokens,)
+//   conds.gen.prompt_feat          f32  (T_mel, 80)
+//   conds.gen.embedding            f32  (1, 192)
+// Plus optional metadata:
+//   chatterbox.conds.emotion_adv          f32
+//   chatterbox.conds.gen_prompt_token_len u32
+//
+// Side-effect: frees any previous voice GGUF buffer; original baked-in
+// conds tensors in ctx_w stay allocated but become unreferenced (they
+// are freed when the model context is destroyed). Returns 0 on success.
+static int chatterbox_load_voice_gguf(chatterbox_context* ctx, const char* path) {
+    if (!ctx || !path)
+        return -1;
+
+    // Drop any previously-loaded voice GGUF before we read the new one,
+    // so a failed load doesn't leak the old buffer.
+    if (ctx->voice_ctx_w) {
+        ggml_free(ctx->voice_ctx_w);
+        ctx->voice_ctx_w = nullptr;
+    }
+    if (ctx->voice_buf_w) {
+        ggml_backend_buffer_free(ctx->voice_buf_w);
+        ctx->voice_buf_w = nullptr;
+    }
+    ctx->voice_tensors.clear();
+
+    // Optional scalar metadata (emotion_adv, gen_prompt_token_len) lives in
+    // the GGUF kv table — read it via the metadata-only pass first.
+    {
+        gguf_context* g = core_gguf::open_metadata(path);
+        if (!g) {
+            fprintf(stderr, "chatterbox: voice GGUF '%s' could not be opened\n", path);
+            return -1;
+        }
+        ctx->conds.emotion_adv = core_gguf::kv_f32(g, "chatterbox.conds.emotion_adv", ctx->conds.emotion_adv);
+        ctx->conds.gen_prompt_token_len =
+            core_gguf::kv_u32(g, "chatterbox.conds.gen_prompt_token_len", ctx->conds.gen_prompt_token_len);
+        core_gguf::free_metadata(g);
+    }
+
+    // Load tensors into a fresh ctx + backend buffer. We share the model's
+    // primary `backend` so conds tensors live alongside the model weights
+    // (avoiding cross-backend tensor_get rounds during synthesise).
+    {
+        core_gguf::WeightLoad wl;
+        if (!core_gguf::load_weights(path, ctx->backend, "chatterbox-voice", wl)) {
+            fprintf(stderr, "chatterbox: voice GGUF '%s' failed to load tensors\n", path);
+            return -1;
+        }
+        ctx->voice_ctx_w = wl.ctx;
+        ctx->voice_buf_w = wl.buf;
+        ctx->voice_tensors = std::move(wl.tensors);
+    }
+
+    // Re-bind conds.* to the voice's tensors. Anything missing in the voice
+    // GGUF stays at its previous value — useful for partial bundles, but
+    // the canonical baker always writes the full set.
+    ggml_tensor* t = nullptr;
+    if ((t = core_gguf::try_get(ctx->voice_tensors, "conds.t3.speaker_emb")))
+        ctx->conds.speaker_emb = t;
+    if ((t = core_gguf::try_get(ctx->voice_tensors, "conds.t3.speech_prompt_tokens")))
+        ctx->conds.speech_prompt_tokens = t;
+    if ((t = core_gguf::try_get(ctx->voice_tensors, "conds.gen.prompt_token"))) {
+        ctx->conds.gen_prompt_token = t;
+        // The metadata-derived length wins when present; otherwise infer.
+        if (ctx->conds.gen_prompt_token_len == 0) {
+            ctx->conds.gen_prompt_token_len = (uint32_t)t->ne[0];
+        }
+    }
+    if ((t = core_gguf::try_get(ctx->voice_tensors, "conds.gen.prompt_feat")))
+        ctx->conds.gen_prompt_feat = t;
+    if ((t = core_gguf::try_get(ctx->voice_tensors, "conds.gen.embedding")))
+        ctx->conds.gen_embedding = t;
+
+    ctx->conds.loaded = (ctx->conds.speaker_emb != nullptr);
+
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "chatterbox: voice loaded from '%s' (%zu tensors, emotion_adv=%.2f)\n", path,
+                ctx->voice_tensors.size(), (double)ctx->conds.emotion_adv);
+    }
+    return ctx->conds.loaded ? 0 : -1;
+}
+
+// Public entry point. Routes by file extension: ``.gguf`` paths load a
+// pre-baked voice bundle; everything else is treated as a reference WAV
+// and (currently) returns -1 with a pointer at the baker script. Native
+// WAV → cond extraction (VE LSTM, CAMPPlus TDNN, S3Tokenizer) is a
+// separate refactor — see PLAN entry on chatterbox voice cloning.
 extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, const char* wav_path) {
-    (void)ctx;
-    (void)wav_path;
-    fprintf(stderr, "chatterbox: voice cloning from WAV not yet implemented\n");
+    if (!ctx || !wav_path)
+        return -1;
+
+    auto ends_with = [](const char* s, const char* suffix) {
+        const size_t ls = std::strlen(s);
+        const size_t lx = std::strlen(suffix);
+        if (ls < lx)
+            return false;
+        return std::strcmp(s + ls - lx, suffix) == 0;
+    };
+
+    if (ends_with(wav_path, ".gguf") || ends_with(wav_path, ".GGUF")) {
+        return chatterbox_load_voice_gguf(ctx, wav_path);
+    }
+
+    fprintf(stderr,
+            "chatterbox: voice cloning directly from a WAV is not yet wired into the C++ runtime.\n"
+            "  Bake a voice GGUF first and pass that:\n"
+            "    python models/bake-chatterbox-voice-from-wav.py --input %s --output my_voice.gguf\n"
+            "    crispasr --backend chatterbox --voice my_voice.gguf --tts \"…\"\n",
+            wav_path);
     return -1;
 }
 

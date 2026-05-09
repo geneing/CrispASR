@@ -2508,6 +2508,146 @@ HiFT final reconstruction also match when fed reference tensors. The
 remaining token-stream drift is sampler parity with CPU
 `torch.multinomial`, not model math.
 
+## Chatterbox base T3 sampler parity — Gumbel-max → torch.multinomial (May 2026)
+
+Followup to the entry above: ported the base T3 sampler at
+`src/chatterbox.cpp:541` from a Gumbel-max trick (one MT19937 32-bit
+uniform per token, `argmax(p_i / -log(1-u_i))`) to a faithful CPU
+`torch.multinomial(probs, num_samples=1)` (cumsum + normalize +
+snap last bucket to 1.0 + binary search on a single 53-bit double
+uniform from two MT19937 draws combined as `random64 = (r1<<32)|r2`,
+masked to 53 bits, divided by 2^53). The recipe matches
+`aten/src/ATen/native/cpu/MultinomialKernel.cpp` and
+`aten/src/ATen/core/DistributionsHelper.h::uniform_real_distribution`
+exactly. Closes the residual "gibberish at start / blurred words"
+audible drift on long prompts (issue #76).
+
+Direct A/B on `"…I want to move like a titan at dawn."` with
+`chatterbox-t3-f16-regen.gguf` + `chatterbox-s3gen-q8_0.gguf`:
+
+| Sampler                   | ASR roundtrip transcript                   |
+|---------------------------|--------------------------------------------|
+| Gumbel-max (`p / -log1p(-u)`) | "…like a **Titanette Dawn**" (mispronounced) |
+| `torch.multinomial` faithful  | "…like a **Titan at dawn**" (matches input)  |
+
+Why Gumbel-max was empirically close but not equivalent here:
+fp32 `-log1p(-u)` with a 32-bit `u` discretizes the right tail to
+`u ∈ {0, 2^-32, 2·2^-32, …}` so the smallest non-1 `u` gives
+`e ≈ 22 = 32·log(2)`. PyTorch's 53-bit-precision uniform reaches
+`e ≈ 37` in the same tail. That biases Gumbel-max toward sampling
+further from the mode for any specific (logit, draw) — within the
+sampling distribution's natural variance per-token, but compounding
+across 60+ AR steps into specific token-id divergence at points
+where the post-temperature-post-min-p probability mass is thin and
+spread (the chatterbox speech-token vocab is 8194-wide and post-CFG
+multimodal, so this is common).
+
+Don't try to match Python's RNG state — `torch.manual_seed(...)`
+seeds CPUGeneratorImpl through a different path than our manual
+MT19937, and chatterbox's reference dump doesn't seed at all. The
+fix is statistical equivalence, not bit-exact reproducibility.
+
+## Chatterbox HiFT vocoder parity nits (May 2026)
+
+Two parity bugs found while diff-testing the vocoder against Python's
+HiFTGenerator with reference mel + reference source-stft fed in:
+
+### 1. Pre-conv_post LeakyReLU slope is `0.01`, not `0.1`
+
+`/private/tmp/resemble-chatterbox/src/chatterbox/models/s3gen/hifigan.py:418`
+calls `F.leaky_relu(x, self.lrelu_slope)` with `lrelu_slope=0.1` —
+this is the in-loop activation. But line 437 — the LAST activation
+before `conv_post` — calls `F.leaky_relu(x)` with **no slope
+argument**, so PyTorch's default `negative_slope=0.01` applies.
+Easy to miss when porting because everything else uses 0.1. Fixed
+at `src/chatterbox_s3gen.cpp:1998`. `voc_conv_post` cos_mean
+improved 0.985 → 0.993 against the per-stage reference.
+
+### 2. Snake activation needs `1/(α + 1e-9)`, not `1/α`
+
+`chatterbox/models/s3gen/transformer/activation.py:71,82`:
+
+```python
+self.no_div_by_zero = 0.000000001
+…
+x = x + (1.0 / (alpha + self.no_div_by_zero)) * pow(sin(x * alpha), 2)
+```
+
+Implemented in C++ via `ggml_scale_bias(ctx, alpha, 1.0, 1e-9)` →
+`ggml_div(sin², α_safe)`. Doesn't help on the current released
+weights (min α observed in `s3.v.rb.*` is 0.016 ≫ 1e-9), but it
+matches Python bit-for-bit and defends against future fine-tunes
+that drift α further toward zero. Three sites in
+`chatterbox_s3gen.cpp` (rb-snake1, rb-snake2, srb-snake1, srb-snake2).
+
+### Residual cumulative drift — fp accumulation order, not algorithmic
+
+After both fixes, `hift_pcm(ref_mel)` still sits at cos_min ≈ 0.89
+even though every individual stage between mel and conv_post passes
+the cos_mean ≥ 0.95 threshold. Per-row dump of `voc_ups_2` shows the
+drift is concentrated in a small cluster of time-steps (T ≈ 2900 of
+4801, mapping back to mel-index 24-25 of 40) with cos as low as 0.16,
+amplified across stages by Snake's `1/α` factor at channels with the
+smallest trained `α` (e.g. `s3.v.rb.1.a1.0.alpha` has elements at
+0.016 and 0.022). This is fp accumulation-order divergence between
+ggml's conv1d/convtranspose1d kernels and torch's; it does NOT
+affect intelligibility (ASR roundtrip on long prompts transcribes
+verbatim). Reaching cos_min = 1.0 here would require pinning ggml's
+reduction order to torch's — high cost, low audible payoff.
+
+## Chatterbox voice cloning — bake to GGUF, load via `--voice` (May 2026)
+
+Voice cloning uses the same baker-→-voice-GGUF pattern as vibevoice
+(`models/convert-vibevoice-voice-to-gguf.py`):
+`models/bake-chatterbox-voice-from-wav.py` runs upstream
+`ChatterboxTTS.prepare_conditionals(wav)` and writes a 150-200 KB
+GGUF using **the same tensor names the C++ runtime already accepts
+for the built-in voice** (see `convert-chatterbox-to-gguf.py:521-548`):
+
+```
+conds.t3.speaker_emb           f32  (1, 256)
+conds.t3.speech_prompt_tokens  i32  (T_prompt,)
+conds.gen.prompt_token         i32  (T_speech,)
+conds.gen.prompt_feat          f32  (T_mel, 80)
+conds.gen.embedding            f32  (1, 192)
+chatterbox.conds.emotion_adv          f32 metadata
+chatterbox.conds.gen_prompt_token_len u32 metadata
+```
+
+C++ side: `chatterbox_set_voice_from_wav()` dispatches on extension —
+`.gguf` paths route through `chatterbox_load_voice_gguf()`, which
+loads via `core_gguf::load_weights` into a separate
+`voice_ctx_w`/`voice_buf_w` and rebinds `ctx->conds.*` tensor pointers.
+The original baked-in default-voice tensors stay allocated in
+`ctx_w`/`buf_w` (unreferenced after rebind, freed only at context
+shutdown). `.wav` paths print a hint pointing at the baker —
+in-process WAV → cond extraction (VE LSTM, CAMPPlus TDNN,
+S3Tokenizer encoder + quantizer) is a separate refactor; weights
+ARE in the s3gen GGUF already (`s3.se.xv` 755 tensors, `s3.se.head`,
+`s3.tok.{enc,quant,encoder,_mel_filters}` 103 tensors), but
+implementing the forward passes is multi-day work.
+
+CLI plumbing: `--voice <path.gguf>` is wired in
+`crispasr_backend_chatterbox.cpp::synthesise()` with a
+per-call `last_voice_key_` cache so server callers can switch voice
+between requests. Mirrors the vibevoice posture (refuses to
+silently fall back to the default voice on a load failure).
+
+### The build-target trap that masked it
+
+`cmake --build build-ninja-compile --target crispasr` only relinks
+the **shared library** `libcrispasr.dylib` and stops there — the CLI
+executable lives in target `crispasr-cli`. So edits to
+`examples/cli/crispasr_backend_*.cpp` need an explicit
+`--target crispasr-cli` rebuild to land in `bin/crispasr`. We hit
+this on the first voice-clone smoke test: the synth log showed no
+"voice loaded" line and the cloned wav md5'd different from default
+purely because of post-build I/O timestamps in the wav header
+(audio bytes were identical). Always check that
+`build-ninja-compile/examples/cli/CMakeFiles/crispasr-cli.dir/<file>.o`
+has a fresher mtime than the .cpp before declaring a CLI-side
+behaviour test "passed".
+
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 
 Bringing up the T5 encoder-decoder runtime (`src/t5_translate.cpp`)
