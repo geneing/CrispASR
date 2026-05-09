@@ -72,8 +72,8 @@ test_backend() {
 
 # Backends with auto-download support and reasonable CPU speed
 FAST_BACKENDS="parakeet moonshine wav2vec2 data2vec hubert fastconformer-ctc"
-MEDIUM_BACKENDS="canary cohere omniasr omniasr-llm qwen3"
-SLOW_BACKENDS="voxtral voxtral4b granite granite-4.1 granite-4.1-plus granite-4.1-nar gemma4-e2b vibevoice vibevoice-1.5b glm-asr kyutai-stt firered-asr"
+MEDIUM_BACKENDS="canary cohere omniasr qwen3"
+SLOW_BACKENDS="omniasr-llm voxtral voxtral4b granite granite-4.1 granite-4.1-plus granite-4.1-nar gemma4-e2b vibevoice vibevoice-1.5b glm-asr kyutai-stt firered-asr"
 # vibevoice variants and omniasr-llm are very slow on CPU — skip by default
 
 echo "CrispASR backend regression tests"

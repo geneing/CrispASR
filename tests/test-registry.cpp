@@ -50,6 +50,13 @@ TEST_CASE("registry: omniasr-llm has entry", "[unit][registry]") {
     REQUIRE(found);
 }
 
+TEST_CASE("registry: omniasr-llm-1b has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    bool found = crispasr_registry_lookup("omniasr-llm-1b", e);
+    REQUIRE(found);
+    REQUIRE(std::string(e.filename).find("1b") != std::string::npos);
+}
+
 TEST_CASE("registry: granite-4.1 has entry", "[unit][registry]") {
     CrispasrRegistryEntry e;
     bool found = crispasr_registry_lookup("granite-4.1", e);

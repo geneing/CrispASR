@@ -108,7 +108,7 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_gemma4_e2b_backend();
     if (name == "moonshine")
         return crispasr_make_moonshine_backend();
-    if (name == "omniasr" || name == "omniasr-ctc" || name == "omniasr-llm")
+    if (name.rfind("omniasr", 0) == 0)
         return crispasr_make_omniasr_backend();
     if (name == "mimo-asr" || name == "mimo_asr" || name == "mimoasr")
         return crispasr_make_mimo_asr_backend();
@@ -161,6 +161,7 @@ std::vector<std::string> crispasr_list_backends() {
         "gemma4-e2b",
         "omniasr",
         "omniasr-llm",
+        "omniasr-llm-1b",
         "mimo-asr",
     };
 }

@@ -1353,7 +1353,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     }
 #endif
 #ifdef CA_HAVE_OMNIASR
-    if (s->backend == "omniasr" || s->backend == "omniasr-ctc" || s->backend == "omniasr-llm") {
+    if (s->backend.rfind("omniasr", 0) == 0) {
         omniasr_context_params p = omniasr_context_default_params();
         p.n_threads = s->n_threads;
         s->omniasr_ctx = omniasr_init_from_file(model_path, p);
@@ -2668,7 +2668,7 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
     }
 #endif
 #ifdef CA_HAVE_OMNIASR
-    if ((s->backend == "omniasr" || s->backend == "omniasr-ctc" || s->backend == "omniasr-llm") && s->omniasr_ctx) {
+    if ((s->backend.rfind("omniasr", 0) == 0) && s->omniasr_ctx) {
         // LLM variant produces per-token probs; CTC variant returns nullptr
         // here — fall through to the plain-text path below.
         omniasr_result* oar = omniasr_transcribe_with_probs((omniasr_context*)s->omniasr_ctx, pcm, n_samples);
