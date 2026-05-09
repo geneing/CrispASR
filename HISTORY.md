@@ -3170,6 +3170,22 @@ Apple M1 Metal: 0.6b q4_k → 44.7× RT, 1.1b q4_k → 37.3× RT. All 8
 quants verified bit-identical English transcript on samples/jfk.wav.
 Commit: `369f3ff`.
 
+#### Windows mic UTF-8 popen fix (#70 follow-up)
+On localized Windows installs the default DirectShow capture device
+name comes back from miniaudio as UTF-8 with non-ASCII characters
+(reporter saw zh `麥克風 (2- AIR 192 6)`). The narrow `_popen` path
+mangled it before ffmpeg saw the `-i audio="..."` arg, so ffmpeg
+exited before delivering any PCM, `2>NUL` hid the failure, and
+`--mic` / `--live` ended silently right after the "capturing from
+default microphone..." banner. New header
+`examples/cli/crispasr_popen.h` widens the UTF-8 command via
+`MultiByteToWideChar` (CP_UTF8 with CP_ACP fallback) and calls
+`_wpopen`. Mic path also now prints the resolved device name + the
+ffmpeg command before spawning, and emits a recovery hint if the
+pipe reaches EOF before any PCM was read. Same helper applied to
+the file-decode ffmpeg subprocess in `examples/common-crispasr.cpp`
+(non-ASCII paths). Commit: `b9b677d`.
+
 #### onnx-asr cross-comparison (re #81)
 Apples-to-apples bench against `istupakov/onnx-asr` 0.11.0 on M1.
 ONNX execution-provider availability table, TDT-vs-TDT and CTC-vs-CTC
