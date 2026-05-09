@@ -148,6 +148,11 @@ float* chatterbox_dump_s3tok_tokens(struct chatterbox_context* ctx, const float*
 // frees with `free()`.
 float* chatterbox_dump_campplus_fbank(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples, int* out_T);
 
+// Diff/debug: CAMPPlus 192-d speaker x-vector (Module 4 phase 2).
+// Forwarder to the s3gen sub-context. Returns a malloc'd 192-float buffer;
+// caller frees with `free()`.
+float* chatterbox_dump_campplus_xvector(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples);
+
 // Diff/debug: return the T3 prefill embeddings for the given text (output of
 // build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
 // Also sets *out_cond_T to the number of conditioning tokens (cond_len).

@@ -263,6 +263,15 @@ struct chatterbox_s3gen_context {
     // tensors after weight load. See chatterbox_s3tok.{h,cpp}.
     cb_s3tok_model s3tok;
 
+    // CAMPPlus speaker encoder (module 4). Bound from the s3.se.* tensors;
+    // the forward runs on CPU (no ggml graph). See chatterbox_campplus.{h,cpp}.
+    cb_campplus_model campplus;
+    chatterbox_campplus::cb_campplus_runtime campplus_cache;
+    // Placeholder field referenced from the bind block as a syntactic anchor —
+    // unused at runtime. Kept here so the bind block compiles cleanly without
+    // adding a fragile pre-declaration. (`(void)` shuts up -Wunused-variable.)
+    int s3tok_campplus_unused = 0;
+
     ~chatterbox_s3gen_context() {
         if (sched)
             ggml_backend_sched_free(sched);
@@ -400,6 +409,153 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
         if (verbosity >= 2) {
             const bool full = tok.conv1_w && tok.conv2_w && tok.quant_pd_w && tok.blocks[0].attn_q_w;
             fprintf(stderr, "s3gen: s3tok %s\n", full ? "bound" : "tensors absent (older GGUF)");
+        }
+    }
+
+    // CAMPPlus speaker encoder — module 4 of the native voice clone path.
+    // Bind all 815 `s3.se.*` tensors. Optional (older GGUFs may lack them).
+    {
+        auto& cp = c->s3tok_campplus_unused; // placeholder
+        (void)cp;
+        auto bind_unit = [&](cb_campplus_unit& u, const char* base) {
+            char k[128];
+            std::snprintf(k, sizeof(k), "%s.linear.weight", base);
+            u.lin_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.linear.bias", base);
+            u.lin_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nl.bn.weight", base);
+            u.bn_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nl.bn.bias", base);
+            u.bn_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nl.bn.running_mean", base);
+            u.bn_m = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nl.bn.running_var", base);
+            u.bn_v = T(c, k);
+        };
+        auto bind_resblock = [&](cb_campplus_resblock& b, const char* base) {
+            char k[128];
+            std::snprintf(k, sizeof(k), "%s.conv1.weight", base);
+            b.conv1_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn1.weight", base);
+            b.bn1_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn1.bias", base);
+            b.bn1_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn1.running_mean", base);
+            b.bn1_m = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn1.running_var", base);
+            b.bn1_v = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.conv2.weight", base);
+            b.conv2_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn2.weight", base);
+            b.bn2_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn2.bias", base);
+            b.bn2_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn2.running_mean", base);
+            b.bn2_m = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.bn2.running_var", base);
+            b.bn2_v = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.0.weight", base);
+            b.sc_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.weight", base);
+            b.sc_bn_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.bias", base);
+            b.sc_bn_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.running_mean", base);
+            b.sc_bn_m = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.running_var", base);
+            b.sc_bn_v = T(c, k);
+        };
+        auto bind_dense_layer = [&](cb_campplus_dense_layer& l, const char* base) {
+            char k[128];
+            std::snprintf(k, sizeof(k), "%s.nonl1.bn.weight", base);
+            l.nonl1_bn_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nonl1.bn.bias", base);
+            l.nonl1_bn_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nonl1.bn.running_mean", base);
+            l.nonl1_bn_m = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nonl1.bn.running_var", base);
+            l.nonl1_bn_v = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.l1.weight", base);
+            l.l1_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nonl2.bn.weight", base);
+            l.nonl2_bn_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nonl2.bn.bias", base);
+            l.nonl2_bn_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nonl2.bn.running_mean", base);
+            l.nonl2_bn_m = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.nonl2.bn.running_var", base);
+            l.nonl2_bn_v = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.cam.ll.weight", base);
+            l.cam_ll_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.cam.l1.weight", base);
+            l.cam_l1_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.cam.l1.bias", base);
+            l.cam_l1_b = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.cam.l2.weight", base);
+            l.cam_l2_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.cam.l2.bias", base);
+            l.cam_l2_b = T(c, k);
+        };
+
+        auto& m = c->campplus;
+        auto& head = m.head;
+        head.conv1_w = T(c, "s3.se.head.conv1.weight");
+        head.bn1_w = T(c, "s3.se.head.bn1.weight");
+        head.bn1_b = T(c, "s3.se.head.bn1.bias");
+        head.bn1_m = T(c, "s3.se.head.bn1.running_mean");
+        head.bn1_v = T(c, "s3.se.head.bn1.running_var");
+        head.conv2_w = T(c, "s3.se.head.conv2.weight");
+        head.bn2_w = T(c, "s3.se.head.bn2.weight");
+        head.bn2_b = T(c, "s3.se.head.bn2.bias");
+        head.bn2_m = T(c, "s3.se.head.bn2.running_mean");
+        head.bn2_v = T(c, "s3.se.head.bn2.running_var");
+        head.layer1.assign(2, cb_campplus_resblock{});
+        head.layer2.assign(2, cb_campplus_resblock{});
+        for (int i = 0; i < 2; i++) {
+            char base[64];
+            std::snprintf(base, sizeof(base), "s3.se.head.layer1.%d", i);
+            bind_resblock(head.layer1[i], base);
+            std::snprintf(base, sizeof(base), "s3.se.head.layer2.%d", i);
+            bind_resblock(head.layer2[i], base);
+        }
+        // First block of each layer downsamples H by 2 (stride=(2,1)).
+        head.layer1[0].stride = 2;
+        head.layer2[0].stride = 2;
+
+        bind_unit(m.tdnn, "s3.se.xv.tdnn");
+        bind_unit(m.transit1, "s3.se.xv.transit1");
+        bind_unit(m.transit2, "s3.se.xv.transit2");
+        bind_unit(m.transit3, "s3.se.xv.transit3");
+        // out_nl is a bare nonlinear (get_nonlinear) — its BN is at
+        // `out_nl.bn.*` directly, NOT `out_nl.nl.bn.*` like the other
+        // units that wrap a Linear+nonlinear pair.
+        m.out_nl.lin_w = nullptr;
+        m.out_nl.lin_b = nullptr;
+        m.out_nl.bn_w = T(c, "s3.se.xv.out_nl.bn.weight");
+        m.out_nl.bn_b = T(c, "s3.se.xv.out_nl.bn.bias");
+        m.out_nl.bn_m = T(c, "s3.se.xv.out_nl.bn.running_mean");
+        m.out_nl.bn_v = T(c, "s3.se.xv.out_nl.bn.running_var");
+        bind_unit(m.dense, "s3.se.xv.dense");
+
+        const int block_layer_counts[3] = {12, 24, 16};
+        const int block_dilations[3] = {1, 2, 2};
+        cb_campplus_dense_block* blocks_ptr[3] = {&m.block1, &m.block2, &m.block3};
+        for (int bi = 0; bi < 3; bi++) {
+            auto& blk = *blocks_ptr[bi];
+            blk.num_layers = block_layer_counts[bi];
+            blk.dilation = block_dilations[bi];
+            blk.layers.assign((size_t)blk.num_layers, cb_campplus_dense_layer{});
+            for (int li = 0; li < blk.num_layers; li++) {
+                char base[80];
+                std::snprintf(base, sizeof(base), "s3.se.xv.block%d.tdnnd%d", bi + 1, li + 1);
+                bind_dense_layer(blk.layers[(size_t)li], base);
+            }
+        }
+
+        if (verbosity >= 2) {
+            const bool full = m.head.conv1_w && m.tdnn.lin_w && m.dense.lin_w && m.block1.layers.size() == 12 &&
+                              m.block1.layers[0].l1_w;
+            fprintf(stderr, "s3gen: campplus %s\n", full ? "bound" : "tensors absent (older GGUF)");
         }
     }
 
@@ -2819,6 +2975,20 @@ extern "C" float* chatterbox_s3gen_dump_campplus_fbank(struct chatterbox_s3gen_c
         return nullptr;
     std::memcpy(r, fb.data(), fb.size() * sizeof(float));
     *out_T = T;
+    return r;
+}
+
+extern "C" float* chatterbox_s3gen_dump_campplus_xvector(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
+                                                         int n_samples) {
+    if (!ctx || !pcm_16k || n_samples <= 0)
+        return nullptr;
+    auto emb = chatterbox_campplus::embed_speaker(ctx->campplus, ctx->campplus_cache, pcm_16k, n_samples);
+    if (emb.size() != 192)
+        return nullptr;
+    float* r = (float*)malloc(192 * sizeof(float));
+    if (!r)
+        return nullptr;
+    std::memcpy(r, emb.data(), 192 * sizeof(float));
     return r;
 }
 

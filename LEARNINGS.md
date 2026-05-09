@@ -2916,12 +2916,87 @@ is multi-hour focused work.
    keep just the mel bins. CAMPPlus's call doesn't pass use_energy →
    defaults to False, so output is exactly num_mel_bins=80 columns.
 
-### Diff parity
+### Diff parity (phase 1)
 
 `tools/reference_backends/chatterbox.py` captures `campplus_fbank` via
 `torchaudio.compliance.kaldi.fbank` + the per-utterance mean subtract.
 `crispasr-diff chatterbox` on JFK 11 s gives `cos_min=0.999994
 cos_mean=0.999999` against torchaudio — fp32 rounding noise tight.
+
+## Chatterbox CAMPPlus phase 2 — TDNN forward (May 2026)
+
+Phase 2 of module 4 ports the CAMPPlus speaker encoder forward to native
+C++ — the FCM 2-D conv head + 12+24+16 dense TDNN layers + StatsPool +
+1024→192 dense projection. ~815 source tensors. Pure CPU float math (no
+ggml graph) since the per-channel BN folding plus the dense block's
+hold-and-broadcast `seg_pool` op are awkward to express in ggml's
+broadcasting; CPU is plenty fast for one-shot voice clone (≈2 s on M1
+for an 11 s clip).
+
+### Stuff that mattered
+
+1. **`out_nl.bn.*` is NOT under `out_nl.nl.bn.*`**. The other units in
+   the GGUF (`tdnn`, `transit{1,2,3}`, `dense`) wrap a Linear+nonlinear
+   pair and store the BN at `<unit>.nl.bn.*`. But `out_nl` is a bare
+   `get_nonlinear` (only a BN, no Linear), so its tensors are at
+   `out_nl.bn.{weight,bias,running_mean,running_var}` directly. Using
+   the generic `bind_unit` path silently bound the BN to nullptr and the
+   xvector forward segfaulted in `apply_bn_inplace` reading from the
+   empty `gamma` vector.
+
+2. **TransitLayer and DenseLayer order is BN→ReLU→Linear, NOT
+   Linear→BN→ReLU**. The `get_nonlinear(config_str, in_channels)` runs
+   FIRST (on the input), then `Linear(in→out)` projects. So the BN's
+   running stats are sized for `in_channels`, not `out_channels`. Folding
+   the BN with the wrong `C` produces silently corrupt output. Got this
+   right by binding via the source `cb_campplus_unit` and folding inside
+   the forward (see `bn_relu_conv1d` helper).
+
+3. **`F.avg_pool1d(k=100, stride=100, ceil_mode=True)` divides by `k`,
+   not by the actual frame count**. PyTorch's `count_include_pad=True`
+   default treats the partial last window as if it were padded with
+   zeros, so the divisor is always 100. Dividing by `n_in_seg` (the
+   actual count) instead would shift the seg_pool values for the last
+   segment of any T not divisible by 100.
+
+4. **`torch.std` defaults to `unbiased=True`** (divide by `n-1`).
+   Matters for the StatsPool — `statistics_pooling(x)` uses
+   `x.std(dim=-1, unbiased=True)`. Using `n` instead of `n-1` gives
+   slightly off std values that the dense's BN would amplify.
+
+5. **CAMPPlus FCM head: PyTorch `BasicResBlock` shortcut path activates
+   when `stride != 1` OR `in_planes != out_planes`**. For our weights
+   (out_channels=32 throughout), the shortcut only appears when stride
+   changes, which is once per layer (the `.0` block). The `.1` block is
+   identity-shortcut. The bind step in `chatterbox_s3gen.cpp` checks
+   `b.sc_w` presence to set `b.has_shortcut`.
+
+6. **GGUF Conv2d weight ne=(kW, kH, in, out) maps directly to PyTorch
+   `(out, in, kH, kW)` row-major**. ggml's reverse-indexing convention
+   means the bytes are the same; just index with PyTorch's natural
+   `((o*in + i)*kH + kh)*kW + kw` formula. Same trick for Conv1d
+   weights ne=(kW, in, out) → PyTorch `(out, in, kW)`.
+
+### Diff parity (phase 2)
+
+`tools/reference_backends/chatterbox.py` captures `campplus_xvector` via
+`s3gen.speaker_encoder.inference([wav_16k])`. The full chatterbox
+top-level module loads TensorFlow transitively (slow); the parity dump
+script can bypass it by directly importing
+`chatterbox.models.s3gen.xvector.CAMPPlus` and loading just the
+`speaker_encoder.*` slice from `s3gen.safetensors`.
+
+`crispasr-diff chatterbox` on JFK 11 s gives:
+- `campplus_fbank`   cos_mean=0.999999  (fp32 rounding noise, phase 1)
+- `campplus_xvector` cos_mean=0.998070  (PASS at the 0.95 threshold —
+                     small drift from accumulator order / BLAS-vs-naïve
+                     conv compute, well under the per-element floor for
+                     speaker-similarity downstream tasks)
+
+The 0.998 vs 1.0 gap is the price of using triple-loop conv kernels
+instead of PyTorch's BLAS GEMM accumulation order. For voice cloning
+(downstream consumer is S3Gen's CFM cross-attention), this is
+imperceptible — the speaker direction is preserved.
 
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 

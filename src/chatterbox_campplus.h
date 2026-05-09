@@ -149,11 +149,52 @@ struct cb_campplus_model {
 
 namespace chatterbox_campplus {
 
+// Per-context runtime cache for the CPU forward — holds the pre-folded
+// BatchNorm params so subsequent calls don't recompute them. Allocate once
+// per chatterbox_s3gen_context (the s3gen layer owns the lifetime). Lazy
+// init on first compute_xvector call.
+struct cb_campplus_runtime {
+    bool initialised = false;
+    void* impl = nullptr; // pimpl — see chatterbox_campplus.cpp
+    cb_campplus_runtime();
+    ~cb_campplus_runtime();
+    cb_campplus_runtime(const cb_campplus_runtime&) = delete;
+    cb_campplus_runtime& operator=(const cb_campplus_runtime&) = delete;
+};
+
 // Compute the 80-bin Kaldi fbank features for the given 16 kHz mono PCM
 // buffer and subtract the per-utterance mean along time (matches
 // `extract_feature` in xvector.py: `feature - feature.mean(0, keepdim=True)`).
 // Returns row-major (T_frames, 80) float32 features. Sets T_frames_out=0
 // on error. Does NOT scale to int16 — CAMPPlus consumes raw [-1, 1] floats.
 std::vector<float> compute_fbank(const float* pcm_16k, int n_samples, int& T_frames_out);
+
+// Run the CAMPPlus forward on a (T, 80) feature buffer (already
+// mean-subtracted via `compute_fbank`) and return the 192-d speaker
+// x-vector. Pure CPU — no ggml graph. Reads all weights into host F32 once
+// per `cache` instance.
+//
+// Pipeline reproduces `CAMPPlus.forward`:
+//   (T,80) → permute → (80,T) → unsqueeze(1) → (1,80,T) [Conv2d input]
+//   FCM head: Conv2d + BN + ReLU + 4 BasicResBlocks + Conv2d + BN + ReLU
+//             → reshape (320, T)
+//   xv: tdnn(320→128, k=5, s=2) + BN + ReLU → (128, T/2)
+//       block1 (12 layers, dilation=1) → 512 channels
+//       transit1 (512→256)
+//       block2 (24 layers, dilation=2) → 1024 channels
+//       transit2 (1024→512)
+//       block3 (16 layers, dilation=2) → 1024 channels
+//       transit3 (1024→512)
+//       out_nl (BN + ReLU)
+//       StatsPool (concat mean+std along T) → 1024-d
+//       dense (1024→192) Conv1d(k=1) + BN(affine=False) → 192-d
+//
+// Returns the (192,) f32 vector. Empty on error.
+std::vector<float> compute_xvector(const cb_campplus_model& m, cb_campplus_runtime& cache, const float* feat_t_80,
+                                   int T);
+
+// Convenience: PCM → fbank → xvector.
+std::vector<float> embed_speaker(const cb_campplus_model& m, cb_campplus_runtime& cache, const float* pcm_16k,
+                                 int n_samples);
 
 } // namespace chatterbox_campplus

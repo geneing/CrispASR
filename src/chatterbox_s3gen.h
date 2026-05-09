@@ -112,6 +112,13 @@ float* chatterbox_s3gen_dump_s3tok_tokens(struct chatterbox_s3gen_context* ctx, 
 float* chatterbox_s3gen_dump_campplus_fbank(struct chatterbox_s3gen_context* ctx, const float* pcm_16k, int n_samples,
                                             int* out_T);
 
+// CAMPPlus speaker encoder forward (Module 4 phase 2). Runs the full FCM
+// head + xvector chain on the 16 kHz mono ref audio and returns the 192-d
+// speaker x-vector that S3Gen consumes as `gen.embedding`. Returns a
+// malloc'd 192-float buffer; caller frees with `free()`.
+float* chatterbox_s3gen_dump_campplus_xvector(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
+                                              int n_samples);
+
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);
 

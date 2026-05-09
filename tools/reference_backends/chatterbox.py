@@ -51,9 +51,11 @@ DEFAULT_STAGES = [
     "s3tok_proj_down",
     "s3tok_tokens",
     "s3tok_speech_prompt_tokens",
-    # CAMPPlus speaker encoder (Module 4 phase 1: fbank front-end only;
-    # the full xvector chain lands separately).
+    # CAMPPlus speaker encoder (Module 4: fbank front-end + 192-d
+    # x-vector via the FCM head + 12+24+16 dense TDNN chain + StatsPool +
+    # 1024→192 dense projection).
     "campplus_fbank",
+    "campplus_xvector",
     "t3_cond_emb",
     "t3_prefill_emb",
     "t3_speech_tokens",
@@ -241,6 +243,16 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
             fb = torchaudio.compliance.kaldi.fbank(wav_t, num_mel_bins=80)  # (T, 80)
             fb = fb - fb.mean(dim=0, keepdim=True)
         out["campplus_fbank"] = fb.cpu().numpy().astype(np.float32, copy=False)
+
+    # ── CAMPPlus 192-d x-vector (Module 4 phase 2) ──
+    if "campplus_xvector" in stages:
+        # `s3gen.speaker_encoder.inference([wav_16k])` runs the full
+        # CAMPPlus forward (FCM head + xvector chain + StatsPool + dense)
+        # and returns the 192-d speaker embedding.
+        wav_t = torch.from_numpy(audio.astype(np.float32, copy=False))
+        with torch.inference_mode():
+            xv = model.s3gen.speaker_encoder.inference([wav_t])  # (1, 192)
+        out["campplus_xvector"] = xv.detach().cpu().numpy().astype(np.float32, copy=False)
 
     # ── T3 conditioning ──
     t3_cond = model.conds.t3

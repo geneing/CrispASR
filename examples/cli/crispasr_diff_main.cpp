@@ -983,6 +983,21 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- CAMPPlus xvector (Module 4 phase 2) ----
+        if (!ref.shape("campplus_xvector").empty()) {
+            float* xv = chatterbox_dump_campplus_xvector(ctx, samples.data(), (int)samples.size());
+            if (xv) {
+                auto rep = ref.compare("campplus_xvector", xv, 192);
+                print_row_mean("campplus_xvector", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  192-d speaker x-vector");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(xv);
+            } else {
+                printf("[ERR ] campplus_xvector       dump_campplus_xvector returned null\n");
+                n_fail++;
+            }
+        }
+
         // ---- t3_cond_emb + t3_prefill_emb (deterministic, compare before stochastic T3) ----
         {
             const char* syn_text = std::getenv("CHATTERBOX_SYN_TEXT");
