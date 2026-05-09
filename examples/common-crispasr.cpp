@@ -46,14 +46,16 @@ extern bool ffmpeg_decode_audio(const std::string & ifname, std::vector<uint8_t>
 
 // Decode any audio container that miniaudio can't handle (m4a/mp4/webm/aac/opus)
 // by piping through an ffmpeg subprocess, producing raw 16kHz mono s16le PCM.
+//
+// On Windows the path may be UTF-8 with non-ASCII characters; the
+// crispasr_popen wrapper widens the command to wchar_t and uses
+// _wpopen so the path survives the CRT/cmd.exe round-trip (same
+// fix applied to the live mic subprocess — see issue #70 follow-up).
+#include "cli/crispasr_popen.h"
 static bool ffmpeg_subprocess_decode(const std::string& fname, std::vector<float>& pcmf32) {
     // Quote the path for the shell command — basic protection for spaces, no full shell escaping
     std::string cmd = "ffmpeg -loglevel error -i \"" + fname + "\" -f s16le -ar 16000 -ac 1 -";
-#ifdef _WIN32
-    FILE* pipe = _popen(cmd.c_str(), "rb");
-#else
-    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
+    FILE* pipe = crispasr::crispasr_popen(cmd, "rb");
     if (!pipe) return false;
 
     std::vector<int16_t> buf;
@@ -62,11 +64,7 @@ static bool ffmpeg_subprocess_decode(const std::string& fname, std::vector<float
     while ((n = fread(tmp, sizeof(int16_t), 4096, pipe)) > 0) {
         buf.insert(buf.end(), tmp, tmp + n);
     }
-#ifdef _WIN32
-    int ret = _pclose(pipe);
-#else
-    int ret = pclose(pipe);
-#endif
+    int ret = crispasr::crispasr_pclose(pipe);
     if (ret != 0 || buf.empty()) return false;
 
     pcmf32.resize(buf.size());

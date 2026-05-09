@@ -10,6 +10,7 @@
 #include "crispasr_backend.h"
 #include "crispasr_cache.h"
 #include "crispasr_mic_cli.h"
+#include "crispasr_popen.h"
 #include "crispasr_vad_cli.h"
 #include "crispasr_output.h"
 #include "crispasr_punctuation_policy.h"
@@ -978,9 +979,24 @@ int crispasr_run_backend(const whisper_params& params_in) {
                              "r");
 #elif defined(_WIN32)
             {
-                std::string dshow_arg = crispasr_windows_dshow_audio_arg();
-                std::string cmd = "ffmpeg -f dshow -i " + dshow_arg + " -f s16le -ar 16000 -ac 1 - 2>NUL";
-                mic_pipe = _popen(cmd.c_str(), "rb");
+                // Resolve the default capture device via miniaudio. On
+                // localized Windows installs this comes back as a UTF-8
+                // string with non-ASCII characters (e.g. zh `麥克風 (...)`
+                // or de `Mikrofon (...)`); the ffmpeg dshow argument
+                // therefore needs UTF-8-safe propagation through the CRT
+                // — see issue #70 follow-up. crispasr_popen widens to
+                // wchar_t and calls _wpopen so the device name survives.
+                const char * dev = crispasr_mic_default_device_name();
+                std::string dshow_arg = crispasr_windows_dshow_audio_arg_from_name(dev);
+                std::string cmd = "ffmpeg -f dshow -i " + dshow_arg + " -f s16le -ar 16000 -ac 1 -";
+                if (params.monitor || params.no_prints == false) {
+                    fprintf(stderr, "crispasr[mic]: device=%s\n", dev && *dev ? dev : "(default)");
+                    fprintf(stderr, "crispasr[mic]: ffmpeg cmd: %s\n", cmd.c_str());
+                }
+                // Suppress ffmpeg stderr on the wire but leave it user-
+                // discoverable (we just printed the command above).
+                cmd += " 2>NUL";
+                mic_pipe = crispasr::crispasr_popen(cmd, "rb");
             }
 #else
             // Linux: try arecord first, then ffmpeg with pulseaudio
@@ -1011,12 +1027,29 @@ int crispasr_run_backend(const whisper_params& params_in) {
         std::vector<float> pcm_window(length_samples, 0.0f);
         std::vector<int16_t> read_buf(step_samples);
         std::string prev_text;
+        // Track whether the audio source ever produced any samples; if
+        // it goes EOF without a single one, the subprocess most likely
+        // failed before delivering PCM (e.g. ffmpeg couldn't open the
+        // dshow device because the name got mangled). Surface a hint
+        // so users don't see the silent exit reported in issue #70.
+        bool any_samples_read = false;
 
         while (true) {
             // Read one step of raw s16le samples from audio source
             size_t n_read = fread(read_buf.data(), sizeof(int16_t), step_samples, audio_src);
-            if (n_read == 0)
+            if (n_read == 0) {
+                if (mic_pipe && !any_samples_read) {
+                    fprintf(stderr,
+                            "\ncrispasr[mic]: pipe ended before any PCM was read.\n"
+                            "  Most likely the capture subprocess (ffmpeg/sox/arecord) failed\n"
+                            "  to open the requested device. Re-run the printed command above\n"
+                            "  without `2>NUL` / `2>/dev/null` to see its stderr, or list\n"
+                            "  available devices: `ffmpeg -list_devices true -f dshow -i dummy`\n"
+                            "  (Windows) / `arecord -l` (Linux).\n");
+                }
                 break; // EOF
+            }
+            any_samples_read = true;
 
             // Convert s16le to float
             std::vector<float> new_samples(n_read);
@@ -1112,11 +1145,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
         }
         fprintf(stdout, "\n");
         if (mic_pipe) {
-#if defined(_WIN32)
-            _pclose(mic_pipe);
-#else
-            pclose(mic_pipe);
-#endif
+            crispasr::crispasr_pclose(mic_pipe);
         }
         return 0;
     }
