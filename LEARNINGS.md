@@ -3093,24 +3093,69 @@ Sized for any L:M reduction; chatterbox uses 16 ↔ 24 kHz
 
 ### Quality assessment
 
-End-to-end on a 24 kHz JFK clip (jfk.wav librosa-resampled to 24 kHz):
-  - Atomic native: rms=0.043, peak=0.60, intelligible English speech
-    in the cloned voice. Whisper roundtrip transcribes the synthesis,
-    though the text drifts more than the python baker — stochastic
-    T3 sampling amplifies the small per-cond drift (our resampler
-    differs slightly from librosa kaiser_fast, so VE / S3Tokenizer /
-    CAMPPlus see slightly different 16 kHz audio than the baker
-    would have used).
-  - Python baker (same WAV): rms=0.088, peak=0.81, speech tracks the
-    prompt text more reliably.
+End-to-end verification (Q4_K T3 + `--no-gpu`, prompt "Ask not what
+your country can do for you.", `samples/jfk.wav` resampled to 24 kHz
+for the atomic path):
 
-Both produce real speech in the cloned voice; the baker is acoustically
-cleaner. For full library-grade parity, drop in a librosa kaiser_fast
-match (resampy port) — a future improvement; the current resampler is
-"production functional" with the documented quality gap. The
-parity-quality compute kernels (VE / S3Tok / CAMPPlus / 24 kHz mel)
-all remain bit- or fp32-rounding-tight against PyTorch when fed
-identical bytes via the diff harness's `audio_24k_input` bypass.
+  - Atomic native (24 kHz WAV → all 5 conds): rms=0.113, ASR
+    roundtrip transcribes the prompt verbatim. Real cloned voice.
+  - Baker GGUF baseline (python `bake-chatterbox-voice-from-wav.py`):
+    rms=0.118, ASR roundtrip transcribes the prompt verbatim.
+  - Partial native (16 kHz WAV → M2+M3 only): rms=0.131, ASR also
+    transcribes verbatim — but the **timbre is the default voice**,
+    not the reference speaker. The path does NOT actually clone;
+    it just feeds T3 the new speaker_emb + speech_prompt_tokens
+    while S3Gen still uses the default voice's gen.* triple. The
+    T3-side prosody hint isn't enough to override S3Gen's vocal
+    identity. For real cloning, use the 24 kHz atomic path or the
+    python baker — both verified producing speaker-cloned output.
+
+### Known issues
+
+1. **F16 T3 + GPU produces broken chatterbox audio**. Pre-existing
+   bug, NOT introduced by this work — reproducible at the original
+   voice-clone commit `86ac98eb` and at every commit before/since.
+   Use `chatterbox-t3-q4_k-regen.gguf` + `--no-gpu` for reliable
+   cloning today. The F16 + GPU path produces gibberish or
+   degenerate sequences on every prompt tested. Tracked as a
+   separate issue; needs investigation into Metal kernel
+   non-determinism or F16 sampling drift in the T3 multinomial
+   path.
+
+2. **T3 sampling can drift on long technical prompts**. The seed=0
+   default is deterministic, but particular prompts produce
+   degenerate output (e.g. "Stop, stop, stop" repetition or wholly
+   unrelated text). Short, common phrases work reliably; if a prompt
+   produces gibberish, try a different seed via
+   `CRISPASR_CHATTERBOX_SEED=<n>` or shorten the input.
+
+### Misdiagnosis worth recording
+
+This entry's first draft claimed the atomic-native path produced
+intelligible speech "with text drift" on a long technical prompt
+("Native voice clone test, all five conditions installed
+atomically."). That was wrong on two counts: (a) I was running with
+the broken F16 + GPU path, and (b) the long technical prompt itself
+triggers the T3 sampler-drift issue regardless of voice path. Both
+issues pre-date this work but I missed them because my first
+sanity check used a contaminated combination. The correct
+verification command is:
+
+```bash
+./build/bin/crispasr --backend chatterbox \
+  -m /path/to/chatterbox-t3-q4_k-regen.gguf \
+  --codec-model /path/to/chatterbox-s3gen-q8_0.gguf \
+  --no-gpu \
+  --voice <ref>.gguf-or-24kwav \
+  --tts "Ask not what your country can do for you." \
+  --tts-output out.wav
+```
+
+The parity-quality compute kernels (VE / S3Tok / CAMPPlus / 24 kHz
+mel) all remain bit- or fp32-rounding-tight against PyTorch when
+fed identical bytes via the diff harness's `audio_24k_input`
+bypass — that part of the work is unaffected by the F16+GPU bug
+and the sampler drift.
 
 ### CLI
 

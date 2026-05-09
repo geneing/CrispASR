@@ -262,12 +262,12 @@ and the GPT-2-T3 path (turbo/kartoffelbox-turbo):
 
 ### Voice cloning
 
-Voice cloning is a **two-step workflow**: bake a reference WAV into a
-small voice GGUF (~150-200 KB) once, then feed that GGUF to
-`--voice` at synthesis time. This mirrors the
-`models/convert-vibevoice-voice-to-gguf.py` pattern and avoids
-shipping the VoiceEncoder LSTM, CAMPPlus TDNN, and S3Tokenizer
-forwards inside the C++ runtime — they all live in the python baker.
+Two paths are supported. **The recommended path is the python baker
++ baked GGUF** — it's the workflow the upstream chatterbox project
+ships, our parity is exact, and the C++ runtime treats the resulting
+GGUF the same way it treats the built-in default voice. The native
+24 kHz WAV path described below the baker is functional but
+experimental — it ships its own caveats (see "Known issues" later).
 
 **Step 1 — bake the voice GGUF (one-time per reference speaker):**
 
@@ -303,26 +303,41 @@ size is ~150-200 KB regardless of reference WAV length.
 `--voice` is per-call cached, so server callers (`--server` mode) can
 switch voices between requests without reloading on every synthesise.
 
-**Direct `--voice <path>.wav` — native cloning, no python required**.
-The C++ runtime now runs the full VoiceEncoder + S3Tokenizer V2 +
-CAMPPlus + 24 kHz Matcha mel pipeline in-process and forks on the
-input sample rate:
+**Direct `--voice <path>.wav` — native cloning, no python required**
+(experimental). The C++ runtime now runs the full VoiceEncoder +
+S3Tokenizer V2 + CAMPPlus + 24 kHz Matcha mel pipeline in-process and
+forks on the input sample rate:
 
 - **24 kHz mono PCM16/F32 WAV** — atomic clone. Resamples 24 → 16 kHz
   via a Kaiser-windowed sinc polyphase resampler, then computes all
   five conds (`speaker_emb`, `speech_prompt_tokens`, `gen.prompt_token`,
   `gen.prompt_feat`, `gen.embedding`) from the same source audio and
-  installs them together — equivalent to what the python baker
-  produces from the same WAV.
-- **16 kHz mono PCM16/F32 WAV** — partial clone. Only the T3-side
-  conds (`speaker_emb`, `speech_prompt_tokens`) get installed; S3Gen
-  stays on the default voice's `gen.*` bundle. Synthesis carries the
-  cloned prosody but the default voice's timbre. Re-encode the
+  installs them together. ASR roundtrip on `samples/jfk.wav`
+  (resampled to 24 kHz) with prompt "Ask not what your country can
+  do for you." returns the prompt verbatim — the cloned voice path
+  works end-to-end.
+- **16 kHz mono PCM16/F32 WAV** — **NOT a real clone**. Only the
+  T3-side conds (`speaker_emb`, `speech_prompt_tokens`) are
+  installed; S3Gen renders with the **default voice's** `gen.*`
+  bundle. The output sounds like the default voice, not the
+  reference speaker. The path exists as a stepping stone in the
+  module ladder; for actual voice cloning, use the 24 kHz WAV
+  branch above OR the python baker (recommended). Re-encode the
   reference at 24 kHz mono (`ffmpeg -i in.* -ar 24000 -ac 1 ref.wav`)
-  for full atomic cloning.
+  to get a real clone.
 
-The runtime prints which conds are installed at verbosity ≥ 1. The
-parity-quality compute kernels are bit- or fp32-rounding-tight
+**Known issues for the native path**:
+- **F16 T3 + GPU produces broken audio** (pre-existing bug not from
+  this work; reproducible at HEAD and at the original voice-clone
+  commit `86ac98eb`). Use **Q4_K T3 + `--no-gpu`** for reliable
+  cloning today: `-m chatterbox-t3-q4_k-regen.gguf --no-gpu`. The
+  F16 + GPU breakage is tracked as a separate issue.
+- T3 sampling can produce unrelated text on long technical prompts
+  (sampler drift). Short, common phrases work reliably; if a prompt
+  produces gibberish, try a different seed via
+  `CRISPASR_CHATTERBOX_SEED=<n>`.
+
+The parity-quality compute kernels are bit- or fp32-rounding-tight
 against PyTorch — verified via `crispasr-diff chatterbox` on the
 `ve_*`, `s3tok_*`, `campplus_fbank`, `campplus_xvector`, and
 `prompt_feat_24k` stages. End-to-end output may drift from the

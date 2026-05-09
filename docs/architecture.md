@@ -315,21 +315,25 @@ loads it via `chatterbox_load_voice_gguf` into a separate
 `voice_ctx_w` / `voice_buf_w` and rebinds `ctx->conds.*` pointers,
 leaving the original baked-in default-voice tensors allocated but
 unreferenced. In-process WAV → cond extraction is fully ported across four
-modules: VE (`src/chatterbox_ve.cpp`), S3Tokenizer V2
+modules — VE (`src/chatterbox_ve.cpp`), S3Tokenizer V2
 (`src/chatterbox_s3tok.cpp`), CAMPPlus + Kaldi fbank
 (`src/chatterbox_campplus.cpp` + `src/core/kaldi_fbank.{h,cpp}`),
-and 24 kHz Matcha mel (in `chatterbox_campplus.cpp`). All are
-verified bit- or fp32-rounding-tight against PyTorch via
-`crispasr-diff chatterbox`. A polyphase Kaiser-windowed sinc
-resampler (`src/core/audio_resample.{h,cpp}`) handles the 16 ↔
-24 kHz conversion. The runtime forks on the input rate when
-`--voice` is a `.wav` path: 24 kHz input triggers atomic cloning
-(all five conds derived from one source); 16 kHz input keeps the
-T3-side-only partial path (the S3Gen-side `gen.*` triple stays at
-default to avoid the inconsistent-conditioning silence trap).
-Output may drift from the python baker due to the resampler
-differing slightly from librosa kaiser_fast; for perfect parity
-the python baker workflow remains recommended.
+and 24 kHz Matcha mel (in `chatterbox_campplus.cpp`) — all verified
+bit- or fp32-rounding-tight against PyTorch via `crispasr-diff
+chatterbox`. A polyphase Kaiser-windowed sinc resampler
+(`src/core/audio_resample.{h,cpp}`) handles the 16 ↔ 24 kHz
+conversion. The runtime forks on the input rate when `--voice` is a
+`.wav` path: 24 kHz input triggers atomic cloning (all five conds
+derived from one source — actually clones the speaker on simple
+prompts, verified by ASR roundtrip on the JFK clip with Q4_K +
+`--no-gpu`); 16 kHz input keeps a T3-side-only partial path that
+**does NOT actually clone** (S3Gen renders with the default voice's
+`gen.*` triple to avoid the inconsistent-conditioning silence trap;
+output sounds like the default voice, not the reference speaker).
+Two known issues affect end-to-end output: F16 T3 + GPU produces
+broken audio (pre-existing bug; use Q4_K + `--no-gpu` until fixed),
+and T3 sampling can drift on long prompts. The python baker workflow
+remains the recommended path for production-quality cloning.
 S3Gen GGUF is auto-discovered next to T3 or passed via `--codec-model`.
 See [`docs/tts.md`](tts.md#voice-cloning) for the workflow.
 
