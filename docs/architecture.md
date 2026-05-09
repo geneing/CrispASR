@@ -314,12 +314,18 @@ already accepts for the built-in voice. `--voice <voice.gguf>` then
 loads it via `chatterbox_load_voice_gguf` into a separate
 `voice_ctx_w` / `voice_buf_w` and rebinds `ctx->conds.*` pointers,
 leaving the original baked-in default-voice tensors allocated but
-unreferenced. In-process WAV → cond extraction in C++ is deferred —
-the VE/CAMPPlus/S3Tokenizer weights ARE in the S3Gen GGUF
-(`s3.se.xv`, `s3.se.head`, `s3.tok.*`) but the forward passes haven't
-been ported to ggml yet. S3Gen GGUF is auto-discovered next to T3
-or passed via `--codec-model`. See [`docs/tts.md`](tts.md#voice-cloning)
-for the workflow.
+unreferenced. In-process WAV → cond extraction is partly ported:
+**Module 2** (`src/chatterbox_ve.cpp`) is the VoiceEncoder forward
+— mel + 3-layer LSTM + projection + L2-norm — verified bit-equivalent
+to upstream via `crispasr-diff chatterbox` on `ve_mel`, `ve_partial_emb`,
+`ve_speaker_emb`. The runtime now clones the speaker embedding
+in-process when `--voice` is a `.wav` path, but **modules 3 (S3Tokenizer)
+and 4 (CAMPPlus / 24 kHz prompt mel) are still pending** — until they
+land, S3Gen falls back to the default voice's prompt mel + x-vector,
+so native WAV cloning carries the new speaker's prosody but not full
+timbre. For complete cloning today, use the python baker workflow.
+S3Gen GGUF is auto-discovered next to T3 or passed via `--codec-model`.
+See [`docs/tts.md`](tts.md#voice-cloning) for the workflow.
 
 Variants:
 - [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) — base, English

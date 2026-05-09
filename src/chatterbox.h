@@ -121,6 +121,18 @@ void chatterbox_pcm_free(float* pcm);
 void chatterbox_free(struct chatterbox_context* ctx);
 void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_threads);
 
+// Diff/debug: VoiceEncoder (Module 2 of the native voice clone path) stages.
+// `pcm_16k` is mono float32 PCM at 16 kHz — same format the python reference
+// dumper feeds `model.ve.embeds_from_wavs([audio], 16000)`. Each call returns
+// a malloc'd buffer the caller releases with `free()`:
+//   - chatterbox_dump_ve_mel        → (T * 40) f32 row-major (raw-amp Slaney mel)
+//   - chatterbox_dump_ve_partial_emb→ (n_partials * 256) f32 row-major (L2-normed per partial)
+//   - chatterbox_dump_ve_speaker_emb→ (256,) f32 (mean across partials, L2-normed)
+float* chatterbox_dump_ve_mel(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples, int* out_T);
+float* chatterbox_dump_ve_partial_emb(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                      int* out_n_partials);
+float* chatterbox_dump_ve_speaker_emb(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples);
+
 // Diff/debug: return the T3 prefill embeddings for the given text (output of
 // build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
 // Also sets *out_cond_T to the number of conditioning tokens (cond_len).

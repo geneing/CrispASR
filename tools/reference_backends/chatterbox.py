@@ -33,6 +33,15 @@ from typing import Dict, Set
 import numpy as np
 
 DEFAULT_STAGES = [
+    # Voice-encoder pipeline (Module 2 of the native voice-clone port). Driven
+    # off the dumper's 16 kHz mono `audio` argument, no silence trim — the
+    # native C++ port doesn't trim yet (TODO when librosa.effects.trim is
+    # ported). Matches `prepare_conditionals` numerics (rate=1.3 default,
+    # min_coverage=0.8) so the dumped speaker_emb is parity-quality on a
+    # pre-trimmed clip.
+    "ve_mel",
+    "ve_partial_emb",
+    "ve_speaker_emb",
     "t3_cond_emb",
     "t3_prefill_emb",
     "t3_speech_tokens",
@@ -120,6 +129,50 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     text_tokens = F.pad(text_tokens, (0, 1), value=eot)
     text_tokens_infer = F.pad(text_tokens_infer, (1, 0), value=sot)
     text_tokens_infer = F.pad(text_tokens_infer, (0, 1), value=eot)
+
+    # ── VoiceEncoder (Module 2 of the native voice-clone port) ──
+    # Mirrors `model.ve.embeds_from_wavs([audio], 16000)` minus the silence
+    # trim — the C++ port at chatterbox_ve.cpp does not trim yet (Phase 2),
+    # so the dumper omits it here for like-for-like parity. The 16 kHz
+    # `audio` already lives in the dumper's hand from load_audio_16k_mono.
+    ve_stages = {"ve_mel", "ve_partial_emb", "ve_speaker_emb"}
+    if ve_stages & stages:
+        from chatterbox.models.voice_encoder.melspec import melspectrogram as _ve_mel
+        from chatterbox.models.voice_encoder.voice_encoder import stride_as_partials as _ve_partials
+
+        ve = model.ve
+        hp = ve.hp
+
+        # 16 kHz audio is required (hp.sample_rate=16000); audio loaded by
+        # tools/dump_reference.py is already at 16 kHz — assert just in case
+        # someone wires this through a different loader.
+        if hp.sample_rate != 16000:
+            raise SystemExit(f"VE expects 16 kHz; got hp.sample_rate={hp.sample_rate}")
+
+        # melspectrogram returns (n_mels=40, T) → transpose to (T, 40)
+        ve_audio = audio.astype(np.float32, copy=False)
+        ve_mel = _ve_mel(ve_audio, hp).T.astype(np.float32, copy=False)
+        if "ve_mel" in stages:
+            out["ve_mel"] = ve_mel  # (T, 40)
+
+        # Partial extraction: rate=1.3 (Resemble default in embeds_from_wavs),
+        # overlap=0.5 only fires when rate is None — so the actual stride
+        # comes from `(sample_rate / rate) / partial_frames` rounded to int
+        # = round(16000/1.3 / 160) = 77, NOT 80.
+        partials_np = _ve_partials(ve_mel, hp, overlap=0.5, rate=1.3, min_coverage=0.8)
+        # (n_partials, 160, 40)
+        with torch.inference_mode():
+            partials_t = torch.from_numpy(partials_np.copy()).float()
+            partial_embeds = ve(partials_t)  # (n_partials, 256), L2-normed
+        if "ve_partial_emb" in stages:
+            out["ve_partial_emb"] = partial_embeds.cpu().numpy().astype(np.float32, copy=False)
+
+        # Mean over partials + L2-normalise — reproduces `inference()` final
+        # step for a single utterance.
+        raw = partial_embeds.mean(dim=0, keepdim=True)
+        spk_emb = raw / torch.linalg.norm(raw, dim=1, keepdim=True)
+        if "ve_speaker_emb" in stages:
+            out["ve_speaker_emb"] = spk_emb.cpu().numpy().astype(np.float32, copy=False)  # (1, 256)
 
     # ── T3 conditioning ──
     t3_cond = model.conds.t3

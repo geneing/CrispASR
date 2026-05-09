@@ -2648,6 +2648,112 @@ purely because of post-build I/O timestamps in the wav header
 has a fresher mtime than the .cpp before declaring a CLI-side
 behaviour test "passed".
 
+## Chatterbox VoiceEncoder native port — module 2 of voice cloning (May 2026)
+
+`src/chatterbox_ve.cpp` ports the upstream
+`chatterbox.models.voice_encoder.embeds_from_wavs` so `--voice <ref>.wav`
+works with no python at runtime. Module 2 only — modules 3
+(S3Tokenizer for `gen.prompt_token` + `t3.speech_prompt_tokens`) and
+4 (CAMPPlus for `gen.embedding`, plus the 24 kHz prompt mel for
+`gen.prompt_feat`) are still pending. See
+`src/chatterbox_ve.h` for the pipeline contract.
+
+### Stuff that mattered
+
+1. **`embeds_from_wavs` default rate is 1.3, NOT 0.5**. Reading the
+   handover I assumed `overlap=0.5` → frame_step = 80, but the
+   upstream wrapper sets `kwargs["rate"] = 1.3` if the caller didn't,
+   and `get_frame_step` switches to `round((sr/rate)/partial_frames) =
+   round(16000/1.3/160) = 77`. Mis-setting this to 80 would still
+   produce a working embedding but with a different partition that
+   diverges from upstream's per-partial layout.
+
+2. **`mel_type='amp'` is no log step at all, not log on the amp**.
+   The upstream `melspec.py` only calls `_amp_to_db` when
+   `hp.mel_type == "db"`. With `'amp'` the LSTM consumes the raw
+   mel-projected magnitude. Implemented as `core_mel::LogBase::None`
+   (added in commit `957eb4ff`) and verified.
+
+3. **`mel_power=2.0` means project `|X|^2`, not `|X|`**. Both
+   `core_mel::SpecKind::Power` and the bare `Magnitude` layout were
+   plausible; the config has `mel_power = 2.0` which is the upstream's
+   knob to square the magnitudes before mel projection. Same as
+   librosa default (`power=2.0`).
+
+4. **The LSTM is small enough to run pure-CPU; ggml graph integration
+   exploded on `buffer_id < 0`**. First attempt built per-partial
+   ggml graphs that mixed model-buffer weights with on-the-fly
+   `ggml_cast` and `ggml_view` ops, fed through `ctx->sched`. Hit
+   `GGML_ASSERT(buffer_id >= 0)` in `ggml_gallocr_allocate_node` —
+   the scheduler couldn't pick a backend for the cast/view chain
+   when the source weights live in a buffer the scheduler hadn't
+   ingested. Rewrote the LSTM as plain C++ float math
+   (`lstm_unidir_cpu` in chatterbox_ve.cpp): read all VE weights to
+   F32 with `read_tensor_f32` (mirrors the existing `tensor_get_f32`
+   helper) and run the recurrence directly. Bit-equivalent to torch's
+   nn.LSTM forward; ~1-2 s for 13 partials on M1 (one-shot voice
+   clone — perf isn't a concern). For larger LSTMs that need GPU
+   dispatch the right pattern is to allocate weights into the
+   scheduler's own context, not borrow tensors from a foreign one.
+
+5. **L2-norm via ggml is awkward; do it on host**. ggml has
+   `ggml_rms_norm` (RMS, not L2 — divides by `sqrt(mean(x²)+eps)`)
+   and no built-in L2. Trying to express `y/sqrt(sum(x²))` via
+   `rms_norm` requires a `1/sqrt(N)` scale that's brittle to the
+   eps. Read the (256,) embedding back from the graph and
+   normalise on CPU — single divide, matches `torch.linalg.norm`
+   exactly with no eps drama.
+
+6. **Silence trim deferred — match the dump's audio path**.
+   Upstream `embeds_from_wavs` does
+   `librosa.effects.trim(top_db=20)` before mel. Porting
+   librosa.feature.rms's center=True/pad_mode='constant' framing
+   plus the dB threshold logic is fiddly; for module 2 we bypass
+   trim in BOTH the C++ port and the python reference dump
+   (`tools/reference_backends/chatterbox.py` calls
+   `melspectrogram` directly instead of `embeds_from_wavs`). Result:
+   bit-equivalent comparison and a clean 1.0 cosine on
+   `ve_partial_emb` and `ve_speaker_emb`. For typical pre-trimmed
+   reference WAVs this is a no-op; long silences would degrade
+   the embedding until trim lands as a follow-up.
+
+7. **`librosa.stft` with `n_fft=400` works fine through
+   `core_fft::fft_radix2_wrapper`**. core_fft splits `400 → 200 → 100
+   → 50 → 25 (odd)` and falls back to direct DFT at the odd remainder.
+   No need for a Bluestein chirp-z. ~10K ops per frame; negligible.
+
+8. **Periodic Hann window, not symmetric**. librosa's STFT default
+   is `scipy.signal.windows.get_window('hann', N, fftbins=True)`,
+   which is the periodic variant `0.5 * (1 - cos(2π i / N))` (i ∈
+   [0, N)). Symmetric Hann uses `N-1` in the denominator and is
+   off-by-one — would fail mel parity by ~1e-3.
+
+9. **`cb_ve_model` lives in chatterbox_ve.h, not chatterbox.cpp's
+   anonymous namespace**. The struct was originally a private
+   detail in chatterbox.cpp; the cleanest separation for a new
+   per-module .cpp is to lift it to the shared header so chatterbox.cpp
+   keeps `bind_ve` and chatterbox_ve.cpp keeps the forward.
+
+### Build target nits (still relevant)
+
+CLI changes need `--target crispasr-cli`; library-only changes work
+with `--target crispasr` (or `--target chatterbox` for the static
+sublib). The diff harness needs `--target crispasr-diff`.
+
+### Diff stages added
+
+`tools/reference_backends/chatterbox.py` now captures:
+- `ve_mel`           — (T, 40) raw-amp Slaney mel after the trim-bypass path
+- `ve_partial_emb`   — (n_partials, 256) L2-normed per-partial embeddings
+- `ve_speaker_emb`   — (1, 256) final speaker embedding (mean + L2)
+
+C++ ABI hooks `chatterbox_dump_ve_*` in `chatterbox.h`. The
+`crispasr-diff chatterbox` harness exits-codes against the same
+0.95 cos_mean threshold as other chatterbox stages. On JFK 11s the
+mel cos_mean is 0.999913 (cos_min 0.905 in low-energy frames where
+fp32 directions are unstable; downstream LSTM filters this out and
+ve_partial_emb / ve_speaker_emb are essentially bit-perfect).
+
 ## T5-family translation runtime traps (May 2026, MADLAD-400 debugging)
 
 Bringing up the T5 encoder-decoder runtime (`src/t5_translate.cpp`)

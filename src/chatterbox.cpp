@@ -14,6 +14,7 @@
 #define _USE_MATH_DEFINES
 #include "chatterbox.h"
 #include "chatterbox_s3gen.h"
+#include "chatterbox_ve.h"
 #include "core/bpe.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
@@ -142,15 +143,8 @@ struct cb_t3_model {
     ggml_tensor* perceiver_out_b = nullptr;
 };
 
-struct cb_ve_model {
-    // 3-layer LSTM
-    ggml_tensor* lstm_ih_w[3] = {}; // weight_ih_l{i}: (4*hidden, input)
-    ggml_tensor* lstm_hh_w[3] = {}; // weight_hh_l{i}: (4*hidden, hidden)
-    ggml_tensor* lstm_ih_b[3] = {}; // bias_ih_l{i}: (4*hidden)
-    ggml_tensor* lstm_hh_b[3] = {}; // bias_hh_l{i}: (4*hidden)
-    ggml_tensor* proj_w = nullptr;  // (embed, hidden)
-    ggml_tensor* proj_b = nullptr;  // (embed)
-};
+// `cb_ve_model` lives in chatterbox_ve.h so chatterbox_ve.cpp can take it
+// by const-ref without exposing internal helpers across the public ABI.
 
 // Precomputed conditioning from conds.pt
 struct cb_precomputed_conds {
@@ -2557,6 +2551,181 @@ static int chatterbox_load_voice_gguf(chatterbox_context* ctx, const char* path)
 // and (currently) returns -1 with a pointer at the baker script. Native
 // WAV → cond extraction (VE LSTM, CAMPPlus TDNN, S3Tokenizer) is a
 // separate refactor — see PLAN entry on chatterbox voice cloning.
+// Decode a tiny WAV file into 16 kHz mono float32 PCM. Supports PCM16 and
+// IEEE-float WAV files at exactly 16 kHz; mono passes through, stereo gets
+// averaged. Anything else returns false with a clear error.
+//
+// The chatterbox runtime reaches for this only on the .wav branch of
+// chatterbox_set_voice_from_wav — there's no re-sampler here yet, by
+// design: we don't want to ship a polyphase resampler whose output is a
+// different number of samples than librosa's `kaiser_fast` (which would
+// silently break VE parity). For non-16 kHz inputs the user can pre-convert
+// (`ffmpeg -i in.* -ar 16000 -ac 1 out.wav`) or fall back to the python
+// baker (`models/bake-chatterbox-voice-from-wav.py`), which uses
+// librosa.resample.
+static bool chatterbox_decode_wav_16k_mono(const char* path, std::vector<float>& out_pcm, std::string& err) {
+    out_pcm.clear();
+    err.clear();
+    FILE* fp = std::fopen(path, "rb");
+    if (!fp) {
+        err = std::string("could not open: ") + path;
+        return false;
+    }
+    std::fseek(fp, 0, SEEK_END);
+    long fsize = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    if (fsize <= 12) {
+        std::fclose(fp);
+        err = "file too small to be WAV";
+        return false;
+    }
+    std::vector<uint8_t> buf((size_t)fsize);
+    const size_t rd = std::fread(buf.data(), 1, buf.size(), fp);
+    std::fclose(fp);
+    if (rd != buf.size()) {
+        err = "fread truncated";
+        return false;
+    }
+    auto rd_u16 = [&](size_t off) -> uint16_t { return (uint16_t)buf[off] | ((uint16_t)buf[off + 1] << 8); };
+    auto rd_u32 = [&](size_t off) -> uint32_t {
+        return (uint32_t)buf[off] | ((uint32_t)buf[off + 1] << 8) | ((uint32_t)buf[off + 2] << 16) |
+               ((uint32_t)buf[off + 3] << 24);
+    };
+    if (std::memcmp(buf.data(), "RIFF", 4) != 0 || std::memcmp(buf.data() + 8, "WAVE", 4) != 0) {
+        err = "not a RIFF/WAVE file";
+        return false;
+    }
+    uint32_t audio_format = 0, channels = 0, sr = 0, bits_per_sample = 0;
+    size_t data_offset = 0;
+    uint32_t data_size = 0;
+    size_t off = 12;
+    while (off + 8 <= buf.size()) {
+        const uint32_t chunk_sz = rd_u32(off + 4);
+        const size_t chunk_data = off + 8;
+        if (chunk_data + (size_t)chunk_sz > buf.size())
+            break;
+        if (std::memcmp(buf.data() + off, "fmt ", 4) == 0 && chunk_sz >= 16) {
+            audio_format = rd_u16(chunk_data);
+            channels = rd_u16(chunk_data + 2);
+            sr = rd_u32(chunk_data + 4);
+            bits_per_sample = rd_u16(chunk_data + 14);
+        } else if (std::memcmp(buf.data() + off, "data", 4) == 0) {
+            data_offset = chunk_data;
+            data_size = chunk_sz;
+        }
+        off = chunk_data + chunk_sz + (chunk_sz & 1u);
+    }
+    if (data_offset == 0) {
+        err = "no data chunk";
+        return false;
+    }
+    if (sr != 16000) {
+        char tmp[128];
+        std::snprintf(tmp, sizeof(tmp),
+                      "sample rate %u not supported (need 16000); pre-convert or use the python baker", sr);
+        err = tmp;
+        return false;
+    }
+    if (channels != 1 && channels != 2) {
+        err = "channel count not supported (need 1 or 2)";
+        return false;
+    }
+    const bool is_pcm = (audio_format == 1);
+    const bool is_float = (audio_format == 3);
+    if (!is_pcm && !is_float) {
+        err = "WAV format must be PCM (1) or IEEE-float (3)";
+        return false;
+    }
+    if (is_pcm && bits_per_sample != 16) {
+        err = "PCM bits per sample must be 16";
+        return false;
+    }
+    if (is_float && bits_per_sample != 32) {
+        err = "float WAV bits per sample must be 32";
+        return false;
+    }
+
+    const uint32_t bytes_per_sample = bits_per_sample / 8;
+    const uint64_t total_samples = (uint64_t)data_size / bytes_per_sample;
+    if (total_samples == 0) {
+        err = "empty data chunk";
+        return false;
+    }
+    const uint64_t n_frames = total_samples / channels;
+    out_pcm.assign((size_t)n_frames, 0.0f);
+    const uint8_t* src = buf.data() + data_offset;
+    if (is_pcm) {
+        for (uint64_t i = 0; i < n_frames; i++) {
+            float sum = 0.0f;
+            for (uint32_t c = 0; c < channels; c++) {
+                const size_t b = (size_t)(i * channels + c) * 2u;
+                const int16_t s = (int16_t)((uint16_t)src[b] | ((uint16_t)src[b + 1] << 8));
+                sum += (float)s / 32768.0f;
+            }
+            out_pcm[(size_t)i] = sum / (float)channels;
+        }
+    } else {
+        // is_float, 32-bit IEEE-float
+        for (uint64_t i = 0; i < n_frames; i++) {
+            float sum = 0.0f;
+            for (uint32_t c = 0; c < channels; c++) {
+                float v;
+                std::memcpy(&v, src + (size_t)(i * channels + c) * 4u, sizeof(float));
+                sum += v;
+            }
+            out_pcm[(size_t)i] = sum / (float)channels;
+        }
+    }
+    return true;
+}
+
+// Replace ctx->conds.speaker_emb with a fresh (1, 256) tensor whose contents
+// are `emb` (256 f32). The previous voice_ctx/buf are freed. Other conds
+// (gen_prompt_token / gen_prompt_feat / gen_embedding) stay pointing at the
+// model's default-voice tensors so S3Gen still sounds like the default voice
+// — that's the Module-2-only contract; modules 3 (S3Tokenizer) and 4
+// (CAMPPlus) will fill in the rest.
+static int chatterbox_install_speaker_emb(chatterbox_context* ctx, const float emb[256]) {
+    if (!ctx || !emb)
+        return -1;
+
+    // Drop any previously loaded voice GGUF / native bundle.
+    if (ctx->voice_ctx_w) {
+        ggml_free(ctx->voice_ctx_w);
+        ctx->voice_ctx_w = nullptr;
+    }
+    if (ctx->voice_buf_w) {
+        ggml_backend_buffer_free(ctx->voice_buf_w);
+        ctx->voice_buf_w = nullptr;
+    }
+    ctx->voice_tensors.clear();
+
+    ggml_init_params ip = {ggml_tensor_overhead() * 4, nullptr, true};
+    ggml_context* vctx = ggml_init(ip);
+    if (!vctx) {
+        fprintf(stderr, "chatterbox: ggml_init failed for native voice\n");
+        return -1;
+    }
+    // Speaker emb is (1, 256) row-major in PyTorch / GGUF. ggml ne=(256, 1).
+    ggml_tensor* spkr = ggml_new_tensor_2d(vctx, GGML_TYPE_F32, 256, 1);
+    ggml_set_name(spkr, "conds.t3.speaker_emb");
+
+    ggml_backend_buffer_t vbuf = ggml_backend_alloc_ctx_tensors(vctx, ctx->backend);
+    if (!vbuf) {
+        fprintf(stderr, "chatterbox: failed to alloc native voice buffer\n");
+        ggml_free(vctx);
+        return -1;
+    }
+    ggml_backend_tensor_set(spkr, emb, 0, 256 * sizeof(float));
+
+    ctx->voice_ctx_w = vctx;
+    ctx->voice_buf_w = vbuf;
+    ctx->voice_tensors["conds.t3.speaker_emb"] = spkr;
+    ctx->conds.speaker_emb = spkr;
+    ctx->conds.loaded = true;
+    return 0;
+}
+
 extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, const char* wav_path) {
     if (!ctx || !wav_path)
         return -1;
@@ -2573,13 +2742,40 @@ extern "C" int chatterbox_set_voice_from_wav(struct chatterbox_context* ctx, con
         return chatterbox_load_voice_gguf(ctx, wav_path);
     }
 
-    fprintf(stderr,
-            "chatterbox: voice cloning directly from a WAV is not yet wired into the C++ runtime.\n"
-            "  Bake a voice GGUF first and pass that:\n"
-            "    python models/bake-chatterbox-voice-from-wav.py --input %s --output my_voice.gguf\n"
-            "    crispasr --backend chatterbox --voice my_voice.gguf --tts \"…\"\n",
-            wav_path);
-    return -1;
+    // Native WAV → speaker_emb (Module 2). The other conds (gen.prompt_token,
+    // gen.prompt_feat, gen.embedding) keep pointing at the default voice's
+    // baked-in tensors until modules 3 and 4 (S3Tokenizer, CAMPPlus) land —
+    // so synthesis will speak the new T3 prosody but with default S3Gen
+    // timbre. Warn the user once so the partial cloning is explicit.
+    std::vector<float> pcm;
+    std::string err;
+    if (!chatterbox_decode_wav_16k_mono(wav_path, pcm, err)) {
+        fprintf(stderr,
+                "chatterbox: native WAV cloning failed: %s\n"
+                "  Re-encode the reference (`ffmpeg -i %s -ar 16000 -ac 1 ref.wav`) or\n"
+                "  bake a voice GGUF instead (`python models/bake-chatterbox-voice-from-wav.py "
+                "--input %s --output my_voice.gguf`).\n",
+                err.c_str(), wav_path, wav_path);
+        return -1;
+    }
+
+    float emb[256];
+    if (!chatterbox_ve::compute_speaker_emb(ctx->ve, ctx->sched, ctx->compute_meta, pcm.data(), (int)pcm.size(), emb)) {
+        fprintf(stderr, "chatterbox: VoiceEncoder forward failed for '%s'\n", wav_path);
+        return -1;
+    }
+
+    if (chatterbox_install_speaker_emb(ctx, emb) != 0) {
+        return -1;
+    }
+
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr,
+                "chatterbox: native WAV clone (%s, %zu samples). speaker_emb cloned; S3Gen voice "
+                "(prompt_token / prompt_feat / embedding) still defaults until modules 3+4 land.\n",
+                wav_path, pcm.size());
+    }
+    return 0;
 }
 
 extern "C" void chatterbox_set_exaggeration(struct chatterbox_context* ctx, float exaggeration) {
@@ -2612,6 +2808,68 @@ extern "C" void chatterbox_free(struct chatterbox_context* ctx) {
 extern "C" void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_threads) {
     if (ctx)
         ctx->n_threads = n_threads > 0 ? n_threads : 4;
+}
+
+// Diff/debug: VE pipeline stages — see chatterbox_ve.h for the spec.
+//
+// These are deliberately public C-ABI: `examples/cli/crispasr_diff_main.cpp`
+// calls them on the same 16 kHz mono float32 buffer the reference dumper
+// fed to `model.ve.embeds_from_wavs`. Each returns a malloc'd buffer the
+// caller frees with plain `free()` (mirrors `chatterbox_dump_t3_prefill_emb`).
+extern "C" float* chatterbox_dump_ve_mel(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                         int* out_T) {
+    if (!ctx || !pcm_16k || n_samples <= 0 || !out_T)
+        return nullptr;
+    int T = 0;
+    auto mel = chatterbox_ve::compute_mel(pcm_16k, n_samples, T);
+    if (mel.empty() || T <= 0) {
+        *out_T = 0;
+        return nullptr;
+    }
+    float* r = (float*)std::malloc(mel.size() * sizeof(float));
+    if (!r)
+        return nullptr;
+    std::memcpy(r, mel.data(), mel.size() * sizeof(float));
+    *out_T = T;
+    return r;
+}
+
+extern "C" float* chatterbox_dump_ve_partial_emb(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples,
+                                                 int* out_n_partials) {
+    if (!ctx || !pcm_16k || n_samples <= 0 || !out_n_partials)
+        return nullptr;
+    int T = 0;
+    auto mel = chatterbox_ve::compute_mel(pcm_16k, n_samples, T);
+    if (mel.empty() || T <= 0) {
+        *out_n_partials = 0;
+        return nullptr;
+    }
+    int n_partials = 0;
+    auto embs =
+        chatterbox_ve::compute_partial_embeds(ctx->ve, ctx->sched, ctx->compute_meta, mel.data(), T, n_partials);
+    if (embs.empty() || n_partials <= 0) {
+        *out_n_partials = 0;
+        return nullptr;
+    }
+    float* r = (float*)std::malloc(embs.size() * sizeof(float));
+    if (!r)
+        return nullptr;
+    std::memcpy(r, embs.data(), embs.size() * sizeof(float));
+    *out_n_partials = n_partials;
+    return r;
+}
+
+extern "C" float* chatterbox_dump_ve_speaker_emb(struct chatterbox_context* ctx, const float* pcm_16k, int n_samples) {
+    if (!ctx || !pcm_16k || n_samples <= 0)
+        return nullptr;
+    float* r = (float*)std::malloc(256 * sizeof(float));
+    if (!r)
+        return nullptr;
+    if (!chatterbox_ve::compute_speaker_emb(ctx->ve, ctx->sched, ctx->compute_meta, pcm_16k, n_samples, r)) {
+        std::free(r);
+        return nullptr;
+    }
+    return r;
 }
 
 extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text, int* out_T,

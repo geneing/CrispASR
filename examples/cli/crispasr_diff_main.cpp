@@ -863,6 +863,51 @@ int main(int argc, char** argv) {
             chatterbox_free(ctx);
             return 4;
         }
+        // ---- VE pipeline (Module 2 of native voice clone) ----
+        // `samples` is the 16 kHz mono float32 PCM that the harness loaded.
+        // Same buffer the python dumper feeds `model.ve.embeds_from_wavs([audio], 16000)`.
+        if (!ref.shape("ve_mel").empty() || !ref.shape("ve_partial_emb").empty() ||
+            !ref.shape("ve_speaker_emb").empty()) {
+            int ve_T = 0;
+            float* ve_mel = chatterbox_dump_ve_mel(ctx, samples.data(), (int)samples.size(), &ve_T);
+            if (ve_mel && ve_T > 0) {
+                auto rep = compare_with_row_width(ref, "ve_mel", ve_mel, (size_t)ve_T * 40, 40);
+                print_row_mean("ve_mel", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  raw-amp Slaney mel");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(ve_mel);
+            } else {
+                printf("[ERR ] ve_mel                 chatterbox_dump_ve_mel returned null\n");
+                n_fail++;
+            }
+
+            int ve_n_part = 0;
+            float* ve_part = chatterbox_dump_ve_partial_emb(ctx, samples.data(), (int)samples.size(), &ve_n_part);
+            if (ve_part && ve_n_part > 0) {
+                auto rep = compare_with_row_width(ref, "ve_partial_emb", ve_part, (size_t)ve_n_part * 256, 256);
+                print_row_mean("ve_partial_emb", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  per-partial L2-normed");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(ve_part);
+            } else {
+                printf("[ERR ] ve_partial_emb         chatterbox_dump_ve_partial_emb returned null\n");
+                n_fail++;
+            }
+
+            float* ve_spk = chatterbox_dump_ve_speaker_emb(ctx, samples.data(), (int)samples.size());
+            if (ve_spk) {
+                // ve_speaker_emb is (1, 256) in the archive; feed as 256 floats.
+                auto rep = ref.compare("ve_speaker_emb", ve_spk, 256);
+                print_row_mean("ve_speaker_emb", rep, CHATTERBOX_MEAN_THRESHOLD,
+                               "criterion=cos_mean>=0.95  mean+L2 over partials");
+                record_mean(rep, CHATTERBOX_MEAN_THRESHOLD);
+                free(ve_spk);
+            } else {
+                printf("[ERR ] ve_speaker_emb         chatterbox_dump_ve_speaker_emb returned null\n");
+                n_fail++;
+            }
+        }
+
         // ---- t3_cond_emb + t3_prefill_emb (deterministic, compare before stochastic T3) ----
         {
             const char* syn_text = std::getenv("CHATTERBOX_SYN_TEXT");

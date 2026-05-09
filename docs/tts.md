@@ -302,12 +302,25 @@ size is ~150-200 KB regardless of reference WAV length.
 
 `--voice` is per-call cached, so server callers (`--server` mode) can
 switch voices between requests without reloading on every synthesise.
-Passing a `.wav` directly to `--voice` currently prints a hint
-pointing at the baker — in-process WAV → cond extraction in C++ is
-deferred (the VE/CAMPPlus/S3Tokenizer weights are already in the
-S3Gen GGUF as `s3.se.xv`, `s3.se.head`, `s3.tok.*`, but the forward
-passes haven't been ported to ggml yet). Track this in the
-project's PLAN.
+
+**Direct `--voice <path>.wav` (Module 2 — partial native cloning)**:
+the C++ runtime now does the VoiceEncoder forward in-process and
+clones the 256-d speaker embedding from a 16 kHz mono WAV (PCM16 or
+F32) without python. Modules 3 (S3Tokenizer for `gen.prompt_token`
+and `t3.speech_prompt_tokens`) and 4 (CAMPPlus for `gen.embedding`)
+are not yet ported, so S3Gen still uses the default voice's prompt
+mel + speaker x-vector — the synthesised audio carries the new
+speaker_emb's prosody but not its full timbre. The runtime prints
+a one-line warning when this partial path is taken. For full-quality
+cloning today, keep using the python baker workflow above; it
+populates all five `conds.*` tensors. The native path is bit-equivalent
+to upstream's VE forward (cos ≥ 1 - fp32-rounding) verified via
+`crispasr-diff chatterbox` on the `ve_mel`, `ve_partial_emb`,
+`ve_speaker_emb` stages.
+
+If the WAV is not 16 kHz mono PCM16/F32, the runtime falls back to
+the same hint-then-error path as before, pointing at the baker or
+suggesting `ffmpeg -i in.* -ar 16000 -ac 1 ref.wav`.
 
 The same `my_voice.gguf` works across all four chatterbox variants
 (`chatterbox`, `chatterbox-turbo`, `kartoffelbox-turbo`,
