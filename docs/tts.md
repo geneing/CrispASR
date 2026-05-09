@@ -1,6 +1,6 @@
 # Text-to-Speech (TTS)
 
-CrispASR ships **five open-weights TTS engines** behind the same
+CrispASR ships **six open-weights TTS engines** behind the same
 `crispasr` binary, each with a distinct voice / quality / footprint
 trade-off:
 
@@ -8,11 +8,12 @@ trade-off:
 |---|---|---|---|
 | **`kokoro`** | Smallest + fastest. 82 M-param StyleTTS2-derived model. Multilingual via espeak-ng + native German backbone. | No (preset voice packs) | Manual `wget` (no `-m auto`) |
 | **`qwen3-tts`** | Highest fidelity / strongest cloning. Speech-LLM (talker + code predictor + 12 Hz codec). | Yes (WAV + ref-text or baked voice GGUF) | ~1.3 GB via `-m auto` |
-| **`vibevoice-tts`** | Lowest-latency streaming TTS, designed for realtime. | Preset voice packs (and a 1.5 B-base WAV cloning path) | ~636 MB via `-m auto` |
+| **`vibevoice-tts`** | Lowest-latency streaming TTS, designed for realtime. | Preset voice packs | ~636 MB via `-m auto` |
+| **`vibevoice-1.5b`** | Base VibeVoice TTS model with WAV cloning. | Yes (`VIBEVOICE_VOICE_AUDIO=<wav>` or `--voice <wav>`) | ~1.6 GB via `-m auto` |
 | **`orpheus`** | Llama-3.2-3B talker + SNAC 24 kHz codec. 8 baked English speakers; expressive output. Greedy loops — pass `--temperature 0.6`. | Preset names via `--voice tara/leah/...` | ~3.5 GB via `-m auto` (talker Q8 + 26 MB SNAC) |
 | **`chatterbox`** | T3 AR + S3Gen flow-matching + HiFTGenerator. Built-in voice baked into the T3 GGUF; clones from a reference WAV. EN/AR/DE variants share runtime. | Yes (`--voice <wav>` via VE/CAMPPlus) | ~880 MB via `-m auto` (T3 Q8 + S3Gen Q8) |
 
-All five write 24 kHz mono WAV via `--tts-output`.
+All six write 24 kHz mono WAV via `--tts-output`.
 
 For HTTP usage, see [`docs/server.md`](server.md) — `POST
 /v1/audio/speech` is the OpenAI-compatible TTS endpoint, available on
@@ -173,6 +174,26 @@ preset; the realtime `0.5B` flow is typically driven by a voice GGUF.
     --backend vibevoice-tts -m auto \
     --tts "Hello, how are you today?" \
     --tts-output hello.wav
+```
+
+## VibeVoice 1.5B — base TTS with WAV cloning
+
+The 1.5B base model supports both a generic no-clone voice and WAV
+reference cloning through `VIBEVOICE_VOICE_AUDIO`.
+
+```bash
+# Generic output, no voice reference.
+./build/bin/crispasr \
+    --backend vibevoice-1.5b -m auto \
+    --tts "Hello, how are you today?" \
+    --tts-output hello.wav
+
+# Clone from a 24 kHz mono WAV reference.
+VIBEVOICE_VOICE_AUDIO=samples/qwen3_tts/clone.wav \
+./build/bin/crispasr \
+    --backend vibevoice-1.5b -m auto \
+    --tts "Hello, how are you today?" \
+    --tts-output hello-clone.wav
 ```
 
 ## Orpheus — Llama-3.2-3B + SNAC codec

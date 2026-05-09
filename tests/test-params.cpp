@@ -50,6 +50,22 @@ TEST_CASE("whisper_params: use_gpu defaults to true", "[unit]") {
     REQUIRE(kDefaults.use_gpu == true);
 }
 
+TEST_CASE("whisper_params: temperature defaults to 0.0", "[unit]") {
+    REQUIRE(kDefaults.temperature == 0.0f);
+}
+
+TEST_CASE("whisper_params: best_of defaults to sensible value", "[unit]") {
+    REQUIRE(kDefaults.best_of >= 1);
+}
+
+TEST_CASE("whisper_params: beam_size defaults to sensible value", "[unit]") {
+    REQUIRE(kDefaults.beam_size >= 1);
+}
+
+TEST_CASE("whisper_params: n_threads defaults to sensible value", "[unit]") {
+    REQUIRE(kDefaults.n_threads >= 1);
+}
+
 TEST_CASE("whisper_params: language defaults to 'auto'", "[unit]") {
     REQUIRE(kDefaults.language == "auto");
 }

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <sys/stat.h>
 #include <vector>
 
@@ -67,14 +68,19 @@ static std::vector<float> resample_16k_to_24k(const float* in, int n_in) {
 
 class VibeVoiceBackend : public CrispasrBackend {
 public:
-    VibeVoiceBackend() = default;
+    VibeVoiceBackend(std::string backend_name, bool allow_generic_no_voice)
+        : backend_name_(std::move(backend_name)), allow_generic_no_voice_(allow_generic_no_voice) {}
     ~VibeVoiceBackend() override { VibeVoiceBackend::shutdown(); }
 
-    const char* name() const override { return "vibevoice"; }
+    const char* name() const override { return backend_name_.c_str(); }
 
     uint32_t capabilities() const override {
         // ASR mode produces segments → framework -am + --diarize work.
-        return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_TTS | CAP_DIARIZE;
+        uint32_t caps = CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_TTS |
+                        CAP_DIARIZE;
+        if (allow_generic_no_voice_)
+            caps |= CAP_VOICE_CLONING;
+        return caps;
     }
 
     bool init(const whisper_params& p) override {
@@ -132,8 +138,8 @@ public:
             voice_path.find('\\') == std::string::npos && !ends_with_ci(voice_path, ".gguf") &&
             !ends_with_ci(voice_path, ".wav")) {
             if (voice_path.find("..") != std::string::npos || voice_path.find('\0') != std::string::npos) {
-                fprintf(stderr, "crispasr[vibevoice-tts]: voice name '%s' contains illegal characters (.. or NUL)\n",
-                        voice_path.c_str());
+                fprintf(stderr, "crispasr[%s]: voice name '%s' contains illegal characters (.. or NUL)\n",
+                        backend_name_.c_str(), voice_path.c_str());
                 return {};
             }
             const std::string gguf_path = params.tts_voice_dir + "/" + voice_path + ".gguf";
@@ -143,8 +149,8 @@ public:
             } else if (file_exists(wav_path)) {
                 voice_path = wav_path;
             } else {
-                fprintf(stderr, "crispasr[vibevoice-tts]: warning: neither '%s' nor '%s' were found on disk\n",
-                        gguf_path.c_str(), wav_path.c_str());
+                fprintf(stderr, "crispasr[%s]: warning: neither '%s' nor '%s' were found on disk\n",
+                        backend_name_.c_str(), gguf_path.c_str(), wav_path.c_str());
             }
             // else: leave bare name; loader will fail with a clear error below.
         }
@@ -157,7 +163,10 @@ public:
         }
 
         // (3)+(4) Sibling auto-pick when nothing was explicitly provided.
-        if (voice_path.empty() && wav_ref_path_.empty()) {
+        // The realtime model wants a prompt voice. The 1.5B base model can
+        // synthesize a generic voice without one, so keep the fallback only for
+        // the realtime path.
+        if (!allow_generic_no_voice_ && voice_path.empty() && wav_ref_path_.empty()) {
             auto slash = params.model.find_last_of("/\\");
             std::string dir = (slash == std::string::npos) ? "." : params.model.substr(0, slash);
             auto try_sibling = [&](const std::string& fname) -> std::string {
@@ -181,24 +190,24 @@ public:
             if (vibevoice_load_voice(ctx_, voice_path.c_str()) == 0) {
                 last_voice_key_ = voice_path;
                 if (params.tts_voice.empty() || params.tts_voice != voice_path)
-                    fprintf(stderr, "crispasr[vibevoice-tts]: voice loaded '%s'\n", voice_path.c_str());
+                    fprintf(stderr, "crispasr[%s]: voice loaded '%s'\n", backend_name_.c_str(), voice_path.c_str());
             } else {
-                fprintf(stderr,
-                        "crispasr[vibevoice-tts]: voice '%s' could not be loaded; "
-                        "refusing to synthesise without a voice prompt.\n",
-                        voice_path.c_str());
+                fprintf(stderr, "crispasr[%s]: voice '%s' could not be loaded; refusing to synthesise without a "
+                                "voice prompt.\n",
+                        backend_name_.c_str(), voice_path.c_str());
                 return {};
             }
         }
 
-        // Gate: no GGUF voice and no WAV reference → check env var fallback or bail.
-        if (last_voice_key_.empty() && wav_ref_path_.empty()) {
+        // Gate: the realtime model requires a prompt voice. The 1.5B base
+        // model can run without one and generate its generic prior voice.
+        if (!allow_generic_no_voice_ && last_voice_key_.empty() && wav_ref_path_.empty()) {
             const char* voice_wav_env = getenv("VIBEVOICE_VOICE_AUDIO");
             if (!voice_wav_env || !voice_wav_env[0]) {
-                fprintf(stderr, "crispasr[vibevoice-tts]: no voice prompt resolved (pass --voice <path.gguf>, "
-                                "--voice <path.wav>, drop a <name>.gguf into --voice-dir, "
-                                "set VIBEVOICE_VOICE_AUDIO=<wav>, or place a vibevoice-voice-*.gguf "
-                                "next to the model).\n");
+                fprintf(stderr, "crispasr[%s]: no voice prompt resolved (pass --voice <path.gguf>, --voice <path.wav>, "
+                                "drop a <name>.gguf into --voice-dir, set VIBEVOICE_VOICE_AUDIO=<wav>, or place a "
+                                "vibevoice-voice-*.gguf next to the model).\n",
+                        backend_name_.c_str());
                 return {};
             }
         }
@@ -229,12 +238,18 @@ public:
 
 private:
     vibevoice_context* ctx_ = nullptr;
-    std::string last_voice_key_;
-    std::string wav_ref_path_; // set when --voice <path.wav> is used (1.5B WAV cloning)
+        std::string last_voice_key_;
+        std::string wav_ref_path_; // set when --voice <path.wav> is used (1.5B WAV cloning)
+        std::string backend_name_ = "vibevoice";
+        bool allow_generic_no_voice_ = false;
 };
 
 } // namespace
 
 std::unique_ptr<CrispasrBackend> crispasr_make_vibevoice_backend() {
-    return std::unique_ptr<CrispasrBackend>(new VibeVoiceBackend());
+    return std::unique_ptr<CrispasrBackend>(new VibeVoiceBackend("vibevoice", false));
+}
+
+std::unique_ptr<CrispasrBackend> crispasr_make_vibevoice_1p5b_backend() {
+    return std::unique_ptr<CrispasrBackend>(new VibeVoiceBackend("vibevoice-1.5b", true));
 }

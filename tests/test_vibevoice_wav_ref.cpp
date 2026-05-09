@@ -104,6 +104,31 @@ TEST_CASE("VibeVoice voice reference rejects unsupported WAV formats", "[unit][v
     REQUIRE_FALSE(vibevoice_parse_mono_pcm16_wav(not_wav.data(), not_wav.size(), pcm));
 }
 
+TEST_CASE("VibeVoice voice reference handles extremely short WAV", "[unit][vibevoice]") {
+    const std::vector<uint8_t> wav = make_wav({42});
+    std::vector<float> pcm;
+
+    REQUIRE(vibevoice_parse_mono_pcm16_wav(wav.data(), wav.size(), pcm));
+    REQUIRE(pcm.size() == 1);
+    REQUIRE(pcm[0] == Catch::Approx(42.0f / 32768.0f));
+}
+
+TEST_CASE("VibeVoice voice reference handles high amplitude (clipping)", "[unit][vibevoice]") {
+    // 32767 is max positive i16
+    const std::vector<uint8_t> wav = make_wav({32767, -32768});
+    std::vector<float> pcm;
+
+    REQUIRE(vibevoice_parse_mono_pcm16_wav(wav.data(), wav.size(), pcm));
+    REQUIRE(pcm.size() == 2);
+    REQUIRE(std::abs(pcm[0]) <= 1.0f);
+    REQUIRE(std::abs(pcm[1]) <= 1.0f);
+}
+
+TEST_CASE("VibeVoice voice reference rejects empty data", "[unit][vibevoice]") {
+    std::vector<float> pcm;
+    REQUIRE_FALSE(vibevoice_parse_mono_pcm16_wav(nullptr, 0, pcm));
+}
+
 TEST_CASE("VibeVoice voice reference normalization preserves waveform shape", "[unit][vibevoice]") {
     std::vector<float> pcm = {1.0f, -0.5f, 0.25f};
 
