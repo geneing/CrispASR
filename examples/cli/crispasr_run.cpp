@@ -986,10 +986,10 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 // therefore needs UTF-8-safe propagation through the CRT
                 // — see issue #70 follow-up. crispasr_popen widens to
                 // wchar_t and calls _wpopen so the device name survives.
-                const char * dev = crispasr_mic_default_device_name();
+                const char* dev = crispasr_mic_default_device_name();
                 std::string dshow_arg = crispasr_windows_dshow_audio_arg_from_name(dev);
                 std::string cmd = "ffmpeg -f dshow -i " + dshow_arg + " -f s16le -ar 16000 -ac 1 -";
-                if (params.monitor || params.no_prints == false) {
+                if (params.stream_monitor || !params.no_prints) {
                     fprintf(stderr, "crispasr[mic]: device=%s\n", dev && *dev ? dev : "(default)");
                     fprintf(stderr, "crispasr[mic]: ffmpeg cmd: %s\n", cmd.c_str());
                 }
@@ -1039,13 +1039,12 @@ int crispasr_run_backend(const whisper_params& params_in) {
             size_t n_read = fread(read_buf.data(), sizeof(int16_t), step_samples, audio_src);
             if (n_read == 0) {
                 if (mic_pipe && !any_samples_read) {
-                    fprintf(stderr,
-                            "\ncrispasr[mic]: pipe ended before any PCM was read.\n"
-                            "  Most likely the capture subprocess (ffmpeg/sox/arecord) failed\n"
-                            "  to open the requested device. Re-run the printed command above\n"
-                            "  without `2>NUL` / `2>/dev/null` to see its stderr, or list\n"
-                            "  available devices: `ffmpeg -list_devices true -f dshow -i dummy`\n"
-                            "  (Windows) / `arecord -l` (Linux).\n");
+                    fprintf(stderr, "\ncrispasr[mic]: pipe ended before any PCM was read.\n"
+                                    "  Most likely the capture subprocess (ffmpeg/sox/arecord) failed\n"
+                                    "  to open the requested device. Re-run the printed command above\n"
+                                    "  without `2>NUL` / `2>/dev/null` to see its stderr, or list\n"
+                                    "  available devices: `ffmpeg -list_devices true -f dshow -i dummy`\n"
+                                    "  (Windows) / `arecord -l` (Linux).\n");
                 }
                 break; // EOF
             }

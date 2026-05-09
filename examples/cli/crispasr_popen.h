@@ -25,10 +25,10 @@
 #include <string>
 
 #if defined(_WIN32)
-    #ifndef NOMINMAX
-        #define NOMINMAX
-    #endif
-    #include <windows.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace crispasr {
@@ -37,19 +37,20 @@ namespace crispasr {
 // (the same alphabet `_popen` / `popen` accepts).
 //
 // Returns nullptr on failure. The caller closes via `crispasr_pclose`.
-inline FILE * crispasr_popen(const std::string & cmd, const char * mode) {
+inline FILE* crispasr_popen(const std::string& cmd, const char* mode) {
 #if defined(_WIN32)
     // Try CP_UTF8 first; fall back to CP_ACP if the conversion fails
     // (e.g. ill-formed UTF-8 from a caller that already in the active
     // code page). MB_ERR_INVALID_CHARS makes CP_UTF8 fail loudly so we
     // know to try the fallback rather than producing replacement chars.
-    auto widen = [](UINT codepage, const std::string & in, std::wstring & out) -> bool {
-        const int n = MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, in.c_str(),
-                                          static_cast<int>(in.size()), nullptr, 0);
-        if (n <= 0) return false;
+    auto widen = [](UINT codepage, const std::string& in, std::wstring& out) -> bool {
+        const int n =
+            MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, in.c_str(), static_cast<int>(in.size()), nullptr, 0);
+        if (n <= 0)
+            return false;
         out.resize(static_cast<size_t>(n));
-        const int got = MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, in.c_str(),
-                                            static_cast<int>(in.size()), out.data(), n);
+        const int got =
+            MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, in.c_str(), static_cast<int>(in.size()), out.data(), n);
         if (got <= 0) {
             out.clear();
             return false;
@@ -63,14 +64,15 @@ inline FILE * crispasr_popen(const std::string & cmd, const char * mode) {
         wcmd.assign(cmd.begin(), cmd.end());
     }
     std::wstring wmode;
-    for (const char * p = mode; *p; ++p) wmode.push_back(static_cast<wchar_t>(*p));
+    for (const char* p = mode; *p; ++p)
+        wmode.push_back(static_cast<wchar_t>(*p));
     return _wpopen(wcmd.c_str(), wmode.c_str());
 #else
     return ::popen(cmd.c_str(), mode);
 #endif
 }
 
-inline int crispasr_pclose(FILE * pipe) {
+inline int crispasr_pclose(FILE* pipe) {
 #if defined(_WIN32)
     return _pclose(pipe);
 #else
