@@ -137,9 +137,15 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
         do_matmul(float{0.0f});
 
     // -----------------------------------------------------------------
-    // 5. log with guard
+    // 5. log with guard (no-op when log_base == None)
     // -----------------------------------------------------------------
     auto apply_log = [&](float v) -> float {
+        if (p.log_base == LogBase::None) {
+            // Skip log entirely; let the rest of the pipeline see the raw
+            // mel-projected spectrum. Used by the Resemble VoiceEncoder
+            // (mel_type='amp').
+            return v;
+        }
         if (p.log_guard == LogGuard::MaxClip) {
             if (v < p.log_eps)
                 v = p.log_eps;
@@ -149,8 +155,10 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
             return (p.log_base == LogBase::Log10) ? std::log10(vv) : std::log(vv);
         }
     };
-    for (size_t i = 0; i < mel_tn.size(); i++) {
-        mel_tn[i] = apply_log(mel_tn[i]);
+    if (p.log_base != LogBase::None) {
+        for (size_t i = 0; i < mel_tn.size(); i++) {
+            mel_tn[i] = apply_log(mel_tn[i]);
+        }
     }
 
     // -----------------------------------------------------------------

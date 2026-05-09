@@ -35,7 +35,21 @@ namespace core_mel {
 // Each model passes its own FFT so we don't disturb numerical paths.
 using FftR2C = void (*)(const float* in, int N, float* out);
 
-enum class LogBase { Ln, Log10 };
+enum class LogBase {
+    Ln,
+    Log10,
+
+    // Skip the log step entirely. The compute() output is the raw
+    // mel-projected spectrum (Power or Magnitude per spec_kind), with
+    // any post-processing (normalization, layout transpose) still
+    // applied. Used by the Resemble VoiceEncoder
+    // (chatterbox/models/voice_encoder/melspec.py — mel_type='amp':
+    // mel_basis @ |stft|^2 with no dB conversion). Pair with
+    // log_guard = MaxClip and log_eps = 0 to also disable the
+    // pre-log floor (which would otherwise raise small values to
+    // log_eps before the log step is even attempted).
+    None,
+};
 
 // What to project through the mel filterbank: |X|^2 (power) — Whisper /
 // most encoders — or |X| (magnitude) — HF Gemma4AudioFeatureExtractor.
