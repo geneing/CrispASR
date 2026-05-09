@@ -1517,8 +1517,16 @@ static float* run_gpt_latent(indextts_context* c, const std::vector<int32_t>& te
     float lat_rms = sqrtf(sum2 / (float)(n_latent * D));
 
     if (c->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: latent extraction done: [%d, %d] rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
-                n_latent, D, lat_rms, result[0], result[1], result[2], result[3], result[4]);
+        // Per-position RMS to check if later positions have speech structure
+        float rms_first = 0, rms_last = 0;
+        for (int j = 0; j < D; j++) {
+            rms_first += result[j] * result[j];
+            rms_last += result[(n_latent - 1) * D + j] * result[(n_latent - 1) * D + j];
+        }
+        rms_first = sqrtf(rms_first / D);
+        rms_last = sqrtf(rms_last / D);
+        fprintf(stderr, "indextts: latent: [%d, %d] rms=%.4f pos0_rms=%.4f posN_rms=%.4f\n", n_latent, D, lat_rms,
+                rms_first, rms_last);
     }
 
     return result;
@@ -1891,6 +1899,23 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
     int32_t* codes = indextts_generate_mel_codes(ctx, text, ref_pcm, ref_n_samples, &n_codes);
     if (!codes || n_codes == 0) {
         return nullptr;
+    }
+
+    // Debug: override mel codes from file if INDEXTTS_MEL_CODES_FILE is set
+    const char* mc_file = getenv("INDEXTTS_MEL_CODES_FILE");
+    if (mc_file && mc_file[0]) {
+        FILE* f = fopen(mc_file, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            n_codes = (int)(sz / sizeof(int32_t));
+            free(codes);
+            codes = (int32_t*)malloc(sz);
+            fread(codes, 1, sz, f);
+            fclose(f);
+            fprintf(stderr, "indextts: DEBUG loaded %d mel codes from %s\n", n_codes, mc_file);
+        }
     }
 
     // Check if vocoder is loaded
