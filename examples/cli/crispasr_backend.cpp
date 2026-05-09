@@ -347,6 +347,15 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "voxtral4b";
     if (contains_ci("voxtral"))
         return "voxtral";
+    // Distinguish parakeet-CTC standalones (parakeet-ctc-0.6b /
+    // parakeet-ctc-1.1b — same FastConformer encoder + CTC head as the
+    // stt_en_fastconformer_ctc family) from parakeet-TDT (transducer)
+    // and the parakeet-tdt_ctc-*-ja hybrid, which are routed via the
+    // `parakeet` backend's TDT path. The "tdt" guard keeps the JA
+    // hybrid (parakeet-tdt_ctc-0.6b-ja) on the parakeet route even
+    // though its filename also contains "ctc".
+    if (contains_ci("parakeet") && contains_ci("ctc") && !contains_ci("tdt"))
+        return "fastconformer-ctc";
     if (contains_ci("parakeet"))
         return "parakeet";
     // Check "fastconformer-ctc" / "stt_en_fc_ctc" style filenames before

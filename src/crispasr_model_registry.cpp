@@ -106,6 +106,16 @@ constexpr Entry k_registry[] = {
     {"fastconformer-ctc", "stt-en-fastconformer-ctc-large-q4_k.gguf",
      "https://huggingface.co/cstr/stt-en-fastconformer-ctc-large-GGUF/resolve/main/stt-en-fastconformer-ctc-large-q4_k.gguf",
      "~83 MB", nullptr, nullptr},
+    // nvidia/parakeet-ctc-{0.6b,1.1b} — same FastConformer-CTC architecture
+    // as the stt_en_fastconformer_ctc_* family (24 / 42 layers respectively),
+    // English-only, lowercase + light-punct output. Filename heuristic
+    // routes parakeet-ctc-* GGUFs to this backend.
+    {"parakeet-ctc-0.6b", "parakeet-ctc-0.6b-q4_k.gguf",
+     "https://huggingface.co/cstr/parakeet-ctc-0.6b-GGUF/resolve/main/parakeet-ctc-0.6b-q4_k.gguf",
+     "~455 MB", nullptr, nullptr},
+    {"parakeet-ctc-1.1b", "parakeet-ctc-1.1b-q4_k.gguf",
+     "https://huggingface.co/cstr/parakeet-ctc-1.1b-GGUF/resolve/main/parakeet-ctc-1.1b-q4_k.gguf",
+     "~795 MB", nullptr, nullptr},
     {"gemma4-e2b", "gemma4-e2b-it-q4_k.gguf",
      "https://huggingface.co/cstr/gemma4-e2b-it-GGUF/resolve/main/gemma4-e2b-it-q4_k.gguf",
      "~2.5 GB", nullptr, nullptr},

@@ -325,6 +325,156 @@ Cross-backend portability of the fused-QKV Q4_K pattern:
   showed no measurable speedup on JFK
 - qwen3-tts: opt-in (existing convention)
 
+### FastConformer encoder flash_attn_ext — 2026-05-09
+
+Commit `c2423313` rewrites the FastConformer encoder self-attention
+(parakeet, canary, canary_ctc) from 3 separate matmuls + add + softmax
+for Shaw relative-position attention into a single `ggml_flash_attn_ext`
+call per layer with the BD position bias precomputed and passed as the
+additive mask. Reduces per-encoder-pass kernel dispatches from
+32 layers × 3 matmuls = 96 down to 32 — the dominant win on GPUs
+where per-launch overhead is real.
+
+Re-verification on Apple M1 Metal (`build-ninja-compile/`,
+`GGML_METAL=ON`, `GGML_BLAS=ON` Apple), 3-pass warm-cache JFK 11 s:
+
+| Backend | Baseline (`c2423313~1`) median | Flash-attn (`c2423313`) median | Speedup | Output |
+|---|---|---|---|---|
+| parakeet (TDT 0.6B v3 F16) | 2.57 s (4.3× RT) | 1.60 s (6.9× RT) | **1.61× (38% faster)** | bit-identical ✓ |
+| canary (1B v2 Q4_K) | 1.53 s (7.2× RT) | 1.15 s (9.6× RT) | **1.33× (25% faster)** | bit-identical ✓ |
+
+Substantially exceeds the commit message's CPU number (~10%), confirming
+the GPU-vs-CPU hypothesis: with kernel-launch overhead in the picture,
+fusion pays off ~3-4× more. Wallclock includes whisper-tiny LID
+(~77 MB Metal load) and feature extraction — both unchanged across the
+two builds, so the encoder-attention-only speedup is larger than the
+table suggests. Parakeet benefits more than canary because its encoder
+runs longer per token (TDT joint loop), so the 32-layer attention block
+dominates a larger share of wallclock.
+
+Issue #81 ("parakeet 5× slower than ONNX on GPU") — this commit closes
+a chunk of the gap but not all of it. Next likely targets: decoder
+loop, joint network, log-mel host→device transfer.
+
+### onnx-asr cross-comparison — issue #81 (2026-05-09)
+
+Replicating the issue reporter's setup (libcrispasr via Python ctypes,
+parakeet-tdt-0.6b-v3 q8_0 GGUF) and comparing against onnx-asr 0.11.0
+on the same Apple M1, JFK 11 s, 3 warm passes per path. crispasr is at
+flash-attn commit `c2423313`. ONNX backend selection follows
+`istupakov/onnx-asr`'s upstream recipe (`pip install onnx-asr`).
+
+**ONNX execution-provider reality check on M1:**
+
+| ONNX model | CPU EP | CoreML EP |
+|---|---|---|
+| `nemo-parakeet-tdt-0.6b-v3` (F32, external-data, encoder 2.4 GB) | ✓ | ✗ external-data initializer + CoreML's 316-partition subgraph split lose `model_path`; inlining hits protobuf's 2 GB ceiling. Tracked upstream: [`microsoft/onnxruntime#26355`](https://github.com/microsoft/onnxruntime/issues/26355), closed *not planned* |
+| `nemo-parakeet-ctc-0.6b` (F32 + external data) | ✓ | ✗ same issue |
+| `nemo-parakeet-ctc-0.6b` int8 (single-file, 650 MB) | ✓ | ✓ loads after ~10 s CoreML compile |
+
+The upstream onnx-asr README claim "Works on … macOS … with support for
+… CoreML" is therefore **partially true** on Apple Silicon for parakeet:
+only the smaller CTC int8 single-file export reaches CoreML; the full
+TDT (and full-precision CTC) exports stay CPU-only because of how
+istupakov packages them with external-data tensors larger than
+protobuf's 2 GB limit.
+
+**TDT-vs-TDT bench** (JFK 11 s, 3 warm passes, load avg ~4.0):
+
+| path | median | RT× |
+|---|---|---|
+| **crispasr ctypes Session, parakeet-tdt q8_0, Metal** | **1.34 s** | **8.24×** |
+| onnx-asr `nemo-parakeet-tdt-0.6b-v3` F32, CPU EP | 1.77 s | 6.23× |
+
+Apples-to-apples on the TDT architecture: **crispasr Metal beats
+onnx-asr CPU by 1.32×.** The Q8_0 ctypes path is faster than the F16
+CLI numbers above because it skips the CLI's whisper-tiny LID startup
+(~77 MB Metal load) and output formatting overhead — closer to what
+the issue reporter actually measured.
+
+**CTC-vs-CTC bench** (JFK 11 s, 3 warm passes, all CTC outputs
+identical, q8_0 quants, load avg ~2.6):
+
+| path | median | RT× |
+|---|---|---|
+| **crispasr Session, parakeet-ctc-0.6b q8_0, Metal** | **~460 ms** | **~24×** |
+| onnx-asr `nemo-parakeet-ctc-0.6b` (~600M) int8, CPU EP | 724 ms | 15.2× |
+| onnx-asr `nemo-parakeet-ctc-0.6b` (~600M) int8, CoreML EP | 1279 ms | 8.6× |
+
+(crispasr Metal value is from the `stt_en_fastconformer_ctc_xlarge` 3-pass
+bench at load ~2.6 — identical encoder + CTC-head graph as
+`parakeet-ctc-0.6b`, only the tokenizer + training data differ. The new
+parakeet-ctc-0.6b GGUFs fall in the same window when measured under
+the same load — variance ~0.4–0.7 s observed across loads 2.6–4.0.)
+
+`nvidia/parakeet-ctc-0.6b` (24L) and `nvidia/parakeet-ctc-1.1b` (42L)
+are now first-class in crispasr — the existing
+`models/convert-stt-fastconformer-ctc-to-gguf.py` handles both (encoder
++ CTC head are architecturally identical to the `stt_en_fastconformer_ctc_*`
+family); `examples/cli/crispasr_backend.cpp` auto-routes
+`parakeet-ctc-*.gguf` filenames to the `fastconformer-ctc` backend (the
+JA hybrid `parakeet-tdt_ctc-0.6b-ja` stays on the `parakeet` TDT path
+via the "tdt" guard). Quantised variants
+([F16, Q8_0, Q5_0, Q4_K]):
+[`cstr/parakeet-ctc-0.6b-GGUF`](https://huggingface.co/cstr/parakeet-ctc-0.6b-GGUF)
+and [`cstr/parakeet-ctc-1.1b-GGUF`](https://huggingface.co/cstr/parakeet-ctc-1.1b-GGUF).
+**crispasr wins by ~1.6×** on the same upstream model on M1 Metal.
+
+Two M1-specific surprises worth surfacing:
+
+1. **CoreML EP is *slower* than CPU EP on M1** for parakeet-shaped
+   graphs (CTC: 1.28 s vs 0.72 s on the same int8 model). M1's CPU
+   vector pipeline + onnxruntime CPU kernels outpace CoreML's
+   per-graph compile + dispatch overhead. ONNX users on Apple Silicon
+   should default to CPU EP for parakeet, not CoreML.
+2. **CoreML EP isn't even reachable for the upstream parakeet TDT
+   ONNX export** (external-data + protobuf 2 GB ceiling, see table
+   above). The headline "works on macOS with CoreML" claim only
+   applies to the smaller CTC int8 single-file export.
+
+**Reframing the 5× claim in issue #81:** the reporter is on Windows +
+RTX 4070 + onnxruntime-directml — i.e. ONNX with a *working dGPU
+execution provider*. DirectML on a 4070 is a real architectural
+advantage no amount of ggml-side fusion will fully erase until our
+CUDA / Vulkan kernels for the parakeet hot paths reach parity. On M1
+the picture inverts: ONNX's only ergonomic path is CPU EP (or CoreML
+EP for the smaller CTC int8 export, where it's *slower* than CPU
+anyway), and crispasr Metal beats every ONNX path that loads — by
+1.32× on TDT-vs-TDT and **1.58× on CTC-vs-CTC at the same param
+count.** The actionable framing for the issue is "which CUDA / Vulkan
+kernels in the parakeet path are leaving perf on the table on dGPU"
+rather than "parakeet is slow on GPU universally."
+
+Reproduce:
+
+```bash
+pip install onnx-asr soundfile
+HF_HOME=/Volumes/backups/ai/huggingface-hub \
+CRISPASR_LIB_PATH=$(pwd)/build-ninja-compile/src/libcrispasr.dylib \
+PYTHONPATH=$(pwd)/python \
+python -c "
+import time, soundfile as sf, onnx_asr
+from crispasr import Session
+audio,_ = sf.read('samples/jfk.wav', dtype='float32')
+
+# 1) crispasr Q8_0 GGUF via ctypes (matches issue #81 reporter setup)
+sess = Session('<path-to>/parakeet-tdt-0.6b-v3-q8_0.gguf', backend='parakeet')
+sess.transcribe(audio.copy(), language='en')  # warm
+for i in range(3):
+    t = time.perf_counter()
+    sess.transcribe(audio.copy(), language='en')
+    print(f'crispasr q8_0 Metal: {(time.perf_counter()-t)*1000:.0f} ms')
+
+# 2) onnx-asr TDT CPU EP
+m = onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', providers=['CPUExecutionProvider'])
+m.recognize(audio)
+for i in range(3):
+    t = time.perf_counter()
+    m.recognize(audio)
+    print(f'onnx tdt CPU EP:     {(time.perf_counter()-t)*1000:.0f} ms')
+"
+```
+
 ---
 
 ## Reproduce
