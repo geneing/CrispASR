@@ -3112,15 +3112,31 @@ for the atomic path):
 
 ### Known issues
 
-1. **F16 T3 + GPU produces broken chatterbox audio**. Pre-existing
-   bug, NOT introduced by this work — reproducible at the original
-   voice-clone commit `86ac98eb` and at every commit before/since.
-   Use `chatterbox-t3-q4_k-regen.gguf` + `--no-gpu` for reliable
-   cloning today. The F16 + GPU path produces gibberish or
-   degenerate sequences on every prompt tested. Tracked as a
-   separate issue; needs investigation into Metal kernel
-   non-determinism or F16 sampling drift in the T3 multinomial
-   path.
+1. **Chatterbox T3 forward drifts on Metal (GPU) past ~step 16**.
+   Pre-existing bug, NOT introduced by this work — reproducible at
+   the original voice-clone commit `86ac98eb` and every commit
+   before/since. The bisect:
+
+   | Config | Tokens 0-15 | Tokens 16+ | ASR result |
+   |---|---|---|---|
+   | Q4_K + CPU | 6133 6405 4137 4137 ... | 5122 4457 5429 ... | "Ask not what your country can do for you." ✓ |
+   | F16 + CPU | identical to Q4_K-CPU | identical to Q4_K-CPU | same ✓ |
+   | Q4_K + GPU | identical to Q4_K-CPU | DRIFTS: 5850 4376 5671 ... | "And not what you're talking about..." ✗ |
+   | F16 + GPU | identical to Q4_K-CPU | DRIFTS more aggressively | gibberish ✗ |
+
+   The T3 forward is BIT-EQUIVALENT between CPU and GPU for the
+   first 16 sampled tokens, then Metal kernel drift causes the KV
+   cache reads / attention output to diverge from CPU. Drift is
+   deterministic (same seed → same broken tokens), so it's a
+   correctness bug in some Metal op, not a race condition. Likely
+   suspects: F16 attention numerical stability past a context-length
+   threshold, or KV cache write/read alignment on Metal. Needs deep
+   ggml-Metal kernel investigation.
+
+   Workaround: use `--no-gpu`. Q4_K + CPU produces clean cloned
+   speech matching the python baker. The CLI prints which conds
+   were installed at verbosity ≥ 1; for production cloning today,
+   prefer the python baker workflow + `--voice <baked>.gguf`.
 
 2. **T3 sampling can drift on long technical prompts**. The seed=0
    default is deterministic, but particular prompts produce
