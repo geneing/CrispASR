@@ -229,17 +229,29 @@ static inline ggml_tensor* build_block(ggml_context* ctx0, ggml_tensor* cur, ggm
     K_ = ggml_permute(ctx0, ggml_reshape_3d(ctx0, K_, head_dim, n_heads, T), 0, 2, 1, 3);
     R = ggml_permute(ctx0, ggml_reshape_3d(ctx0, R, head_dim, n_heads, 2 * T - 1), 0, 2, 1, 3);
 
-    ggml_tensor* AC = ggml_mul_mat(ctx0, ggml_cont(ctx0, K_), Q_u);
+    // Compute the relative position bias BD = rel_shift(Q_v × R^T).
+    // This is query-dependent so it can't be precomputed, but it CAN
+    // be passed as the additive mask to ggml_flash_attn_ext, which
+    // fuses AC (= Q_u × K^T) + BD + softmax + ×V into one kernel.
     ggml_tensor* BD_raw = ggml_mul_mat(ctx0, ggml_cont(ctx0, R), Q_v);
     ggml_tensor* BD = rel_shift(ctx0, BD_raw);
 
-    ggml_tensor* scores = ggml_add(ctx0, AC, BD);
-    scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f / sqrtf((float)head_dim), 0.0f);
+    // flash_attn_ext computes: softmax(Q_u × K^T * scale + mask) × V
+    // We need:                 softmax((Q_u × K^T + BD) * scale)  × V
+    // So pass mask = BD * scale to get equivalent semantics.
+    const float scale = 1.0f / sqrtf((float)head_dim);
+    // BD is a strided view from rel_shift — make contiguous before scale/cast.
+    ggml_tensor* BD_c = ggml_cont(ctx0, BD);
+    ggml_tensor* BD_scaled = ggml_scale(ctx0, BD_c, scale);
+    // flash_attn_ext mask must be F16
+    ggml_tensor* BD_mask = ggml_cast(ctx0, BD_scaled, GGML_TYPE_F16);
 
-    ggml_tensor* V3 = ggml_reshape_3d(ctx0, V, head_dim, n_heads, T);
-    ggml_tensor* V_t = ggml_permute(ctx0, V3, 1, 2, 0, 3);
-    ggml_tensor* attn_out = ggml_mul_mat(ctx0, ggml_cont(ctx0, V_t), scores);
-    attn_out = ggml_reshape_2d(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, attn_out, 0, 2, 1, 3)), d, T);
+    // V needs [head_dim, T, n_heads] layout for flash_attn_ext (same as K)
+    ggml_tensor* V_ = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, V, head_dim, n_heads, T), 0, 2, 1, 3));
+
+    ggml_tensor* attn_out =
+        ggml_flash_attn_ext(ctx0, ggml_cont(ctx0, Q_u), ggml_cont(ctx0, K_), V_, BD_mask, scale, 0.0f, 0.0f);
+    attn_out = ggml_reshape_2d(ctx0, attn_out, d, T);
 
     attn_out = mm_bias(e.attn_out_w, attn_out, e.attn_out_b);
     cur = ggml_add(ctx0, inpAttn, attn_out);
