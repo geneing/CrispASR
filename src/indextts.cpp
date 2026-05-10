@@ -108,7 +108,11 @@ struct indextts_model {
     // GPT-2 transformer blocks
     std::vector<indextts_gpt2_block> blocks;
 
-    // Final norm + LM head
+    // GPT-2 final LayerNorm (gpt.ln_f — applied by HuggingFace GPT2Model)
+    ggml_tensor* gpt_ln_f_w = nullptr;
+    ggml_tensor* gpt_ln_f_b = nullptr;
+
+    // IndexTTS final norm (separate from gpt.ln_f)
     ggml_tensor* final_norm_w = nullptr; // (d_model)
     ggml_tensor* final_norm_b = nullptr; // (d_model)
     ggml_tensor* mel_head_w = nullptr;   // (mel_vocab, d_model)
@@ -503,6 +507,8 @@ static bool bind_model(indextts_context* c) {
     }
 
     // Final norm + head
+    m.gpt_ln_f_w = core_gguf::try_get(t, "gpt.ln_f.weight");
+    m.gpt_ln_f_b = core_gguf::try_get(t, "gpt.ln_f.bias");
     m.final_norm_w = core_gguf::require(t, "final_norm.weight", "indextts");
     m.final_norm_b = core_gguf::require(t, "final_norm.bias", "indextts");
     m.mel_head_w = core_gguf::require(t, "mel_head.weight", "indextts");
@@ -1464,15 +1470,22 @@ static ggml_cgraph* build_gpt2_kv_graph(indextts_context* c, int n_past, int n_t
         cur = ggml_add(ctx0, residual, mlp);
     }
 
-    // Final LayerNorm
-    cur = ggml_norm(ctx0, cur, ln_eps);
-    cur = ggml_mul(ctx0, cur, c->model.final_norm_w);
-    cur = ggml_add(ctx0, cur, c->model.final_norm_b);
+    // GPT-2 final LayerNorm (gpt.ln_f — HuggingFace GPT2Model applies this)
+    if (c->model.gpt_ln_f_w && c->model.gpt_ln_f_b) {
+        cur = ggml_norm(ctx0, cur, ln_eps);
+        cur = ggml_mul(ctx0, cur, c->model.gpt_ln_f_w);
+        cur = ggml_add(ctx0, cur, c->model.gpt_ln_f_b);
+    }
 
     // Take last token for prefill
     if (T > 1) {
         cur = ggml_view_2d(ctx0, cur, D, 1, cur->nb[1], (size_t)(T - 1) * cur->nb[1]);
     }
+
+    // IndexTTS final_norm (applied in get_logits after skipping conditioning tokens)
+    cur = ggml_norm(ctx0, cur, ln_eps);
+    cur = ggml_mul(ctx0, cur, c->model.final_norm_w);
+    cur = ggml_add(ctx0, cur, c->model.final_norm_b);
 
     // Mel head
     cur = ggml_mul_mat(ctx0, c->model.mel_head_w, cur);
@@ -1617,7 +1630,14 @@ static ggml_cgraph* build_gpt2_latent_graph(indextts_context* c, int n_total, in
         cur = ggml_add(ctx0, residual, mlp);
     }
 
-    // Final LayerNorm
+    // GPT-2 final LayerNorm (gpt.ln_f)
+    if (c->model.gpt_ln_f_w && c->model.gpt_ln_f_b) {
+        cur = ggml_norm(ctx0, cur, ln_eps);
+        cur = ggml_mul(ctx0, cur, c->model.gpt_ln_f_w);
+        cur = ggml_add(ctx0, cur, c->model.gpt_ln_f_b);
+    }
+
+    // IndexTTS final_norm
     cur = ggml_norm(ctx0, cur, ln_eps);
     cur = ggml_mul(ctx0, cur, c->model.final_norm_w);
     cur = ggml_add(ctx0, cur, c->model.final_norm_b);
@@ -2093,19 +2113,15 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
             scored.push_back({logits[i], i});
         std::partial_sort(scored.begin(), scored.begin() + 5, scored.end(),
                           [](auto& a, auto& b) { return a.first > b.first; });
+        // FULL sort to find exact rank of 478
+        std::sort(scored.begin(), scored.end(), [](auto& a, auto& b) { return a.first > b.first; });
         fprintf(stderr, "indextts: prefill top10:");
-        std::partial_sort(scored.begin(), scored.begin() + 10, scored.end(),
-                          [](auto& a, auto& b) { return a.first > b.first; });
         for (int i = 0; i < 10; i++)
             fprintf(stderr, " %d(%.3f)", scored[i].second, scored[i].first);
-        // Check where Python's pick (478) ranks
-        int rank_478 = 0;
-        for (auto& s : scored)
-            if (s.second == 478) {
-                fprintf(stderr, " | 478 rank=%d val=%.3f", rank_478, s.first);
+        for (int i = 0; i < (int)scored.size(); i++)
+            if (scored[i].second == 478) {
+                fprintf(stderr, " | 478 rank=%d val=%.3f", i, scored[i].first);
                 break;
-            } else {
-                rank_478++;
             }
         fprintf(stderr, "\n");
     }
@@ -2116,7 +2132,7 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
     const int mel_vocab = (int)ctx->hp.mel_vocab_size;
     const int stop_token = (int)ctx->hp.stop_mel_token;
     const float rep_penalty = ctx->params.repetition_penalty;
-    const int B = 3; // beam size
+    const int B = 3; // beam size matching Python
 
     struct Beam {
         std::vector<int32_t> tokens;
