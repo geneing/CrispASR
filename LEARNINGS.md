@@ -3426,6 +3426,87 @@ something downstream of T3 (likely s3gen or speech_head F32 matmul
 through some indirect path) introduces additional drift. So even F16
 isn't a clean GPU path. Auto-fallback remains.
 
+### Round 4 (2026-05-10) — kernel-level fix landed (partial bit-identity)
+
+Implemented the proper kernel-level fix:
+
+1. `kernel_quantize_q8_K_f32` (ggml-metal.metal): F32 input column →
+   Q8_K block. Each threadgroup processes 1 256-element block, 32
+   threads per group. simd_shuffle_xor reduction finds amax + signed
+   max, then `iscale = -127/max`, `qs[j] = MIN(127, round(iscale ×
+   x[j]))`, `bsums[k] = sum of qs[k*16..k*16+15]`. Mirrors CPU
+   `quantize_row_q8_K_ref` exactly.
+2. `kernel_mul_mv_q4_K_q8_K` (ggml-metal.metal): one thread per output
+   element. Mirrors CPU `ggml_vec_dot_q4_K_q8_K_generic` exactly:
+   unpack 256 Q4_K nibbles into int8 a[256], unpack 12-byte scales
+   table into 8 scale + 8 min uchars (kmask1/2/3), int32 accumulators
+   per scale lane, dmin contribution via bsums × mins, final F32
+   multiply by d_q4 × d_q8.
+3. Dispatch path in `ggml_metal_op_mul_mat`: when PREC_F32 + Q4_K
+   weight + F32 input + ne00 % 256 == 0, reserve a Q8_K scratch
+   buffer at the tail of dst (via
+   `ggml_metal_op_mul_mat_extra_q8_K` + the
+   `ggml_backend_metal_buffer_type_get_alloc_size` hook), dispatch
+   the quantize kernel to fill it, sync via
+   `ggml_metal_op_concurrency_reset`, dispatch the Q4_K×Q8_K matmul.
+4. Routed `flash_attn_ext` to CPU when PREC_F32 is set, via
+   `ggml_metal_device_supports_op` returning false. Apple's FA kernel
+   uses simdgroup_half8x8 tiles for Q×K^T regardless of K type
+   (FA_TYPES_F32 still declares Q as half), leaking ~1e-4 drift even
+   with F32 KV. Routing to CPU avoids the issue at the cost of
+   per-layer cross-device transfers.
+5. chatterbox `build_graph_t3_kv` / `build_graph_t3_gpt2_kv` graph
+   walks now tag every `GGML_OP_MUL_MAT` AND every
+   `GGML_OP_FLASH_ATTN_EXT` with `GGML_PREC_F32`.
+
+### Verification + remaining drift
+
+| Stage                   | CPU vs GPU drift                  |
+|-------------------------|-----------------------------------|
+| Layer-0 norm output     | bit-identical                     |
+| Layer-0 K weight (cast) | bit-identical (after `.h` → `.f`) |
+| Layer-0 K projection    | **bit-identical**                 |
+| Layer-0 K cache (KV[0]) | **bit-identical** through every t |
+| Layer-0 V projection    | bit-identical                     |
+| Layer-0 Q projection    | bit-identical                     |
+| Layer-0 K rope          | bit-identical                     |
+| Layer-0 attn output     | **bit-identical** (post out_proj) |
+| Layer-0 FFN output      | **bit-identical**                 |
+| Layer-1 norm output     | bit-identical                     |
+| Layer-1 K projection    | bit-identical                     |
+| Layer-1 K cache         | bit-identical at every sampled t  |
+| Layer-1 attn output     | **drifts ~1e-4** (despite all of the above being identical!) |
+| Layer-29 attn output    | drifts ~3e-3                      |
+| End-of-prefill logits   | drift ~0.1–0.2                    |
+
+AR token sequence (chatterbox seed=42, "Hello world", greedy temp=0):
+matches CPU through **decode step 11**, then diverges. Compare to:
+- Pre-#83 fix:                  matches through ~step 1
+- After kernel only:            matches through step 6
+- After kernel + FA→CPU:        matches through step 11
+
+End-to-end audio: chatterbox FORCE_GPU=1 now produces partially
+intelligible speech ("They put your" instead of empty/noise on the
+JFK clone). The auto-fallback remains the production path until the
+remaining ~1e-4 layer-1+ drift is identified and eliminated — likely
+in some Metal op the diagnostic dumps haven't yet traced through
+(candidates: rope on Q with rope_freq_factors, swiglu, an
+F32-weight matmul path I haven't covered, or an inter-kernel
+cross-device copy with subtle precision behaviour).
+
+### Status
+
+The Q4_K × Q8_K kernel infrastructure is solid and ships with diagnostic
+knobs (`CRISPASR_CHATTERBOX_DUMP_KV_LAYER`, `_DUMP_LAYER`, `_DUMP_ATTN_AT`,
+`_DUMP_FFN_AT`, `_DUMP_QPROJ_AT`, `_DUMP_VPROJ_AT`) for further
+bisection. Q5_K, Q6_K, Q8_0 use the same template — straightforward
+port once Q4_K is shaken out.
+
+The default chatterbox path (no env overrides) auto-falls-back to
+full CPU. `CRISPASR_CHATTERBOX_FORCE_GPU=1` enables the new
+kernel + FA→CPU path; tokens diverge at step 11+ but layer 0 is
+bit-identical.
+
 2. **T3 sampling can drift on long technical prompts**. The seed=0
    default is deterministic, but particular prompts produce
    degenerate output (e.g. "Stop, stop, stop" repetition or wholly

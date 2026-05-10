@@ -1189,10 +1189,14 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
         x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.ffn_norm_w);
         ggml_tensor* mlp = core_ffn::swiglu(ctx0, x, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
-        if (il == 0 && std::getenv("CRISPASR_CHATTERBOX_DUMP_FFN_AT")) {
-            ggml_set_name(mlp, "L0_ffn_out");
-            ggml_set_output(mlp);
-            ggml_build_forward_expand(gf, mlp);
+        if (std::getenv("CRISPASR_CHATTERBOX_DUMP_FFN_AT")) {
+            const char* lyr_env = std::getenv("CRISPASR_CHATTERBOX_DUMP_LAYER");
+            const int dbg_layer = lyr_env ? (int)std::strtol(lyr_env, nullptr, 10) : 0;
+            if ((int)il == dbg_layer) {
+                ggml_set_name(mlp, "DBG_ffn_out");
+                ggml_set_output(mlp);
+                ggml_build_forward_expand(gf, mlp);
+            }
         }
         cur = ggml_add(ctx0, residual, mlp);
     }
@@ -1330,7 +1334,7 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_VPROJ_AT", "L0_V_proj", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KROPE_AT", "L0_K_rope", (int)c->hp.head_dim);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_ATTN_AT", "DBG_attn_out", (int)c->hp.hidden_size);
-    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_FFN_AT", "L0_ffn_out", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_FFN_AT", "DBG_ffn_out", (int)c->hp.hidden_size);
 
     // Special: dump the dequantised K weight tensor (row 0).  Stride through
     // the row in chunks to expose any per-block drift.
@@ -1358,14 +1362,16 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     // comparing on/off-GPU writes byte-by-byte at a single step.
     if (const char* e = std::getenv("CRISPASR_CHATTERBOX_DUMP_KV_AT"); e && *e) {
         const int dump_n_past = (int)std::strtol(e, nullptr, 10);
+        const char* lyr_env = std::getenv("CRISPASR_CHATTERBOX_DUMP_KV_LAYER");
+        const int dump_layer = lyr_env ? (int)std::strtol(lyr_env, nullptr, 10) : 0;
         if (n_past + n_tokens > dump_n_past && n_past <= dump_n_past && (use_kv_k == nullptr || use_kv_k == c->kv_k)) {
             const int hd_l = (int)c->hp.head_dim;
             ggml_tensor* kv_t = c->kv_k;
             const size_t row_bytes = (size_t)hd_l * ggml_type_size(kv_t->type);
-            const size_t off_bytes = (size_t)dump_n_past * kv_t->nb[1]; // layer 0, kv head 0, row dump_n_past
+            const size_t off_bytes = (size_t)dump_layer * kv_t->nb[3] + (size_t)dump_n_past * kv_t->nb[1];
             std::vector<uint8_t> raw(row_bytes);
             ggml_backend_tensor_get(kv_t, raw.data(), off_bytes, row_bytes);
-            fprintf(stderr, "[KV] L=0 h=0 t=%d type=%s hd=%d:", dump_n_past, ggml_type_name(kv_t->type), hd_l);
+            fprintf(stderr, "[KV] L=%d h=0 t=%d type=%s hd=%d:", dump_layer, dump_n_past, ggml_type_name(kv_t->type), hd_l);
             if (kv_t->type == GGML_TYPE_F16) {
                 for (int i = 0; i < std::min(8, hd_l); i++) {
                     fprintf(stderr, " %.4f", ggml_fp16_to_fp32(((ggml_fp16_t*)raw.data())[i]));
