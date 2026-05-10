@@ -171,13 +171,15 @@ target_link_libraries(crispasr-diff PRIVATE
 install(TARGETS crispasr-diff RUNTIME BUNDLE DESTINATION bin)
 
 # ---------------------------------------------------------------------------
-# crispasr-lid — standalone text language identification (GlotLID, LID-176).
-# Reads UTF-8 text from --text or stdin, prints top-k label\tscore lines.
+# crispasr-lid — standalone text language identification.
+# Auto-routes between fastText (GlotLID-V3, LID-176) and Google CLD3 by
+# peeking the GGUF's general.architecture key at load time. One binary
+# for any text-LID GGUF.
 # ---------------------------------------------------------------------------
 add_executable(crispasr-lid crispasr_lid_main.cpp)
 target_link_libraries(crispasr-lid PRIVATE
     crispasr
-    lid-fasttext
+    text-lid-dispatch
     ${CMAKE_THREAD_LIBS_INIT}
 )
 install(TARGETS crispasr-lid RUNTIME BUNDLE DESTINATION bin)

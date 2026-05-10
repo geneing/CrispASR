@@ -1929,8 +1929,8 @@ int main(int argc, char** argv) {
         float conf = 0.f;
         const char* pred = lid_fasttext_predict(ctx, text.c_str(), &conf);
         const std::string ref_label = ref.meta("top1_label");
-        printf("[INFO] top1_label             ours='%s' (%.4f)  ref='%s'\n",
-               pred ? pred : "(null)", conf, ref_label.c_str());
+        printf("[INFO] top1_label             ours='%s' (%.4f)  ref='%s'\n", pred ? pred : "(null)", conf,
+               ref_label.c_str());
         if (pred && !ref_label.empty() && ref_label != pred) {
             n_fail++;
         }

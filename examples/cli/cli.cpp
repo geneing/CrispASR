@@ -8,10 +8,10 @@
 #include "crispasr_diagnostics.h" // --version / --diagnostics + verbose banner (#31)
 #include "crispasr_model_mgr_cli.h"
 #include "crispasr_model_registry.h"
-#include "crispasr_output.h"  // crispasr_make_disp_segments — split-on-punct (#29)
-#include "crispasr_server.h"  // crispasr_run_server()
-#include "crispasr_vad_cli.h" // crispasr_resolve_vad_model — auto-DL silero (#33)
-#include "lid_fasttext.h"     // text LID for --lid-on-transcript
+#include "crispasr_output.h"   // crispasr_make_disp_segments — split-on-punct (#29)
+#include "crispasr_server.h"   // crispasr_run_server()
+#include "crispasr_vad_cli.h"  // crispasr_resolve_vad_model — auto-DL silero (#33)
+#include "text_lid_dispatch.h" // text LID dispatcher for --lid-on-transcript (fastText or CLD3)
 
 #include <cmath>
 #include <algorithm>
@@ -736,8 +736,9 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
         params.lid_backend.c_str());
     fprintf(stderr, "  --lid-model FNAME                 [%-7s] optional LID model path (default ggml-tiny.bin)\n",
             params.lid_model.c_str());
-    fprintf(stderr, "  --lid-on-transcript FNAME         [%-7s] post-ASR text LID: run lid-fasttext (GlotLID/LID-176) "
-                    "on the final transcript and emit lang=<code> to stderr\n",
+    fprintf(stderr,
+            "  --lid-on-transcript FNAME         [%-7s] post-ASR text LID: run lid-fasttext (GlotLID/LID-176) "
+            "or lid-cld3 — auto-routed by GGUF arch — on the transcript; emits lang=<code> to stderr\n",
             params.lid_on_transcript.c_str());
     fprintf(stderr,
             "  --diarize-method NAME             [%-7s] diarize method: energy|xcorr|vad-turns|sherpa|pyannote|ecapa\n",
@@ -2058,11 +2059,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Post-ASR text LID: if --lid-on-transcript was set, run the
-    // fastText classifier on the assembled transcript and emit
-    // `lang=<code>\tconf=<score>` to stderr. Errors are logged but
-    // never fail the run — the transcript output stays the source of
-    // truth.
+    // Post-ASR text LID: if --lid-on-transcript was set, run a text
+    // classifier on the assembled transcript and emit
+    // `lang=<code>\tconf=<score>` to stderr. The dispatcher peeks the
+    // GGUF's general.architecture and picks fastText (GlotLID/LID-176)
+    // or CLD3 automatically. Errors are logged but never fail the
+    // run — the transcript output stays the source of truth.
     if (!params.lid_on_transcript.empty()) {
         std::vector<crispasr_segment> lid_segs = cli_whisper_collect_segments(ctx);
         std::string transcript;
@@ -2075,18 +2077,17 @@ int main(int argc, char** argv) {
             if (!params.no_prints)
                 fprintf(stderr, "crispasr[lid-on-transcript]: empty transcript, skipping\n");
         } else {
-            lid_fasttext_context* lid = lid_fasttext_init_from_file(params.lid_on_transcript.c_str(), 1);
+            text_lid_context* lid = text_lid_init_from_file(params.lid_on_transcript.c_str(), 1);
             if (!lid) {
-                fprintf(stderr, "crispasr[lid-on-transcript]: failed to load '%s'\n",
-                        params.lid_on_transcript.c_str());
+                fprintf(stderr, "crispasr[lid-on-transcript]: failed to load '%s'\n", params.lid_on_transcript.c_str());
             } else {
                 float conf = 0.f;
-                const char* lab = lid_fasttext_predict(lid, transcript.c_str(), &conf);
+                const char* lab = text_lid_predict(lid, transcript.c_str(), &conf);
                 if (lab)
-                    fprintf(stderr, "lang=%s\tconf=%.6f\n", lab, conf);
+                    fprintf(stderr, "lang=%s\tconf=%.6f\tbackend=%s\n", lab, conf, text_lid_backend(lid));
                 else
                     fprintf(stderr, "crispasr[lid-on-transcript]: prediction failed\n");
-                lid_fasttext_free(lid);
+                text_lid_free(lid);
             }
         }
     }

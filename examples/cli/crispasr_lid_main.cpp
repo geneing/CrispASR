@@ -4,27 +4,29 @@
 // transcript or arbitrary text. Reads UTF-8 text from --text or stdin
 // and emits the top-k predictions one per line (label\tscore).
 //
+// Auto-routes between fastText (GlotLID-V3 / LID-176) and CLD3
+// based on the GGUF's `general.architecture` key — one binary, any
+// supported text-LID GGUF.
+//
 // Usage:
 //
 //   crispasr-lid -m /path/to/lid-glotlid-f16.gguf --text "Hello world"
+//   crispasr-lid -m /path/to/cld3-f16.gguf --text "Hallo Welt"
 //   echo "Bonjour le monde" | crispasr-lid -m lid-glotlid-f16.gguf
-//   crispasr-lid -m lid-glotlid-f16.gguf -k 5 < transcript.txt
+//   crispasr-lid -m cld3-f16.gguf -k 5 < transcript.txt
 //
 // Output (default top-1, single line):
 //
-//   eng_Latn\t0.9997
+//   eng_Latn\t0.9997    (fastText / GlotLID — ISO 639-3 + script)
+//   en\t0.9997          (CLD3 — ISO 639-1)
 //
 // Output with -k > 1 (one entry per line):
 //
 //   eng_Latn\t0.9997
 //   sco_Latn\t0.0001
 //   ...
-//
-// Currently supports the GlotLID-V3 (flat softmax) variant. LID-176
-// (hierarchical softmax) requires a separate predictor that hasn't
-// landed yet; loading an HS model exits with a clear error.
 
-#include "lid_fasttext.h"
+#include "text_lid_dispatch.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -40,10 +42,10 @@ void usage(FILE* out, const char* argv0) {
     std::fprintf(out,
                  "usage: %s -m <model.gguf> [--text \"...\"] [-k N] [--quiet]\n"
                  "\n"
-                 "Identify the language of UTF-8 text using a fastText supervised\n"
-                 "LID model packaged as GGUF (e.g. GlotLID-V3, 2102 ISO 639-3 +\n"
-                 "script labels). Defaults to reading text from stdin if --text\n"
-                 "is omitted.\n"
+                 "Identify the language of UTF-8 text using any text-LID GGUF.\n"
+                 "Auto-routes between fastText (GlotLID-V3, LID-176) and Google\n"
+                 "CLD3 by reading the GGUF's general.architecture key. Defaults\n"
+                 "to reading text from stdin if --text is omitted.\n"
                  "\n"
                  "Options:\n"
                  "  -m, --model PATH    LID GGUF (required)\n"
@@ -116,28 +118,28 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    lid_fasttext_context* ctx = lid_fasttext_init_from_file(model_path.c_str(), 1);
+    text_lid_context* ctx = text_lid_init_from_file(model_path.c_str(), 1);
     if (!ctx) {
-        // Errors already printed to stderr by the loader.
+        // Errors already printed to stderr by the dispatcher / loader.
         return 1;
     }
 
     if (topk == 1) {
         float conf = 0.f;
-        const char* lab = lid_fasttext_predict(ctx, text.c_str(), &conf);
+        const char* lab = text_lid_predict(ctx, text.c_str(), &conf);
         if (!lab) {
             std::fprintf(stderr, "crispasr-lid: prediction failed\n");
-            lid_fasttext_free(ctx);
+            text_lid_free(ctx);
             return 1;
         }
         std::printf("%s\t%.6f\n", lab, conf);
     } else {
         std::vector<const char*> labs(static_cast<size_t>(topk), nullptr);
         std::vector<float> scores(static_cast<size_t>(topk), 0.f);
-        const int n = lid_fasttext_predict_topk(ctx, text.c_str(), topk, labs.data(), scores.data());
+        const int n = text_lid_predict_topk(ctx, text.c_str(), topk, labs.data(), scores.data());
         if (n <= 0) {
             std::fprintf(stderr, "crispasr-lid: prediction failed\n");
-            lid_fasttext_free(ctx);
+            text_lid_free(ctx);
             return 1;
         }
         for (int i = 0; i < n; i++) {
@@ -146,10 +148,10 @@ int main(int argc, char** argv) {
     }
 
     if (!quiet) {
-        std::fprintf(stderr, "crispasr-lid: %s, dim=%d, %d labels\n",
-                     lid_fasttext_variant(ctx), lid_fasttext_dim(ctx), lid_fasttext_n_labels(ctx));
+        std::fprintf(stderr, "crispasr-lid: backend=%s variant=%s dim=%d %d labels\n", text_lid_backend(ctx),
+                     text_lid_variant(ctx), text_lid_dim(ctx), text_lid_n_labels(ctx));
     }
 
-    lid_fasttext_free(ctx);
+    text_lid_free(ctx);
     return 0;
 }
