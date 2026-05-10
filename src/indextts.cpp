@@ -2265,12 +2265,20 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
 
     // Beam search loop
     for (int step = 1; step < max_mel && !beams[0].finished; step++) {
-        struct Cand {
+        // Renamed from `Cand` to `BeamCand` to dodge a cppcheck
+        // false-positive: `core/beam_decode.h` declares an unrelated
+        // `struct Cand` in a different function scope, and cppcheck
+        // matches the two by name across translation units, then
+        // reports `Uninitialized struct member: c.parent` /
+        // `c.score` against the *other* Cand (which has
+        // `beam_idx`/`cum_logprob` instead). Disambiguating here
+        // silences the bogus warning without touching beam_decode.h.
+        struct BeamCand {
             int parent;
             int32_t token;
             double score;
         };
-        std::vector<Cand> cands;
+        std::vector<BeamCand> cands;
 
         for (int bi = 0; bi < (int)beams.size(); bi++) {
             auto& beam = beams[bi];
