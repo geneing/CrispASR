@@ -2077,6 +2077,12 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
     }
     n_past += prefill_len;
 
+    // Debug: check logit value at Python's preferred token 478
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: logit[478]=%.4f logit[7220]=%.4f gap=%.4f\n", logits[478], logits[7220],
+                logits[7220] - logits[478]);
+    }
+
     // Debug: compare prefill logits against Python reference
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "indextts: prefill logits[0:5] = [%.3f, %.3f, %.3f, %.3f, %.3f]\n", logits[0], logits[1],
@@ -2087,75 +2093,175 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
             scored.push_back({logits[i], i});
         std::partial_sort(scored.begin(), scored.begin() + 5, scored.end(),
                           [](auto& a, auto& b) { return a.first > b.first; });
-        fprintf(stderr, "indextts: prefill top5:");
-        for (int i = 0; i < 5; i++)
+        fprintf(stderr, "indextts: prefill top10:");
+        std::partial_sort(scored.begin(), scored.begin() + 10, scored.end(),
+                          [](auto& a, auto& b) { return a.first > b.first; });
+        for (int i = 0; i < 10; i++)
             fprintf(stderr, " %d(%.3f)", scored[i].second, scored[i].first);
+        // Check where Python's pick (478) ranks
+        int rank_478 = 0;
+        for (auto& s : scored)
+            if (s.second == 478) {
+                fprintf(stderr, " | 478 rank=%d val=%.3f", rank_478, s.first);
+                break;
+            } else {
+                rank_478++;
+            }
         fprintf(stderr, "\n");
     }
 
-    // 5. AR decode — greedy argmax with full-history repetition penalty.
-    // Python uses `do_sample=False, repetition_penalty=10.0` which applies
-    // rep penalty to ALL previously generated tokens before picking argmax.
+    // 5. AR decode — beam search with per-beam KV snapshots and rep penalty.
+    // Matches Python's generate(num_beams=3, do_sample=False, repetition_penalty=10.0).
     std::vector<int32_t> mel_codes;
     const int mel_vocab = (int)ctx->hp.mel_vocab_size;
     const int stop_token = (int)ctx->hp.stop_mel_token;
     const float rep_penalty = ctx->params.repetition_penalty;
+    const int B = 3; // beam size
 
-    for (int step = 0; step < max_mel; step++) {
-        // Apply repetition penalty to ALL previously generated tokens
-        if (rep_penalty > 1.0f) {
-            for (int32_t tok : mel_codes) {
-                if (tok >= 0 && tok < mel_vocab) {
-                    logits[tok] = (logits[tok] > 0) ? logits[tok] / rep_penalty : logits[tok] * rep_penalty;
-                }
-            }
-        }
+    struct Beam {
+        std::vector<int32_t> tokens;
+        double score = 0.0;              // cumulative log-probability
+        std::vector<uint8_t> kv_k, kv_v; // KV snapshot
+        bool finished = false;
+    };
 
-        // Greedy argmax (with optional first-token override for debugging)
-        int32_t next_tok = 0;
-        float best_val = logits[0];
-        for (int i = 1; i < mel_vocab; i++) {
-            if (logits[i] > best_val) {
-                best_val = logits[i];
-                next_tok = i;
-            }
+    auto save_kv = [&](std::vector<uint8_t>& k, std::vector<uint8_t>& v) {
+        k.resize(ggml_nbytes(ctx->kv_k));
+        v.resize(ggml_nbytes(ctx->kv_v));
+        ggml_backend_tensor_get(ctx->kv_k, k.data(), 0, k.size());
+        ggml_backend_tensor_get(ctx->kv_v, v.data(), 0, v.size());
+    };
+
+    auto restore_kv = [&](const std::vector<uint8_t>& k, const std::vector<uint8_t>& v) {
+        ggml_backend_tensor_set(ctx->kv_k, k.data(), 0, k.size());
+        ggml_backend_tensor_set(ctx->kv_v, v.data(), 0, v.size());
+    };
+
+    // Apply rep penalty to logits based on token history
+    auto apply_rep = [&](float* lg, const std::vector<int32_t>& hist) {
+        if (rep_penalty <= 1.0f)
+            return;
+        for (int32_t t : hist) {
+            if (t >= 0 && t < mel_vocab)
+                lg[t] = (lg[t] > 0) ? lg[t] / rep_penalty : lg[t] * rep_penalty;
         }
-        // Debug: force first code to Python's pick if env INDEXTTS_FIRST_CODE is set
-        if (step == 0) {
-            const char* fc = getenv("INDEXTTS_FIRST_CODE");
-            if (fc && fc[0]) {
-                next_tok = atoi(fc);
-                fprintf(stderr, "indextts: DEBUG forced first code to %d\n", next_tok);
-            }
+    };
+
+    // Log-softmax of a single token
+    auto log_softmax_at = [&](const float* lg, int tok) -> double {
+        float mx = lg[0];
+        for (int i = 1; i < mel_vocab; i++)
+            mx = std::max(mx, lg[i]);
+        double sum = 0;
+        for (int i = 0; i < mel_vocab; i++)
+            sum += std::exp((double)(lg[i] - mx));
+        return (double)(lg[tok] - mx) - std::log(sum);
+    };
+
+    // Seed beams from prefill logits (no rep penalty yet — empty history)
+    std::vector<Beam> beams;
+    {
+        // Save post-prefill KV
+        std::vector<uint8_t> prompt_k, prompt_v;
+        save_kv(prompt_k, prompt_v);
+
+        // Find top-B from prefill logits
+        std::vector<std::pair<float, int>> scored(mel_vocab);
+        for (int i = 0; i < mel_vocab; i++)
+            scored[i] = {logits[i], i};
+        std::partial_sort(scored.begin(), scored.begin() + B, scored.end(),
+                          [](auto& a, auto& b) { return a.first > b.first; });
+
+        for (int b = 0; b < B; b++) {
+            Beam beam;
+            beam.tokens.push_back(scored[b].second);
+            beam.score = log_softmax_at(logits, scored[b].second);
+            beam.kv_k = prompt_k;
+            beam.kv_v = prompt_v;
+            beam.finished = (scored[b].second == stop_token);
+            beams.push_back(std::move(beam));
         }
         free(logits);
         logits = nullptr;
-
-        if (next_tok == stop_token) {
-            if (ctx->params.verbosity >= 1) {
-                fprintf(stderr, "indextts: stop token at step %d\n", step);
-            }
-            break;
-        }
-
-        mel_codes.push_back(next_tok);
-
-        if (ctx->params.verbosity >= 2) {
-            fprintf(stderr, "  step %d: mel code %d\n", step, (int)next_tok);
-        }
-
-        // Build embedding and decode next step
-        std::vector<float> tok_embed = build_mel_token_embed(ctx, next_tok, step + 1);
-        logits = run_gpt2_kv(ctx, tok_embed.data(), 1, n_past);
-        if (!logits) {
-            fprintf(stderr, "indextts: decode step %d failed\n", step);
-            break;
-        }
-        n_past += 1;
     }
 
-    if (logits) {
-        free(logits);
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: beam search (B=%d) seeds:", B);
+        for (auto& b : beams)
+            fprintf(stderr, " %d(%.2f)", b.tokens[0], b.score);
+        fprintf(stderr, "\n");
+    }
+
+    // Beam search loop
+    for (int step = 1; step < max_mel && !beams[0].finished; step++) {
+        struct Cand {
+            int parent;
+            int32_t token;
+            double score;
+        };
+        std::vector<Cand> cands;
+
+        for (int bi = 0; bi < (int)beams.size(); bi++) {
+            auto& beam = beams[bi];
+            if (beam.finished) {
+                cands.push_back({bi, stop_token, beam.score});
+                continue;
+            }
+
+            // Restore KV and step with last token
+            restore_kv(beam.kv_k, beam.kv_v);
+            int mel_pos = (int)beam.tokens.size();
+            int np = prefill_len + mel_pos - 1;
+            std::vector<float> emb = build_mel_token_embed(ctx, beam.tokens.back(), mel_pos);
+            float* lg = run_gpt2_kv(ctx, emb.data(), 1, np);
+            if (!lg)
+                continue;
+
+            // Save post-step KV
+            save_kv(beam.kv_k, beam.kv_v);
+
+            // Apply rep penalty using this beam's FULL token history
+            apply_rep(lg, beam.tokens);
+
+            // Top-B candidates from this beam
+            std::vector<std::pair<float, int>> sc(mel_vocab);
+            for (int i = 0; i < mel_vocab; i++)
+                sc[i] = {lg[i], i};
+            std::partial_sort(sc.begin(), sc.begin() + B, sc.end(), [](auto& a, auto& b) { return a.first > b.first; });
+            for (int k = 0; k < B; k++) {
+                double lp = log_softmax_at(lg, sc[k].second);
+                cands.push_back({bi, sc[k].second, beam.score + lp});
+            }
+            free(lg);
+        }
+
+        // Keep top-B candidates globally
+        std::partial_sort(cands.begin(), cands.begin() + std::min((int)cands.size(), B), cands.end(),
+                          [](auto& a, auto& b) { return a.score > b.score; });
+        int keep = std::min((int)cands.size(), B);
+
+        std::vector<Beam> next;
+        for (int i = 0; i < keep; i++) {
+            auto& c = cands[i];
+            Beam nb;
+            nb.tokens = beams[c.parent].tokens;
+            nb.kv_k = beams[c.parent].kv_k;
+            nb.kv_v = beams[c.parent].kv_v;
+            nb.score = c.score;
+            if (c.token == stop_token) {
+                nb.finished = true;
+            } else {
+                nb.tokens.push_back(c.token);
+            }
+            next.push_back(std::move(nb));
+        }
+        beams = std::move(next);
+    }
+
+    // Best beam
+    mel_codes = beams[0].tokens;
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: stop token at step %d\n", (int)mel_codes.size());
     }
 
     if (logits) {
