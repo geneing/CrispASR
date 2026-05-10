@@ -523,6 +523,9 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
         params.vad_model = ARGV_NEXT;
     } else if (arg == "-vt" || arg == "--vad-threshold") {
         params.vad_threshold = std::stof(ARGV_NEXT);
+        // Issue #83 follow-up: mark explicit so per-model auto-tuning
+        // (whisper-vad-encdec lowers default to 0.30) doesn't override.
+        params.vad_threshold_explicit = true;
     } else if (arg == "-vspd" || arg == "--vad-min-speech-duration-ms") {
         params.vad_min_speech_duration_ms = std::stoi(ARGV_NEXT);
     } else if (arg == "-vsd" || arg == "--vad-min-silence-duration-ms") {

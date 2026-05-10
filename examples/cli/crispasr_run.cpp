@@ -959,6 +959,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
 
         crispasr_vad_options stream_vad_opts;
         stream_vad_opts.threshold = params.vad_threshold;
+        stream_vad_opts.threshold_explicit = params.vad_threshold_explicit;
         stream_vad_opts.min_speech_duration_ms = params.vad_min_speech_duration_ms;
         stream_vad_opts.min_silence_duration_ms = params.vad_min_silence_duration_ms;
         stream_vad_opts.speech_pad_ms = params.vad_speech_pad_ms;

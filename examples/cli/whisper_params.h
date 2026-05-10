@@ -90,6 +90,11 @@ struct whisper_params {
     bool vad = false;
     std::string vad_model = "";
     float vad_threshold = 0.5f;
+    // Issue #83 follow-up: tracks whether the user passed `-vt` /
+    // `--vad-threshold` explicitly. Backends with non-Silero probability
+    // calibration (whisper-vad-encdec) auto-lower the threshold when this
+    // is false so the out-of-the-box default doesn't drop most speech.
+    bool vad_threshold_explicit = false;
     int vad_min_speech_duration_ms = 250;
     int vad_min_silence_duration_ms = 100;
     float vad_max_speech_duration_s = FLT_MAX;

@@ -55,6 +55,14 @@ struct crispasr_vad_options {
     // Post-VAD clean-up
     int chunk_seconds = 30; // split any merged slice longer than this; 0 = no split
     int n_threads = 4;      // VAD inference threads
+    // Issue #83 follow-up: distinguish "user passed -vt explicitly" from
+    // "default 0.5 was inherited." VAD models with non-Silero probability
+    // calibration (currently whisper-vad-encdec) use this to auto-lower
+    // the threshold so the default config produces useful slices instead
+    // of dropping most speech. Set true when the CLI/binding propagates a
+    // user-supplied `-vt`/`--vad-threshold`; library callers leave it false
+    // to opt into per-model auto-tuning.
+    bool threshold_explicit = false;
 };
 
 // Load Silero VAD, emit one slice per speech segment, then merge

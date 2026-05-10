@@ -116,7 +116,22 @@ std::vector<crispasr_audio_slice> crispasr_compute_vad_slices(const float* sampl
             int n_segs = 0;
             float min_speech_sec = opts.min_speech_duration_ms / 1000.0f;
             float min_silence_sec = opts.min_silence_duration_ms / 1000.0f;
-            whisper_vad_encdec_detect(vctx, samples, n_samples, &segs, &n_segs, opts.threshold, min_speech_sec,
+            // Issue #83 follow-up: this VAD's frame classifier is calibrated
+            // lower than Silero / FireRed — observed mean_prob ≈ 0.27 on
+            // continuous Japanese speech (`2-min-Okayu.wav`) where firered
+            // posts ≈ 0.49. With the global default threshold (0.5) most of
+            // the audio falls below positive-thresh and the segment merger
+            // collapses long stretches into nothing. Auto-lower to 0.30 when
+            // the user didn't pass `-vt` explicitly; pass-through otherwise.
+            float effective_threshold = opts.threshold;
+            if (!opts.threshold_explicit && opts.threshold == 0.5f) {
+                effective_threshold = 0.30f;
+                fprintf(stderr,
+                        "whisper_vad_encdec: using threshold=%.2f (default 0.5 is too "
+                        "aggressive for this model — pass -vt to override)\n",
+                        effective_threshold);
+            }
+            whisper_vad_encdec_detect(vctx, samples, n_samples, &segs, &n_segs, effective_threshold, min_speech_sec,
                                       min_silence_sec, nullptr, nullptr, nullptr, nullptr);
             for (int i = 0; i < n_segs; i++) {
                 int64_t t0_cs = (int64_t)(segs[i].start_sec * 100.0f);

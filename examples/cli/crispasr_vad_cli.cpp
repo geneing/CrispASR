@@ -77,6 +77,7 @@ std::vector<crispasr_audio_slice> crispasr_compute_audio_slices(const float* sam
     if (!vad_path.empty()) {
         crispasr_vad_options opts;
         opts.threshold = params.vad_threshold;
+        opts.threshold_explicit = params.vad_threshold_explicit;
         opts.min_speech_duration_ms = params.vad_min_speech_duration_ms;
         opts.min_silence_duration_ms = params.vad_min_silence_duration_ms;
         opts.speech_pad_ms = params.vad_speech_pad_ms;

@@ -85,5 +85,5 @@ The converter uses ONNX graph topology tracing to correctly map anonymous tensor
 - The whisper encoder weights are **fine-tuned** (not identical to `openai/whisper-base`)
 - The decoder uses learned position queries (1500 x 512) as input, cross-attending to encoder output
 - Frame classifier applies sigmoid to produce per-frame speech probabilities
-- VAD segmentation uses hysteresis thresholding (positive threshold 0.5, negative threshold 0.35)
+- VAD segmentation uses hysteresis thresholding. The frame classifier's calibration sits lower than Silero / FireRed — on continuous speech the mean probability is around 0.25–0.30 even when activity is steady — so CrispASR auto-lowers the positive threshold to **0.30** (negative threshold 0.15 via the standard 0.15-step hysteresis) when `--vad-threshold` isn't set explicitly. Pass `-vt 0.5` to keep the legacy stricter behaviour, or `-vt 0.2` for noisier/softer material.
 - The runtime casts conv weights to F16 (ggml im2col requirement) and quantized biases to F32 at graph build time
