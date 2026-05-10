@@ -647,6 +647,8 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
         ggml_tensor* bias_4d = ggml_cast(ctx0, ggml_reshape_4d(ctx0, conv_b, 1, 1, conv_b->ne[0], 1), GGML_TYPE_F32);
         cur = ggml_add(ctx0, cur, bias_4d);
     }
+    // ReLU after Conv2d (Python: nn.Sequential(Conv2d, ReLU))
+    cur = ggml_relu(ctx0, cur);
 
     // ggml_conv_2d output: [W=49, H=T_enc, C=512, 1]
     // where ne[0]=49 (mel subsampled), ne[1]=T_enc (time subsampled), ne[2]=512 (channels)
@@ -682,7 +684,10 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
     ggml_set_name(cur, "dbg_linear_out");
     ggml_set_output(cur);
 
-    // Add sinusoidal positional encoding (stored as [512, 5000, 1], F16)
+    // Scale by sqrt(d_model) then add positional encoding
+    // Python: x = x * self.xscale + pos_emb (xscale = sqrt(d_model))
+    cur = ggml_scale(ctx0, cur, sqrtf((float)d));
+
     ggml_tensor* pe_full = core_gguf::try_get(ts, "cond_enc.embed.pos_enc.pe");
     if (pe_full && T_enc > 0) {
         // pe_full is [512, 5000, 1], we need [512, T_enc]
@@ -824,6 +829,12 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
         cur = ggml_norm(ctx0, cur, ln_eps);
         cur = ggml_mul(ctx0, cur, core_gguf::try_get(ts, fmt("norm_final.weight").c_str()));
         cur = ggml_add(ctx0, cur, core_gguf::try_get(ts, fmt("norm_final.bias").c_str()));
+
+        // Debug: name each block output
+        char bname[32];
+        snprintf(bname, sizeof(bname), "dbg_block_%d", il);
+        ggml_set_name(cur, bname);
+        ggml_set_output(cur);
     }
 
     // After-norm
@@ -1149,6 +1160,24 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
                 }
                 fprintf(stderr, "indextts: pre-transformer rms=%.4f nan=%d/%d\n", sqrtf(s2 / std::max(1, n - nnan)),
                         nnan, n);
+            }
+        }
+
+        // Debug: per-block output comparison
+        for (int bi = 0; bi < (int)c->hp.cond_n_layers; bi++) {
+            char bname[32];
+            snprintf(bname, sizeof(bname), "dbg_block_%d", bi);
+            ggml_tensor* dbg = ggml_graph_get_tensor(gf, bname);
+            if (dbg) {
+                int n = (int)ggml_nelements(dbg);
+                std::vector<float> d(n);
+                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                float s2 = 0;
+                for (float v : d)
+                    s2 += v * v;
+                // Block output is [512, T_enc]. first5 = first 5 elements of position 0
+                fprintf(stderr, "indextts: block_%d rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", bi, sqrtf(s2 / n),
+                        d[0], d[1], d[2], d[3], d[4]);
             }
         }
 
