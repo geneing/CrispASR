@@ -553,16 +553,16 @@ static std::vector<float> compute_ref_mel(const float* pcm, int n_samples, int* 
     n_samples = (int)pcm_24k.size();
     const int pad = (n_fft - hop) / 2; // 384
 
-    // Reflect-pad audio
+    // Reflect-pad audio (use resampled audio_ptr, not original pcm!)
     std::vector<float> audio_p(n_samples + 2 * pad, 0.0f);
     for (int i = 0; i < pad; i++) {
-        audio_p[i] = pcm[std::min(pad - i, n_samples - 1)];
+        audio_p[i] = audio_ptr[std::min(pad - i, n_samples - 1)];
     }
     for (int i = 0; i < n_samples; i++) {
-        audio_p[pad + i] = pcm[i];
+        audio_p[pad + i] = audio_ptr[i];
     }
     for (int i = 0; i < pad; i++) {
-        audio_p[pad + n_samples + i] = pcm[std::max(n_samples - 2 - i, 0)];
+        audio_p[pad + n_samples + i] = audio_ptr[std::max(n_samples - 2 - i, 0)];
     }
 
     // Periodic Hann window
@@ -646,6 +646,9 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
     int T_enc = ((T_mel - 3) / 2) + 1;
     int H_enc = 49; // (100 - 3) / 2 + 1
 
+    ggml_set_name(cur, "dbg_conv2d_out");
+    ggml_set_output(cur);
+
     // Reshape to [H_enc * 512, T_enc] then linear → [512, T_enc]
     // cur is [W=T_enc, H=H_enc, C=512, batch=1]
     // Permute to [W, C, H, batch] → reshape to [H*C, T_enc]
@@ -667,6 +670,10 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
         pe = ggml_cast(ctx0, pe, GGML_TYPE_F32);
         cur = ggml_add(ctx0, cur, pe);
     }
+
+    // Debug: output pre-transformer embeddings
+    ggml_set_name(cur, "dbg_pre_transformer");
+    ggml_set_output(cur);
 
     // Build relative position sinusoidal table for self-attention
     auto pos_data = core_conformer::make_pos_enc(d, T_enc);
@@ -990,8 +997,29 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
         return true;
     }
 
+    // Limit mel to ~5s reference for ggml_conv_2d stability
+    if (T_mel > 500) {
+        T_mel = 500;
+        mel.resize((size_t)100 * T_mel); // MelsTime layout: [n_mels, T]
+    }
+
     if (c->params.verbosity >= 1) {
         fprintf(stderr, "indextts: ref mel: %d frames x 100 bands\n", T_mel);
+    }
+
+    // Debug: check mel values
+    {
+        int nnan = 0;
+        float mrms = 0;
+        for (size_t i = 0; i < mel.size(); i++) {
+            if (std::isnan(mel[i]) || std::isinf(mel[i]))
+                nnan++;
+            else
+                mrms += mel[i] * mel[i];
+        }
+        mrms = sqrtf(mrms / std::max((size_t)1, mel.size() - nnan));
+        fprintf(stderr, "indextts: mel values rms=%.4f nan=%d/%zu min=%.4f max=%.4f\n", mrms, nnan, mel.size(),
+                *std::min_element(mel.begin(), mel.end()), *std::max_element(mel.begin(), mel.end()));
     }
 
     // Step 2: Run Conformer encoder
@@ -1021,13 +1049,66 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
             return true;
         }
 
+        // Debug: check conv2d output
+        {
+            ggml_tensor* dbg = ggml_graph_get_tensor(gf, "dbg_conv2d_out");
+            if (dbg) {
+                int n = (int)ggml_nelements(dbg);
+                std::vector<float> d(n);
+                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                int nnan = 0;
+                float s2 = 0;
+                for (float v : d) {
+                    if (std::isnan(v) || std::isinf(v))
+                        nnan++;
+                    else
+                        s2 += v * v;
+                }
+                fprintf(stderr, "indextts: conv2d_out rms=%.4f nan=%d/%d ne=(%lld,%lld,%lld,%lld)\n",
+                        sqrtf(s2 / std::max(1, n - nnan)), nnan, n, (long long)dbg->ne[0], (long long)dbg->ne[1],
+                        (long long)dbg->ne[2], (long long)dbg->ne[3]);
+            }
+        }
+        // Debug: check pre-transformer output
+        {
+            ggml_tensor* dbg = ggml_graph_get_tensor(gf, "dbg_pre_transformer");
+            if (dbg) {
+                int n = (int)ggml_nelements(dbg);
+                std::vector<float> d(n);
+                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                int nnan = 0;
+                float s2 = 0;
+                for (float v : d) {
+                    if (std::isnan(v) || std::isinf(v))
+                        nnan++;
+                    else
+                        s2 += v * v;
+                }
+                fprintf(stderr, "indextts: pre-transformer rms=%.4f nan=%d/%d\n", sqrtf(s2 / std::max(1, n - nnan)),
+                        nnan, n);
+            }
+        }
+
         // Read conformer output: [512, T_enc]
         ggml_tensor* out = ggml_graph_get_tensor(gf, "conformer_out");
         std::vector<float> conf_out((size_t)cond_d * T_enc);
         ggml_backend_tensor_get(out, conf_out.data(), 0, conf_out.size() * sizeof(float));
 
-        if (c->params.verbosity >= 1) {
-            fprintf(stderr, "indextts: Conformer output: [%d, %d]\n", cond_d, T_enc);
+        {
+            float crms = 0;
+            int n_nan = 0;
+            for (size_t i = 0; i < conf_out.size(); i++) {
+                if (std::isnan(conf_out[i]) || std::isinf(conf_out[i]))
+                    n_nan++;
+                else
+                    crms += conf_out[i] * conf_out[i];
+            }
+            crms = sqrtf(crms / std::max((size_t)1, conf_out.size()));
+            if (c->params.verbosity >= 1) {
+                fprintf(stderr,
+                        "indextts: Conformer output: [%d, %d] rms=%.4f nan=%d first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                        cond_d, T_enc, crms, n_nan, conf_out[0], conf_out[1], conf_out[2], conf_out[3], conf_out[4]);
+            }
         }
 
         // Step 3: Run Perceiver resampler
