@@ -1,6 +1,6 @@
 # Text-to-Speech (TTS)
 
-CrispASR ships **six open-weights TTS engines** behind the same
+CrispASR ships **seven open-weights TTS engines** behind the same
 `crispasr` binary, each with a distinct voice / quality / footprint
 trade-off:
 
@@ -12,8 +12,9 @@ trade-off:
 | **`vibevoice-1.5b`** | Base VibeVoice TTS model with WAV cloning. | Yes (`VIBEVOICE_VOICE_AUDIO=<wav>` or `--voice <wav>`) | ~1.6 GB via `-m auto` |
 | **`orpheus`** | Llama-3.2-3B talker + SNAC 24 kHz codec. 8 baked English speakers; expressive output. Greedy loops — pass `--temperature 0.6`. | Preset names via `--voice tara/leah/...` | ~3.5 GB via `-m auto` (talker Q8 + 26 MB SNAC) |
 | **`chatterbox`** | T3 AR + S3Gen flow-matching + HiFTGenerator. Built-in voice baked into the T3 GGUF; clones via a baked voice GGUF (see workflow below). EN/AR/DE variants share runtime. | Yes (`--voice <voice.gguf>`, baked from a WAV with `models/bake-chatterbox-voice-from-wav.py`) | ~880 MB via `-m auto` (T3 Q8 + S3Gen Q8) |
+| **`indextts`** | IndexTTS-1.5: GPT-2 AR (24L/1280d) mel-code generator + BigVGAN vocoder. Designed for Chinese+English. Zero-shot voice cloning from any reference WAV. | Yes (`--voice <ref.wav>`) | ~2.4 GB via `-m auto` (GPT F16 + BigVGAN F16) |
 
-All six write 24 kHz mono WAV via `--tts-output`.
+All seven write 24 kHz mono WAV via `--tts-output`.
 
 For HTTP usage, see [`docs/server.md`](server.md) — `POST
 /v1/audio/speech` is the OpenAI-compatible TTS endpoint, available on
@@ -416,4 +417,35 @@ reference.
 [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) ·
 [`cstr/chatterbox-turbo-GGUF`](https://huggingface.co/cstr/chatterbox-turbo-GGUF) ·
 [`cstr/kartoffelbox-turbo-GGUF`](https://huggingface.co/cstr/kartoffelbox-turbo-GGUF) ·
-[`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF)
+[`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF) ·
+[`cstr/indextts-1.5-GGUF`](https://huggingface.co/cstr/indextts-1.5-GGUF)
+
+## IndexTTS — Chinese/English voice cloning
+
+IndexTTS-1.5 is a zero-shot voice cloning TTS model. Given a short
+reference WAV (~3-10 s), it reproduces the speaker's voice for arbitrary
+text. Architecture: Conformer+Perceiver conditioning encoder → GPT-2
+autoregressive mel-code generator (24 layers, 1280d, beam search) →
+BigVGAN vocoder (24 kHz).
+
+```bash
+# Auto-download (~2.4 GB: GPT F16 + BigVGAN F16)
+./build/bin/crispasr --backend indextts -m auto \
+    --tts "Hello world, this is a test." \
+    --voice reference_speaker.wav \
+    --tts-output cloned.wav
+
+# Explicit paths
+./build/bin/crispasr --backend indextts \
+    --model indextts-gpt.gguf \
+    --codec-model indextts-bigvgan.gguf \
+    --tts "Hello world." \
+    --voice reference_speaker.wav \
+    --tts-output hello.wav
+```
+
+The `--voice` flag points to any mono WAV file (16 kHz or 24 kHz) of the
+target speaker. Longer clips (5-10 s) give better cloning fidelity.
+
+Set `INDEXTTS_DEBUG=1` for per-stage intermediate dumps (mel, conformer
+blocks, perceiver output) useful for diff-testing against Python.

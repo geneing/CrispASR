@@ -49,9 +49,6 @@ int indextts_set_vocoder_path(struct indextts_context* ctx, const char* path);
 // for voice cloning. ref_pcm is mono 24kHz float32 PCM samples.
 // Caller frees with indextts_pcm_free. *out_n_samples is set on success.
 // Returns nullptr on error.
-//
-// Phase 1: returns nullptr (BigVGAN not yet implemented). Use
-// indextts_generate_mel_codes for testing the GPT forward pass.
 float* indextts_synthesize(struct indextts_context* ctx, const char* text, const float* ref_pcm, int ref_n_samples,
                            int* out_n_samples);
 

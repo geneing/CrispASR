@@ -4349,3 +4349,31 @@ The `compute_ref_mel` function assumed 16kHz input and always
 resampled to 24kHz. If the reference WAV is already 24kHz (common),
 this double-resamples and destroys the signal. The CLI must check
 the WAV sample rate and only resample when needed.
+
+### Center-padding: reflect vs zero (the mel spectrogram root cause)
+
+The core_mel `center_pad` option originally used **zero-padding** but
+torchaudio's `center=True` uses **reflect-padding**. This caused the
+first 2 STFT frames to differ from Python, propagating through the
+6-layer Conformer into conditioning (norm 288.88 vs 288.92), then
+compounding through 24 GPT layers to flip a beam search token at step 14
+(6283 instead of 6109).
+
+The hypothesis that F16 weight precision caused the gap was WRONG — an
+F32 GGUF produced identical conditioning values. The actual root cause
+was padding mode. Fix: added `center_pad_reflect` to `core_mel::Params`.
+
+Lesson: when mel values at t=0 and t=1 differ from Python but t≥2 match
+exactly, always check center-padding mode — it's reflect vs zero.
+
+### HF beam search applies repetition penalty AFTER log_softmax
+
+HuggingFace's `_beam_search` computes log_softmax on raw logits FIRST,
+then passes the log-probabilities through `logits_processor` (which
+includes `RepetitionPenaltyLogitsProcessor`). Since log-probs are always
+≤ 0, the penalty multiplies them (making them more negative).
+
+The C++ originally applied rep penalty to raw logits BEFORE log_softmax,
+which changes beam dynamics. With `repetition_penalty=10.0`, this causes
+different beam paths to win. Fix: compute log_softmax first, then apply
+penalty to log-probs, matching HF's exact order.

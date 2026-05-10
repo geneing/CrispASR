@@ -272,6 +272,14 @@ constexpr Entry k_registry[] = {
      "~1.4 GB",
      "chatterbox-s3gen-q8_0.gguf",
      "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-s3gen-q8_0.gguf"},
+    // IndexTTS-1.5: GPT-2 AR mel-code generator + BigVGAN vocoder.
+    // Voice cloning via Conformer+Perceiver conditioning on reference audio.
+    // Two-file setup: GPT (mel codes) + BigVGAN (vocoder).
+    {"indextts", "indextts-gpt.gguf",
+     "https://huggingface.co/cstr/indextts-1.5-GGUF/resolve/main/indextts-gpt.gguf",
+     "~2.1 GB",
+     "indextts-bigvgan.gguf",
+     "https://huggingface.co/cstr/indextts-1.5-GGUF/resolve/main/indextts-bigvgan.gguf"},
     // CTC forced aligner — used by `-am auto` to attach word-level
     // timestamps (LLM-decode backends, or any backend when paired
     // with `--force-aligner` / `-fa`). Q4_K is the recommended quant
