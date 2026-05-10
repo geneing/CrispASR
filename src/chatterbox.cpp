@@ -2166,14 +2166,17 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
     // both on GPU, expected to be broken). CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU=1
     // tries the selective split (kept for future regression once the kernel
     // lands).
-    // cppcheck-suppress duplicateAssignExpression
     // Both backend toggles intentionally start at the same default
     // (params.use_gpu) and are flipped independently below depending
     // on the user's CRISPASR_CHATTERBOX_* env knobs — the CPU-fallback
     // path zeros only t3_use_gpu under the split mode, only s3gen
     // under separate setups, etc. Coalescing into one variable would
-    // lose the per-backend dispatch granularity.
+    // lose the per-backend dispatch granularity. The suppress comment
+    // must be on the line *immediately* preceding the flagged line
+    // (cppcheck doesn't skip blank/comment lines), so it sits twice.
+    // cppcheck-suppress duplicateAssignExpression
     bool t3_use_gpu = params.use_gpu;
+    // cppcheck-suppress duplicateAssignExpression
     bool s3gen_use_gpu = params.use_gpu;
     if (params.use_gpu) {
         const char* force_gpu_env = std::getenv("CRISPASR_CHATTERBOX_FORCE_GPU");
