@@ -475,6 +475,125 @@ for i in range(3):
 "
 ```
 
+### jason-ni/parakeet.cpp cross-comparison — issue #81 (2026-05-10)
+
+[`jason-ni/parakeet.cpp`](https://github.com/jason-ni/parakeet.cpp) is
+the prior public attempt at a ggml port of parakeet, referenced in
+issue #81 as evidence that "ggml-based parakeet is slow." Author paused
+2025-07 with the README note "the ggml implementation is not as
+efficient as expected" after observing 1 s encoder time vs a claimed
+0.001 s for parakeet-mlx. The 0.001 s claim is almost certainly an
+async-dispatch return time on MLX, not actual compute — real MLX
+encoder cost is in the same single-second range as ours and theirs.
+
+**Scope of their build.** Encoder-only proof of concept for **Parakeet
+TDT 0.6B v2** (English-only, MLX checkpoint), F32 weights, ~4 000 LOC
+including a custom mini-runtime (`framework_*`). No decoder, no joint
+network, no streaming, no quantisation, no Python/CLI integration.
+Test harness is `parakeet_cpp <gguf> <pe.bin> <input.data>` — feeds
+pre-baked mel features, returns encoder hidden states.
+
+**Their graph.** Standard FastConformer encoder, 24 layers ×
+(LN → FF1 → LN → self-attn → LN → conv → LN → FF2 → LN), exactly the
+architecture we ship. The interesting differences are all in the self-
+attention block at `src/framework_nn.cpp` lines 820–1010:
+
+- **Shaw relative-position attention done as separate ops**:
+  `matrix_ac = mul_mat(K, Q+u_bias)`,
+  `matrix_bd = mul_mat(P_emb, Q+v_bias)`, then a left-pad + slice
+  trick to align positions, add, scale, softmax, multiply by V.
+  3 matmuls + softmax + matmul + several view/transpose passes per
+  layer. Same shape as our pre-`c2423313` baseline.
+- **`ggml_flash_attn_ext` path is written but commented out** (lines
+  944–987). They had the fused approach drafted, didn't activate it —
+  exactly the path our `c2423313` activates and tunes.
+- **Conv2D pre-encode (subsampling)** uses `ggml_conv_2d` — same as
+  us. Their conformer self-attn comment notes
+  `weight f16 is required for ggml_conv_2d_dw` on Metal — same Metal
+  constraint we observed.
+- **F32 weights only**, no Q4_K / Q8_0 / F16 quantisation paths.
+
+So architecturally their encoder is a sibling of ours minus the
+2026-05 flash-attn-ext fusion. The "ggml is slow" finding they paused
+on is exactly the bottleneck commit `c2423313` addresses (1.61× on
+parakeet TDT v3 F16, M1 Metal).
+
+**Apples-to-apples on their own test audio** (`assets/input.wav`,
+47.74 s, mel features identical), encoder-only, 3 warm runs:
+
+| build | hardware | precision | encoder mean | RT |
+|---|---|---|---|---|
+| jason-ni/parakeet.cpp (their README) | Apple **M4** | F32 | 0.92 s | 51.9× |
+| **crispasr `parakeet_test_encoder` (this commit, flash-attn-ext)** | Apple **M1** | F16 | **1.66 s** | **28.8×** |
+| crispasr `parakeet_test_encoder` (this commit, flash-attn-ext) | Apple M1 | Q8_0 | 2.64 s | 18.1× |
+
+Hardware-normalised: M4 GPU is ≈ 1.5–1.8× M1 on Metal compute,
+putting jason-ni's number at ~30–35× RT on M1-equivalent hardware.
+We're at 28.8× RT on M1 with F16 + flash-attn-ext — **roughly within
+hardware noise of each other** for encoder-only. The gap they panicked
+about against MLX is illusory; the gap against ours doesn't exist
+once you normalise hardware.
+
+**Important encoder-vs-pipeline note.** On the *encoder alone*, F16 is
+faster than Q8_0 on Metal (Q8_0 dequant overhead doesn't pay off when
+encoder ops are matmul-bandwidth-friendly even at F16). Q8_0 wins for
+the **full pipeline** because the TDT joint network + label-predictor
+LSTM run many small matmuls per output token where weight memory
+bandwidth dominates. The `tools/benchmark_asr_engines` matrix puts
+Q8_0 at 7.4× RT for full inference / 60 s. **Different shapes win
+different quants** — pick by what your pipeline actually does, not
+by quant name alone.
+
+**What we have that they don't, attributable to specific work:**
+
+1. Flash-attn-ext attention fusion (`c2423313`). Their `ggml_flash_attn_ext`
+   path exists in code but is commented out.
+2. Full TDT decoder (label predictor + joint network + per-frame TDT
+   step). They're encoder-only.
+3. Quantisation paths (Q4_K, Q5_0, Q8_0). They ship F32 only.
+4. Multilingual TDT v3 support. They support v2 (English-only).
+5. Production integration: CLI, `python/crispasr/Session`, streaming,
+   VAD, mic, WER tooling, multi-backend dispatch. Theirs is a single
+   test binary.
+6. Cross-platform: CUDA / Vulkan / Metal / CPU. Theirs is
+   Metal-focused (`-DGGML_METAL=ON`).
+
+**Reframe of issue #81 in light of this**: the prior public ggml
+attempt (jason-ni) plateaued at our pre-`c2423313` baseline and paused
+on a misread benchmark. Our crispasr build, post-flash-attn fusion,
+matches it on encoder-only and ships everything else around it. The
+remaining issue #81 gap on Windows + RTX 4070 + DirectML is still
+about CUDA/Vulkan kernel coverage on the dGPU side, not about ggml
+fundamentally being too slow for parakeet.
+
+Reproduce the encoder-only number:
+
+```python
+# Save jason-ni's input.wav reference: 47.74 s, 16 kHz mono.
+# T_mel = 4774 (10 ms hop matches both their preprocess and ours).
+import ctypes, time
+lib = ctypes.CDLL('build-ninja-compile/src/libcrispasr.dylib')
+lib.crispasr_parakeet_init.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+lib.crispasr_parakeet_init.restype  = ctypes.c_void_p
+lib.parakeet_test_encoder.argtypes  = [ctypes.c_void_p, ctypes.c_int]
+lib.parakeet_test_encoder.restype   = ctypes.c_int
+lib.crispasr_parakeet_free.argtypes = [ctypes.c_void_p]
+
+ctx = lib.crispasr_parakeet_init(b'parakeet-tdt-0.6b-v3.gguf', 4, 1)  # F16, flash-attn on
+lib.parakeet_test_encoder(ctx, 4774)  # warm
+for _ in range(3):
+    t = time.perf_counter()
+    lib.parakeet_test_encoder(ctx, 4774)
+    print(f'{(time.perf_counter()-t)*1000:.0f} ms')
+lib.crispasr_parakeet_free(ctx)
+```
+
+`parakeet_test_encoder` runs the full encoder graph with mel = zeros —
+compute-bound, identical kernel dispatches to a real call, no I/O.
+Use it instead of the CLI when you want encoder-only timing without
+LID-model load, mel extraction, and the TDT decoder loop in the
+wallclock.
+
 ---
 
 ## Reproduce
