@@ -169,14 +169,15 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
         float inv_beta_c = (c < p->C) ? (1.0f / p->beta[c]) : 1.0f;
 
         // 1. Replicate-pad the channel: pad by up_pad on each side
+        // ggml layout: ne[0]=T (innermost), ne[1]=C. Element (t,c) at data[c*T + t].
         int T_padded = T + 2 * up_pad;
         std::vector<float> padded(T_padded);
         for (int t = 0; t < up_pad; t++)
-            padded[t] = x_in[0 * C + c]; // replicate first
+            padded[t] = x_in[c * T + 0]; // replicate first
         for (int t = 0; t < T; t++)
-            padded[up_pad + t] = x_in[t * C + c]; // ne[0]=T stride
+            padded[up_pad + t] = x_in[c * T + t];
         for (int t = 0; t < up_pad; t++)
-            padded[up_pad + T + t] = x_in[(T - 1) * C + c]; // replicate last
+            padded[up_pad + T + t] = x_in[c * T + (T - 1)]; // replicate last
 
         // 2. Conv_transpose1d with filter at stride=2, then scale by 2
         int T_up = (T_padded - 1) * 2 + K;
@@ -216,11 +217,11 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
             for (int k = 0; k < K; k++) {
                 sum += ds_padded[t * 2 + k] * p->ds_filter[k];
             }
-            x_out[t * C + c] = sum;
+            x_out[c * T + t] = sum;
         }
         // Zero-fill any remaining (shouldn't happen if padding is correct)
         for (int t = T_final; t < T; t++) {
-            x_out[t * C + c] = 0.0f;
+            x_out[c * T + t] = 0.0f;
         }
     }
 }
@@ -685,12 +686,14 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
     ggml_context* ctx0 = ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, n_nodes, false);
 
-    // Input: latent (T_in, gpt_dim) — ggml layout: ne[0]=T_in, ne[1]=gpt_dim
-    // But we want Conv1d to see channels in ne[1], time in ne[0].
-    // ggml_conv_1d expects input shape (T, C_in) and kernel (k, C_in, C_out).
-    ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_in, hp.gpt_dim);
-    ggml_set_name(x, "latent_input");
-    ggml_set_input(x);
+    // Input: latent from GPT has ggml shape ne[0]=D, ne[1]=T (each position is D contiguous floats).
+    // Conv1d in ggml expects ne[0]=T (time in innermost). So we create the tensor matching
+    // the GPT layout and then transpose it for conv operations.
+    ggml_tensor* x_raw = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hp.gpt_dim, T_in);
+    ggml_set_name(x_raw, "latent_input");
+    ggml_set_input(x_raw);
+    // Transpose to ne[0]=T_in, ne[1]=gpt_dim for conv1d
+    ggml_tensor* x = ggml_cont(ctx0, ggml_transpose(ctx0, x_raw));
 
     // Speaker embedding input: (1, spk_emb_dim)
     ggml_tensor* spk = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, hp.spk_emb_dim);
@@ -1092,8 +1095,8 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
         return nullptr;
     }
 
-    // Set latent input: shape (T_in, gpt_dim)
-    // The latent from GPT is [T, 1280] row-major, which maps to ggml (T, 1280) with ne[0]=T.
+    // Set latent input: GPT produces [n_latent, D] row-major (each position is D contiguous floats).
+    // The tensor was created as (D, T_in) to match this layout.
     {
         ggml_tensor* inp = ggml_graph_get_tensor(gf, "latent_input");
         if (!inp) {

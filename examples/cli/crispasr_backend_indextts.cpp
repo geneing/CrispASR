@@ -215,6 +215,26 @@ public:
         if (!voice_path_.empty()) {
             int sr = 0;
             if (read_wav_mono(voice_path_, ref_audio, sr)) {
+                // IndexTTS API expects 24kHz mono float32 PCM. Resample if needed.
+                if (sr != 24000 && sr > 0) {
+                    double ratio = 24000.0 / (double)sr;
+                    int out_len = (int)(ref_audio.size() * ratio);
+                    std::vector<float> resampled(out_len);
+                    for (int i = 0; i < out_len; i++) {
+                        double src = i / ratio;
+                        int idx = (int)src;
+                        double frac = src - idx;
+                        if (idx + 1 < (int)ref_audio.size())
+                            resampled[i] = (float)((1.0 - frac) * ref_audio[idx] + frac * ref_audio[idx + 1]);
+                        else if (idx < (int)ref_audio.size())
+                            resampled[i] = ref_audio[idx];
+                    }
+                    ref_audio = std::move(resampled);
+                    if (!params.no_prints) {
+                        fprintf(stderr, "crispasr[indextts]: resampled reference audio from %d Hz to 24000 Hz\n", sr);
+                    }
+                    sr = 24000;
+                }
                 ref_pcm = ref_audio.data();
                 ref_n_samples = (int)ref_audio.size();
                 if (!params.no_prints) {

@@ -123,6 +123,9 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
             if capture_layers and (il == 0 or il == n_layers - 1):
                 layers_out[il] = x[0].detach().clone()
 
+        # GPT-2 final LayerNorm (gpt.ln_f — HuggingFace GPT2Model applies this)
+        if "gpt.ln_f.weight" in sd:
+            x = F.layer_norm(x, [D], sd["gpt.ln_f.weight"], sd["gpt.ln_f.bias"])
         x_norm = F.layer_norm(x, [D], sd["final_norm.weight"], sd["final_norm.bias"])
         return x_norm[0], layers_out
 
@@ -169,12 +172,13 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         mask = torch.triu(mask, diagonal=1)
         x_norm, _ = gpt_forward(full_seq, mask)
         logits = x_norm[-1] @ mel_head_w.t() + mel_head_b
+        top5 = logits.topk(5)
         cur_token = logits.argmax().item()
         if cur_token == stop_mel:
             break
         mel_codes.append(cur_token)
-        if step < 3 or step % 20 == 0:
-            print(f"  step {step}: token={cur_token}")
+        if step < 10 or step % 20 == 0:
+            print(f"  step {step}: token={cur_token} top5={top5.indices.tolist()} vals={[f'{v:.3f}' for v in top5.values.tolist()]}")
 
     print(f"  generated {len(mel_codes)} mel codes")
     if "mel_codes" in stages:

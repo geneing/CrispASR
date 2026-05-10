@@ -1126,10 +1126,8 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
             // Independent diagnostic K projection, rope, and pre-cpy view —
             // computed only when one of the dump knobs is set.  Avoids an
             // unconditional extra matmul in the production graph.
-            if (std::getenv("CRISPASR_CHATTERBOX_DUMP_NORM_AT") ||
-                std::getenv("CRISPASR_CHATTERBOX_DUMP_KPROJ_AT") ||
-                std::getenv("CRISPASR_CHATTERBOX_DUMP_KROPE_AT") ||
-                std::getenv("CRISPASR_CHATTERBOX_DUMP_WK")) {
+            if (std::getenv("CRISPASR_CHATTERBOX_DUMP_NORM_AT") || std::getenv("CRISPASR_CHATTERBOX_DUMP_KPROJ_AT") ||
+                std::getenv("CRISPASR_CHATTERBOX_DUMP_KROPE_AT") || std::getenv("CRISPASR_CHATTERBOX_DUMP_WK")) {
                 // Dequantize the layer-0 K weight to F32 so the dump can
                 // compare CPU vs GPU dequant directly (without going through
                 // a matmul). Helps separate dequant precision from matmul
@@ -1146,10 +1144,10 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
                 ggml_build_forward_expand(gf, K_dbg);
 
                 ggml_tensor* K_dbg_3d = ggml_reshape_3d(ctx0, K_dbg, hd, n_kv, T);
-                ggml_tensor* K_rope_dbg = ggml_rope_ext(
-                    ctx0, K_dbg_3d, positions, kvp.rope_freq_factors, /*n_rot*/ hd,
-                    kvp.rope_type, kvp.n_ctx_orig, kvp.rope_theta, /*freq_scale*/ 1.0f,
-                    /*ext_factor*/ 0.0f, /*attn_factor*/ 1.0f, kvp.rope_beta_fast, kvp.rope_beta_slow);
+                ggml_tensor* K_rope_dbg =
+                    ggml_rope_ext(ctx0, K_dbg_3d, positions, kvp.rope_freq_factors, /*n_rot*/ hd, kvp.rope_type,
+                                  kvp.n_ctx_orig, kvp.rope_theta, /*freq_scale*/ 1.0f,
+                                  /*ext_factor*/ 0.0f, /*attn_factor*/ 1.0f, kvp.rope_beta_fast, kvp.rope_beta_slow);
                 ggml_set_name(K_rope_dbg, "L0_K_rope");
                 ggml_set_output(K_rope_dbg);
                 ggml_build_forward_expand(gf, K_rope_dbg);

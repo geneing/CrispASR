@@ -4184,3 +4184,87 @@ contract. The diff harness's top-1-match check therefore needs the
 reference dumper's `top1_label` field as the source of truth; you
 can't paper over short-input quirks by feeding longer inputs at
 diff time.
+
+---
+
+## IndexTTS-1.5 TTS backend
+
+### HuggingFace GPT-2 has TWO final LayerNorms
+
+IndexTTS uses HuggingFace's GPT2Model, which applies a built-in
+`gpt.ln_f` LayerNorm after all transformer blocks. IndexTTS then
+applies its own `final_norm` on top. Missing `gpt.ln_f` caused
+a 2.0 logit gap, demoting the correct first mel token from rank 0
+to rank 11. Both norms must be loaded into the GGUF and applied:
+transformer blocks → gpt.ln_f → final_norm → mel_head.
+
+### HF generate skips mel position 1
+
+During HuggingFace's `generate()` loop, the mel position embedding
+for generated tokens is computed as `attention_mask.shape[1] - mel_len`.
+Because `fake_inputs` has `mel_len + 1` tokens (with start_mel at
+the end), the first generated token after prefill gets mel_pos[2]
+instead of mel_pos[1]. Position 1 is never used during inference.
+The sequence is: start_mel=pos[0], gen_tok_0=pos[2], gen_tok_1=pos[3], etc.
+This is a train/inference mismatch in IndexTTS but the model works
+with it, so the C++ must match: `mel_pos = beam.tokens.size() + 1`.
+
+### Latent extraction: mel_logits[:, :-2] gives (n_mel + 1) positions
+
+Python's `forward(return_latent=True)` internally prepends start_mel
+and appends stop_mel, then strips the last 2 positions. The result
+has (n_mel + 1) positions: [start_mel_hidden, c1_hidden, ..., ck_hidden].
+The C++ latent pass must extract this exact count, not n_mel.
+
+### Reference dump tool was missing gpt.ln_f
+
+The simplified reference dump in `tools/reference_backends/indextts.py`
+manually reimplements GPT-2 but originally skipped `gpt.ln_f`,
+producing wrong reference values. Any manual reimplementation of
+HuggingFace GPT-2 must include `gpt.ln_f`.
+
+### Conformer RelPositionalEncoding does NOT add pos_emb to x
+
+WeNet/ESPnet Conformers have two positional encoding classes:
+- `PositionalEncoding.forward`: returns `(x * xscale + pos_emb, pos_emb)`
+- `RelPositionalEncoding.forward`: returns `(x * xscale, pos_emb)`
+
+IndexTTS uses `RelPositionalEncoding`. The `pos_emb` is passed
+separately to the attention layer as the R matrix — it is NEVER
+added to the input x. Adding it corrupts every subsequent block.
+
+### Conformer attention: absolute pos table, no rel_shift
+
+IndexTTS's Conformer uses `RelPositionMultiHeadedAttention` but with
+a critical deviation from the paper: `rel_shift` is commented out
+("useless in speech recognition"). The position table is the stored
+`pe[:, 0:T]` — T absolute positions, NOT a 2T-1 relative table.
+The `matrix_bd = Q_v @ R^T` is already a T×T square matrix and
+needs no shift. Using a 2T-1 sinusoidal table + rel_shift corrupts
+attention scores in all 6 blocks.
+
+### BigVGAN SnakeBeta: ggml memory layout is [c*T + t], not [t*C + c]
+
+The anti-aliased SnakeBeta activation runs as a custom `ggml_map_custom1`
+op. For a tensor with `ne[0]=T, ne[1]=C`, ggml stores element (t, c)
+at offset `c * T + t` — channel-major, time innermost. Accessing as
+`data[t * C + c]` (which is row-major [T, C]) scrambles channels
+across time, producing noise instead of speech. This single bug was
+the root cause of the vocoder producing unrecognizable audio.
+
+### BigVGAN latent input: GPT output layout vs ggml tensor layout
+
+The GPT latent extraction outputs `ne[0]=D, ne[1]=n_positions`, meaning
+each position's D=1280 values are contiguous (row-major [pos, D]).
+The vocoder's `ggml_conv_1d` needs `ne[0]=T, ne[1]=C` with time innermost.
+Copying raw bytes from the GPT tensor into a `(T, C)` ggml tensor
+transposes the data — channels become time and vice versa. Fix:
+create the input tensor as `(D, T)` matching GPT layout, then
+`ggml_transpose` + `ggml_cont` before conv operations.
+
+### Reference audio sample rate must be checked
+
+The `compute_ref_mel` function assumed 16kHz input and always
+resampled to 24kHz. If the reference WAV is already 24kHz (common),
+this double-resamples and destroys the signal. The CLI must check
+the WAV sample rate and only resample when needed.
