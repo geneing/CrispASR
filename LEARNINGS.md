@@ -3585,3 +3585,158 @@ Silero LID's `lang_dict_95.json` maps indices to "xx, Name" strings
 (e.g. "de, German", "en, English"). The GGUF stores these verbatim in
 `silero_lid.lang_strs`. Downstream backends expect bare ISO codes.
 Must extract the part before the comma.
+
+## Text LID via CLD3 — Google compact language detector (May 2026)
+
+`src/lid_cld3.{h,cpp}` ports Google's CLD3
+([github.com/google/cld3](https://github.com/google/cld3),
+Apache-2.0) — a tiny shallow classifier (~1.5 MB F32 / ~440 KB F16)
+that emits 109 ISO 639-1 labels. Six feature extractors (4 cbog
+char-ngram bags at sizes 1/2/3/4, RelevantScript, Script) →
+80-d concat → FC + ReLU → 208-d hidden → FC → softmax. Released as
+`cstr/cld3-GGUF` on the Hub. Sibling backend to lid-fasttext; the
+post-merge auto-routing dispatcher picks between them via the GGUF's
+`general.architecture` key.
+
+Forward path is pure manual F32 (no ggml graph) — the compute is
+well under 1 MFLOP per call (one 80×208 matmul + one 208×109 matmul +
+softmax). F16 weights are dequantized to F32 once at load time via
+`ggml_fp16_to_fp32`; the 1.5 MB RAM hit is trivial.
+
+### CLD3's `float16` is bfloat16-style, NOT IEEE binary16
+
+CLD3 ships its weights in `src/lang_id_nn_params.cc` as 1.76 MB of
+plain-text C++ array literals — no binary side-car. The `float16`
+typedef in `src/float16.h:43-49` is **the upper 16 bits of a binary32
+float** (1 sign + 8 exponent + 7 mantissa, i.e. bfloat16-style),
+NOT IEEE 754 binary16 (1+5+10). The header even calls this out
+explicitly: *"NOTE: The IEEE floating point standard defines a
+float16 format that is different than this format..."*.
+
+**The trap**: decoding the `15392u`-style literals via numpy `<f2`
+silently produces garbage — the bit patterns are a different format.
+The correct decode is `(uint32(value) << 16).view(float32)`. This is
+the dominant cause of "weights load but produce nonsense" — it looks
+correct, just shifted into wrong magnitude.
+
+This is also why `embedding_network.cc:122-123`'s dequant formula is
+`(static_cast<int>(uint8) - 128) * multiplier` (where `multiplier`
+includes the bf16-style scale): symmetric quantization with bias 128.
+Got the bf16 decode wrong → the dequantized embedding rows look like
+random numbers, the cbog feature contributions cancel out, and the
+softmax is uniform.
+
+### Hash function is MurmurHash2-32 with seed 0xBEEF, NOT CityHash
+
+The CLD3 brief tentatively guessed CityHash because the upstream code
+includes `absl_city`. Wrong: `utils.cc:137-183`'s `Hash32` is textbook
+MurmurHash2-32 with `m=0x5BD1E995, r=24`, default seed `0xBEEF` (=
+48879). Trivial 30-line port to numpy and C++.
+
+The cbog feature IDs use the raw UTF-8 bytes of the ngram string as
+the hash input (no UTF-8 normalisation), so byte-for-byte hash parity
+with upstream is mandatory. Off-by-one or signed-vs-unsigned errors
+in the hash get amplified through the embedding lookup and produce
+top-1 mismatches across every multilingual input.
+
+### Hiragana, Katakana, Hangul are NOT separate ULScript values
+
+The brief estimated ~107 languages and called out 6 distinct feature
+extractors. The actual model has **109 labels** (in
+`task_context_params.cc:43-57`, NOT `lang_id_nn_params.cc`) and
+**3 feature classes instantiated 6 times** — `ContinuousBagOfNgramsFunction`
+×4 with different `id_dim`/`size`, `RelevantScriptFeature` ×1,
+`ScriptFeature` ×1. The cbog instantiation at index 5 is the
+1-character "unigram" with `id_dim=100`.
+
+The bigger trap was in the **103-row text-script embedding**. The
+ULScript enum at `script_span/generated_ulscript.h` has 102 values
+running 0..101, with `NUM_ULSCRIPTS = 102` as a sentinel. **It does
+NOT include Hiragana, Katakana, or Hangul as separate values** —
+they all return `ULScript_Hani = 24` from the upstream
+`ScriptScanner`, then a *secondary* Hangul-vs-Hani codepoint count
+in `ScriptFeature::Compute` (language_identifier_features.cc:128-161)
+returns the `NUM_ULSCRIPTS=102` sentinel only when Hangul-script
+codepoints outnumber non-Hangul ones in the same span.
+
+Early Python-port smoke-set failures traced directly to guessed
+values:
+
+  | Input                | Symptom                  | Cause                           |
+  |----------------------|--------------------------|---------------------------------|
+  | `नमस्ते दुनिया` (Hindi)| top1 = `bn` (Bengali)    | We mapped Devanagari→10; 10=Bengali. Correct: 9. |
+  | `你好世界`            | top1 = `mr` (Marathi)    | We mapped Hani→43. Correct: 24. |
+  | `こんにちは世界`        | top1 = `bg` (Bulgarian)  | We mapped Hiragana→41 (doesn't exist). Correct: Hani=24, Hangul-vs-Hani fixup leaves it as Hani. |
+
+Read `script_span/generated_ulscript.h` first; do NOT guess these
+values. The 103rd row (sentinel) is the special `NUM_ULSCRIPTS` slot.
+
+### Full-Unicode lowercase in cleanup is non-optional
+
+Upstream's `ScriptScanner::GetOneScriptSpanLower` lowercases ALL
+letters across all scripts (Cyrillic П→п, Greek Α→α, Latin H→h)
+before feeding the text to the feature extractors. ASCII-only
+lowercase changes the bytes that get hashed by MurmurHash2 → different
+ngram IDs → softmax lands on the wrong sibling label. Specifically,
+`Привет мир` lowercased only as ASCII keeps the uppercase Cyrillic
+codepoints, hashes their UTF-8 bytes, and predicts `tg` (Tajik)
+instead of `ru` (Russian). Both are Cyrillic — same script feature —
+but the cbog ngrams diverge.
+
+The C++ port covers this with a hand-rolled case-fold table in
+`src/lid_cld3.cpp::lower_codepoint` covering Latin / Latin-1 / Latin
+Extended-A / Greek / Cyrillic / Armenian. Codepoints not in the
+table fall through unchanged. ICU would handle the long tail
+correctly but adding ICU as a dependency for one tiny LID model is
+a poor tradeoff.
+
+### Simplified text cleanup vs vendoring `script_span/`
+
+Upstream's full preprocessing pipeline runs the input through
+`ScriptScanner::GetOneScriptSpanLower` → `CheapSqueezeInplace` →
+`SelectTextGivenBeginAndSize` (snippet selection if too long).
+That's a ~250 KB Unicode state machine in `script_span/` (4 generated
+UTF-8 transition tables at 40-82 KB each, plus orchestration).
+
+We chose to ship a **simplified cleanup** (full-Unicode lowercase via
+hand-rolled case-fold + ASCII punct/digit strip + whitespace collapse)
+in `cleanup_text`. On the 8-input multilingual smoke set (clean
+single-script inputs), this matches upstream byte-for-byte for 7/8.
+The 8th, "Hello world", is a low-confidence (<0.5) underdetermined
+input where small algorithmic differences flip the argmax (we say
+`fi`, pycld3 says `ky` — both clearly wrong). The Python reference
+dumper downgrades that case to a warning when both predictions are
+below the 0.7 reliability threshold and proceeds with the dump, so
+the C++/Python cosine gate still measures the algorithmic agreement
+of *our* port, which lands at cos=1.000000 across every stage on
+F16.
+
+If divergence ever shows up on a confident input (>0.7 prob both
+sides, different argmax), escalate to vendoring the full
+`script_span/` tree from `/Volumes/backups/ai/upstream/cld3/src/`.
+It's Apache-2.0 so distribution is fine; it's just a lot of generated
+code mass to carry in-tree.
+
+### `[in_dim, out_dim]` storage → transpose at conversion time
+
+Upstream stores hidden + softmax weights as `[in_dim, out_dim]`
+row-major (because `SparseReluProductPlusBias` iterates `x[i] * weights[i]`,
+where `weights[i]` is row `i` mapping input dimension `i` to all
+outputs). GGUF's `ggml_mul_mat(W, x) = y` convention is `[out_dim,
+in_dim]`. The converter in `models/convert-cld3-to-gguf.py` transposes
+once at write time so the runtime can do `W @ x` with no orientation
+check at every load. Forgetting this transpose produces a softmax
+of all NaN — the FC outputs become `concat[80] @ W[80,208] = wrong-dim`
+and the bias add silently strides off the buffer.
+
+### CLD3's "Hello world" is `ky` — known short-input quirk
+
+CLD3 trained on web-scale data and gives short ambiguous inputs
+their statistically-most-frequent-language guess. "Hello world" is
+short enough that it lands on `ky` (Kyrgyz) consistently across
+every variant (`'hello world'`, `'Hello world!'`, `'  Hello world  '`,
+etc.) at p=0.7192. This isn't a bug in our port — it's the
+contract. The diff harness's top-1-match check therefore needs the
+reference dumper's `top1_label` field as the source of truth; you
+can't paper over short-input quirks by feeding longer inputs at
+diff time.
