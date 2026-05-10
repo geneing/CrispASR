@@ -8,6 +8,14 @@ CrispASR/GGUF on the same parakeet-tdt-0.6b-v3 model). Runs both
 engines on the same audio under the same window/warmup/runs settings
 and reports realtime factor + per-call latency.
 
+A more thorough version of the issue #81 cross-comparison documented
+in PERFORMANCE.md "onnx-asr cross-comparison — issue #81 (2026-05-09)":
+the existing PERFORMANCE.md run is 1 quant × whole-file × 1 audio; this
+script sweeps a 5-quant × 2-mode × 2-audio matrix and emits JSON for
+downstream tooling, while keeping the same engine-comparison framing.
+Read PERFORMANCE.md first for the headline conclusions, this script for
+deeper exploration / CUDA portability.
+
 Two call modes:
 
   whole    — feed the full audio in one transcribe call. Closest to
@@ -238,15 +246,31 @@ def host_default_lib() -> Path:
 
 
 def host_default_providers() -> list[str]:
-    """Auto-pick a sensible onnxruntime EP per host."""
+    """Auto-pick a sensible onnxruntime EP per host.
+
+    On macOS we deliberately default to CPU EP, not CoreML — PERFORMANCE.md
+    "onnx-asr cross-comparison — issue #81 (2026-05-09)" documents that
+    on M1 the CoreML EP is *slower* than CPU EP for parakeet-shaped
+    graphs (CTC int8: 1.28 s CoreML vs 0.72 s CPU on the same model),
+    and that the upstream parakeet TDT export can't even reach CoreML
+    because of `onnxruntime#26355` (external-data + protobuf 2 GB
+    ceiling). Use `--providers CoreMLExecutionProvider,...` if you
+    want to measure CoreML explicitly.
+
+    On Windows / Linux with a working dGPU EP (CUDA / DirectML / TRT)
+    we prefer the GPU EP — that's where ONNX has its real architectural
+    advantage and is the shape relevant to issue #81's reporter.
+    """
     try:
         import onnxruntime as ort
         avail = ort.get_available_providers()
     except Exception:
         return ["CPUExecutionProvider"]
-    for ep in ("CUDAExecutionProvider", "CoreMLExecutionProvider", "DmlExecutionProvider"):
+    # GPU EPs that are actually fast in practice, in preference order.
+    for ep in ("CUDAExecutionProvider", "TensorrtExecutionProvider", "DmlExecutionProvider"):
         if ep in avail:
             return [ep, "CPUExecutionProvider"]
+    # On macOS, CPU EP outperforms CoreML EP for parakeet — default to CPU.
     return ["CPUExecutionProvider"]
 
 
@@ -501,17 +525,20 @@ def bench_onnx(
     import onnx_asr  # type: ignore
     import numpy as np  # type: ignore
 
-    # The onnxruntime CoreML EP currently fails on fp32 ONNX models with
-    # external-data sidecars: graph optimization tries to materialize the
-    # external initializer but loses the model_path along the way and dies
-    # with `model_path must not be empty`. Workaround: pre-merge the
-    # `<name>.onnx + <name>.onnx.data` pair into a single fp32 file with
-    # `onnx.save(..., save_as_external_data=False)` and replace the
-    # original. We don't do that here automatically (it's a one-time
-    # 2.4 GB rewrite per repo); instead we auto-fall-back to CPU EP for
-    # that cell and record what actually ran in `extra.providers_used`,
-    # so the matrix is still complete and the JSON makes the substitution
-    # auditable.
+    # The onnxruntime CoreML EP can't load fp32 ONNX models with
+    # external-data sidecars — tracked upstream as `onnxruntime#26355`
+    # (closed *not planned*): the external-data initializer + CoreML's
+    # subgraph split lose `model_path` along the way; inlining hits
+    # protobuf's 2 GB ceiling. See PERFORMANCE.md "onnx-asr
+    # cross-comparison — issue #81 (2026-05-09)" for the full table.
+    # Workaround for users who want fp32 on CoreML: pre-merge into a
+    # single file via `onnx.save(..., save_as_external_data=False)`
+    # (one-time 2.4 GB rewrite per repo). We don't do that here
+    # automatically; instead we auto-fall-back to CPU EP — which is
+    # also the host default on M1 (CPU EP is *faster* than CoreML EP
+    # for parakeet on M1, per the same PERFORMANCE.md section) — and
+    # record what actually ran in `extra.providers_used` so the JSON
+    # makes the substitution auditable.
     actual_providers = list(providers)
     fp32_external_data = (
         quantization is None

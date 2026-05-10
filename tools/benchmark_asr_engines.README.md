@@ -5,6 +5,21 @@ library) vs CrispASR on the **same** Parakeet TDT 0.6B v3 model. Built
 to reproduce the comparison from
 [issue #81](https://github.com/CrispStrobe/CrispASR/issues/81).
 
+**Read first**: `PERFORMANCE.md` § "onnx-asr cross-comparison —
+issue #81 (2026-05-09)". That section documents the headline
+conclusion (crispasr Metal Q8_0 wins TDT-vs-TDT by 1.32× on M1, and
+CTC-vs-CTC by 1.58×; on Windows + RTX 4070 + DirectML the picture
+inverts and ONNX wins because of dGPU EP coverage), pins the
+upstream onnxruntime issue
+[`microsoft/onnxruntime#26355`](https://github.com/microsoft/onnxruntime/issues/26355)
+(closed *not planned*) for the external-data + CoreML loading
+failure, and notes that on M1 the CoreML EP is *slower* than CPU EP
+for parakeet-shaped graphs. This script is the **wider-matrix
+follow-up** (5 quants × 2 modes × 2 audios + JSON output + Metal-
+JIT prewarm + CUDA portability) — the per-cell numbers won't differ
+much from PERFORMANCE.md, but the matrix lets you compare quants and
+streaming windows directly.
+
 The script runs both engines through the same audio under the same
 window/warmup/runs settings and reports realtime factor (RTx),
 mean/p50/p95 per-call latency, and (on the short clip) WER against the
@@ -45,8 +60,13 @@ python tools/benchmark_asr_engines.py --prewarm --json /tmp/bench.json
 
 The script will:
 
-1. Auto-pick `CoreMLExecutionProvider` for `onnxruntime` (override with
-   `--providers CPUExecutionProvider`).
+1. Auto-pick a sensible `onnxruntime` provider per host: `CUDA` /
+   `TensorRT` / `DirectML` if available (the dGPU EPs that actually
+   beat CrispASR on Windows), otherwise **`CPUExecutionProvider`**
+   (including on macOS — the CoreML EP is slower than CPU EP for
+   parakeet on M1, per PERFORMANCE.md). Override with
+   `--providers CoreMLExecutionProvider,CPUExecutionProvider` if you
+   want to measure CoreML explicitly.
 2. Auto-find `libcrispasr.dylib` under `build-ninja-compile/src/`
    (override with `--crispasr-lib /path/to/lib`).
 3. Auto-locate GGUF models under `/Volumes/backups/ai/crispasr/`,
@@ -153,18 +173,24 @@ Columns:
    could add that later if useful.
 5. **WER uses `jiwer`** (`pip install jiwer`). Without it, the WER
    column shows `—`.
-6. **`onnx-asr` fp32 on macOS CoreML.** The fp32 ONNX encoder ships as
-   `encoder-model.onnx + encoder-model.onnx.data` (external data),
-   which the onnxruntime CoreML EP currently fails to load — graph
-   optimization tries to materialize the external initializer but
-   loses the model_path and dies with `model_path must not be empty`.
-   The script auto-falls-back to CPU EP for that cell and records the
-   substitution in `extra.providers_used`. To run fp32 on CoreML, pre-
-   merge the file once: `python -c "import onnx; m =
-   onnx.load('encoder-model.onnx'); onnx.save(m,
-   'encoder-model.onnx', save_as_external_data=False)"` (≈ 2.4 GB
-   single-file rewrite). The int8 ONNX is a single file so it runs on
-   CoreML without this workaround.
+6. **`onnx-asr` fp32 on macOS CoreML EP.** The fp32 ONNX encoder ships
+   as `encoder-model.onnx + encoder-model.onnx.data` (external data).
+   The onnxruntime CoreML EP can't load that combination: the
+   external-data initializer + CoreML's subgraph split lose
+   `model_path`; inlining hits protobuf's 2 GB ceiling. Tracked
+   upstream as
+   [`microsoft/onnxruntime#26355`](https://github.com/microsoft/onnxruntime/issues/26355)
+   (closed *not planned*); see PERFORMANCE.md § "onnx-asr cross-
+   comparison — issue #81" for the full table. **Default hides this**
+   because we use CPU EP by default on macOS anyway (it's faster than
+   CoreML for parakeet on M1). If you opt into CoreML via
+   `--providers CoreMLExecutionProvider,CPUExecutionProvider`, the
+   fp32 cell auto-falls-back to CPU EP and records the substitution
+   in `extra.providers_used`. To force fp32 on CoreML, pre-merge once:
+   `python -c "import onnx; m = onnx.load('encoder-model.onnx');
+   onnx.save(m, 'encoder-model.onnx', save_as_external_data=False)"`
+   (≈ 2.4 GB single-file rewrite). The int8 ONNX is a single file
+   so it runs on CoreML without the workaround.
 
 ## Reproducing issue #81
 
