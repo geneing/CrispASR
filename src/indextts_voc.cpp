@@ -627,6 +627,12 @@ static std::vector<float> run_ecapa_tdnn(indextts_voc_context* c, const float* r
         return std::vector<float>(512, 0.0f);
     }
 
+    // Limit mel to 500 frames (~5s reference) — longer reference doesn't improve quality
+    if (T_mel > 500) {
+        T_mel = 500;
+        mel.resize((size_t)T_mel * 100);
+    }
+
     if (c->verbosity >= 1) {
         fprintf(stderr, "indextts-voc: ECAPA mel: %d frames x 100 bands\n", T_mel);
     }
