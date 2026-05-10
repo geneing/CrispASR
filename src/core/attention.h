@@ -60,11 +60,13 @@ namespace core_attn {
 inline ggml_type kv_dtype_parse(const char* s, const char* backend_tag, const char* env_name, ggml_type fallback) {
     if (!s || !*s)
         return fallback;
-    if (std::strcmp(s, "f16") == 0)
+    if (std::strcmp(s, "f16") == 0 || std::strcmp(s, "F16") == 0)
         return GGML_TYPE_F16;
-    if (std::strcmp(s, "q8_0") == 0)
+    if (std::strcmp(s, "f32") == 0 || std::strcmp(s, "F32") == 0)
+        return GGML_TYPE_F32;
+    if (std::strcmp(s, "q8_0") == 0 || std::strcmp(s, "Q8_0") == 0)
         return GGML_TYPE_Q8_0;
-    if (std::strcmp(s, "q4_0") == 0)
+    if (std::strcmp(s, "q4_0") == 0 || std::strcmp(s, "Q4_0") == 0)
         return GGML_TYPE_Q4_0;
     std::fprintf(stderr, "%s: %s='%s' unrecognised, defaulting to f16\n", backend_tag, env_name, s);
     return GGML_TYPE_F16;
@@ -636,10 +638,19 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
         ggml_view_3d(ctx0, kv_k, hd, Lk, n_kv, kv_k->nb[1], kv_k->nb[2], (size_t)il * kv_k->nb[3]);
     ggml_tensor* v_layer_view =
         ggml_view_3d(ctx0, kv_v, hd, Lk, n_kv, kv_v->nb[1], kv_v->nb[2], (size_t)il * kv_v->nb[3]);
-    ggml_tensor* Kfull =
-        ggml_is_quantized(kv_k->type) ? ggml_cast(ctx0, k_layer_view, GGML_TYPE_F32) : ggml_cont(ctx0, k_layer_view);
-    ggml_tensor* Vfull =
-        ggml_is_quantized(kv_v->type) ? ggml_cast(ctx0, v_layer_view, GGML_TYPE_F32) : ggml_cont(ctx0, v_layer_view);
+    // CRISPASR_KV_READ_F32=1 forces the cache read to dequantise (or
+    // upcast F16) to F32 before flash_attn. Useful when F16 attention
+    // accumulator drift on Metal sends the sampler off the rails for
+    // sensitive models (chatterbox T3 — see LEARNINGS §82). Default
+    // off to preserve legacy bit-exactness with the F16 fast path.
+    static const bool s_kv_read_f32 = []() {
+        const char* s = std::getenv("CRISPASR_KV_READ_F32");
+        return s && *s && std::strcmp(s, "0") != 0;
+    }();
+    const bool need_dequant_k = ggml_is_quantized(kv_k->type) || (s_kv_read_f32 && kv_k->type != GGML_TYPE_F32);
+    const bool need_dequant_v = ggml_is_quantized(kv_v->type) || (s_kv_read_f32 && kv_v->type != GGML_TYPE_F32);
+    ggml_tensor* Kfull = need_dequant_k ? ggml_cast(ctx0, k_layer_view, GGML_TYPE_F32) : ggml_cont(ctx0, k_layer_view);
+    ggml_tensor* Vfull = need_dequant_v ? ggml_cast(ctx0, v_layer_view, GGML_TYPE_F32) : ggml_cont(ctx0, v_layer_view);
 
     // ---- GQA expansion ----
     if (p.gqa_mode != GQA_NATIVE && grp > 1) {

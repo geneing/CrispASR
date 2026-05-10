@@ -327,11 +327,13 @@ forks on the input sample rate:
   to get a real clone.
 
 **Known issues for the native path**:
-- **F16 T3 + GPU produces broken audio** (pre-existing bug not from
-  this work; reproducible at HEAD and at the original voice-clone
-  commit `86ac98eb`). Use **Q4_K T3 + `--no-gpu`** for reliable
-  cloning today: `-m chatterbox-t3-q4_k-regen.gguf --no-gpu`. The
-  F16 + GPU breakage is tracked as a separate issue.
+- **Chatterbox T3 forward auto-falls back to CPU** when GPU is
+  requested. Metal has cumulative F16 logit drift that breaks
+  chatterbox's multinomial sampler past ~16 decode steps; the
+  runtime detects GPU mode and quietly switches to CPU with a
+  loud stderr warning so the output stays correct. Override with
+  `CRISPASR_CHATTERBOX_FORCE_GPU=1` (output may be garbled). The
+  underlying ggml-Metal numerical issue is tracked separately.
 - T3 sampling can produce unrelated text on long technical prompts
   (sampler drift). Short, common phrases work reliably; if a prompt
   produces gibberish, try a different seed via
