@@ -1180,6 +1180,10 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         pp.n_threads = s->n_threads;
         pp.verbosity = g_open_verbosity_tls;
         pp.use_gpu = g_open_use_gpu_tls;
+        // Parakeet's pre-existing toggle is named `use_flash`; the
+        // unified open-params calls it `flash_attn`. Both map to the
+        // same kernel switch in the encoder SA blocks.
+        pp.use_flash = g_open_flash_attn_tls;
         s->parakeet_ctx = parakeet_init_from_file(model_path, pp);
         if (!s->parakeet_ctx) {
             delete s;
@@ -1194,6 +1198,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
         p.use_gpu = g_open_use_gpu_tls;
+        p.use_flash = g_open_flash_attn_tls;
         s->canary_ctx = canary_init_from_file(model_path, p);
         if (!s->canary_ctx) {
             delete s;
@@ -1208,6 +1213,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
         p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->qwen3_ctx = qwen3_asr_init_from_file(model_path, p);
         if (!s->qwen3_ctx) {
             delete s;
@@ -1222,6 +1228,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
         p.use_gpu = g_open_use_gpu_tls;
+        p.use_flash = g_open_flash_attn_tls;
         s->cohere_ctx = cohere_init_from_file(model_path, p);
         if (!s->cohere_ctx) {
             delete s;
@@ -1236,6 +1243,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
         p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->granite_ctx = granite_speech_init_from_file(model_path, p);
         if (!s->granite_ctx) {
             delete s;
@@ -1263,6 +1271,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
         p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->voxtral_ctx = voxtral_init_from_file(model_path, p);
         if (!s->voxtral_ctx) {
             delete s;
@@ -1275,7 +1284,9 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "voxtral4b") {
         voxtral4b_context_params p = voxtral4b_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->voxtral4b_ctx = voxtral4b_init_from_file(model_path, p);
         if (!s->voxtral4b_ctx) {
             delete s;
@@ -1302,6 +1313,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
         p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->vibevoice_ctx = vibevoice_init_from_file(model_path, p);
         if (!s->vibevoice_ctx) {
             delete s;
@@ -1316,6 +1328,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
         p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->qwen3_tts_ctx = qwen3_tts_init_from_file(model_path, p);
         if (!s->qwen3_tts_ctx) {
             delete s;
@@ -1415,6 +1428,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         orpheus_context_params p = orpheus_context_default_params();
         p.use_gpu = g_open_use_gpu_tls;
         p.verbosity = g_open_verbosity_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->orpheus_ctx = orpheus_init_from_file(model_path, p);
         if (!s->orpheus_ctx) {
             delete s;
@@ -1431,6 +1445,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         s->backend = "kokoro";
         kokoro_context_params p = kokoro_context_default_params();
         p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->kokoro_ctx = kokoro_init_from_file(model_path, p);
         if (!s->kokoro_ctx) {
             delete s;
@@ -1453,6 +1468,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         // you're doing" log level so first-time bake users see progress.
         p.verbosity = g_open_verbosity_tls > 0 ? g_open_verbosity_tls : 1;
         p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
         s->chatterbox_ctx = chatterbox_init_from_file(model_path, p);
         if (!s->chatterbox_ctx) {
             delete s;

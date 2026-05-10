@@ -2363,6 +2363,7 @@ extern "C" struct kokoro_context_params kokoro_context_default_params(void) {
     //                              is dramatically slower than the GPU.
     // Mirrors the QWEN3_TTS_CODEC_GPU pattern from the qwen3-tts codec.
     p.gen_force_metal = env_bool("KOKORO_GEN_FORCE_METAL") || env_bool("KOKORO_GEN_GPU");
+    p.flash_attn = true;
     std::strncpy(p.espeak_lang, "en-us", sizeof(p.espeak_lang) - 1);
     return p;
 }

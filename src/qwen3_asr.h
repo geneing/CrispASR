@@ -24,6 +24,10 @@ struct qwen3_asr_context_params {
     int n_threads;
     int verbosity; // 0=silent 1=normal 2=verbose
     bool use_gpu;  // false => force CPU backend
+    bool flash_attn; // true => use ggml_flash_attn_ext on the
+                     // Whisper-style encoder + Qwen3 LLM SA blocks.
+                     // Plumbed in PLAN #89 (May 2026); compute-graph
+                     // wiring lands per backend in #86.
 };
 
 struct qwen3_asr_context_params qwen3_asr_context_default_params(void);

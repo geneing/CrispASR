@@ -785,6 +785,7 @@ extern "C" voxtral_context_params voxtral_context_default_params(void) {
     p.n_threads = 4;
     p.verbosity = 1;
     p.use_gpu = true;
+    p.flash_attn = true;
     return p;
 }
 

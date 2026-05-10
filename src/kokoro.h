@@ -33,6 +33,9 @@ struct kokoro_context_params {
     int n_threads;
     int verbosity; // 0=silent, 1=normal, 2=verbose
     bool use_gpu;
+    bool flash_attn;      // PLAN #89 plumbing — kokoro StyleTTS2 has
+                          // small attention layers in the predictor;
+                          // wiring is lowest-priority in #86.
     bool gen_force_metal; // KOKORO_GEN_FORCE_METAL=1 — debug only; default false
                           // pins the iSTFTNet generator to backend_cpu to avoid
                           // a known Metal hang on stride-10 ConvTranspose1d

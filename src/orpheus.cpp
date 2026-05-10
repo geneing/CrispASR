@@ -296,6 +296,7 @@ extern "C" struct orpheus_context_params orpheus_context_default_params(void) {
     // the slice (c) ASR roundtrip was validated against.
     p.temperature = 0.6f;
     p.max_audio_tokens = 0;
+    p.flash_attn = true;
     return p;
 }
 

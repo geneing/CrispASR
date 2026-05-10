@@ -21,7 +21,9 @@ struct vibevoice_context_params {
     int max_new_tokens;
     int verbosity; // 0=silent 1=normal 2=verbose
     bool use_gpu;
-    int tts_steps; // DPM-Solver++ inference steps (default 20, min 4)
+    int tts_steps;   // DPM-Solver++ inference steps (default 20, min 4)
+    bool flash_attn; // PLAN #89 plumbing — σ-VAE encoder + Qwen2.5
+                     // talker SA blocks.
 };
 
 struct vibevoice_context_params vibevoice_context_default_params(void);

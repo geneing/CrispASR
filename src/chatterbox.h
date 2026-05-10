@@ -40,6 +40,9 @@ struct chatterbox_context_params {
     float top_p;              // top_p sampling (default 1.0)
     int max_speech_tokens;    // upper bound on T3 AR decode (default 1000)
     int cfm_steps;            // number of CFM Euler steps (default 10)
+    bool flash_attn;          // PLAN #89 plumbing — T3 Llama-style AR
+                              // loop. Highest-impact target alongside
+                              // orpheus for the kernel wiring in #86.
 };
 
 struct chatterbox_context_params chatterbox_context_default_params(void);

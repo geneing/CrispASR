@@ -122,6 +122,7 @@ extern "C" struct vibevoice_context_params vibevoice_context_default_params(void
     p.verbosity = 1;
     p.use_gpu = true;
     p.tts_steps = 20;
+    p.flash_attn = true;
     return p;
 }
 

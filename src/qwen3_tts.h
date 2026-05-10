@@ -31,6 +31,7 @@ struct qwen3_tts_context_params {
     bool use_gpu;
     float temperature;   // 0 = greedy
     int max_codec_steps; // upper bound on AR decode steps; 0 = use built-in default (1500)
+    bool flash_attn;     // PLAN #89 plumbing — Qwen3 talker SA blocks.
 };
 
 struct qwen3_tts_context_params qwen3_tts_context_default_params(void);

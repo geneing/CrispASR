@@ -544,7 +544,8 @@ static bool granite_speech_load_model(granite_speech_model& model, const char* p
 // ===========================================================================
 
 extern "C" struct granite_speech_context_params granite_speech_context_default_params(void) {
-    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true};
+    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true,
+            /*flash_attn=*/true};
 }
 
 // ---- Tokenizer encode side (delegates to src/core/bpe.h) ----

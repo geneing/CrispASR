@@ -42,6 +42,9 @@ struct voxtral_context_params {
     int n_threads;
     int verbosity; // 0=silent 1=normal 2=verbose
     bool use_gpu;  // false => force CPU backend
+    bool flash_attn; // PLAN #89 plumbing — Whisper encoder + Mistral
+                     // 3B SA blocks. Compute-graph wiring lands in
+                     // PLAN #86.
 };
 
 struct voxtral_context_params voxtral_context_default_params(void);

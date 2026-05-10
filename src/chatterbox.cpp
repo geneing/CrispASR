@@ -2087,6 +2087,7 @@ extern "C" struct chatterbox_context_params chatterbox_context_default_params(vo
     p.top_p = 1.0f;
     p.max_speech_tokens = 1000;
     p.cfm_steps = 10;
+    p.flash_attn = true;
     return p;
 }
 

@@ -881,7 +881,8 @@ static ggml_cgraph* voxtral4b_build_graph_embed(voxtral4b_context* ctx, int n_to
 // ===========================================================================
 
 extern "C" struct voxtral4b_context_params voxtral4b_context_default_params(void) {
-    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true};
+    return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true,
+            /*flash_attn=*/true};
 }
 
 extern "C" struct voxtral4b_context* voxtral4b_init_from_file(const char* path,

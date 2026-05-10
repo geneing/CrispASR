@@ -36,6 +36,9 @@ struct orpheus_context_params {
     bool use_gpu;
     float temperature;    // 0 = greedy
     int max_audio_tokens; // upper bound on AR decode steps; 0 = use built-in default (8192)
+    bool flash_attn;      // PLAN #89 plumbing — Llama-3.2-3B AR loop.
+                          // Highest-impact target for the kernel-level
+                          // wiring in PLAN #86 (long AR decodes).
 };
 
 struct orpheus_context_params orpheus_context_default_params(void);

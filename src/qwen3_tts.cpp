@@ -4816,6 +4816,7 @@ extern "C" struct qwen3_tts_context_params qwen3_tts_context_default_params(void
     p.use_gpu = true;
     p.temperature = 0.0f;
     p.max_codec_steps = 0;
+    p.flash_attn = true;
     return p;
 }
 
