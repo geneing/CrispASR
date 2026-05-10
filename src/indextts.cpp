@@ -903,6 +903,9 @@ static ggml_cgraph* build_perceiver_graph(indextts_context* c, int T_enc) {
         proj_ctx = ggml_add(ctx0, proj_ctx, proj_b);
     }
 
+    ggml_set_name(proj_ctx, "dbg_perc_proj");
+    ggml_set_output(proj_ctx);
+
     // Learned latent queries: [1280, 32]
     ggml_tensor* latents_w = core_gguf::try_get(ts, "perc.latents");
     // Copy latents to a compute tensor
@@ -961,13 +964,14 @@ static ggml_cgraph* build_perceiver_graph(indextts_context* c, int T_enc) {
         if (ffn_up_b) {
             ffn_h = ggml_add(ctx0, ffn_h, ffn_up_b);
         }
-        // Split at midpoint: 3412/2 = 1706
+        // GEGLU split: Python does x, gate = chunk(2), return gelu(gate) * x
+        // First half = value (x), second half = gate
         const int inner = 1706;
-        ggml_tensor* ffn_gate = ggml_view_2d(ctx0, ffn_h, inner, n_latents, ffn_h->nb[1], 0);
-        ggml_tensor* ffn_up = ggml_view_2d(ctx0, ffn_h, inner, n_latents, ffn_h->nb[1], inner * sizeof(float));
+        ggml_tensor* ffn_val = ggml_view_2d(ctx0, ffn_h, inner, n_latents, ffn_h->nb[1], 0);
+        ggml_tensor* ffn_gate = ggml_view_2d(ctx0, ffn_h, inner, n_latents, ffn_h->nb[1], inner * sizeof(float));
+        ffn_val = ggml_cont(ctx0, ffn_val);
         ffn_gate = ggml_cont(ctx0, ffn_gate);
-        ffn_up = ggml_cont(ctx0, ffn_up);
-        ggml_tensor* ffn_act = ggml_mul(ctx0, ggml_gelu(ctx0, ffn_gate), ffn_up);
+        ggml_tensor* ffn_act = ggml_mul(ctx0, ggml_gelu(ctx0, ffn_gate), ffn_val);
 
         // down: [1706, 32] → [1280, 32]
         snprintf(key, sizeof(key), "perc.layers.%d.1.2.weight", il);
@@ -1224,6 +1228,21 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
             fprintf(stderr, "indextts: Perceiver compute failed\n");
             c->cond_latents.assign((size_t)n_latents * D, 0.0f);
             return true;
+        }
+
+        // Debug: read proj_context
+        {
+            ggml_tensor* dbg = ggml_graph_get_tensor(pgf, "dbg_perc_proj");
+            if (dbg) {
+                int n = (int)ggml_nelements(dbg);
+                std::vector<float> d(n);
+                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                float s2 = 0;
+                for (float v : d)
+                    s2 += v * v;
+                fprintf(stderr, "indextts: perc_proj rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", sqrtf(s2 / n), d[0],
+                        d[1], d[2], d[3], d[4]);
+            }
         }
 
         // Read perceiver output: [1280, 32]

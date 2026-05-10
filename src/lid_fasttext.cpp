@@ -1,3 +1,4 @@
+#include <cmath>
 // lid_fasttext.cpp — see lid_fasttext.h.
 //
 // fastText supervised LID forward pass, manual F32/F16 path. The model
@@ -127,8 +128,8 @@ struct TensorView {
     int64_t ne0 = 0;               // dim (innermost)
     int64_t ne1 = 0;               // n_rows (outer)
     enum ggml_type type = GGML_TYPE_F32;
-    size_t row_bytes = 0;                   // bytes per logical row of `ne0` elements
-    ggml_to_float_t to_float = nullptr;     // dequant callback when not F32
+    size_t row_bytes = 0;               // bytes per logical row of `ne0` elements
+    ggml_to_float_t to_float = nullptr; // dequant callback when not F32
     bool ok = false;
 };
 
@@ -260,8 +261,8 @@ static void compute_embedding_bag(lid_fasttext_context* ctx) {
 // Numerically-stable log(sigmoid(x)).
 static inline float log_sigmoid_stable(float x) {
     if (x >= 0.0f)
-        return -std::log1p(std::expf(-x));
-    return x - std::log1p(std::expf(x));
+        return -std::log1p(std::exp(-x));
+    return x - std::log1p(std::exp(x));
 }
 
 static void compute_logits_softmax_flat(lid_fasttext_context* ctx) {
@@ -414,8 +415,7 @@ extern "C" struct lid_fasttext_context* lid_fasttext_init_from_file(const char* 
     ctx->loss = core_gguf::kv_str(meta, "lid_fasttext.loss", "softmax");
     core_gguf::free_metadata(meta);
     if (ctx->loss != "softmax" && ctx->loss != "hs") {
-        fprintf(stderr,
-                "lid_fasttext: unsupported loss '%s' (only 'softmax' and 'hs' are wired up)\n",
+        fprintf(stderr, "lid_fasttext: unsupported loss '%s' (only 'softmax' and 'hs' are wired up)\n",
                 ctx->loss.c_str());
         delete ctx;
         return nullptr;
@@ -521,8 +521,9 @@ extern "C" struct lid_fasttext_context* lid_fasttext_init_from_file(const char* 
             return nullptr;
         }
         if (off_t->type != GGML_TYPE_I32 || paths_t->type != GGML_TYPE_I32 || codes_t->type != GGML_TYPE_I8) {
-            fprintf(stderr, "lid_fasttext[hs]: tree tensors have wrong types "
-                            "(offsets=%s paths=%s codes=%s; expected I32 I32 I8)\n",
+            fprintf(stderr,
+                    "lid_fasttext[hs]: tree tensors have wrong types "
+                    "(offsets=%s paths=%s codes=%s; expected I32 I32 I8)\n",
                     ggml_type_name(off_t->type), ggml_type_name(paths_t->type), ggml_type_name(codes_t->type));
             core_gguf::free_weights(ctx->wl);
             ggml_backend_free(ctx->backend);
