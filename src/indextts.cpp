@@ -141,7 +141,8 @@ static std::vector<int32_t> tokenize_fallback(const indextts_tokenizer& /*tok*/,
     return result;
 }
 
-// SentencePiece BPE tokenizer — iterative pair merging using vocab scores.
+// SentencePiece unigram tokenizer — Viterbi decoding to find the optimal
+// segmentation that maximizes the total log-probability (score sum).
 static std::vector<int32_t> tokenize_bpe(const indextts_tokenizer& tok, const std::string& text) {
     if (!tok.loaded || tok.id_to_token.empty())
         return tokenize_fallback(tok, text, 12000);
@@ -152,52 +153,53 @@ static std::vector<int32_t> tokenize_bpe(const indextts_tokenizer& tok, const st
     for (char c : text)
         proc += (c == ' ') ? std::string("\xe2\x96\x81") : std::string(1, c);
 
-    // Split into UTF-8 characters
-    struct piece {
-        size_t start, len;
-    };
-    std::vector<piece> pieces;
-    for (size_t i = 0; i < proc.size();) {
-        size_t cl = 1;
-        unsigned char c = proc[i];
-        if ((c & 0xE0) == 0xC0)
-            cl = 2;
-        else if ((c & 0xF0) == 0xE0)
-            cl = 3;
-        else if ((c & 0xF8) == 0xF0)
-            cl = 4;
-        if (i + cl > proc.size())
-            cl = 1;
-        pieces.push_back({i, cl});
-        i += cl;
-    }
+    const int N = (int)proc.size();
+    const int max_piece_len = 48; // max bytes to check per piece
 
-    // Iterative merge: find pair with highest score, merge, repeat
-    while (pieces.size() > 1) {
-        float best_s = -1e30f;
-        size_t best_j = SIZE_MAX;
-        for (size_t j = 0; j + 1 < pieces.size(); j++) {
-            std::string m = proc.substr(pieces[j].start, pieces[j].len + pieces[j + 1].len);
-            auto it = tok.token_to_id.find(m);
+    // Viterbi forward pass: best_score[i] = best log-prob for proc[0..i-1]
+    std::vector<float> best_score(N + 1, -1e30f);
+    std::vector<int> best_len(N + 1, 0); // length of the best last piece ending at i
+    best_score[0] = 0.0f;
+
+    for (int i = 0; i < N; i++) {
+        if (best_score[i] <= -1e29f)
+            continue;
+        // Try all pieces starting at position i
+        for (int len = 1; len <= std::min(max_piece_len, N - i); len++) {
+            // Only try pieces that start at valid UTF-8 boundaries
+            std::string piece = proc.substr(i, len);
+            auto it = tok.token_to_id.find(piece);
             if (it != tok.token_to_id.end()) {
-                float s = (it->second < (int32_t)tok.scores.size()) ? tok.scores[it->second] : -1e20f;
-                if (s > best_s) {
-                    best_s = s;
-                    best_j = j;
+                float score = (it->second < (int32_t)tok.scores.size()) ? tok.scores[it->second] : -20.0f;
+                float total = best_score[i] + score;
+                if (total > best_score[i + len]) {
+                    best_score[i + len] = total;
+                    best_len[i + len] = len;
                 }
             }
         }
-        if (best_j == SIZE_MAX)
-            break;
-        pieces[best_j].len += pieces[best_j + 1].len;
-        pieces.erase(pieces.begin() + (long)best_j + 1);
+        // Fallback: single byte as <unk> if no piece matches
+        if (best_score[i + 1] <= -1e29f) {
+            best_score[i + 1] = best_score[i] + (-20.0f); // unk penalty
+            best_len[i + 1] = 1;
+        }
     }
 
-    // Convert pieces to IDs, merging consecutive unknowns into single <unk>=2
+    // Viterbi backtrace
+    std::vector<std::pair<int, int>> segments; // (start, len)
+    int pos = N;
+    while (pos > 0) {
+        int len = best_len[pos];
+        segments.push_back({pos - len, len});
+        pos -= len;
+    }
+    std::reverse(segments.begin(), segments.end());
+
+    // Convert to token IDs, merging consecutive unknowns
     std::vector<int32_t> result;
     bool prev_unk = false;
-    for (const auto& p : pieces) {
-        std::string s = proc.substr(p.start, p.len);
+    for (const auto& seg : segments) {
+        std::string s = proc.substr(seg.first, seg.second);
         auto it = tok.token_to_id.find(s);
         if (it != tok.token_to_id.end()) {
             result.push_back(it->second);
@@ -525,7 +527,10 @@ static bool bind_model(indextts_context* c) {
 // mel spectrogram with 24kHz sample rate, 100 bands, hop=256, n_fft=1024.
 // Input audio is expected at 16kHz — upsampled to 24kHz internally.
 
-// Simple linear interpolation resampler (16kHz → 24kHz = ratio 3:2)
+// Linear interpolation resampler (16kHz → 24kHz = ratio 3:2).
+// A proper sinc resampler would match torchaudio exactly, but linear
+// interpolation produces mel with ~25% lower RMS — the Conformer
+// normalizes this away after block 0.
 static std::vector<float> resample_16k_to_24k(const float* pcm, int n_samples) {
     const double ratio = 24000.0 / 16000.0; // 1.5
     int n_out = (int)(n_samples * ratio);
@@ -1964,16 +1969,25 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
         ctx->cond_latents.assign((size_t)n_lat * D, 0.0f);
     }
 
-    // 1. Tokenize text
+    // 1. Uppercase text then tokenize (IndexTTS normalizer uppercases before BPE)
+    std::string text_upper;
+    for (const char* p = text; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 'a' && c <= 'z')
+            text_upper += (char)(c - 32);
+        else
+            text_upper += (char)c;
+    }
+
     std::vector<int32_t> text_tokens;
     if (ctx->tokenizer.loaded) {
-        text_tokens = tokenize_bpe(ctx->tokenizer, text);
+        text_tokens = tokenize_bpe(ctx->tokenizer, text_upper);
     } else {
-        text_tokens = tokenize_fallback(ctx->tokenizer, text, ctx->hp.text_vocab_size);
+        text_tokens = tokenize_fallback(ctx->tokenizer, text_upper, ctx->hp.text_vocab_size);
     }
 
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: text \"%s\" -> %zu tokens\n", text, text_tokens.size());
+        fprintf(stderr, "indextts: text \"%s\" -> %zu tokens\n", text_upper.c_str(), text_tokens.size());
     }
 
     // 2. Allocate KV cache
@@ -2125,12 +2139,17 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
         return nullptr;
     }
 
-    // Step 2: Re-tokenize text to rebuild the full sequence for latent pass
+    // Step 2: Re-tokenize text (uppercased) for latent pass
+    std::string text_upper2;
+    for (const char* p = text; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        text_upper2 += (c >= 'a' && c <= 'z') ? (char)(c - 32) : (char)c;
+    }
     std::vector<int32_t> text_tokens;
     if (ctx->tokenizer.loaded) {
-        text_tokens = tokenize_bpe(ctx->tokenizer, text);
+        text_tokens = tokenize_bpe(ctx->tokenizer, text_upper2);
     } else {
-        text_tokens = tokenize_fallback(ctx->tokenizer, text, ctx->hp.text_vocab_size);
+        text_tokens = tokenize_fallback(ctx->tokenizer, text_upper2, ctx->hp.text_vocab_size);
     }
 
     std::vector<int32_t> mel_codes_vec(codes, codes + n_codes);
