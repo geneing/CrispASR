@@ -2239,6 +2239,71 @@ class CrispasrSession {
     }
   }
 
+  /// Open a streaming decode session against this session's backend.
+  ///
+  /// Backed by `crispasr_session_stream_open` on the C side, which
+  /// dispatches the rolling-window protocol to whichever backend the
+  /// session loaded (whisper, kyutai-stt, moonshine-streaming, …).
+  /// Same shape as [CrispASR.openStream] (Whisper-only) but works for
+  /// every backend that publishes a streaming entry point.
+  ///
+  /// Throws [UnsupportedError] when the loaded dylib predates
+  /// `crispasr_session_stream_open`, [StateError] when the session
+  /// is already closed, and [Exception] when the backend has no
+  /// streaming arm (the C side returns null in that case).
+  StreamingSession openStream({
+    int stepMs = 3000,
+    int lengthMs = 10000,
+    int keepMs = 200,
+    int nThreads = 4,
+    String? language,
+    bool translate = false,
+  }) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_stream_open')) {
+      throw UnsupportedError(
+          'Session-level streaming not in this libcrispasr — needs CrispASR 0.6+.');
+    }
+    final fn = _lib.lookupFunction<
+        Pointer<Void> Function(
+            Pointer<Void>, Int32, Int32, Int32, Int32, Pointer<Utf8>, Int32),
+        Pointer<Void> Function(Pointer<Void>, int, int, int, int,
+            Pointer<Utf8>, int)>('crispasr_session_stream_open');
+    final langPtr = (language == null || language.isEmpty || language == 'auto')
+        ? nullptr
+        : language.toNativeUtf8();
+    final handle = fn(_handle, nThreads, stepMs, lengthMs, keepMs,
+        langPtr.cast<Utf8>(), translate ? 1 : 0);
+    if (langPtr != nullptr) calloc.free(langPtr);
+    if (handle == nullptr) {
+      throw Exception(
+          'crispasr_session_stream_open returned null — backend "$_backend" '
+          'has no streaming entry point.');
+    }
+    final feedFn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<Float>, Int32),
+        int Function(Pointer<Void>, Pointer<Float>, int)>('crispasr_stream_feed');
+    final flushFn = _lib.providesSymbol('crispasr_stream_flush')
+        ? _lib.lookupFunction<Int32 Function(Pointer<Void>),
+            int Function(Pointer<Void>)>('crispasr_stream_flush')
+        : null;
+    final getTextFn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<Utf8>, Int32, Pointer<Double>,
+            Pointer<Double>, Pointer<Int64>),
+        int Function(Pointer<Void>, Pointer<Utf8>, int, Pointer<Double>,
+            Pointer<Double>, Pointer<Int64>)>('crispasr_stream_get_text');
+    final closeFn = _lib.lookupFunction<Void Function(Pointer<Void>),
+        void Function(Pointer<Void>)>('crispasr_stream_close');
+
+    return StreamingSession._(
+      handle: handle,
+      feed: feedFn,
+      flush: flushFn,
+      getText: getTextFn,
+      close: closeFn,
+    );
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;
