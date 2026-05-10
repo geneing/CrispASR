@@ -3330,6 +3330,102 @@ with a similar `CRISPASR_CHATTERBOX_DUMP_NORM_AT` /
 
 Tracked as a follow-up in PLAN.md #83.
 
+### Methodical bisect, round 2 (2026-05-10) — drift is in mul_mat algorithm
+
+Added per-op intermediate dumps (`CRISPASR_CHATTERBOX_DUMP_NORM_AT`,
+`DUMP_KPROJ_AT`, `DUMP_KROPE_AT`, `DUMP_WK`) in
+`chatterbox.cpp:build_graph_t3_kv` that name and surface the layer-0
+RMSNorm output, K projection mul_mat output, K rope output, and the
+dequantized K weight tensor. Run on CPU and GPU at the same step,
+diff per element. Findings:
+
+| stage              | CPU                                | GPU (FORCE_GPU)                    | drift |
+|--------------------|------------------------------------|------------------------------------|-------|
+| `L0_norm_out` t=45 | -0.0589 -0.0123 -0.0126 -0.0622 …  | -0.0589 -0.0123 -0.0126 -0.0622 …  | **0** (norm bit-identical) |
+| `L0_W_K_f32` row=0 | -0.012791 -0.039632 -0.012791 …    | -0.012791 -0.039632 -0.012791 …    | **0** (Q4_K dequant bit-identical, after fixing `.h` → `.f` literals) |
+| `L0_K_proj` t=45   | -0.3584  0.0566  0.2575 -0.0085 …  | -0.3579  0.0566  0.2551 -0.0067 …  | **~1e-3** (the matmul is the culprit) |
+| `L0_K_rope` t=45   | -0.1699 -0.1519 -0.3115  0.0020 …  | -0.1712 -0.1503 -0.3128  0.0031 …  | ~1e-3 (rope just propagates) |
+
+So norm and dequant are bit-identical CPU/GPU; the drift is **purely in
+the K projection mul_mat itself**.
+
+Then the orthogonal test: load chatterbox-t3-f16 (F16 weights, NOT
+Q4_K). Run CPU vs GPU. K_proj output now bit-identical between CPU
+and GPU at every position tested through t=70+. KV cache values also
+bit-identical. So the matmul is correct **for F16 inputs**.
+
+Forcing the dispatch through `mul_mv_ext` (the F32-precise
+`dot(float4,float4)` path) for `PREC_F32` ops, then casting Q4_K to
+F32 before the matmul (`ggml_cast(W, F32)` followed by F32×F32
+matmul): **same ~1e-3 drift**. So even when the GPU does
+F32×F32 matmul on dequantized Q4_K weights, it doesn't match the
+CPU's Q4_K matmul.
+
+The real reason: **CPU and GPU implement Q4_K matmul differently.**
+CPU's path is `ggml_vec_dot_q4_K_q8_K` (`ggml-cpu/quants.c:645`) —
+it quantizes the F32 input to Q8_K (8-bit-per-element block-quantized)
+before the dot product, then computes the dot using packed integer
+multiplies + scale factors. GPU's path is `kernel_mul_mv_q4_K_f32`
+(`ggml-metal.metal:7748`) — it keeps F32 input and multiplies by the
+unpacked Q4_K nibbles directly. Both are valid but produce different
+F32 outputs in the ~1e-3 range, and **chatterbox's multinomial
+sampler is sensitive enough to flip token selection**.
+
+Q8_0 weights show the same CPU/GPU drift (~1e-3) confirming the issue
+isn't Q4_K-specific — it's any quantized weight type with input-quant
+on CPU vs F32-input on GPU.
+
+### Patch landed (partial fix, useful infrastructure)
+
+1. `dequantize_q4_K` rewritten to mirror CPU's
+   `dequantize_row_q4_K` arithmetic exactly: `dl * (q & 0x0F)` for
+   the low nibble and `dl * (q >> 4)` for the high nibble, with
+   `d` and `dl` always F32. Was previously `(d/16.h) * sc * (q &
+   0xF0)` — F16 division, mathematically equivalent but rounds
+   differently in F32. After the fix, CPU and GPU dequant are
+   bit-identical (verified element-by-element on row 0, 256
+   weights). Small but principled improvement.
+2. `kernel_mul_mv_ext` dispatch in `ggml-metal-ops.cpp` now honours
+   `GGML_PREC_F32` even for `ne11 > 8` (legacy path on M1-M4 only —
+   tensor API has its own behaviour). Picks `r1ptg=4` for the
+   PREC_F32 batch case. Allows Vulkan-style PREC_F32 → high-precision
+   kernel routing. **Doesn't fix the algorithmic CPU/GPU mismatch
+   for quantised weights** — F32 dot product on dequantised Q-weights
+   still differs from CPU's Q8_K-quantized dot product.
+3. `kernel_mul_mm_hp` and the chatterbox `ggml_mul_mat_set_prec(...,
+   GGML_PREC_F32)` graph walk land as planned; harmless when the
+   matmul falls back to legacy half-tile (other backends).
+4. `CRISPASR_METAL_STRICT_FP=1` knob disables Metal fast-math
+   (`setFastMathEnabled:NO`). Tested — doesn't change the drift, so
+   it's not an FMA/fusion issue.
+5. Per-op intermediate dump knobs in `chatterbox.cpp` for future
+   bisects: `CRISPASR_CHATTERBOX_DUMP_NORM_AT=<t>`, `DUMP_KPROJ_AT`,
+   `DUMP_KROPE_AT`, `DUMP_WK`.
+
+### Remaining work
+
+The proper fix is a Metal `kernel_mul_mv_q4_K_q8_K` (Q4_K weights ×
+Q8_K-quantised input) mirroring CPU's `ggml_vec_dot_q4_K_q8_K`. That
+needs:
+
+1. A Q8_K quantisation kernel that block-quantises F32 input to Q8_K
+   (256-element blocks, one F32 scale per block, plus per-16-element
+   subscale).
+2. A new Metal mul_mv (and mul_mm matrix variant) that consumes
+   Q8_K input and Q4_K weight, doing integer multiplies + F32 scale.
+
+This is ~200-400 lines of Metal kernel code for **each** quant pair
+(Q4_K×Q8_K, Q5_K×Q8_K, Q6_K×Q8_K, Q8_0×Q8_0, ...). A rabbit hole. The
+auto-fallback to CPU remains the practical fix for chatterbox.
+
+For users who want GPU performance: convert chatterbox to F16 weights
+(`chatterbox-t3-f16-regen.gguf`) — F16×F32 matmul matches between
+CPU and GPU bit-for-bit, so chatterbox runs correctly on GPU. The
+caveat: **end-to-end F16+GPU still has audible artefacts** because
+something downstream of T3 (likely s3gen or speech_head F32 matmul
+through some indirect path) introduces additional drift. So even F16
+isn't a clean GPU path. Auto-fallback remains.
+
 2. **T3 sampling can drift on long technical prompts**. The seed=0
    default is deterministic, but particular prompts produce
    degenerate output (e.g. "Stop, stop, stop" repetition or wholly

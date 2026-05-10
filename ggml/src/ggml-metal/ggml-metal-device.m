@@ -227,7 +227,15 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
                 MTLCompileOptions * options = [MTLCompileOptions new];
                 options.preprocessorMacros = prep;
 
-                //[options setFastMathEnabled:false];
+                // CrispASR patch (#83): disable fast-math when CRISPASR_METAL_STRICT_FP=1.
+                // Fast-math allows the compiler to fuse multiplies (FMA can be more
+                // accurate, but operand reordering may downconvert F32 to F16-precision
+                // intermediates inside `dot()` and other built-ins). Strict FP gives
+                // bit-identical CPU/GPU output for chatterbox K projection at the cost
+                // of some throughput.
+                if (getenv("CRISPASR_METAL_STRICT_FP")) {
+                    [options setFastMathEnabled:NO];
+                }
 
                 library = [device newLibraryWithSource:src options:options error:&error];
                 if (error) {

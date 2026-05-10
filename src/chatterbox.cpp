@@ -1115,6 +1115,47 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.attn_norm_w);
 
+        // PLAN #83 diag: name layer-0 intermediates so the per-op CPU/GPU bisect
+        // dump in run_t3_kv can fetch and compare them. Names are unique strings
+        // so only layer 0 leaks into ggml_graph_get_tensor lookups.
+        if (il == 0) {
+            ggml_set_name(x, "L0_norm_out");
+            ggml_set_output(x);
+            ggml_build_forward_expand(gf, x);
+
+            // Independent diagnostic K projection, rope, and pre-cpy view —
+            // computed only when one of the dump knobs is set.  Avoids an
+            // unconditional extra matmul in the production graph.
+            if (std::getenv("CRISPASR_CHATTERBOX_DUMP_NORM_AT") ||
+                std::getenv("CRISPASR_CHATTERBOX_DUMP_KPROJ_AT") ||
+                std::getenv("CRISPASR_CHATTERBOX_DUMP_KROPE_AT") ||
+                std::getenv("CRISPASR_CHATTERBOX_DUMP_WK")) {
+                // Dequantize the layer-0 K weight to F32 so the dump can
+                // compare CPU vs GPU dequant directly (without going through
+                // a matmul). Helps separate dequant precision from matmul
+                // precision.
+                ggml_tensor* W_K_dbg = ggml_cast(ctx0, b.attn_k_w, GGML_TYPE_F32);
+                ggml_set_name(W_K_dbg, "L0_W_K_f32");
+                ggml_set_output(W_K_dbg);
+                ggml_build_forward_expand(gf, W_K_dbg);
+
+                ggml_tensor* K_dbg = ggml_mul_mat(ctx0, b.attn_k_w, x);
+                ggml_mul_mat_set_prec(K_dbg, GGML_PREC_F32);
+                ggml_set_name(K_dbg, "L0_K_proj");
+                ggml_set_output(K_dbg);
+                ggml_build_forward_expand(gf, K_dbg);
+
+                ggml_tensor* K_dbg_3d = ggml_reshape_3d(ctx0, K_dbg, hd, n_kv, T);
+                ggml_tensor* K_rope_dbg = ggml_rope_ext(
+                    ctx0, K_dbg_3d, positions, kvp.rope_freq_factors, /*n_rot*/ hd,
+                    kvp.rope_type, kvp.n_ctx_orig, kvp.rope_theta, /*freq_scale*/ 1.0f,
+                    /*ext_factor*/ 0.0f, /*attn_factor*/ 1.0f, kvp.rope_beta_fast, kvp.rope_beta_slow);
+                ggml_set_name(K_rope_dbg, "L0_K_rope");
+                ggml_set_output(K_rope_dbg);
+                ggml_build_forward_expand(gf, K_rope_dbg);
+            }
+        }
+
         ggml_tensor* attn =
             core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
                                     /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
@@ -1218,6 +1259,59 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
             for (int i = 0; i < std::min(8, vocab); i++)
                 fprintf(stderr, " %.4f", r[i]);
             fprintf(stderr, "\n");
+        }
+    }
+
+    // PLAN #83 diag: dump layer-0 intermediate tensors named in build_graph_t3_kv
+    // (L0_norm_out, L0_K_proj, L0_K_rope) for the requested token position.
+    // Run on CPU and on GPU at the same n_past, diff per-element, find which op
+    // contributes the dominant drift.
+    auto dump_intermediate = [&](const char* env_name, const char* tensor_name, int row_dim_size) {
+        const char* e = std::getenv(env_name);
+        if (!e || !*e)
+            return;
+        const int row_id = (int)std::strtol(e, nullptr, 10);
+        if (n_past + n_tokens <= row_id || n_past > row_id)
+            return;
+        if (use_kv_k != nullptr && use_kv_k != c->kv_k)
+            return;
+        ggml_tensor* t = ggml_graph_get_tensor(gf, tensor_name);
+        if (!t)
+            return;
+        const int local_row = row_id - n_past;
+        const size_t row_bytes = (size_t)row_dim_size * sizeof(float);
+        std::vector<float> buf(row_dim_size);
+        // L0_norm_out and L0_K_proj are 2D (D, T); row stride = D*sizeof(F32).
+        // L0_K_rope is 3D (hd, n_kv, T) — use t->nb[2] for the time stride.
+        const size_t off_bytes = (ggml_n_dims(t) == 3 ? (size_t)local_row * t->nb[2] : (size_t)local_row * t->nb[1]);
+        if (off_bytes + row_bytes > ggml_nbytes(t))
+            return;
+        ggml_backend_tensor_get(t, buf.data(), off_bytes, row_bytes);
+        fprintf(stderr, "[%s] t=%d:", tensor_name, row_id);
+        for (int i = 0; i < std::min(8, row_dim_size); i++)
+            fprintf(stderr, " %.4f", buf[i]);
+        fprintf(stderr, "\n");
+    };
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_NORM_AT", "L0_norm_out", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KPROJ_AT", "L0_K_proj", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KROPE_AT", "L0_K_rope", (int)c->hp.head_dim);
+
+    // Special: dump the dequantised K weight tensor (row 0).  Stride through
+    // the row in chunks to expose any per-block drift.
+    if (const char* e = std::getenv("CRISPASR_CHATTERBOX_DUMP_WK"); e && *e) {
+        if (use_kv_k == nullptr || use_kv_k == c->kv_k) {
+            ggml_tensor* w = ggml_graph_get_tensor(gf, "L0_W_K_f32");
+            if (w) {
+                const int n_dump = std::min(256, (int)w->ne[0]);
+                std::vector<float> wbuf(n_dump);
+                ggml_backend_tensor_get(w, wbuf.data(), 0, n_dump * sizeof(float));
+                for (int chunk = 0; chunk < n_dump; chunk += 8) {
+                    fprintf(stderr, "[L0_W_K_f32] row=0 cols=%d..%d:", chunk, chunk + 7);
+                    for (int i = 0; i < 8 && chunk + i < n_dump; i++)
+                        fprintf(stderr, " %.6f", wbuf[chunk + i]);
+                    fprintf(stderr, "\n");
+                }
+            }
         }
     }
 

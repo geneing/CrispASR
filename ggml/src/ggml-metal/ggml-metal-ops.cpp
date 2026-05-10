@@ -2049,34 +2049,41 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
     // to the matrix-vector kernel
     const int ne11_mm_min = 8;
 
+    // CrispASR patch (#83): when an op carries the GGML_PREC_F32 hint, route
+    // mat-mat through the mul_mv_ext small-batch path for any ne11. The ext
+    // kernel uses scalar `dot(float4,float4)` accumulators (no simdgroup
+    // matmul), giving full F32 precision matching the CPU backend. mul_mm and
+    // even the Apple tensor-API mul_mm both observed to silently downconvert
+    // F32 operands to ~F16 precision in the simdgroup tile multiply on M1-M4
+    // (LEARNINGS §"Root cause located — ggml-metal kernel_mul_mm legacy
+    // path"). Chatterbox T3's multinomial speech-token sampler is uniquely
+    // sensitive to the resulting ~1e-3 K-projection drift; other backends are
+    // unaffected because they don't tag PREC_F32.
+    const enum ggml_prec prec = (enum ggml_prec) ggml_get_op_params_i32(op, 0);
+    const bool prec_f32 = (prec == GGML_PREC_F32);
+
+    const ggml_type tsrc0 = op->src[0]->type;
+    const bool ext_basic_q =
+        tsrc0 == GGML_TYPE_F32  || tsrc0 == GGML_TYPE_F16  || tsrc0 == GGML_TYPE_BF16  ||
+        tsrc0 == GGML_TYPE_Q1_0 || tsrc0 == GGML_TYPE_Q4_0 || tsrc0 == GGML_TYPE_Q4_1  ||
+        tsrc0 == GGML_TYPE_Q5_0 || tsrc0 == GGML_TYPE_Q5_1 || tsrc0 == GGML_TYPE_Q8_0  ||
+        tsrc0 == GGML_TYPE_MXFP4 || tsrc0 == GGML_TYPE_IQ4_NL;
+    const bool ext_k_quant =
+        tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K || tsrc0 == GGML_TYPE_Q6_K ||
+        tsrc0 == GGML_TYPE_Q2_K || tsrc0 == GGML_TYPE_Q3_K;
+    const bool ext_supported = ext_basic_q || ext_k_quant;
+
     // first try to use small-batch mat-mv kernels
     // these should be efficient for BS [2, ~8]
     if (op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
         (
-         (
-          (
-           op->src[0]->type == GGML_TYPE_F32  || // TODO: helper function
-           op->src[0]->type == GGML_TYPE_F16  ||
-           op->src[0]->type == GGML_TYPE_BF16 ||
-           op->src[0]->type == GGML_TYPE_Q1_0 ||
-           op->src[0]->type == GGML_TYPE_Q4_0 ||
-           op->src[0]->type == GGML_TYPE_Q4_1 ||
-           op->src[0]->type == GGML_TYPE_Q5_0 ||
-           op->src[0]->type == GGML_TYPE_Q5_1 ||
-           op->src[0]->type == GGML_TYPE_Q8_0 ||
-           op->src[0]->type == GGML_TYPE_MXFP4 ||
-           op->src[0]->type == GGML_TYPE_IQ4_NL ||
-           false) && (ne11 >= 2 && ne11 <= 8)
-         ) ||
-         (
-          (
-           op->src[0]->type == GGML_TYPE_Q4_K ||
-           op->src[0]->type == GGML_TYPE_Q5_K ||
-           op->src[0]->type == GGML_TYPE_Q6_K ||
-           op->src[0]->type == GGML_TYPE_Q2_K ||
-           op->src[0]->type == GGML_TYPE_Q3_K ||
-           false) && (ne11 >= 4 && ne11 <= 8)
-         )
+         (ext_basic_q && ne11 >= 2 && ne11 <= 8) ||
+         (ext_k_quant && ne11 >= 4 && ne11 <= 8) ||
+         // CrispASR patch (#83): force mul_mv_ext for PREC_F32 even at
+         // larger ne11 — F32-precise dot product accumulator. The kernel
+         // instantiations support r1ptg in {2,3,4,5} (lines 3899+ of
+         // ggml-metal.metal); we pick r1ptg=4 below for ne11>8.
+         (prec_f32 && ext_supported && ne11 >= 2)
         )
        ) {
         // TODO: determine the optimal parameters based on grid utilization
@@ -2103,22 +2110,30 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
         const int16_t r0ptg  = nypsg*nsg;         // num src0 rows per threadgroup
               int16_t r1ptg  = 4;                 // num src1 rows per threadgroup
 
-        // note: not sure how optimal are those across all different hardware. there might be something cleverer
-        switch (ne11) {
-            case 2:
-                r1ptg = 2; break;
-            case 3:
-            case 6:
-                r1ptg = 3; break;
-            case 4:
-            case 7:
-            case 8:
-                r1ptg = 4; break;
-            case 5:
-                r1ptg = 5; break;
-            default:
-                GGML_ABORT("unsupported ne11");
-        };
+        if (prec_f32 && ne11 > 8) {
+            // CrispASR patch (#83): for PREC_F32 with ne11 > 8, pick a fixed
+            // r1ptg=4 — kernel instantiations only cover {2,3,4,5} and the
+            // dispatch grid handles partial tail tiles via the in-kernel
+            // bounds check (`i11 + ir1 < args.ne11`).
+            r1ptg = 4;
+        } else {
+            // note: not sure how optimal are those across all different hardware. there might be something cleverer
+            switch (ne11) {
+                case 2:
+                    r1ptg = 2; break;
+                case 3:
+                case 6:
+                    r1ptg = 3; break;
+                case 4:
+                case 7:
+                case 8:
+                    r1ptg = 4; break;
+                case 5:
+                    r1ptg = 5; break;
+                default:
+                    GGML_ABORT("unsupported ne11");
+            };
+        }
 
         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_ext(lib, op->src[0]->type, op->src[1]->type, nsg, nxpsg, r1ptg);
 

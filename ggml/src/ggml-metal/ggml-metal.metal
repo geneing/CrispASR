@@ -685,14 +685,25 @@ void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & re
     q = q + (il/4) * 32 + 16 * (il&1);
     il = il & 3;
     const uchar2 sc = get_scale_min_k4_just2(is, il/2, xb->scales);
-    const float d   = il < 2 ? xb->d : xb->d / 16.h;
-    const float min = xb->dmin;
+    // CrispASR patch (#83): mirror the CPU `dequantize_row_q4_K` arithmetic
+    // exactly — `d * sc * nibble - dmin * m`, with `nibble = q & 0x0F` (low
+    // half) or `q >> 4` (high half). The legacy version used
+    // `(d/16) * (q & 0xF0)` which is mathematically equivalent but rounds
+    // differently in F32, accumulating ~1e-3 drift on K=1024 dot products
+    // — enough to break chatterbox's multinomial speech-token sampler.
+    const float d   = (float) xb->d;
+    const float min = (float) xb->dmin;
     const float dl = d * sc[0];
     const float ml = min * sc[1];
 
-    const ushort mask = il < 2 ? 0x0F : 0xF0;
-    for (int i = 0; i < 16; ++i) {
-        reg[i/4][i%4] = dl * (q[i] & mask) - ml;
+    if (il < 2) {
+        for (int i = 0; i < 16; ++i) {
+            reg[i/4][i%4] = dl * (float)(q[i] & 0x0F) - ml;
+        }
+    } else {
+        for (int i = 0; i < 16; ++i) {
+            reg[i/4][i%4] = dl * (float)(q[i] >> 4) - ml;
+        }
     }
 }
 
