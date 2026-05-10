@@ -44,6 +44,12 @@ crispasr -m auto --backend whisper -f de.wav --translate
 # Live mic
 crispasr --mic -m auto --backend parakeet
 
+# Text LID — auto-routes by GGUF arch, auto-downloads on first use
+crispasr-lid -m auto --text "Bonjour le monde"           # cstr/cld3-GGUF (default)
+crispasr-lid -m auto:glotlid --text "Bonjour le monde"   # 2102 ISO 639-3 + script
+# Post-ASR text LID
+crispasr -m parakeet.gguf -f speech.wav --lid-on-transcript auto
+
 # JSON with word + token detail
 crispasr -m auto --backend parakeet -f audio.wav -ojf
 
@@ -282,11 +288,63 @@ upstream tools like SubtitleEdit.
 
 ## Language detection (LID)
 
+CrispASR has **two distinct LID paths**: audio-LID (decides what language
+the audio is in, before/during ASR) and text-LID (decides the language of
+a transcript or arbitrary UTF-8 string).
+
+### Audio LID (pre-/in-ASR)
+
 | Flag | Meaning |
 |---|---|
 | `-l auto`, `--detect-language` | Auto-detect the input language. Backends without native lang-detect (cohere, canary, granite, voxtral, voxtral4b) get it via the LID pre-step |
-| `--lid-backend NAME` | LID provider: `whisper` (default), `silero` (95 langs, 16 MB), `ecapa` (107 or 45 langs, 40-43 MB), `firered` (120 langs, 544 MB), or `off` |
-| `--lid-model FNAME` | Override the LID model path (default: auto-downloads `ggml-tiny.bin` ~75 MB on first use) |
+| `--lid-backend NAME` | Audio-LID provider: `whisper` (default), `silero` (95 langs, 16 MB), `ecapa` (107 or 45 langs, 40-43 MB), `firered` (120 langs, 544 MB), or `off` |
+| `--lid-model FNAME` | Override the audio-LID model path (default: auto-downloads `ggml-tiny.bin` ~75 MB on first use) |
+
+### Text LID (post-ASR / standalone)
+
+Runs on a transcript or any UTF-8 string. The dispatcher in
+`src/text_lid_dispatch.{h,cpp}` peeks the GGUF's `general.architecture`
+and picks fastText (GlotLID-V3 / LID-176) or Google CLD3 — same flag,
+same binary, any text-LID GGUF.
+
+| Flag | Meaning |
+|---|---|
+| `--lid-on-transcript FNAME` | After ASR, run a text-LID GGUF on the assembled transcript and emit `lang=<code>\tconf=<score>\tbackend=<name>` to stderr. Accepts a path or `auto[:cld3\|glotlid\|lid-fasttext176]` (default `cld3`, auto-downloaded). Errors are logged but never fail the run |
+
+Standalone CLI: `crispasr-lid` (separate binary, ships with every build):
+
+| Flag | Meaning |
+|---|---|
+| `-m`, `--model PATH\|auto[:variant]` | Path or auto-download key. `auto` / `auto:cld3` → `cstr/cld3-GGUF` (default). `auto:glotlid` → `cstr/glotlid-GGUF`. `auto:lid-fasttext176` → `cstr/fasttext-lid176-GGUF`. A bare canonical filename (e.g. `cld3-f16.gguf`) is also looked up in the registry and downloaded if missing |
+| `--text STR` | Input text (otherwise stdin) |
+| `-k`, `--topk N` | Top-k predictions, one `label\tscore` per line (default 1) |
+| `--quiet` | Suppress the trailing `backend=… variant=… dim=… N labels` summary |
+
+First-use download lands in `~/.cache/crispasr/` (or
+`$CRISPASR_CACHE_DIR` if set). Subsequent runs are instant.
+
+Example — same input, three different label spaces:
+
+```bash
+$ crispasr-lid -m cld3-f16.gguf --text "Bonjour le monde, comment allez-vous?"
+fr	0.999983
+crispasr-lid: backend=lid-cld3 variant=Google CLD3 dim=80 109 labels
+
+$ crispasr-lid -m lid-glotlid-f16.gguf --text "Bonjour le monde, comment allez-vous?"
+fra_Latn	0.983436
+crispasr-lid: backend=lid-fasttext variant=glotlid-v3 dim=256 2102 labels
+
+$ crispasr-lid -m lid-fasttext176-f16.gguf --text "Bonjour le monde, comment allez-vous?"
+fr	0.958174
+crispasr-lid: backend=lid-fasttext variant=fasttext-lid176 dim=16 176 labels
+```
+
+CLD3 is the smallest+fastest option (440 KB F16, 109 langs, Apache-2.0)
+but inherits CLD3's known short-input quirks (`"Hello world"` lands on
+`ky 0.72` consistently — too short to disambiguate; the C++ port
+faithfully reproduces upstream's `pycld3` behaviour). GlotLID-V3 covers
+the most languages (2102 ISO 639-3 + script). LID-176 is **CC-BY-SA-3.0
+(viral)** — pick CLD3 or GlotLID for non-SA distribution.
 
 ## LLM-backend specific
 

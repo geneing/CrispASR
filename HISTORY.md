@@ -3292,3 +3292,98 @@ Files added: 6 new sources / 2 new headers
 (`chatterbox_ve.{h,cpp}`, `chatterbox_s3tok.{h,cpp}`,
 `chatterbox_campplus.{h,cpp}`, `core/kaldi_fbank.{h,cpp}`,
 `core/audio_resample.{h,cpp}`).
+
+### §83 — Text LID: fastText (GlotLID-V3 / LID-176) + Google CLD3 + auto-routing dispatcher (2026-05-10)
+
+Two text-LID backend families landed in one slice. Both run on a
+transcript or any UTF-8 string (no audio); both expose the same C
+ABI shape (init/free/predict/predict_topk/extract_stage); a thin
+dispatcher chooses between them by peeking the GGUF's
+`general.architecture` at load time.
+
+#### `lid_fasttext.{h,cpp}` — GlotLID-V3 + Facebook LID-176
+
+`models/convert-glotlid-to-gguf.py` packages both fastText supervised
+LID families: GlotLID-V3 (flat softmax, 2102 ISO 639-3 + script
+labels, Apache-2.0) and Facebook LID-176 (hierarchical softmax, 176
+ISO 639-1 codes, **CC-BY-SA-3.0** — viral; redistributors of the
+GGUF inherit ShareAlike). Forward path is manual F32/F16 + on-the-fly
+dequant via `ggml_get_type_traits(type)->to_float`, no graph — the
+compute is ~1 MFLOP per call over a large embedding table. Released
+as `cstr/glotlid-GGUF` and `cstr/fasttext-lid176-GGUF`.
+
+Two traps documented in LEARNINGS.md "Text LID via fastText":
+
+* **`</s>` row injection** — fastText's `Dictionary::getLine` injects
+  an `</s>` (always `input_matrix[0]`) at end-of-stream in supervised
+  mode; `model.f.tokenize(text)` does NOT return it. Missing the EOS
+  row drops cosine vs `model.get_sentence_vector` to ~0.973.
+
+* **Hierarchical-softmax sign convention** — LID-176 uses HS, not
+  flat softmax. Per-label `log P = Σ log_sigmoid((2c-1)·f)`. Sign-flip
+  makes predict land in the wrong subtree of the root: fastText says
+  `fr/0.95` for "Bonjour le monde", the buggy port says `en/0.88`.
+
+#### `lid_cld3.{h,cpp}` — Google compact language detector v3
+
+`models/convert-cld3-to-gguf.py` regex-parses the upstream
+`src/lang_id_nn_params.cc` plain-text C++ array literals (1.76 MB
+embedded weight blob, no binary side-car) and dequantizes the six
+`uint8 + per-row bfloat16-scale` embedding tables to F32. Forward
+path runs six feature extractors (4× ContinuousBagOfNgrams at
+sizes 1/2/3/4, RelevantScript, Script) → 80-d concat → FC + ReLU →
+208-d hidden → FC → softmax over 109 ISO 639-1 labels.
+
+Released as `cstr/cld3-GGUF` (Apache-2.0, 440 KB F16 — F16 is the
+*only* viable shipping format because every weight tensor's column
+width is in `{8, 16, 80, 208}`, none of which divide the 32-element
+K-quant block size; `crispasr-quantize` skips them all).
+
+Diff harness: 8/8 PASS at cos≥0.999 across an en/de/fr/ru/zh/ja/hi/pt
+multilingual smoke set on F16 (88/88 stage compares).
+
+Four traps documented in LEARNINGS.md "Text LID via CLD3":
+
+* **bfloat16-style `float16`** — CLD3's `float16` typedef is the top
+  16 bits of fp32 (1+8+7), NOT IEEE binary16 (1+5+10). Decoding
+  `15392u`-style literals via numpy `<f2` silently produces garbage;
+  correct decode is `(uint32(value) << 16).view(float32)`.
+
+* **MurmurHash2-32, NOT CityHash** — `utils.cc:137-183` is textbook
+  MurmurHash2 with `m=0x5BD1E995, r=24, seed=0xBEEF`. The cbog
+  feature IDs use the raw UTF-8 bytes of the ngram string as the
+  hash input, so byte-for-byte hash parity with upstream is
+  mandatory.
+
+* **Hiragana/Katakana/Hangul are NOT separate ULScript values** —
+  they all return `ULScript_Hani=24` from the upstream
+  `ScriptScanner`; a secondary Hangul-vs-Hani codepoint count
+  returns `NUM_ULSCRIPTS=102` only when Korean wins. Mis-mapping
+  these (Hani=43, Devanagari=10) was the dominant cause of early
+  smoke failures (नमस्ते दुनिया → bn, 你好世界 → mr).
+
+* **Full-Unicode lowercase** — ASCII-only case folding flips
+  Cyrillic-language argmax (Привет мир → tg instead of ru) because
+  the cbog ngrams hash uppercase Cyrillic UTF-8 bytes to different
+  feature IDs than upstream's `GetOneScriptSpanLower` produces.
+
+#### `text_lid_dispatch.{h,cpp}` — backend-agnostic façade
+
+Peeks `general.architecture` once at load time, then dispatches each
+public call to the matching backend's C ABI via a flat tag-switch
+(no virtual base, no function-pointer table — both backends already
+mirror each other's shape, so the dispatcher is one integer compare
+per call). Powers both the `crispasr-lid` standalone binary and
+`crispasr --lid-on-transcript`. Same flag, same binary, any text-LID
+GGUF.
+
+End-to-end on this box (one binary, three GGUFs, three label spaces):
+
+```
+$ crispasr-lid -m cld3-f16.gguf            --text "Bonjour le monde, comment allez-vous?"
+fr	0.999983       (lid-cld3, dim=80, 109 labels)
+$ crispasr-lid -m lid-glotlid-f16.gguf     --text "..."
+fra_Latn	0.983436   (lid-fasttext glotlid-v3, dim=256, 2102 labels)
+$ crispasr-lid -m lid-fasttext176-f16.gguf --text "..."
+fr	0.958174       (lid-fasttext fasttext-lid176, dim=16, 176 labels)
+```

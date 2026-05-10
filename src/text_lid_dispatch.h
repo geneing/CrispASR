@@ -37,6 +37,31 @@ struct text_lid_context;
 // supervised). Returns NULL on failure with an error logged to stderr.
 struct text_lid_context* text_lid_init_from_file(const char* gguf_path, int n_threads);
 
+#ifdef __cplusplus
+} // extern "C"
+
+#include <string>
+
+// Resolve `arg` to a usable on-disk GGUF path, auto-downloading from the
+// registry if needed. Accepted forms:
+//
+//   "auto"                       → cstr/cld3-GGUF (smallest, Apache-2.0)
+//   "auto:cld3"                  → same as "auto"
+//   "auto:glotlid"               → cstr/glotlid-GGUF (2102 ISO 639-3)
+//   "auto:lid-fasttext176"       → cstr/fasttext-lid176-GGUF (CC-BY-SA-3.0)
+//   "<filename>" or "<path>"     → if it exists, return as-is; else look up
+//                                  by basename in the registry and download.
+//
+// Returns the absolute path on success, empty string on failure (with an
+// error logged to stderr). `cache_dir_override` is forwarded to
+// `crispasr_cache::ensure_cached_file`; pass an empty string for the
+// default `~/.cache/crispasr/`.
+std::string text_lid_resolve_path(const std::string& arg, const std::string& cache_dir_override = "",
+                                  bool quiet = false);
+
+extern "C" {
+#endif
+
 void text_lid_free(struct text_lid_context* ctx);
 
 // Top-1 prediction. Returns the label string (pointer valid until the

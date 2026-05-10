@@ -145,6 +145,9 @@ Work with all backends.
 |---|---|---|---|---|---|
 | **FireRedPunc** | Punctuation restoration | BERT-base (12L, d=768), 5 classes | Chinese + English | Apache-2.0 | [`cstr/fireredpunc-GGUF`](https://huggingface.co/cstr/fireredpunc-GGUF) |
 | **fullstop-punc** | Punctuation restoration | XLM-RoBERTa-large (24L, d=1024), 6 classes | EN, DE, FR, IT | MIT | [`cstr/fullstop-punc-multilang-GGUF`](https://huggingface.co/cstr/fullstop-punc-multilang-GGUF) |
+| **CLD3** | Text language ID | Embedding-bag → FC + ReLU → softmax (~1.5 MB F32) | 109 ISO 639-1 | Apache-2.0 | [`cstr/cld3-GGUF`](https://huggingface.co/cstr/cld3-GGUF) |
+| **GlotLID-V3** | Text language ID | fastText supervised, flat softmax | 2102 ISO 639-3 + script | Apache-2.0 | [`cstr/glotlid-GGUF`](https://huggingface.co/cstr/glotlid-GGUF) |
+| **LID-176** | Text language ID | fastText supervised, hierarchical softmax | 176 ISO 639-1 | CC-BY-SA-3.0 | [`cstr/fasttext-lid176-GGUF`](https://huggingface.co/cstr/fasttext-lid176-GGUF) |
 
 All runtimes share ggml-based inference. The speech-LLM backends (**qwen3**, **voxtral**, **voxtral4b**, **granite**, **glm-asr**, **kyutai-stt**) inject audio encoder frames directly into an autoregressive language model's input embeddings, instead of using a dedicated CTC/transducer/seq2seq decoder. The **fastconformer-ctc** backend hosts the NeMo FastConformer-CTC standalone ASR family — `stt_en_fastconformer_ctc_{large,xlarge,xxlarge}` and the architecturally-identical `parakeet-ctc-{0.6b,1.1b}` (different training data + tokenizer, same encoder + head shape) — with greedy CTC decoding. Same C++ runtime as the canary-ctc aligner.
 
@@ -294,6 +297,52 @@ These VAD providers are available:
 - **Whisper-VAD-EncDec** *(experimental)* — Whisper-base encoder + TransformerDecoder head, 22 MB Q4_K. Trained on Japanese ASMR; may not generalise well to all domains. Pass `--vad -vm whisper-vad`. Slower than others (~1s vs ~50ms). ([`cstr/whisper-vad-encdec-asmr-GGUF`](https://huggingface.co/cstr/whisper-vad-encdec-asmr-GGUF))
 
 Pass `--lid-backend off` to skip LID entirely.
+
+### Text language identification (post-ASR / standalone)
+
+Audio LID (above) tags **what was spoken**; text LID tags **what was
+written**. Text LID runs on a transcript or any UTF-8 string and is
+useful for routing post-ASR pipelines (translation, punctuation, sub
+selection) without re-running an audio model. Three GGUF families,
+one binary — the dispatcher picks by `general.architecture`:
+
+| Backend | Labels | Size (F16) | License | HF repo |
+|---|---:|---:|---|---|
+| **CLD3** (Google compact language detector v3) | 109 ISO 639-1 | **440 KB** | Apache-2.0 | [`cstr/cld3-GGUF`](https://huggingface.co/cstr/cld3-GGUF) |
+| **GlotLID-V3** (cis-lmu fastText) | 2102 ISO 639-3 + script | 250 MB | Apache-2.0 | [`cstr/glotlid-GGUF`](https://huggingface.co/cstr/glotlid-GGUF) |
+| **LID-176** (Facebook fastText) | 176 ISO 639-1 | 63 MB | CC-BY-SA-3.0¹ | [`cstr/fasttext-lid176-GGUF`](https://huggingface.co/cstr/fasttext-lid176-GGUF) |
+
+¹ LID-176 is **CC-BY-SA-3.0 (viral)** — redistributors of the GGUF
+inherit ShareAlike. CLD3 + GlotLID-V3 are Apache-2.0 with no such
+constraint. Pick CLD3 for the smallest, fastest path; GlotLID for
+maximum coverage (low-resource languages); LID-176 only if you need
+its specific 176-label space and accept the SA obligation.
+
+**Standalone CLI** — auto-routes by GGUF arch, with auto-download:
+
+```bash
+crispasr-lid -m auto --text "Bonjour le monde"        # → cstr/cld3-GGUF (default, ~440 KB)
+crispasr-lid -m auto:glotlid --text "Bonjour le monde" -k 5
+crispasr-lid -m auto:lid-fasttext176 --text "Hallo Welt"
+# Or pass an explicit path / canonical filename (looked up in the registry):
+crispasr-lid -m cld3-f16.gguf --text "你好世界"
+# zh	0.997816
+echo "Привет мир" | crispasr-lid -m auto --quiet
+# ru	0.907322
+```
+
+**Post-ASR pipeline** — `--lid-on-transcript` runs the same dispatcher
+on the assembled transcript (also accepts `auto[:variant]`):
+
+```bash
+crispasr -m ggml-tiny.bin -f speech.wav --lid-on-transcript auto
+# (transcript on stdout)
+# lang=de	conf=0.997123	backend=lid-cld3
+```
+
+The dispatcher (`src/text_lid_dispatch.{h,cpp}`) is a thin C ABI
+façade — one integer compare per call; per-stage diff harness is
+green at cos≥0.999 across 8 multilingual smoke samples.
 
 ---
 

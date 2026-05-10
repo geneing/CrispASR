@@ -322,6 +322,23 @@ constexpr Entry k_registry[] = {
      "~135 MB",
      "kokoro-voice-af_heart.gguf",
      "https://huggingface.co/cstr/kokoro-voices-GGUF/resolve/main/kokoro-voice-af_heart.gguf"},
+
+    // Text-LID — three families, one auto-routing dispatcher
+    // (`src/text_lid_dispatch.cpp`). `lid-cld3` is the default for
+    // `crispasr-lid -m auto` because it's the smallest (440 KB F16),
+    // Apache-2.0, and matches CLD3's full 109-language ISO 639-1 contract.
+    {"lid-cld3", "cld3-f16.gguf",
+     "https://huggingface.co/cstr/cld3-GGUF/resolve/main/cld3-f16.gguf", "~440 KB", nullptr, nullptr},
+    // GlotLID-V3 — fastText supervised, 2102 ISO 639-3 + script labels.
+    // Apache-2.0, ~250 MB F16. Best coverage for low-resource languages.
+    {"lid-glotlid", "glotlid-f16.gguf",
+     "https://huggingface.co/cstr/glotlid-GGUF/resolve/main/glotlid-f16.gguf", "~250 MB", nullptr, nullptr},
+    // Facebook LID-176 — fastText hierarchical-softmax, 176 ISO 639-1.
+    // CC-BY-SA-3.0 (viral). ~63 MB F16. Pick only if you need its
+    // specific 176-label space and accept the SA obligation.
+    {"lid-fasttext176", "fasttext-lid176-f16.gguf",
+     "https://huggingface.co/cstr/fasttext-lid176-GGUF/resolve/main/fasttext-lid176-f16.gguf",
+     "~63 MB", nullptr, nullptr},
 };
 
 // Multi-companion extras. When a backend needs >1 auxiliary file the

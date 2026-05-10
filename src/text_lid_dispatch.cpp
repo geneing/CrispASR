@@ -10,12 +10,15 @@
 #include "text_lid_dispatch.h"
 
 #include "core/gguf_loader.h"
+#include "crispasr_cache.h"
+#include "crispasr_model_registry.h"
 #include "lid_cld3.h"
 #include "lid_fasttext.h"
 
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <sys/stat.h>
 
 namespace {
 
@@ -170,4 +173,80 @@ extern "C" int text_lid_dim(const struct text_lid_context* ctx) {
 
 extern "C" const char* text_lid_backend(const struct text_lid_context* ctx) {
     return ctx ? backend_name(ctx->backend) : backend_name(kBackendUnknown);
+}
+
+// ===========================================================================
+// Path resolution + auto-download (C++-only helper, see header).
+// ===========================================================================
+
+namespace {
+
+bool path_exists(const std::string& p) {
+    struct stat st {};
+    return ::stat(p.c_str(), &st) == 0 && st.st_size > 0;
+}
+
+std::string basename_of(const std::string& p) {
+    auto pos = p.find_last_of("/\\");
+    return pos == std::string::npos ? p : p.substr(pos + 1);
+}
+
+// Map `auto[:variant]` shorthand to a registry backend name. Default
+// (bare `auto` or `auto:cld3`) is CLD3 — smallest, Apache-2.0.
+const char* auto_variant_to_backend(const std::string& arg) {
+    if (arg == "auto" || arg == "auto:cld3" || arg == "auto:lid-cld3")
+        return "lid-cld3";
+    if (arg == "auto:glotlid" || arg == "auto:lid-glotlid")
+        return "lid-glotlid";
+    if (arg == "auto:lid-fasttext176" || arg == "auto:fasttext176" || arg == "auto:lid176")
+        return "lid-fasttext176";
+    return nullptr;
+}
+
+} // namespace
+
+std::string text_lid_resolve_path(const std::string& arg, const std::string& cache_dir_override, bool quiet) {
+    if (arg.empty()) {
+        fprintf(stderr, "text_lid: empty model path\n");
+        return "";
+    }
+
+    // 1. `auto[:variant]` → registry lookup → download.
+    if (arg.rfind("auto", 0) == 0 && (arg.size() == 4 || arg[4] == ':')) {
+        const char* backend = auto_variant_to_backend(arg);
+        if (!backend) {
+            fprintf(stderr,
+                    "text_lid: unknown auto variant '%s'. "
+                    "Supported: auto, auto:cld3, auto:glotlid, auto:lid-fasttext176\n",
+                    arg.c_str());
+            return "";
+        }
+        CrispasrRegistryEntry entry;
+        if (!crispasr_registry_lookup(backend, entry)) {
+            fprintf(stderr, "text_lid: backend '%s' not in registry\n", backend);
+            return "";
+        }
+        return crispasr_cache::ensure_cached_file(entry.filename, entry.url, quiet, "text-lid", cache_dir_override);
+    }
+
+    // 2. Path exists as-is — use it.
+    if (path_exists(arg))
+        return arg;
+
+    // 3. Try registry lookup by basename — handy when the user pasted a
+    //    canonical filename (`cld3-f16.gguf`, `lid-glotlid-f16.gguf`, …)
+    //    without first downloading. Same fallback the main `-m` path uses.
+    CrispasrRegistryEntry entry;
+    if (crispasr_registry_lookup_by_filename(basename_of(arg), entry)) {
+        std::string cached =
+            crispasr_cache::ensure_cached_file(entry.filename, entry.url, quiet, "text-lid", cache_dir_override);
+        if (!cached.empty())
+            return cached;
+    }
+
+    fprintf(stderr,
+            "text_lid: model '%s' not found and no registry hit. "
+            "Pass an existing path, or use one of: auto, auto:cld3, auto:glotlid, auto:lid-fasttext176.\n",
+            arg.c_str());
+    return "";
 }

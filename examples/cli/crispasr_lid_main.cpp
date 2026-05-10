@@ -118,7 +118,13 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    text_lid_context* ctx = text_lid_init_from_file(model_path.c_str(), 1);
+    // Resolve `-m auto[:variant]` and bare-filename inputs against the
+    // registry, downloading into ~/.cache/crispasr/ on first use.
+    const std::string resolved = text_lid_resolve_path(model_path, /*cache_dir_override=*/"", /*quiet=*/quiet);
+    if (resolved.empty()) {
+        return 1;
+    }
+    text_lid_context* ctx = text_lid_init_from_file(resolved.c_str(), 1);
     if (!ctx) {
         // Errors already printed to stderr by the dispatcher / loader.
         return 1;

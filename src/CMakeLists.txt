@@ -875,6 +875,10 @@ set_target_properties(text-lid-dispatch PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(text-lid-dispatch PUBLIC .)
 target_compile_features   (text-lid-dispatch PUBLIC cxx_std_17)
 target_link_libraries     (text-lid-dispatch PUBLIC crispasr-core lid-fasttext lid-cld3)
+# `text_lid_resolve_path()` calls into crispasr_cache::ensure_cached_file
+# and crispasr_registry_lookup — both compiled into the crispasr shared
+# library, not separate targets. The symbols resolve when the consumer
+# (crispasr-lid, libcrispasr) links text-lid-dispatch + crispasr together.
 if(NOT MSVC)
     target_compile_options(text-lid-dispatch PRIVATE -O3)
 endif()

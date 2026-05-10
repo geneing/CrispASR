@@ -31,7 +31,8 @@ symbols. The CLI keeps only presentation + UX policy.
 │   crispasr_model_registry.{h,cpp} backend → canonical GGUF URL    │
 ├───────────────────────────────────────────────────────────────────┤
 │ src/{whisper,parakeet,canary,canary_ctc,cohere,qwen3_asr,         │
-│      voxtral,voxtral4b,granite_speech,silero_lid,pyannote_seg}.cpp│
+│      voxtral,voxtral4b,granite_speech,silero_lid,pyannote_seg,    │
+│      lid_fasttext,lid_cld3,text_lid_dispatch}.cpp                 │
 │   Per-model runtimes (public C APIs)                              │
 ├───────────────────────────────────────────────────────────────────┤
 │ src/core/      — shared model primitives (crispasr-core)          │
@@ -55,7 +56,10 @@ all consume the same symbols.
 | `crispasr_c_api.cpp` | The C-ABI. Exports session open/close/transcribe, VAD, diarize, LID, alignment, cache, registry — everything a wrapper needs. |
 | `crispasr_vad.{h,cpp}` | Silero VAD slicing + whisper-style stitching with timestamp remapping. Used by `crispasr_session_transcribe_vad`. |
 | `crispasr_diarize.{h,cpp}` | Four diarizers: energy (stereo), xcorr (stereo, TDOA), vad-turns (mono, timing), pyannote (mono, GGUF). |
-| `crispasr_lid.{h,cpp}` | whisper-tiny + silero-native language ID with process-wide whisper-context cache. |
+| `crispasr_lid.{h,cpp}` | whisper-tiny + silero-native **audio**-LID with process-wide whisper-context cache. |
+| `lid_fasttext.{h,cpp}` | Text-LID runtime for fastText supervised models — GlotLID-V3 (flat softmax, 2102 ISO 639-3 + script labels) and Facebook LID-176 (hierarchical softmax, 176 ISO 639-1 codes). Pure manual F32/F16 + on-the-fly dequant; no ggml graph. |
+| `lid_cld3.{h,cpp}` | Text-LID runtime for Google CLD3 — six feature extractors (4× cbog, RelevantScript, ScriptFeature) → 80-d concat → FC + ReLU → 208-d hidden → FC → softmax over 109 ISO 639-1 labels. Pure manual F32 forward. |
+| `text_lid_dispatch.{h,cpp}` | Backend-agnostic façade over `lid_fasttext` and `lid_cld3`. Peeks `general.architecture` at load time and dispatches to the matching backend; one C ABI for any text-LID GGUF. Powers `crispasr-lid` and `--lid-on-transcript`. |
 | `crispasr_aligner.{h,cpp}` | canary-CTC + Qwen3-ForcedAligner forced alignment behind one entry point; filename-based dispatch. |
 | `crispasr_cache.{h,cpp}` | WinHTTP / curl / wget download into `~/.cache/crispasr/`; zombie-file detection. |
 | `crispasr_model_registry.{h,cpp}` | Backend → canonical GGUF URL table; fuzzy filename lookup for "did you mean …?" hints. |

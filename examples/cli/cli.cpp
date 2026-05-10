@@ -737,8 +737,9 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
     fprintf(stderr, "  --lid-model FNAME                 [%-7s] optional LID model path (default ggml-tiny.bin)\n",
             params.lid_model.c_str());
     fprintf(stderr,
-            "  --lid-on-transcript FNAME         [%-7s] post-ASR text LID: run lid-fasttext (GlotLID/LID-176) "
-            "or lid-cld3 — auto-routed by GGUF arch — on the transcript; emits lang=<code> to stderr\n",
+            "  --lid-on-transcript FNAME         [%-7s] post-ASR text LID. Path or "
+            "'auto[:cld3|glotlid|lid-fasttext176]' (default cld3, auto-downloaded). "
+            "Emits lang=<code>\\tconf=<x>\\tbackend=<n> to stderr.\n",
             params.lid_on_transcript.c_str());
     fprintf(stderr,
             "  --diarize-method NAME             [%-7s] diarize method: energy|xcorr|vad-turns|sherpa|pyannote|ecapa\n",
@@ -2077,7 +2078,11 @@ int main(int argc, char** argv) {
             if (!params.no_prints)
                 fprintf(stderr, "crispasr[lid-on-transcript]: empty transcript, skipping\n");
         } else {
-            text_lid_context* lid = text_lid_init_from_file(params.lid_on_transcript.c_str(), 1);
+            // Resolve `auto[:variant]` + bare-filename inputs against the
+            // registry, downloading into ~/.cache/crispasr/ on first use.
+            const std::string resolved =
+                text_lid_resolve_path(params.lid_on_transcript, params.cache_dir, params.no_prints);
+            text_lid_context* lid = resolved.empty() ? nullptr : text_lid_init_from_file(resolved.c_str(), 1);
             if (!lid) {
                 fprintf(stderr, "crispasr[lid-on-transcript]: failed to load '%s'\n", params.lid_on_transcript.c_str());
             } else {
