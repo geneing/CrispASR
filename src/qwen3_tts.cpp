@@ -1959,7 +1959,13 @@ bool code_pred_generate_15(qwen3_tts_context* c, const float* past_hidden_d, con
     const int d = (int)hp.cp_d_model;
     const int n_groups = (int)hp.cp_n_code_groups; // 16
     const int top_k = 50;
-    const float temperature = 0.9f;
+    // 0.9 was the original hardcoded value matching the qwen-tts
+    // reference. We now read from cparams so the runtime setter
+    // (`qwen3_tts_set_temperature`, added 0.6.2) actually takes
+    // effect. cparams.temperature defaults to 0.9 in
+    // qwen3_tts_context_default_params(), so untouched callers keep
+    // the historical behaviour.
+    const float temperature = c->params.temperature > 0 ? c->params.temperature : 0.9f;
     const char* dump_dir = env_str("QWEN3_TTS_DUMP_DIR");
 
     // ---- step 0: inputs_embeds = (past_hidden, last_id_hidden), n_past=0 ----
@@ -4811,6 +4817,21 @@ extern "C" struct qwen3_tts_context_params qwen3_tts_context_default_params(void
     p.temperature = 0.0f;
     p.max_codec_steps = 0;
     return p;
+}
+
+// Runtime sampling temperature setter — the code-predictor's
+// top-k sampler (code_pred_generate_15) reads c->params.temperature
+// on every step, so post-init mutation is safe. 0.0 means "fall back
+// to the upstream qwen-tts reference value of 0.9"; pass an explicit
+// non-zero value to override.
+extern "C" void qwen3_tts_set_temperature(struct qwen3_tts_context* ctx, float temperature) {
+    if (!ctx)
+        return;
+    if (temperature < 0.0f)
+        temperature = 0.0f;
+    if (temperature > 4.0f)
+        temperature = 4.0f;
+    ctx->params.temperature = temperature;
 }
 
 static void build_embd_caches(qwen3_tts_context* c) {

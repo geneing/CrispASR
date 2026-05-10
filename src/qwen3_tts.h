@@ -248,6 +248,11 @@ void qwen3_tts_free(struct qwen3_tts_context* ctx);
 
 void qwen3_tts_set_n_threads(struct qwen3_tts_context* ctx, int n_threads);
 
+// Runtime sampling temperature for the code-predictor's top-k sampler
+// (default 0.9 — pass 0.0 to revert to that default; pass any other
+// non-zero value to override).
+void qwen3_tts_set_temperature(struct qwen3_tts_context* ctx, float temperature);
+
 // Compute the 128-mel log-mel spectrogram used by the speaker encoder
 // from 24 kHz mono audio. Returns malloc'd (T_mel × 128) row-major float32.
 // *out_T_mel is set to the number of mel frames. Caller frees with free().

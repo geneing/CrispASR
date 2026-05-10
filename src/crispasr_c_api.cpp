@@ -864,9 +864,20 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
 // `use_gpu` defaults to true so unmodified callers behave like
 // pre-0.6.1 builds (which always passed GPU-on params). `verbosity`
 // defaults to 0 (silent) for the same reason.
+//
+// `flash_attn` and `n_gpu_layers` (added in 0.6.2) follow the same
+// pattern. Today only the whisper backend's `whisper_context_params`
+// has a native `flash_attn` field; other backends accept the toggle
+// but their compute graphs don't yet branch on it (a per-backend
+// kernel-level commit lands those incrementally). `n_gpu_layers`
+// is reserved for backends with a llama.cpp-style layer-offload
+// concept (orpheus / voxtral / qwen3 / granite LLM); -1 means
+// "as many as possible", 0 = CPU-only inference.
 // ─────────────────────────────────────────────────────────────────────
 static thread_local bool g_open_use_gpu_tls = true;
 static thread_local int g_open_verbosity_tls = 0;
+static thread_local bool g_open_flash_attn_tls = true;
+static thread_local int g_open_n_gpu_layers_tls = -1;
 
 struct crispasr_session {
     std::string backend; // "whisper", "parakeet", ...
@@ -1154,6 +1165,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
 
     if (s->backend == "whisper") {
         whisper_context_params cparams = whisper_context_default_params();
+        cparams.use_gpu = g_open_use_gpu_tls;
+        cparams.flash_attn = g_open_flash_attn_tls;
         s->whisper_ctx = whisper_init_from_file_with_params(model_path, cparams);
         if (!s->whisper_ctx) {
             delete s;
@@ -1509,23 +1522,29 @@ CA_EXPORT crispasr_session* crispasr_session_open(const char* model_path, int n_
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Open with explicit runtime params (CrispASR 0.6.1).
+// Open with explicit runtime params (CrispASR 0.6.1, extended 0.6.2).
 //
 // Layout-stable struct via a leading version int — host languages
 // can extend by reading the version field and skipping unknown
-// trailing bytes. Pass `version = 1` for the v1 layout below; future
-// versions append fields and bump the int. NULL = use historical
-// defaults (use_gpu=true, verbosity=0).
+// trailing bytes. v2 (0.6.2) adds `flash_attn` and `n_gpu_layers`
+// in the v1 reserved padding; v1 callers see those fields as zero
+// (which is interpreted as "use defaults" — flash_attn defaults
+// true, n_gpu_layers defaults -1).
 //
 // `backend` may be "" / NULL to delegate to GGUF arch detection
 // (same path as `crispasr_session_open`).
 // ─────────────────────────────────────────────────────────────────
 struct crispasr_open_params_v1 {
-    int abi_version; // = 1
+    int abi_version; // = 1 or 2
     int n_threads;
     int use_gpu;   // 0 = CPU only, non-zero = GPU when available
     int verbosity; // 0 = silent, 1+ = chatty
-    int reserved[8];
+    // ── v2 (0.6.2) additions ───────────────────────────────────────
+    // Set abi_version >= 2 to opt into these fields. v1 callers
+    // get the historical defaults.
+    int flash_attn;    // 0 = off, non-zero = on (default on)
+    int n_gpu_layers;  // -1 = max, 0 = CPU-only LLM, >0 = bound
+    int reserved[6];   // future-compat padding (was 8 in v1; -2 here)
 };
 
 CA_EXPORT crispasr_session* crispasr_session_open_with_params(const char* model_path, const char* backend_name,
@@ -1539,10 +1558,20 @@ CA_EXPORT crispasr_session* crispasr_session_open_with_params(const char* model_
     int n_threads = 4;
     bool use_gpu = true;
     int verbosity = 0;
+    bool flash_attn = true;
+    int n_gpu_layers = -1;
     if (params && params->abi_version >= 1) {
         n_threads = params->n_threads > 0 ? params->n_threads : 4;
         use_gpu = params->use_gpu != 0;
         verbosity = params->verbosity;
+        if (params->abi_version >= 2) {
+            // v2 fields: 0 in flash_attn means "explicitly off"; we
+            // can't distinguish "v1 caller, struct memset to 0" from
+            // "v2 caller, asked for off". The version gate above is
+            // the disambiguator — only read these when v2.
+            flash_attn = params->flash_attn != 0;
+            n_gpu_layers = params->n_gpu_layers;
+        }
     }
 
     // Stash the runtime overrides for the duration of the open call.
@@ -1552,8 +1581,12 @@ CA_EXPORT crispasr_session* crispasr_session_open_with_params(const char* model_
     // and this scoped pair is the simplest correct shape.
     const bool prev_use_gpu = g_open_use_gpu_tls;
     const int prev_verbosity = g_open_verbosity_tls;
+    const bool prev_flash_attn = g_open_flash_attn_tls;
+    const int prev_n_gpu_layers = g_open_n_gpu_layers_tls;
     g_open_use_gpu_tls = use_gpu;
     g_open_verbosity_tls = verbosity;
+    g_open_flash_attn_tls = flash_attn;
+    g_open_n_gpu_layers_tls = n_gpu_layers;
 
     crispasr_session* s = nullptr;
     if (backend_name && backend_name[0] != '\0') {
@@ -1579,6 +1612,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_with_params(const char* model_
 
     g_open_use_gpu_tls = prev_use_gpu;
     g_open_verbosity_tls = prev_verbosity;
+    g_open_flash_attn_tls = prev_flash_attn;
+    g_open_n_gpu_layers_tls = prev_n_gpu_layers;
     return s;
 }
 
@@ -4031,6 +4066,16 @@ CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temper
 #ifdef CA_HAVE_CHATTERBOX
     if (s->chatterbox_ctx) {
         chatterbox_set_temperature((chatterbox_context*)s->chatterbox_ctx, temperature);
+        (void)seed;
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx) {
+        // qwen3-tts's code-predictor sampler reads cparams.temperature
+        // on every step (after the 0.6.2 wiring); 0.0 means "use the
+        // upstream 0.9 default" — pass any other value to override.
+        qwen3_tts_set_temperature((qwen3_tts_context*)s->qwen3_tts_ctx, temperature);
         (void)seed;
         touched++;
     }

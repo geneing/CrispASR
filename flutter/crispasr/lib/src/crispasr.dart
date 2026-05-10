@@ -1593,6 +1593,14 @@ class CrispasrSession {
     int nThreads = 4,
     bool useGpu = true,
     int verbosity = 0,
+    /// CrispASR 0.6.2+: enable flash-attention on backends that have
+    /// a flash-attn path (whisper today; LLM backends incrementally).
+    /// Defaults true to match the ggml convention.
+    bool flashAttn = true,
+    /// CrispASR 0.6.2+: cap on GPU-offloaded transformer layers for
+    /// LLM-based backends. -1 = "as many as possible" (the C-side
+    /// sentinel); 0 = CPU-only LLM inference; >0 = bounded.
+    int nGpuLayers = -1,
     String? backend,
     String? libPath,
   }) {
@@ -1604,13 +1612,17 @@ class CrispasrSession {
     }
     // ABI struct layout (see crispasr_open_params_v1 in
     // src/crispasr_c_api.cpp): int32 abi_version, n_threads, use_gpu,
-    // verbosity + 8 reserved int32. Total 48 bytes.
+    // verbosity, flash_attn, n_gpu_layers + 6 reserved int32. Total
+    // 48 bytes — same size as the v1 layout (we used 2 of the 8
+    // reserved slots).
     final paramsPtr = calloc<Uint8>(48);
     final ints = paramsPtr.cast<Int32>();
-    ints[0] = 1;          // abi_version
+    ints[0] = 2;          // abi_version (v2 — opt into flash_attn / n_gpu_layers)
     ints[1] = nThreads;   // n_threads
     ints[2] = useGpu ? 1 : 0;
     ints[3] = verbosity;
+    ints[4] = flashAttn ? 1 : 0;
+    ints[5] = nGpuLayers;
     final pathPtr = modelPath.toNativeUtf8();
     final bePtr = backend != null && backend.isNotEmpty
         ? backend.toNativeUtf8()
