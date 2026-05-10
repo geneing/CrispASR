@@ -43,6 +43,20 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
         const int pad = n_fft / 2;
         padded_in.assign((size_t)(pad + n_samples + pad), 0.0f);
         std::memcpy(padded_in.data() + pad, base_ptr, (size_t)n_samples * sizeof(float));
+        if (p.center_pad_reflect) {
+            // Reflect-pad matching PyTorch's torch.nn.functional.pad(x, (pad, pad), "reflect").
+            // Left: padded[pad-1-i] = base_ptr[i+1] for i in [0, pad)
+            for (int i = 0; i < pad; i++) {
+                int src = (i + 1) < n_samples ? (i + 1) : n_samples - 1;
+                padded_in[pad - 1 - i] = base_ptr[src];
+            }
+            // Right: padded[pad+n_samples+i] = base_ptr[n_samples-2-i] for i in [0, pad)
+            for (int i = 0; i < pad; i++) {
+                int src = (n_samples - 2 - i) >= 0 ? (n_samples - 2 - i) : 0;
+                padded_in[pad + n_samples + i] = base_ptr[src];
+            }
+        }
+        // else: zero-pad (padded_in already zero-initialized via resize)
         in_ptr = padded_in.data();
         in_len = (int)padded_in.size();
     } else {

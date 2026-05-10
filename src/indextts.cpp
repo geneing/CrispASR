@@ -639,7 +639,8 @@ static std::vector<float> compute_ref_mel(const float* pcm, int n_samples, int i
     p.layout = core_mel::Layout::MelsTime;
     p.fb_layout = core_mel::FbLayout::MelsFreqs;
     p.matmul = core_mel::MatmulPrecision::Double;
-    p.center_pad = true; // matches PyTorch center=True (pads n_fft//2 reflect on each side)
+    p.center_pad = true;
+    p.center_pad_reflect = true; // torchaudio center=True uses reflect padding
 
     int T = 0;
     auto mel = core_mel::compute(pcm_24k.data(), n_samples, hann.data(), n_fft, mel_fb.data(), n_freqs,
@@ -1107,6 +1108,8 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
         fprintf(stderr, "indextts: ref mel: %d frames x 100 bands\n", T_mel);
     }
 
+    const bool dbg = getenv("INDEXTTS_DEBUG") != nullptr;
+
     // Debug: check mel values
     {
         int nnan = 0;
@@ -1120,6 +1123,13 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
         mrms = sqrtf(mrms / std::max((size_t)1, mel.size() - nnan));
         fprintf(stderr, "indextts: mel values rms=%.4f nan=%d/%zu min=%.4f max=%.4f\n", mrms, nnan, mel.size(),
                 *std::min_element(mel.begin(), mel.end()), *std::max_element(mel.begin(), mel.end()));
+        if (dbg) {
+            // MelsTime layout: data[t + mel_band * T_mel]
+            fprintf(stderr, "indextts: mel band0 t0-4: [%.6f, %.6f, %.6f, %.6f, %.6f]\n", mel[0 + 0 * T_mel],
+                    mel[1 + 0 * T_mel], mel[2 + 0 * T_mel], mel[3 + 0 * T_mel], mel[4 + 0 * T_mel]);
+            fprintf(stderr, "indextts: mel band50 t0-2: [%.6f, %.6f, %.6f]\n", mel[0 + 50 * T_mel], mel[1 + 50 * T_mel],
+                    mel[2 + 50 * T_mel]);
+        }
     }
 
     // Step 2: Run Conformer encoder
@@ -1151,9 +1161,7 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
         }
 
         // Debug: dump conv2d element map to find correct dimension ordering
-        // Python reference: y[c=0,t=0,w=0]=-0.286049, y[c=1,t=0,w=0]=-0.637862
-        //                   y[c=0,t=1,w=0]=-0.447213, y[c=0,t=0,w=1]=-0.286049
-        {
+        if (dbg) {
             ggml_tensor* dbg = ggml_graph_get_tensor(gf, "dbg_conv2d_out");
             if (dbg) {
                 int n = (int)ggml_nelements(dbg);
@@ -1181,12 +1189,12 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
             }
         }
         // Debug: check linear output (before PE)
-        {
-            ggml_tensor* dbg = ggml_graph_get_tensor(gf, "dbg_linear_out");
-            if (dbg) {
-                int n = (int)ggml_nelements(dbg);
+        if (dbg) {
+            ggml_tensor* dt = ggml_graph_get_tensor(gf, "dbg_linear_out");
+            if (dt) {
+                int n = (int)ggml_nelements(dt);
                 std::vector<float> d(n);
-                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                ggml_backend_tensor_get(dt, d.data(), 0, n * sizeof(float));
                 float s2 = 0;
                 for (float v : d)
                     s2 += v * v;
@@ -1195,12 +1203,12 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
             }
         }
         // Debug: check pre-transformer output
-        {
-            ggml_tensor* dbg = ggml_graph_get_tensor(gf, "dbg_pre_transformer");
-            if (dbg) {
-                int n = (int)ggml_nelements(dbg);
+        if (dbg) {
+            ggml_tensor* dt = ggml_graph_get_tensor(gf, "dbg_pre_transformer");
+            if (dt) {
+                int n = (int)ggml_nelements(dt);
                 std::vector<float> d(n);
-                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                ggml_backend_tensor_get(dt, d.data(), 0, n * sizeof(float));
                 int nnan = 0;
                 float s2 = 0;
                 for (float v : d) {
@@ -1215,20 +1223,21 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
         }
 
         // Debug: per-block output comparison
-        for (int bi = 0; bi < (int)c->hp.cond_n_layers; bi++) {
-            char bname[32];
-            snprintf(bname, sizeof(bname), "dbg_block_%d", bi);
-            ggml_tensor* dbg = ggml_graph_get_tensor(gf, bname);
-            if (dbg) {
-                int n = (int)ggml_nelements(dbg);
-                std::vector<float> d(n);
-                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
-                float s2 = 0;
-                for (float v : d)
-                    s2 += v * v;
-                // Block output is [512, T_enc]. first5 = first 5 elements of position 0
-                fprintf(stderr, "indextts: block_%d rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", bi, sqrtf(s2 / n),
-                        d[0], d[1], d[2], d[3], d[4]);
+        if (dbg) {
+            for (int bi = 0; bi < (int)c->hp.cond_n_layers; bi++) {
+                char bname[32];
+                snprintf(bname, sizeof(bname), "dbg_block_%d", bi);
+                ggml_tensor* dt = ggml_graph_get_tensor(gf, bname);
+                if (dt) {
+                    int n = (int)ggml_nelements(dt);
+                    std::vector<float> d(n);
+                    ggml_backend_tensor_get(dt, d.data(), 0, n * sizeof(float));
+                    float s2 = 0;
+                    for (float v : d)
+                        s2 += v * v;
+                    fprintf(stderr, "indextts: block_%d rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", bi,
+                            sqrtf(s2 / n), d[0], d[1], d[2], d[3], d[4]);
+                }
             }
         }
 
@@ -1273,12 +1282,12 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
         }
 
         // Debug: read proj_context
-        {
-            ggml_tensor* dbg = ggml_graph_get_tensor(pgf, "dbg_perc_proj");
-            if (dbg) {
-                int n = (int)ggml_nelements(dbg);
+        if (dbg) {
+            ggml_tensor* dt = ggml_graph_get_tensor(pgf, "dbg_perc_proj");
+            if (dt) {
+                int n = (int)ggml_nelements(dt);
                 std::vector<float> d(n);
-                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                ggml_backend_tensor_get(dt, d.data(), 0, n * sizeof(float));
                 float s2 = 0;
                 for (float v : d)
                     s2 += v * v;
@@ -2183,45 +2192,61 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
         ggml_backend_tensor_set(ctx->kv_v, v.data(), 0, v.size());
     };
 
-    // Apply rep penalty to logits based on token history
-    auto apply_rep = [&](float* lg, const std::vector<int32_t>& hist) {
-        if (rep_penalty <= 1.0f)
-            return;
-        for (int32_t t : hist) {
-            if (t >= 0 && t < mel_vocab)
-                lg[t] = (lg[t] > 0) ? lg[t] / rep_penalty : lg[t] * rep_penalty;
-        }
-    };
-
-    // Log-softmax of a single token
-    auto log_softmax_at = [&](const float* lg, int tok) -> double {
+    // Compute full log-softmax over vocabulary, then apply rep penalty to log-probs.
+    // HuggingFace beam search applies RepetitionPenaltyLogitsProcessor AFTER log_softmax:
+    //   log_probs = log_softmax(raw_logits)
+    //   for each token in history: log_probs[t] *= penalty (since log_probs <= 0, this makes them more negative)
+    // Returns a vector of penalized log-probabilities.
+    auto compute_log_probs = [&](const float* lg, const std::vector<int32_t>& hist) -> std::vector<double> {
+        std::vector<double> log_probs(mel_vocab);
+        // Log-softmax
         float mx = lg[0];
         for (int i = 1; i < mel_vocab; i++)
             mx = std::max(mx, lg[i]);
         double sum = 0;
         for (int i = 0; i < mel_vocab; i++)
             sum += std::exp((double)(lg[i] - mx));
-        return (double)(lg[tok] - mx) - std::log(sum);
+        double log_sum = std::log(sum);
+        for (int i = 0; i < mel_vocab; i++)
+            log_probs[i] = (double)(lg[i] - mx) - log_sum;
+
+        // Apply repetition penalty AFTER log_softmax (matching HF behavior).
+        // log_probs are always <= 0, so score < 0 is always true — multiply by penalty.
+        if (rep_penalty > 1.0f) {
+            for (int32_t t : hist) {
+                if (t >= 0 && t < mel_vocab) {
+                    if (log_probs[t] < 0)
+                        log_probs[t] *= (double)rep_penalty;
+                    else
+                        log_probs[t] /= (double)rep_penalty;
+                }
+            }
+        }
+        return log_probs;
     };
 
-    // Seed beams from prefill logits (no rep penalty yet — empty history)
+    // Seed beams from prefill logits (no rep penalty — empty history at first step)
     std::vector<Beam> beams;
     {
         // Save post-prefill KV
         std::vector<uint8_t> prompt_k, prompt_v;
         save_kv(prompt_k, prompt_v);
 
-        // Find top-B from prefill logits
-        std::vector<std::pair<float, int>> scored(mel_vocab);
+        // Compute log-probs (no history for first step, so no penalty applied)
+        std::vector<int32_t> empty_hist;
+        auto lp = compute_log_probs(logits, empty_hist);
+
+        // Find top-B from log-probabilities
+        std::vector<std::pair<double, int>> scored(mel_vocab);
         for (int i = 0; i < mel_vocab; i++)
-            scored[i] = {logits[i], i};
+            scored[i] = {lp[i], i};
         std::partial_sort(scored.begin(), scored.begin() + B, scored.end(),
                           [](auto& a, auto& b) { return a.first > b.first; });
 
         for (int b = 0; b < B; b++) {
             Beam beam;
             beam.tokens.push_back(scored[b].second);
-            beam.score = log_softmax_at(logits, scored[b].second);
+            beam.score = scored[b].first;
             beam.kv_k = prompt_k;
             beam.kv_v = prompt_v;
             beam.finished = (scored[b].second == stop_token);
@@ -2270,19 +2295,18 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
             // Save post-step KV
             save_kv(beam.kv_k, beam.kv_v);
 
-            // Apply rep penalty using this beam's FULL token history
-            apply_rep(lg, beam.tokens);
+            // Compute log-probs then apply rep penalty (matching HF order)
+            auto lp = compute_log_probs(lg, beam.tokens);
+            free(lg);
 
-            // Top-B candidates from this beam
-            std::vector<std::pair<float, int>> sc(mel_vocab);
+            // Top-B candidates from this beam (scored by penalized log-probs)
+            std::vector<std::pair<double, int>> sc(mel_vocab);
             for (int i = 0; i < mel_vocab; i++)
-                sc[i] = {lg[i], i};
+                sc[i] = {lp[i], i};
             std::partial_sort(sc.begin(), sc.begin() + B, sc.end(), [](auto& a, auto& b) { return a.first > b.first; });
             for (int k = 0; k < B; k++) {
-                double lp = log_softmax_at(lg, sc[k].second);
-                cands.push_back({bi, sc[k].second, beam.score + lp});
+                cands.push_back({bi, sc[k].second, beam.score + sc[k].first});
             }
-            free(lg);
         }
 
         // Keep top-B candidates globally

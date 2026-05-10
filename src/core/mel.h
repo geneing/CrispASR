@@ -137,10 +137,14 @@ struct Params {
     // of the per-audio max. Ignored for other normalization modes.
     float fixed_max = 1.5f;
 
-    // Apply symmetric zero-padding of n_fft/2 samples before/after the input
+    // Apply symmetric padding of n_fft/2 samples before/after the input
     // (matches torchaudio / NeMo center=True). Set false if the caller has
     // already padded the input.
     bool center_pad = true;
+
+    // Use reflect padding instead of zero padding for center_pad.
+    // torchaudio and librosa use reflect padding by default. NeMo uses zero padding.
+    bool center_pad_reflect = false;
 
     // Pre-emphasis coefficient: x[i] -= preemph * x[i-1] applied BEFORE
     // center-padding (so the first sample is preserved as-is, matching

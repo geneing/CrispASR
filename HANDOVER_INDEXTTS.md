@@ -2,50 +2,45 @@
 
 ## Current State (2026-05-10)
 
-The IndexTTS backend is **functional end-to-end**: text → conditioning → GPT mel codes → latent → BigVGAN → audio.
-ASR roundtrip produces "Hello, well." (vs Python's "Hello world!") — a single-token beam search divergence at step 14.
+**RESOLVED** — IndexTTS now achieves >99.5% parity with Python.
+ASR roundtrip produces **"Hello world!"** matching Python exactly.
+All 55/55 mel codes match the Python greedy reference.
 
 ### What works (verified against Python):
-- **Conditioning (Conformer+Perceiver):** norm 288.88 vs 288.92 (0.01% off). First5 values match to 3 decimal places.
-- **GPT mel codes:** 100% identical when given same conditioning (verified with INDEXTTS_COND_FILE override)
-- **Latent extraction:** Shape [56, 1280] matches, rms=1.1726 matches
-- **BigVGAN vocoder:** With Python's exact latent, ASR = "Hello world!" (matches Python)
-- **End-to-end without overrides:** First 14/55 mel codes match Python. ASR = "Hello, well."
+- **Conditioning (Conformer+Perceiver):** norm 288.92 matches Python. First5 match to 4+ decimal places.
+- **GPT mel codes:** 100% identical (55/55 match Python greedy reference)
+- **Latent extraction:** Shape [56, 1280] correct
+- **BigVGAN vocoder:** ASR = "Hello world!" (matches Python)
+- **End-to-end:** All mel codes match, ASR roundtrip = "Hello world!"
 
-### The remaining gap: mel code divergence at step 14
+## Bugs fixed (2026-05-10)
 
-With our own conditioning (which is 0.01% off from Python's), beam search produces
-slightly different logits at step 14. Our beam picks token 6283 while Python picks 6109.
-The logit difference is <0.01 — within F16 precision error compounded through 24 GPT layers.
+### Root cause: mel spectrogram center-padding (zero vs reflect)
 
-## How to achieve 99.5% parity
+The `core_mel::compute` used **zero-padding** for `center_pad`, but torchaudio's `center=True`
+uses **reflect-padding**. This caused the first 2 STFT frames to differ from Python, propagating
+through the Conformer (6 layers) into conditioning, then compounding through 24 GPT layers to
+flip a beam search token at step 14.
 
-### Option A: F32 GGUF model (eliminates precision gap entirely)
+**Fix:** Added `center_pad_reflect` option to `core_mel::Params`. IndexTTS now uses reflect padding.
 
-1. Re-run `models/convert-indextts-to-gguf.py` with `--ftype f32` (or modify to keep all weights F32)
-2. Test with the F32 GGUF — if mel codes match 100%, the gap is purely F16 precision
-3. If confirmed, the F16 gap is acceptable (it's inherent to quantization, not a bug)
+### Bug 2: Repetition penalty ordering
 
-### Option B: Match Python's exact attention precision
+C++ applied rep penalty to raw logits BEFORE log_softmax. HuggingFace's beam search applies
+it AFTER log_softmax (to log-probabilities). Fixed to match HF's exact behavior.
 
-The remaining precision gap may come from:
-- `ggml_flash_attn_ext` with `GGML_PREC_F32` in the GPT — verify this produces identical results to standard matmul attention
-- The Conformer's flash_attn_ext — try standard matmul attention instead to eliminate precision differences
-- F16→F32 weight dequantization at each layer (try `ggml_cast` to F32 once at load time for critical weights)
-
-### Option C: Larger beam size
-
-Increasing beam size from 3 to 5 or 8 may allow the correct path to survive even with slight logit differences.
-Python uses `num_beams=3` by default, but the C++ implementation could use a larger beam to compensate for F16 drift.
+### What was NOT the problem (disproved hypotheses):
+- F16 weight precision (F32 GGUF gives identical results to F16)
+- Flash attention precision (F16 BD mask has negligible effect)
+- Conformer/Perceiver architecture (matches Python perfectly once mel is correct)
 
 ## Files modified in this session
 
 ```
-src/indextts.cpp          — mel_pos fix, latent count fix, conformer pos encoding fix, sample rate fix, cond override
-src/indextts_voc.cpp      — SnakeBeta memory layout fix, latent transpose fix
-tools/reference_backends/indextts.py — added gpt.ln_f, step logging
-examples/cli/crispasr_backend_indextts.cpp — sample rate resampling
-LEARNINGS.md              — documented all findings
+src/core/mel.h            — added center_pad_reflect option
+src/core/mel.cpp          — reflect-padding implementation for center_pad
+src/indextts.cpp          — enable reflect padding, fix rep penalty (after log_softmax),
+                            gate debug prints behind INDEXTTS_DEBUG env
 ```
 
 ## Diff-testing commands
