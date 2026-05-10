@@ -780,31 +780,45 @@ jobs:
           name: crispasr-windows-x86_64-vulkan
           path: release/crispasr-windows-x86_64-vulkan.zip
 
+  # `if: always() && !cancelled()` together with no-skipped-needs lets
+  # publish run when SOME builds failed but the rest produced artifacts —
+  # better than blocking the whole release on (e.g.) a transient
+  # windows-cuda toolchain hiccup. The download-artifact step gracefully
+  # ignores missing names, the action-gh-release files: glob is `**/...`
+  # and `fail_on_unmatched_files: false` so any subset that landed gets
+  # uploaded. The next round of builds (or a manual `gh release upload`)
+  # can fill in late-arriving / re-run artifacts incrementally —
+  # softprops/action-gh-release also defaults to NOT clobbering existing
+  # release bodies, so the manually-set release notes survive.
+  #
+  # For v0.6.1 we observed publish blocked for ~30 min waiting on the
+  # 3 CUDA jobs (slow, not failing); meanwhile the 11 fast builds had
+  # produced their artifacts and were sitting unused in run storage.
   publish:
     needs: [build-linux, build-python-linux, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan]
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: false
+
+      - name: List downloaded artifacts (diagnostic)
+        run: find artifacts -maxdepth 3 -type f | sort
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          # Glob ** picks up whatever build jobs actually produced. If a
+          # job failed and didn't upload its artifact, that file is just
+          # absent from the upload set — fail_on_unmatched_files: false
+          # makes the action tolerant.
           files: |
-            artifacts/crispasr-linux-x86_64/crispasr-linux-x86_64.tar.gz
-            artifacts/crispasr-python-linux-x86_64/crispasr-python-linux-x86_64.tar.gz
-            artifacts/crispasr-macos/crispasr-macos.tar.gz
-            artifacts/libcrispasr-macos-arm64/libcrispasr-macos-arm64.tar.gz
-            artifacts/libcrispasr-linux-x86_64/libcrispasr-linux-x86_64.tar.gz
-            artifacts/libcrispasr-linux-x86_64-cuda/libcrispasr-linux-x86_64-cuda.tar.gz
-            artifacts/libcrispasr-windows-x86_64/libcrispasr-windows-x86_64.tar.gz
-            artifacts/libcrispasr-windows-x86_64-vulkan/libcrispasr-windows-x86_64-vulkan.tar.gz
-            artifacts/libcrispasr-windows-x86_64-cuda/libcrispasr-windows-x86_64-cuda.tar.gz
-            artifacts/libcrispasr-windows-x86_64-cpu-legacy/libcrispasr-windows-x86_64-cpu-legacy.tar.gz
-            artifacts/crispasr-windows-x86_64-cpu/crispasr-windows-x86_64-cpu.zip
-            artifacts/crispasr-windows-x86_64-cpu-legacy/crispasr-windows-x86_64-cpu-legacy.zip
-            artifacts/crispasr-windows-x86_64-cuda/crispasr-windows-x86_64-cuda.zip
-            artifacts/crispasr-windows-x86_64-vulkan/crispasr-windows-x86_64-vulkan.zip
-          generate_release_notes: true
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+          fail_on_unmatched_files: false
+          # Preserve existing release body (manually-curated notes)
+          # rather than letting auto-generation overwrite it.
+          generate_release_notes: false
