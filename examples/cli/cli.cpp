@@ -501,6 +501,15 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
         params.stream_json = true;
     } else if (arg == "--stream-final-on-silence-ms") {
         params.stream_final_silence_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "--stream-final-mode") {
+        std::string mode = ARGV_NEXT;
+        if (mode != "redecode" && mode != "prefix") {
+            fprintf(stderr, "crispasr: --stream-final-mode must be 'redecode' or 'prefix' (got '%s')\n", mode.c_str());
+            exit(2);
+        }
+        params.stream_final_mode = mode;
+    } else if (arg == "--stream-utterance-max-sec") {
+        params.stream_utterance_max_sec = std::stoi(ARGV_NEXT);
     } else if (arg == "--firered-vad-debug") {
         // Issue #84: opt-in debug dump from src/firered_vad.cpp.
         // Plumbed via env var so src/ doesn't have to learn about
@@ -817,6 +826,12 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
     fprintf(stderr,
             "  --stream-final-on-silence-ms N    [%-7d] trailing silence (ms) that promotes a partial to final\n",
             params.stream_final_silence_ms);
+    fprintf(stderr,
+            "  --stream-final-mode MODE          [%-7s] final.text source: 'redecode' (re-runs on the utterance "
+            "PCM, best quality) or 'prefix' (LCP-accumulated, no extra encoder pass)\n",
+            params.stream_final_mode.c_str());
+    fprintf(stderr, "  --stream-utterance-max-sec N      [%-7d] cap on per-utterance PCM buffer in redecode mode\n",
+            params.stream_utterance_max_sec);
     fprintf(stderr, "  --firered-vad-debug               [%-7s] enable FireRed VAD probability/fbank stderr dumps\n",
             params.firered_vad_debug ? "true" : "false");
     fprintf(stderr, "  -n N,      --max-new-tokens N     [%-7d] max new tokens for LLM backends\n",

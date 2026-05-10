@@ -1038,21 +1038,33 @@ int crispasr_run_backend(const whisper_params& params_in) {
         pcm_window.reserve(length_samples);
         std::vector<int16_t> read_buf(step_samples);
         std::string prev_text;
-        // Issue #84: opt-in JSON streaming state. `utterance_id`
-        // increments each time we open a new utterance after a
-        // finalize; `current_partial_*` track the open-utterance
-        // surface (text/start) so the final event can echo the
-        // last decoded text + boundaries. `silence_ms` accumulates
-        // trailing silence steps to drive auto-finalization. We
-        // keep `cumulative_samples` in real samples consumed (not
-        // window samples) so `t0`/`t1` map to wall-clock seconds
-        // since stream start.
+        // Issue #84 round 2 (CKwasd retest): the JSON streaming state
+        // machine is utterance-centric, not chunk-centric. Each
+        // utterance is a continuous speech region (delimited by VAD
+        // trailing-silence ≥ `--stream-final-on-silence-ms`, falling
+        // back to "model decoded nothing for N steps" when VAD is off);
+        // `final.text` covers the **whole** utterance, not just the
+        // last rolling-window hypothesis the way round 1 emitted.
+        //
+        // `utterance_pcm` accumulates the speech-region PCM (capped at
+        // `--stream-utterance-max-sec`) so finalize can re-decode the
+        // whole region in one shot — the rolling `pcm_window` evicts
+        // old audio and would lose the start of long utterances. The
+        // `prefix_*` strings drive the alternative `--stream-final-mode
+        // prefix` accumulator (longest-common-prefix across consecutive
+        // partials) for callers that don't want the extra encoder pass.
+        // `last_speech_end_sample` is the stream-timeline sample where
+        // VAD last saw speech; `--stream-final-on-silence-ms` is checked
+        // against `now - last_speech_end_sample`, not "all-empty steps".
         int64_t utterance_id = 0;
         bool have_open_utterance = false;
-        std::string current_partial_text;
-        double current_partial_t0 = 0.0;
-        int silence_ms_accum = 0;
+        int64_t utterance_start_sample = 0;
+        int64_t last_speech_end_sample = 0;
+        std::vector<float> utterance_pcm;
+        std::string prefix_committed;
+        std::string last_partial_text; // dedupe key + prefix-mode tail
         int64_t cumulative_samples = 0;
+        const int64_t utterance_max_samples = (int64_t)params.stream_utterance_max_sec * SR;
         // Track whether the audio source ever produced any samples; if
         // it goes EOF without a single one, the subprocess most likely
         // failed before delivering PCM (e.g. ffmpeg couldn't open the
@@ -1103,12 +1115,38 @@ int crispasr_run_backend(const whisper_params& params_in) {
             }
 
             std::vector<crispasr_segment> segs;
+            // Per-slice text, kept alongside the aggregate `segs` for the
+            // round-2 JSON state machine. Each entry is `(slice, text)`
+            // where the text has had `apply_punc_model` + (optionally)
+            // strip-punctuation applied, matching what the aggregate
+            // `segs` will look like after the post-loop processing —
+            // the aggregate is the source of truth for the legacy plain
+            // text path; this side-channel exists so the JSON path can
+            // attribute each slice's text to the right utterance.
+            std::vector<std::pair<crispasr_audio_slice, std::string>> step_slice_text;
             if (!stream_vad_path.empty()) {
                 const auto slices = crispasr_compute_vad_slices(pcm_window.data(), (int)pcm_window.size(), SR,
                                                                 stream_vad_path.c_str(), stream_vad_opts);
                 for (const auto& sl : slices) {
                     auto slice_segs =
                         backend->transcribe(pcm_window.data() + sl.start, sl.end - sl.start, sl.t0_cs, params);
+                    if (params.stream_json) {
+                        // Apply punc/strip on a copy so the per-slice text
+                        // is in its final form before we hand it to the
+                        // utterance state machine. The aggregate gets the
+                        // same treatment after the loop, so plain-text
+                        // mode behavior is unchanged.
+                        std::vector<crispasr_segment> sl_for_text = slice_segs;
+                        apply_punc_model(punc_ctx.get(), sl_for_text);
+                        if (!params.punctuation) {
+                            for (auto& seg : sl_for_text)
+                                crispasr_strip_punctuation(seg);
+                        }
+                        std::string sl_text;
+                        for (const auto& s : sl_for_text)
+                            sl_text += s.text;
+                        step_slice_text.emplace_back(sl, std::move(sl_text));
+                    }
                     segs.insert(segs.end(), std::make_move_iterator(slice_segs.begin()),
                                 std::make_move_iterator(slice_segs.end()));
                 }
@@ -1122,60 +1160,201 @@ int crispasr_run_backend(const whisper_params& params_in) {
                     crispasr_strip_punctuation(seg);
                 }
             }
+            // No-VAD JSON path: synthesize a single "slice" covering
+            // the whole window so the same state machine handles both
+            // VAD-on and VAD-off cases.
+            if (params.stream_json && stream_vad_path.empty() && !segs.empty()) {
+                std::string all_text;
+                for (const auto& s : segs)
+                    all_text += s.text;
+                crispasr_audio_slice fake_sl{0, (int)pcm_window.size(), 0, 0};
+                step_slice_text.emplace_back(fake_sl, std::move(all_text));
+            }
 
             if (params.stream_monitor && segs.empty()) {
                 fprintf(stderr, "\xC2\xB7"); // · = silence
                 fflush(stderr);
             }
 
-            // Issue #84: structured JSON-Lines streaming events. We
-            // run this branch in place of the plain-text stdout
-            // branch; partial/final/silence cover the lifecycle so
-            // wrappers can route partials to a live caption pane and
-            // only ship finals to a translation API.
+            // Issue #84 round 2: utterance-centric JSON state machine.
+            // The round-1 design echoed the last rolling-window partial
+            // as `final.text`, which dropped the start of utterances
+            // longer than `--stream-length`. The fix is to (a) buffer
+            // the utterance's PCM in `utterance_pcm`, (b) drive
+            // finalization off VAD-detected trailing silence (when VAD
+            // is on) instead of "the whole window decoded to nothing,"
+            // and (c) re-decode the buffered PCM at finalize time so
+            // `final.text` covers the full utterance. The cheaper
+            // `--stream-final-mode prefix` path keeps round-1's cost
+            // by accumulating a longest-common-prefix across partials
+            // instead of re-decoding.
             if (params.stream_json) {
-                const double now_t = (double)cumulative_samples / (double)SR;
-                const double window_seconds = (double)pcm_window.size() / (double)SR;
-                const double window_t0 = (now_t - window_seconds) > 0.0 ? (now_t - window_seconds) : 0.0;
-                if (segs.empty()) {
-                    // Trailing silence — count step toward auto-finalize.
-                    silence_ms_accum += params.stream_step_ms;
-                    if (have_open_utterance && params.stream_final_silence_ms > 0 &&
-                        silence_ms_accum >= params.stream_final_silence_ms) {
-                        fprintf(stdout,
-                                "{\"type\":\"final\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
-                                (long long)utterance_id, crispasr_json_escape(current_partial_text).c_str(),
-                                current_partial_t0, now_t);
-                        fflush(stdout);
-                        have_open_utterance = false;
-                        current_partial_text.clear();
-                        prev_text.clear();
+                const int64_t now_sample = cumulative_samples;
+                const int64_t window_start_sample = cumulative_samples - (int64_t)pcm_window.size();
+
+                auto finalize_utterance = [&]() {
+                    if (!have_open_utterance)
+                        return;
+                    std::string final_text;
+                    if (params.stream_final_mode == "redecode") {
+                        if (!utterance_pcm.empty()) {
+                            // Disable nested VAD: utterance_pcm is already
+                            // the speech region we identified, no need to
+                            // re-segment it (and the nested VAD path would
+                            // discover the same slices we're collapsing here).
+                            whisper_params decode_params = params;
+                            decode_params.vad = false;
+                            decode_params.vad_model.clear();
+                            auto utt_segs =
+                                backend->transcribe(utterance_pcm.data(), (int)utterance_pcm.size(), 0, decode_params);
+                            apply_punc_model(punc_ctx.get(), utt_segs);
+                            if (!params.punctuation) {
+                                for (auto& seg : utt_segs)
+                                    crispasr_strip_punctuation(seg);
+                            }
+                            for (const auto& s : utt_segs)
+                                final_text += s.text;
+                        }
                     } else {
-                        fprintf(stdout, "{\"type\":\"silence\",\"t\":%.3f}\n", now_t);
-                        fflush(stdout);
+                        // prefix mode: stitch committed prefix + last partial tail
+                        if (!last_partial_text.empty() && last_partial_text.size() >= prefix_committed.size() &&
+                            last_partial_text.compare(0, prefix_committed.size(), prefix_committed) == 0) {
+                            final_text = last_partial_text;
+                        } else if (prefix_committed.empty()) {
+                            final_text = last_partial_text;
+                        } else if (last_partial_text.empty()) {
+                            final_text = prefix_committed;
+                        } else {
+                            final_text = prefix_committed + " " + last_partial_text;
+                        }
                     }
-                } else {
-                    std::string text;
-                    for (const auto& s : segs)
-                        text += s.text;
-                    if (!have_open_utterance) {
-                        utterance_id++;
-                        have_open_utterance = true;
-                        current_partial_t0 = window_t0;
+                    const double t0 = (double)utterance_start_sample / (double)SR;
+                    const double t1 = (double)last_speech_end_sample / (double)SR;
+                    fprintf(stdout,
+                            "{\"type\":\"final\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
+                            (long long)utterance_id, crispasr_json_escape(final_text).c_str(), t0, t1);
+                    fflush(stdout);
+                    have_open_utterance = false;
+                    utterance_pcm.clear();
+                    prefix_committed.clear();
+                    last_partial_text.clear();
+                };
+
+                auto open_utterance_at = [&](int window_offset, int64_t stream_start) {
+                    utterance_id++;
+                    have_open_utterance = true;
+                    utterance_start_sample = stream_start;
+                    last_speech_end_sample = stream_start;
+                    if (window_offset < 0)
+                        window_offset = 0;
+                    if (window_offset > (int)pcm_window.size())
+                        window_offset = (int)pcm_window.size();
+                    utterance_pcm.assign(pcm_window.begin() + window_offset, pcm_window.end());
+                    prefix_committed.clear();
+                    last_partial_text.clear();
+                };
+
+                auto on_partial_text = [&](const std::string& new_text) {
+                    if (new_text.empty() || new_text == last_partial_text)
+                        return;
+                    // Maintain the prefix accumulator so prefix-mode
+                    // finalization has accumulated state ready (also
+                    // cheap to keep updated when redecode is the active
+                    // mode — it's just string compares).
+                    if (last_partial_text.empty()) {
+                        // first partial of this utterance — nothing to commit yet
+                    } else if (new_text.size() + 16 < last_partial_text.size()) {
+                        // Window rolled past: the previous partial had
+                        // content that's now gone. Commit it as stable.
+                        if (last_partial_text.size() > prefix_committed.size())
+                            prefix_committed = last_partial_text;
+                    } else {
+                        size_t lcp = 0;
+                        const size_t lim = std::min(last_partial_text.size(), new_text.size());
+                        while (lcp < lim && last_partial_text[lcp] == new_text[lcp])
+                            ++lcp;
+                        if (lcp > prefix_committed.size())
+                            prefix_committed = last_partial_text.substr(0, lcp);
                     }
-                    silence_ms_accum = 0;
-                    if (!text.empty() && text != prev_text) {
-                        current_partial_text = text;
-                        prev_text = text;
-                        fprintf(
-                            stdout,
+                    last_partial_text = new_text;
+                    const double t0 = (double)utterance_start_sample / (double)SR;
+                    const double t1 = (double)cumulative_samples / (double)SR;
+                    fprintf(stdout,
                             "{\"type\":\"partial\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
-                            (long long)utterance_id, crispasr_json_escape(text).c_str(), current_partial_t0, now_t);
-                        fflush(stdout);
+                            (long long)utterance_id, crispasr_json_escape(new_text).c_str(), t0, t1);
+                    fflush(stdout);
+                };
+
+                const bool was_open_at_step_start = have_open_utterance;
+                bool utterance_just_opened = false;
+
+                // Drive the utterance state machine over the per-slice
+                // results we collected above. For VAD-on, each slice is
+                // a real VAD speech region; for VAD-off, there's at
+                // most one synthetic "whole window" slice.
+                for (const auto& [sl, sl_text] : step_slice_text) {
+                    const int64_t s_start = window_start_sample + (int64_t)sl.start;
+                    const int64_t s_end = window_start_sample + (int64_t)sl.end;
+
+                    // Silence-driven finalize: if the gap between the
+                    // last speech end and this slice's start is wider
+                    // than the threshold, close the open utterance
+                    // before opening a new one for this slice.
+                    if (have_open_utterance && params.stream_final_silence_ms > 0 &&
+                        (s_start - last_speech_end_sample) * 1000 / SR >= params.stream_final_silence_ms) {
+                        finalize_utterance();
                     }
+
+                    if (!have_open_utterance) {
+                        // Open utterance starting from this slice's
+                        // window-relative start. (For the no-VAD
+                        // synthetic slice this is offset 0 = start of
+                        // the rolling buffer, which is the best we can
+                        // do without VAD timing.)
+                        open_utterance_at((int)sl.start, s_start);
+                        utterance_just_opened = true;
+                    }
+
+                    if (s_end > last_speech_end_sample)
+                        last_speech_end_sample = s_end;
+
+                    on_partial_text(sl_text);
                 }
+
+                // Append this step's NEW samples to utterance_pcm (only
+                // when the utterance was already open at step start —
+                // otherwise the open path already copied the relevant
+                // tail of pcm_window, which includes the new samples).
+                if (have_open_utterance && was_open_at_step_start && !utterance_just_opened) {
+                    utterance_pcm.insert(utterance_pcm.end(), pcm_window.end() - n_new, pcm_window.end());
+                }
+
+                // Cap the per-utterance buffer so monologues don't OOM.
+                // When exceeded, force-finalize and let the next step's
+                // speech open a fresh utterance with a new id.
+                if (have_open_utterance && (int64_t)utterance_pcm.size() > utterance_max_samples) {
+                    last_speech_end_sample = now_sample;
+                    finalize_utterance();
+                }
+
+                // End-of-step trailing-silence check: handles the case
+                // where this step had no speech at all (step_slice_text
+                // empty) but an utterance is open and trailing silence
+                // has accumulated beyond the threshold.
+                if (have_open_utterance && step_slice_text.empty() && params.stream_final_silence_ms > 0 &&
+                    (now_sample - last_speech_end_sample) * 1000 / SR >= params.stream_final_silence_ms) {
+                    finalize_utterance();
+                }
+
+                // Heartbeat silence event for consumers that need
+                // timing even during pauses.
+                if (step_slice_text.empty()) {
+                    fprintf(stdout, "{\"type\":\"silence\",\"t\":%.3f}\n", (double)now_sample / (double)SR);
+                    fflush(stdout);
+                }
+
                 if (params.stream_monitor) {
-                    fprintf(stderr, segs.empty() ? "" : "\xE2\x9C\x93");
+                    fprintf(stderr, step_slice_text.empty() ? "" : "\xE2\x9C\x93");
                     fflush(stderr);
                 }
                 continue;
@@ -1218,13 +1397,45 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 fflush(stderr);
             }
         }
-        // Issue #84: flush any open utterance as a final on EOF so
-        // wrappers don't miss the tail of the last spoken segment.
+        // Issue #84 round 2: flush any open utterance as a final on
+        // EOF so wrappers don't miss the tail of the last spoken
+        // region. Same dual-path (redecode / prefix) as the in-loop
+        // finalize. `t1` falls back to `cumulative_samples / SR` when
+        // we never saw a "speech ended" event before the pipe closed.
         if (params.stream_json && have_open_utterance) {
-            const double now_t = (double)cumulative_samples / (double)SR;
+            std::string final_text;
+            if (params.stream_final_mode == "redecode") {
+                if (!utterance_pcm.empty()) {
+                    whisper_params decode_params = params;
+                    decode_params.vad = false;
+                    decode_params.vad_model.clear();
+                    auto utt_segs =
+                        backend->transcribe(utterance_pcm.data(), (int)utterance_pcm.size(), 0, decode_params);
+                    apply_punc_model(punc_ctx.get(), utt_segs);
+                    if (!params.punctuation) {
+                        for (auto& seg : utt_segs)
+                            crispasr_strip_punctuation(seg);
+                    }
+                    for (const auto& s : utt_segs)
+                        final_text += s.text;
+                }
+            } else {
+                if (!last_partial_text.empty() && last_partial_text.size() >= prefix_committed.size() &&
+                    last_partial_text.compare(0, prefix_committed.size(), prefix_committed) == 0) {
+                    final_text = last_partial_text;
+                } else if (prefix_committed.empty()) {
+                    final_text = last_partial_text;
+                } else if (last_partial_text.empty()) {
+                    final_text = prefix_committed;
+                } else {
+                    final_text = prefix_committed + " " + last_partial_text;
+                }
+            }
+            const double t0 = (double)utterance_start_sample / (double)SR;
+            const double t1 = last_speech_end_sample > 0 ? (double)last_speech_end_sample / (double)SR
+                                                         : (double)cumulative_samples / (double)SR;
             fprintf(stdout, "{\"type\":\"final\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
-                    (long long)utterance_id, crispasr_json_escape(current_partial_text).c_str(), current_partial_t0,
-                    now_t);
+                    (long long)utterance_id, crispasr_json_escape(final_text).c_str(), t0, t1);
             fflush(stdout);
         }
         fprintf(stdout, "\n");

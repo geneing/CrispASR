@@ -68,7 +68,52 @@ instead of trailing silence).
 
 `t0` / `t1` are wall-clock seconds since stream start, derived from
 the cumulative sample count, so they map to the same timeline as the
-input PCM.
+input PCM. `t0` marks where the **utterance** started (first VAD
+speech frame, or first non-empty model decode in no-VAD mode); `t1`
+marks the last detected speech frame for `final` events, or the
+current decoder-step time for `partial`.
+
+### Finalization timing
+
+Finalization fires when there has been **`--stream-final-on-silence-ms`
+worth of trailing silence after the last detected speech**, not when
+the entire rolling window has decoded to empty. With VAD enabled the
+silence detector uses each VAD slice's end time directly; without VAD
+the fallback is "the model decoded nothing for that long."
+
+The practical effect: a speaker who pauses mid-paragraph for ~800 ms
+gets a `final` per natural pause, instead of one giant final at the
+end of the recording. Set `--stream-final-on-silence-ms` higher
+(e.g. `2000`) if you want fewer finalizations / longer-form chunks.
+
+### How `final.text` is built — `--stream-final-mode`
+
+Two modes; `redecode` is the default.
+
+```bash
+# Best quality — re-runs the backend on the buffered utterance PCM at
+# finalize time. final.text is guaranteed to cover [t0..t1] regardless
+# of how the rolling window evicted audio.
+crispasr --stream --stream-json --stream-final-mode redecode ...
+
+# Cheaper — no extra encoder pass. final.text is built from a
+# longest-common-prefix accumulator across consecutive partials, with
+# the last partial appended. Subject to text duplication when the
+# rolling window evicts mid-utterance audio.
+crispasr --stream --stream-json --stream-final-mode prefix ...
+```
+
+In `redecode` mode CrispASR buffers the speech-region PCM in memory
+(capped at `--stream-utterance-max-sec`, default `60` s — about 4 MB
+at 16 kHz mono float). When the cap is hit the current utterance
+auto-finalizes and the next speech opens a new utterance with a
+fresh `utterance_id`. For most live-captioning / translation use
+cases the redecode path is what you want — its output covers the
+whole utterance the way `t0`/`t1` advertise.
+
+`prefix` mode preserves round-1 cost (no extra `transcribe()` call)
+at the price of imperfect text reconstruction on long utterances.
+Useful when the encoder is large and the per-chunk budget is tight.
 
 ## Microphone (`--mic`)
 
