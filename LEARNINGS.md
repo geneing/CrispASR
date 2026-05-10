@@ -3507,6 +3507,109 @@ full CPU. `CRISPASR_CHATTERBOX_FORCE_GPU=1` enables the new
 kernel + FA→CPU path; tokens diverge at step 11+ but layer 0 is
 bit-identical.
 
+### Round 5 (2026-05-10) — FA-input bisect: every input bit-identical, output drifts
+
+After the Round 4 kernel fix, layer-0 was bit-identical CPU/GPU
+end-to-end (every named tensor: norm, K/Q/V proj, K rope, attn out,
+FFN out — all match). Layer 1 K cache and V cache were also
+bit-identical at every sampled position (t=0, 10, 20, 30, 40, 45) on
+both halves. So the input to layer-1 attention is reliably
+bit-identical. Yet **layer-1 attn out (post out_proj) drifts ~1e-4**
+and propagates by layer 29 to ~3e-3, blowing up to ~0.1–0.2 in
+end-of-prefill logits. AR token sequence matches CPU exactly through
+decode step 11, then diverges.
+
+Bisect-round-5 added named graph outputs in `core_attn::kv_self_attn`
+for the FA inputs and outputs (`CRISPASR_CORE_ATTN_DUMP_FA_LAYER=N`):
+
+| Stage at layer 1, t=45  | CPU vs GPU       |
+|-------------------------|------------------|
+| Q post-rope             | bit-identical    |
+| Kfull (FA input)        | bit-identical    |
+| Vfull (FA input)        | bit-identical    |
+| **FA output**           | **drifts 1e-4**  |
+| out_proj input (= FA reshape) | drifts 1e-4 (propagated) |
+| attn out (post out_proj)| drifts 1e-4 (propagated) |
+
+`flash_attn` was confirmed routed to CPU on every layer (5100 of 5100
+T3 FA ops on CPU; the 30 Metal FA ops counted are S3Gen). So both
+halves invoke `ggml_compute_forward_flash_attn_ext_f16` with
+bit-identical Q, K, V, mask, scale. The function is deterministic, yet
+output differs.
+
+Forced single-thread (`-t 1`) didn't change the drift, ruling out
+ggml-cpu's threaded reduction order. Tested with both default
+multi-threaded and `-t 1`.
+
+The puzzle: layer 0 stays bit-identical (FA inputs and output match),
+but starting from layer 1 the FA output diverges despite identical
+inputs. The split between layer 0 and layer 1 strongly suggests
+something about the second-or-later FA invocation in a graph that
+mixes Metal and CPU backends.
+
+Possible explanations to chase next session:
+
+1. **Memory ordering / barrier** — Apple unified memory shares physical
+   buffers between CPU and GPU. When a CPU-routed op (FA) writes its
+   output and a subsequent GPU-routed op (out_proj) reads it, the
+   ggml-backend scheduler should emit a sync. If the sync is missing
+   for the second-or-later layer, the GPU might read stale or
+   half-flushed CPU writes.
+2. **Backend-internal cache pollution** — ggml-cpu reuses internal
+   thread-local scratch for FA's softmax. If that scratch was
+   touched by a prior op and not cleared, the second FA invocation
+   could pick up garbage in unaccounted bytes.
+3. **Different CPU FA chunking depending on graph context** —
+   `ggml_compute_forward_flash_attn_ext_f16` has multiple internal
+   paths (one_chunk, tiled). The chunk decision uses `ne01` and
+   thread count; if these differ between a CPU-only run and a
+   Metal-routed run (different graph structure passed to the
+   ggml-cpu backend), chunk boundaries shift and F32 reductions land
+   on different roundings.
+4. **`ggml_cont` produces F16 cache view differently on Metal** —
+   even though I dumped K cache values and they matched at sampled
+   positions, the layout/stride of the resulting Kfull contiguous
+   tensor might differ, putting bytes in different addresses, which
+   could affect SIMD-aligned loads in CPU FA.
+
+Diagnostic infra ready for round 6:
+
+- `CRISPASR_CORE_ATTN_DUMP_FA_LAYER=N` — names FA inputs/output of
+  layer N as graph outputs.
+- `CRISPASR_CORE_ATTN_DUMP_FA_AT=t` / `_Q_AT` / `_KFULL_AT` / `_VFULL_AT`
+  — fetch and print the named outputs for position t.
+- `CRISPASR_CHATTERBOX_DUMP_KV_LAYER=N`, `_DUMP_KV_AT=t`,
+  `_DUMP_VV_AT=t` — KV cache dump per layer.
+- `CRISPASR_CHATTERBOX_DUMP_LAYER=N`, `_DUMP_ATTN_AT=t`, `_DUMP_FFN_AT=t`,
+  `_DUMP_NORM_AT=t`, `_DUMP_KPROJ_AT=t`, `_DUMP_QPROJ_AT=t`,
+  `_DUMP_VPROJ_AT=t`, `_DUMP_KROPE_AT=t` — per-layer per-stage dumps.
+
+### Benchmark (2026-05-10)
+
+Measured end-to-end on chatterbox-base T3 Q4_K (\"Ask not what your
+country can do for you, ask what you can do for your country\",
+median of 3 runs):
+
+| Path                                               | wall time |
+|----------------------------------------------------|-----------|
+| CPU (auto-fallback, default)                       | ~66 s     |
+| GPU FORCE_GPU=1 (kernel_mul_mv_q4_K_q8_K + FA→CPU) | ~58 s     |
+
+~12% speedup, no regression. End-to-end audio with FORCE_GPU=1
+produces partially intelligible cloned speech (\"They put your\"
+recognised by ASR vs the canonical \"Ask not what your country can
+do for you...\" on the CPU path). The token sequence matches CPU
+through decode step 11, then diverges due to the layer-1+ residual.
+
+### Production default
+
+Auto-fallback to full CPU remains the production default — the
+~1e-4 layer-1+ drift is too small to hurt CPU output but flips
+chatterbox's multinomial speech-token sampler around step 11+ on the
+GPU path, producing audibly degraded clones. The
+`CRISPASR_CHATTERBOX_FORCE_GPU=1` knob unlocks the new kernel for
+debug/perf experimentation.
+
 2. **T3 sampling can drift on long technical prompts**. The seed=0
    default is deterministic, but particular prompts produce
    degenerate output (e.g. "Stop, stop, stop" repetition or wholly
