@@ -44,6 +44,10 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **DONE** | [#75 /v1/audio/speech OpenAI parity round 1](#75-v1audiospeech-openai-feature-parity-round-1) | Small-Medium | PR #63 merged + corrective batch (`d35940b`…`85302c5`) + 75a/75b (`b932fa9`) + 75d chunking (`0bff2d7`) shipped 2026-05-05; 75c-opt-1 (server-side speed resampler) included in `b932fa9`. Pending: 75c-opt-2 native-backend duration knobs, 75e (streaming/mp3/upload) — each its own work item. → HISTORY §81 |
 | **MEDIUM** | [#80 nano-cohere-transcribe-inspired tweaks](#80-nano-cohere-transcribe-inspired-perf--chunking-tweaks) | Small | 80c done; 80b energy chunker in progress; 80a parked (measurement: <1 % of wall on Metal); 80d/80e TODO |
 | **DEFERRED** | [#81 Nemotron-Speech-Streaming-EN-0.6B](#81-nemotron-speech-streaming-en-06b--first-cache-aware-streaming-native-asr) | M-L | NVOML license, ~60–75 % reuse from parakeet/canary; the new bit is cache-aware FastConformer streaming. Wait for `--stream-json` (issue #84) to settle + a second user request (only mention so far is issue #85) before starting. |
+| **MEDIUM** | [#86 Per-backend flash-attention wiring](#86-per-backend-flash-attention-wiring-crisperweaver-driven) | 2–3 days | Plumbing shipped 0.6.2; kernel-level wiring per backend is the remaining work. Whisper done; orpheus/chatterbox-T3 are the next-best pickings. |
+| **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
+| **MEDIUM** | [#88 Kokoro length-scale + vibevoice diffusion steps](#88-kokoro-length-scale--vibevoice-diffusion-step-runtime-knobs) | 1 day combined | Two backend-internal refactors; CrisperWeaver Synthesize screen already has placeholder sliders (client-side resample / no-op today). |
+| **MEDIUM** | [#89 Flash-attn field migration](#89-per-backend-flash_attn-field-migration-preq-for-86) | ~2 hours | Mechanical struct-field plumbing across the 12 backends with `use_gpu`; prereq for #86. |
 
 **Recently completed** (full write-ups in HISTORY.md): **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 
@@ -2312,3 +2316,204 @@ When demand materializes: **realistic estimate 3–5 days of focused
 work** for someone who's already touched parakeet/canary, plus
 benchmarking against the upstream Open ASR Leaderboard table to
 confirm parity on the published WERs.
+
+---
+
+## 86. Per-backend flash-attention wiring (CrisperWeaver-driven)
+
+**Status:** open. Plumbing complete in 0.6.2 (commit `ff5536a6`),
+kernel-level wiring per backend is the remaining work.
+
+### Context
+
+CrisperWeaver's *Settings → Performance → ASR flash-attention*
+toggle ships via `crispasr_session_open_with_params` (open params
+struct v2 added in 0.6.2). The toggle threads through to a thread-
+local `g_open_flash_attn_tls` that every backend's init arm can
+read to set `cparams.flash_attn` on its context_params struct.
+
+**Today only whisper actually consumes the flag at the kernel
+level** — `whisper_context_params` already has a `flash_attn` field
+that whisper.cpp branches on internally (it switches to
+`ggml_flash_attn_ext` for the QKV → softmax → V product when set).
+
+Other backends accept the toggle but their compute graphs still
+build the historical `ggml_soft_max_ext(KQ)` path. For users on
+Metal, that's a measurable perf gap on every long-running LLM
+backend (orpheus, voxtral, qwen3 ASR, qwen3-tts, granite-speech,
+chatterbox-T3, gemma4-e2b).
+
+### Per-backend status
+
+| Backend | Has `use_gpu` field | Has `flash_attn` field | Compute graph branch | Effort |
+|---|---|---|---|---|
+| whisper | ✅ (whisper.cpp upstream) | ✅ | ✅ | DONE |
+| parakeet | ✅ | ❌ | — | Small (Conformer encoder) |
+| canary | ✅ | ❌ | — | Small (encoder SA + decoder XA) |
+| qwen3 (asr) | ✅ | ❌ | — | Medium (Whisper-like enc + Qwen3 LLM) |
+| cohere | ✅ | ❌ | — | Small (Conformer encoder) |
+| granite_speech | ✅ | ❌ | — | Medium (Conformer + Granite LLM) |
+| voxtral | ✅ | ❌ | — | Medium (Whisper enc + Mistral 3B) |
+| voxtral4b | ✅ | ❌ | — | Medium (causal enc + SWA decoder) |
+| vibevoice | ✅ | ❌ | — | Small (σ-VAE encoder + Qwen2.5 talker) |
+| qwen3_tts | ✅ | ❌ | — | Medium (talker + code-predictor) |
+| orpheus | ✅ | ❌ | — | Small-Medium (Llama 3.2 3B AR loop) |
+| kokoro | ✅ | ❌ | — | Small (StyleTTS2-derived; less impact) |
+| chatterbox | ✅ | ❌ | — | Medium (T3 AR + S3Gen flow-matching) |
+
+### Approach (per-backend recipe)
+
+For each backend with a transformer attention block:
+
+1. Add `bool flash_attn` to `*_context_params` (default-init to true
+   in `*_context_default_params()`).
+2. Plumb `g_open_flash_attn_tls → cparams.flash_attn` in
+   `crispasr_session_open_explicit`'s arm for that backend (mirror
+   the existing `cparams.use_gpu` line).
+3. In the compute graph, swap the QKV path:
+   - Before: `ggml_soft_max_ext(ggml_mul_mat(K, Q), scale)` then
+     `ggml_mul_mat(V_T, softmax_out)`.
+   - After: branch on `cparams.flash_attn`:
+     - true → `ggml_flash_attn_ext(Q, K, V, mask, scale, ...)`
+     - false → keep the historical path.
+4. Verify the Metal kernel for `flash_attn_ext` exists for the
+   relevant head dim. Most are covered (D ∈ {64, 80, 96, 112, 128})
+   but check before committing.
+5. Diff-harness round-trip: dump pre/post-attention tensors with
+   the flag on vs off, confirm the kernels agree to 1e-3 (Metal
+   F16 fast-math drift is the typical failure mode — use
+   `GGML_PREC_F32` op_param if needed; same fix as #83).
+
+### Recommended order
+
+1. **orpheus + chatterbox-T3** — Llama-style AR loops, biggest
+   wall-clock win on long generations (3 B Llama / T3 dominate
+   the synth budget). Reuses the same `ggml_flash_attn_ext` pattern
+   per-block.
+2. **voxtral / voxtral4b / qwen3 ASR / granite-speech** — LLM-based
+   ASR backends where flash-attn helps both the Whisper-style
+   encoder and the LLM decoder.
+3. **qwen3-tts** — talker is Qwen3-style transformer; same recipe
+   as qwen3 ASR.
+4. **parakeet / canary / cohere** — Conformer encoders. Lower per-
+   call benefit but sums up for batch-transcribe users.
+5. **vibevoice / kokoro** — smallest impact; do last or skip.
+
+### Effort estimate
+
+~4–6 hours per LLM backend (orpheus/voxtral/qwen3/granite/chatterbox),
+~2 hours per Conformer (parakeet/canary/cohere). Total realistic
+sweep: 2–3 focused days, can be split across separate PRs since
+each backend is independent.
+
+---
+
+## 87. `gpu_backend` runtime selector (multi-backend ggml build)
+
+**Status:** open. Needs ggml-side support to land first.
+
+### Context
+
+CrisperWeaver's *Settings → Performance* exposes an "ASR on GPU"
+boolean today. The deeper knob — picking BETWEEN Metal, CUDA,
+Vulkan at runtime when more than one is built into libcrispasr —
+isn't doable yet because each `*_init_from_file` calls a single
+`ggml_backend_*_init()` directly, and the CMake flag picks which
+ggml backend gets compiled in.
+
+### What ggml supports today
+
+`ggml_backend_*_init()` returns a per-backend handle. Multiple
+backends CAN compile into one binary (`-DGGML_METAL=ON
+-DGGML_VULKAN=ON` builds both); each backend's init function lives
+behind its own `#ifdef`, and the runtime can call any of them. What
+ggml doesn't yet have is a uniform "auto-pick the best available"
+selector — that's the missing piece.
+
+### Approach when we tackle it
+
+1. Add `crispasr_select_backend(const char* hint)` helper that
+   resolves a hint string (`"auto" / "metal" / "cuda" / "vulkan" /
+   "cpu"`) to a `ggml_backend_t` using `#ifdef GGML_METAL` /
+   `#ifdef GGML_CUDA` / `#ifdef GGML_VULKAN` chains. `auto`
+   prefers Metal on macOS, CUDA on Linux+NV, Vulkan on Linux+AMD
+   or Windows, CPU as fallback.
+2. Refactor every per-backend `*_init_from_file()` to take a
+   `ggml_backend_t* preferred_backend` param (or read a thread-
+   local set by a new `crispasr_session_open_params_v3`).
+3. Add `gpu_backend_hint` (string field) to the open params struct
+   v3.
+4. Plumb through CrisperWeaver's `AdvancedTranscribeOptions` →
+   `LoadModel` → `openWithParams`.
+
+### Effort estimate
+
+~1 week of focused work — touches every backend's init path. Best
+done as a separate phased PR, one backend per commit.
+
+---
+
+## 88. Kokoro length-scale + vibevoice diffusion-step runtime knobs
+
+**Status:** open. Each is its own backend-internal refactor.
+
+### Kokoro (length-scale / speaking rate)
+
+Today `kokoro_context_params` only has `use_gpu` + `n_threads` (set
+via `kokoro_set_n_threads`). The duration-predictor inside StyleTTS2
+emits per-phoneme frame counts that get scaled to mel frames; there's
+no runtime scalar to multiply that count.
+
+**Approach:** add `float length_scale` to `kokoro_context_params`
+(default 1.0). In the duration-predictor forward (find the
+`predicted_dur = ...` line in `kokoro.cpp`), multiply each frame
+count by `cparams.length_scale` before allocating the mel buffer.
+Add `kokoro_set_length_scale(ctx, scale)` runtime setter; route
+through `crispasr_session_set_length_scale(s, scale)` on the
+unified API. Surface as a "speed" slider in CrisperWeaver's
+Synthesize screen (already has client-side resample as a fallback).
+
+**Effort:** half a day. Pure `kokoro.cpp` change; no other backends
+involved.
+
+### VibeVoice (diffusion-step count)
+
+Today vibevoice's diffusion step count is locked into its session
+config when the GGUF loads. The schedule + step count are baked
+into a tensor named `cfm_schedule` (or similar) in the GGUF.
+
+**Approach:** expose `int diffusion_steps` on
+`vibevoice_context_params` (default = whatever the schedule tensor
+encodes). At synth time, if `cparams.diffusion_steps > 0`, sub-
+sample the schedule down to that many steps (linear interpolation
+in t-space — same trick HF diffusers uses). New
+`vibevoice_set_diffusion_steps(ctx, n)` runtime setter; route on
+the session API.
+
+**Effort:** half a day. Quality-vs-latency check needed: <10 steps
+typically degrades fidelity sharply, so document a sensible
+[5, 50] range.
+
+---
+
+## 89. Per-backend `flash_attn` field migration (preq for #86)
+
+**Status:** prerequisite for #86. Mechanical refactor.
+
+Each backend with a `*_context_params` struct that today has
+`use_gpu` needs a `flash_attn` field added next to it (default
+true), threaded through `*_default_params()`, and stored on the
+context for the compute graph to read. Same pattern as the existing
+`use_gpu` plumbing.
+
+Backends to touch (12 of them — every one with `use_gpu`):
+parakeet, canary, qwen3, cohere, granite_speech, voxtral,
+voxtral4b (has its own struct), vibevoice, qwen3_tts, orpheus,
+kokoro, chatterbox.
+
+**Effort:** ~2 hours total — one mechanical edit per backend,
+repeated 12 times. Can land in a single commit since it's all
+struct-field plumbing with no semantic change yet (the field
+exists but the compute graph doesn't branch on it; that's #86).
+
+---
