@@ -496,6 +496,21 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
         params.stream_length_ms = std::stoi(ARGV_NEXT);
     } else if (arg == "--stream-keep") {
         params.stream_keep_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "--stream-json") {
+        // Issue #84: machine-readable JSON-Lines streaming events.
+        params.stream_json = true;
+    } else if (arg == "--stream-final-on-silence-ms") {
+        params.stream_final_silence_ms = std::stoi(ARGV_NEXT);
+    } else if (arg == "--firered-vad-debug") {
+        // Issue #84: opt-in debug dump from src/firered_vad.cpp.
+        // Plumbed via env var so src/ doesn't have to learn about
+        // whisper_params; firered_vad reads the env on each call.
+        params.firered_vad_debug = true;
+#ifdef _WIN32
+        _putenv_s("CRISPASR_FIRERED_VAD_DEBUG", "1");
+#else
+        setenv("CRISPASR_FIRERED_VAD_DEBUG", "1", 1);
+#endif
     } else if (arg == "--list-backends") {
         crispasr_print_backend_matrix();
         exit(0);
@@ -787,10 +802,20 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             params.server_api_keys.empty() ? "" : "(set)");
     fprintf(stderr, "  --stream-step N                   [%-7d] chunk size in ms for streaming\n",
             params.stream_step_ms);
-    fprintf(stderr, "  --stream-length N                 [%-7d] context window in ms for streaming\n",
+    fprintf(stderr,
+            "  --stream-length N                 [%-7d] rolling context window cap in ms (true rolling buffer)\n",
             params.stream_length_ms);
-    fprintf(stderr, "  --stream-keep N                   [%-7d] overlap to keep between chunks in ms\n",
+    fprintf(stderr,
+            "  --stream-keep N                   [%-7d] (legacy, no-op since #84) overlap to keep between chunks\n",
             params.stream_keep_ms);
+    fprintf(stderr,
+            "  --stream-json                     [%-7s] emit JSON-Lines partial/final/silence events on stdout\n",
+            params.stream_json ? "true" : "false");
+    fprintf(stderr,
+            "  --stream-final-on-silence-ms N    [%-7d] trailing silence (ms) that promotes a partial to final\n",
+            params.stream_final_silence_ms);
+    fprintf(stderr, "  --firered-vad-debug               [%-7s] enable FireRed VAD probability/fbank stderr dumps\n",
+            params.firered_vad_debug ? "true" : "false");
     fprintf(stderr, "  -n N,      --max-new-tokens N     [%-7d] max new tokens for LLM backends\n",
             params.max_new_tokens);
     fprintf(stderr, "  -ck N,     --chunk-seconds N      [%-7d] fallback chunk size when VAD is disabled\n",
@@ -844,7 +869,7 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             params.vad_model.c_str());
     fprintf(stderr, "  -vt N,     --vad-threshold N               [%-7.2f] VAD threshold for speech recognition\n",
             params.vad_threshold);
-    fprintf(stderr, "  -vspd N,   --vad-min-speech-duration-ms  N [%-7d] VAD min speech duration (0.0-1.0)\n",
+    fprintf(stderr, "  -vspd N,   --vad-min-speech-duration-ms  N [%-7d] VAD min speech duration (ms)\n",
             params.vad_min_speech_duration_ms);
     fprintf(stderr,
             "  -vsd N,    --vad-min-silence-duration-ms N [%-7d] VAD min silence duration (to split segments)\n",

@@ -149,6 +149,24 @@ struct whisper_params {
     int32_t stream_step_ms = 3000;
     int32_t stream_length_ms = 10000;
     int32_t stream_keep_ms = 200;
+    // Issue #84: opt-in JSON-Lines streaming output for wrappers
+    // (browser bridges, translators) that need machine-readable
+    // partial/final/silence events instead of plain stdout text.
+    // When true, the streaming loop emits one JSON object per event
+    // on stdout: {"type":"partial"|"final"|"silence", "utterance_id":N,
+    // "text":"…", "t0":sec, "t1":sec}. Plain-text stdout is suppressed.
+    bool stream_json = false;
+    // Trailing-silence threshold (ms) for promoting the open partial
+    // to final and incrementing utterance_id. 0 = never auto-finalize
+    // (only an open partial is emitted). Default 800 ms is a sensible
+    // pause length for live captions / translation handoff and matches
+    // the example in the issue. Only relevant with --stream-json.
+    int32_t stream_final_silence_ms = 800;
+    // Issue #84: gate the noisy `firered_vad: N frames, max_prob=…`
+    // and `fbank[0,:3]=…` stderr dumps in src/firered_vad.cpp behind
+    // an explicit opt-in. Set by --firered-vad-debug (or the
+    // CRISPASR_FIRERED_VAD_DEBUG env var directly).
+    bool firered_vad_debug = false;
     bool auto_download = false;
     bool dry_run_resolve = false;
     bool dry_run_ignore_cache = false;

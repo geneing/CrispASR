@@ -1024,9 +1024,34 @@ int crispasr_run_backend(const whisper_params& params_in) {
             _setmode(_fileno(stdin), _O_BINARY);
 #endif
 
-        std::vector<float> pcm_window(length_samples, 0.0f);
+        // Issue #84: true rolling buffer — accumulate audio up to
+        // length_samples, never collapse back to keep+step. The old
+        // code reallocated `pcm_window` to `keep_samples + n_new`
+        // every step, capping the steady-state decode buffer at
+        // ~3.4 s for the default 200 ms / 3 s settings even though
+        // `--stream-length` was advertised as the context window.
+        // Start empty (no leading-zero padding) and let the buffer
+        // grow naturally up to `length_samples`, then drop the
+        // oldest samples from the front to maintain the cap.
+        std::vector<float> pcm_window;
+        pcm_window.reserve(length_samples);
         std::vector<int16_t> read_buf(step_samples);
         std::string prev_text;
+        // Issue #84: opt-in JSON streaming state. `utterance_id`
+        // increments each time we open a new utterance after a
+        // finalize; `current_partial_*` track the open-utterance
+        // surface (text/start) so the final event can echo the
+        // last decoded text + boundaries. `silence_ms` accumulates
+        // trailing silence steps to drive auto-finalization. We
+        // keep `cumulative_samples` in real samples consumed (not
+        // window samples) so `t0`/`t1` map to wall-clock seconds
+        // since stream start.
+        int64_t utterance_id = 0;
+        bool have_open_utterance = false;
+        std::string current_partial_text;
+        double current_partial_t0 = 0.0;
+        int silence_ms_accum = 0;
+        int64_t cumulative_samples = 0;
         // Track whether the audio source ever produced any samples; if
         // it goes EOF without a single one, the subprocess most likely
         // failed before delivering PCM (e.g. ffmpeg couldn't open the
@@ -1051,27 +1076,24 @@ int crispasr_run_backend(const whisper_params& params_in) {
             any_samples_read = true;
 
             // Convert s16le to float
-            std::vector<float> new_samples(n_read);
-            for (size_t i = 0; i < n_read; i++)
-                new_samples[i] = read_buf[i] / 32768.0f;
+            const size_t n_new = n_read;
+            const size_t prev_size = pcm_window.size();
+            pcm_window.resize(prev_size + n_new);
+            for (size_t i = 0; i < n_new; i++)
+                pcm_window[prev_size + i] = read_buf[i] / 32768.0f;
 
-            // Shift window: keep the tail, append new samples
-            int n_keep = std::min(keep_samples, (int)pcm_window.size());
-            int n_new = (int)new_samples.size();
-            int n_total = n_keep + n_new;
-            if (n_total > length_samples)
-                n_total = length_samples;
-
-            std::vector<float> next_window(n_total);
-            // Copy keep portion from end of previous window
-            if (n_keep > 0 && (int)pcm_window.size() >= n_keep) {
-                std::copy(pcm_window.end() - n_keep, pcm_window.end(), next_window.begin());
+            // Issue #84: enforce the rolling cap by dropping the
+            // oldest samples once we exceed `--stream-length`. This
+            // is the only place the buffer can shrink — there is no
+            // separate "keep" tail because the whole tail up to
+            // `length_samples` is now the context window. The legacy
+            // `--stream-keep` flag is accepted for compatibility but
+            // is no longer wired in (see help text + docs/streaming.md).
+            if ((int)pcm_window.size() > length_samples) {
+                pcm_window.erase(pcm_window.begin(), pcm_window.end() - length_samples);
             }
-            // Append new samples
-            int copy_start = std::max(0, n_total - n_new);
-            std::copy(new_samples.begin(), new_samples.begin() + std::min(n_new, n_total),
-                      next_window.begin() + copy_start);
-            pcm_window = std::move(next_window);
+            cumulative_samples += (int64_t)n_new;
+            (void)keep_samples; // legacy, intentionally unused
 
             // Monitor: show progress during processing
             if (params.stream_monitor) {
@@ -1103,6 +1125,59 @@ int crispasr_run_backend(const whisper_params& params_in) {
             if (params.stream_monitor && segs.empty()) {
                 fprintf(stderr, "\xC2\xB7"); // · = silence
                 fflush(stderr);
+            }
+
+            // Issue #84: structured JSON-Lines streaming events. We
+            // run this branch in place of the plain-text stdout
+            // branch; partial/final/silence cover the lifecycle so
+            // wrappers can route partials to a live caption pane and
+            // only ship finals to a translation API.
+            if (params.stream_json) {
+                const double now_t = (double)cumulative_samples / (double)SR;
+                const double window_seconds = (double)pcm_window.size() / (double)SR;
+                const double window_t0 = (now_t - window_seconds) > 0.0 ? (now_t - window_seconds) : 0.0;
+                if (segs.empty()) {
+                    // Trailing silence — count step toward auto-finalize.
+                    silence_ms_accum += params.stream_step_ms;
+                    if (have_open_utterance && params.stream_final_silence_ms > 0 &&
+                        silence_ms_accum >= params.stream_final_silence_ms) {
+                        fprintf(stdout,
+                                "{\"type\":\"final\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
+                                (long long)utterance_id, crispasr_json_escape(current_partial_text).c_str(),
+                                current_partial_t0, now_t);
+                        fflush(stdout);
+                        have_open_utterance = false;
+                        current_partial_text.clear();
+                        prev_text.clear();
+                    } else {
+                        fprintf(stdout, "{\"type\":\"silence\",\"t\":%.3f}\n", now_t);
+                        fflush(stdout);
+                    }
+                } else {
+                    std::string text;
+                    for (const auto& s : segs)
+                        text += s.text;
+                    if (!have_open_utterance) {
+                        utterance_id++;
+                        have_open_utterance = true;
+                        current_partial_t0 = window_t0;
+                    }
+                    silence_ms_accum = 0;
+                    if (!text.empty() && text != prev_text) {
+                        current_partial_text = text;
+                        prev_text = text;
+                        fprintf(
+                            stdout,
+                            "{\"type\":\"partial\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
+                            (long long)utterance_id, crispasr_json_escape(text).c_str(), current_partial_t0, now_t);
+                        fflush(stdout);
+                    }
+                }
+                if (params.stream_monitor) {
+                    fprintf(stderr, segs.empty() ? "" : "\xE2\x9C\x93");
+                    fflush(stderr);
+                }
+                continue;
             }
 
             if (segs.empty())
@@ -1141,6 +1216,15 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 fprintf(stderr, "\xE2\x9C\x93"); // ✓ = got text
                 fflush(stderr);
             }
+        }
+        // Issue #84: flush any open utterance as a final on EOF so
+        // wrappers don't miss the tail of the last spoken segment.
+        if (params.stream_json && have_open_utterance) {
+            const double now_t = (double)cumulative_samples / (double)SR;
+            fprintf(stdout, "{\"type\":\"final\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
+                    (long long)utterance_id, crispasr_json_escape(current_partial_text).c_str(), current_partial_t0,
+                    now_t);
+            fflush(stdout);
         }
         fprintf(stdout, "\n");
         if (mic_pipe) {

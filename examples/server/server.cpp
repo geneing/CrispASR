@@ -63,7 +63,7 @@ struct server_params {
     std::string tmp_dir = ".";
 
     int32_t port = 8080;
-    int32_t ws_port = 0;  // 0 = port+1; -1 = disabled
+    int32_t ws_port = 0; // 0 = port+1; -1 = disabled
     int32_t read_timeout = 600;
     int32_t write_timeout = 600;
 
@@ -222,7 +222,7 @@ void whisper_print_usage(int /*argc*/, char** argv, const whisper_params& params
     fprintf(stderr, "  -vm FNAME, --vad-model FNAME               [%-7s] VAD model path\n", params.vad_model.c_str());
     fprintf(stderr, "  -vt N,     --vad-threshold N               [%-7.2f] VAD threshold for speech recognition\n",
             params.vad_threshold);
-    fprintf(stderr, "  -vspd N,   --vad-min-speech-duration-ms  N [%-7d] VAD min speech duration (0.0-1.0)\n",
+    fprintf(stderr, "  -vspd N,   --vad-min-speech-duration-ms  N [%-7d] VAD min speech duration (ms)\n",
             params.vad_min_speech_duration_ms);
     fprintf(stderr,
             "  -vsd N,    --vad-min-silence-duration-ms N [%-7d] VAD min silence duration (to split segments)\n",
