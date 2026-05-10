@@ -1405,7 +1405,8 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
             const size_t off_bytes = (size_t)dump_layer * kv_t->nb[3] + (size_t)dump_n_past * kv_t->nb[1];
             std::vector<uint8_t> raw(row_bytes);
             ggml_backend_tensor_get(kv_t, raw.data(), off_bytes, row_bytes);
-            fprintf(stderr, "[%s] L=%d h=0 t=%d type=%s hd=%d:", tag, dump_layer, dump_n_past, ggml_type_name(kv_t->type), hd_l);
+            fprintf(stderr, "[%s] L=%d h=0 t=%d type=%s hd=%d:", tag, dump_layer, dump_n_past,
+                    ggml_type_name(kv_t->type), hd_l);
             if (kv_t->type == GGML_TYPE_F16) {
                 for (int i = 0; i < std::min(8, hd_l); i++) {
                     fprintf(stderr, " %.4f", ggml_fp16_to_fp32(((ggml_fp16_t*)raw.data())[i]));
@@ -1420,8 +1421,8 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
             fprintf(stderr, "\n");
         }
     };
-    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_KV_AT",  "KV", c->kv_k);
-    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_VV_AT",  "VV", c->kv_v);
+    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_KV_AT", "KV", c->kv_k);
+    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_VV_AT", "VV", c->kv_v);
 
     // Skip the legacy KV inline dump (now handled by the lambda above).
     return r;
