@@ -1241,8 +1241,14 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
                     fprintf(stderr, " %.4f", ggml_fp16_to_fp32(((ggml_fp16_t*)raw.data())[i]));
                 }
             } else if (kv_t->type == GGML_TYPE_F32) {
-                for (int i = 0; i < std::min(8, hd_l); i++)
-                    fprintf(stderr, " %.4f", ((float*)raw.data())[i]);
+                // memcpy avoids the unsigned-char* → float* type-pun cast
+                // that trips cppcheck's invalidPointerCast portability
+                // warning. The buffer really is F32 in this branch.
+                for (int i = 0; i < std::min(8, hd_l); i++) {
+                    float v;
+                    std::memcpy(&v, raw.data() + i * sizeof(float), sizeof(float));
+                    fprintf(stderr, " %.4f", v);
+                }
             }
             fprintf(stderr, "\n");
         }

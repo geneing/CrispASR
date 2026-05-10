@@ -54,8 +54,8 @@ const char* lid_fasttext_predict(struct lid_fasttext_context* ctx, const char* u
 // order and returns the actual count written (≤ k, never zero on
 // success). Each label pointer is valid until the next ctx call.
 // Returns 0 on failure or empty input.
-int lid_fasttext_predict_topk(struct lid_fasttext_context* ctx, const char* utf8_text, int k,
-                              const char** out_labels, float* out_scores);
+int lid_fasttext_predict_topk(struct lid_fasttext_context* ctx, const char* utf8_text, int k, const char** out_labels,
+                              float* out_scores);
 
 // Diff-harness helper: extract a named intermediate tensor as a
 // malloc'd float buffer matching the reference dump's shape. Caller
@@ -77,7 +77,7 @@ float* lid_fasttext_extract_stage(struct lid_fasttext_context* ctx, const char* 
                                   int* out_n);
 
 // Read-only metadata accessors — useful for the diff harness and CLI.
-const char* lid_fasttext_variant(const struct lid_fasttext_context* ctx);  // "glotlid-v3" | "fasttext-lid176"
+const char* lid_fasttext_variant(const struct lid_fasttext_context* ctx); // "glotlid-v3" | "fasttext-lid176"
 int lid_fasttext_n_labels(const struct lid_fasttext_context* ctx);
 int lid_fasttext_dim(const struct lid_fasttext_context* ctx);
 
