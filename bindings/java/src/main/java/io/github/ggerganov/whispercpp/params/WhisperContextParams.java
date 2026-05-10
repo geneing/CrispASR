@@ -37,8 +37,16 @@ public class WhisperContextParams extends Structure {
 
     public WhisperAheads.ByValue dtw_aheads;
 
-    /** DTW memory size (internal use) */
-    public NativeLong dtw_mem_size;
+    /**
+     * DTW memory size (internal use). C declares this as `size_t` —
+     * 8 bytes on every 64-bit platform — so use the Java `long`
+     * primitive (always 8 bytes), not `NativeLong` (4 bytes on Win64).
+     * Mismatch caused `whisper_init_from_file_with_params` to read
+     * past the Java-marshalled struct by 4 bytes once bindings-java
+     * actually started running on Windows after the C1061 fix landed,
+     * surfacing as a JNA `Invalid memory access` error. See WhisperAheads.n_heads.
+     */
+    public long dtw_mem_size;
 
     /** Use GPU for inference */
     public void useGpu(boolean enable) {
