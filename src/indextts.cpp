@@ -20,6 +20,7 @@
 
 #include "indextts.h"
 #include "indextts_voc.h"
+#include "core/beam_decode.h"
 #include "core/fastconformer.h"
 #include "core/fft.h"
 #include "core/gguf_loader.h"
@@ -1282,6 +1283,21 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
         }
     }
 
+    // Debug: override conditioning from file
+    const char* cond_file = getenv("INDEXTTS_COND_FILE");
+    if (cond_file && cond_file[0]) {
+        FILE* f = fopen(cond_file, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            size_t sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            c->cond_latents.resize(sz / sizeof(float));
+            fread(c->cond_latents.data(), 1, sz, f);
+            fclose(f);
+            fprintf(stderr, "indextts: DEBUG loaded conditioning from %s\n", cond_file);
+        }
+    }
+
     return true;
 }
 
@@ -1315,8 +1331,8 @@ static bool kv_alloc(indextts_context* c, int max_ctx) {
         return false;
     }
 
-    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_h, nl);
-    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F16, hd, max_ctx, n_h, nl);
+    c->kv_k = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F32, hd, max_ctx, n_h, nl);
+    c->kv_v = ggml_new_tensor_4d(c->kv_ctx, GGML_TYPE_F32, hd, max_ctx, n_h, nl);
 
     c->kv_buf = ggml_backend_alloc_ctx_tensors(c->kv_ctx, c->backend);
     if (!c->kv_buf) {
@@ -1421,9 +1437,10 @@ static ggml_cgraph* build_gpt2_kv_graph(indextts_context* c, int n_past, int n_t
         // Permute Q to (hd, T, n_h)
         Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
 
-        // Flash attention
+        // Flash attention with F32 precision (critical for GPT logit accuracy)
         ggml_tensor* attn =
             ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, (T == 1) ? nullptr : causal_mask, attn_scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
         attn = ggml_reshape_2d(ctx0, attn, D, T);
 
         // Output projection + residual
@@ -1578,6 +1595,7 @@ static ggml_cgraph* build_gpt2_latent_graph(indextts_context* c, int n_total, in
         V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
 
         ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, causal_mask, attn_scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
         attn = ggml_reshape_2d(ctx0, attn, D, T);
 
         attn = ggml_mul_mat(ctx0, b.attn_proj_w, attn);
@@ -2075,49 +2093,81 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
         fprintf(stderr, "\n");
     }
 
-    // 5. AR decode loop
+    // 5. AR decode — beam search with KV replay
     std::vector<int32_t> mel_codes;
     const int mel_vocab = (int)ctx->hp.mel_vocab_size;
     const int stop_token = (int)ctx->hp.stop_mel_token;
-    std::vector<int32_t> recent_tokens;
 
-    for (int step = 0; step < max_mel; step++) {
-        // Sample from logits
-        int32_t next_tok =
-            sample_top_k_top_p(logits, mel_vocab, ctx->params.temperature, ctx->params.top_k, ctx->params.top_p,
-                               ctx->params.repetition_penalty, recent_tokens, ctx->rng_state);
-        free(logits);
-        logits = nullptr;
+    // Beam search with KV save/restore (branched variant — O(beam × T))
+    struct KvSnap {
+        std::vector<uint8_t> k_data, v_data;
+    };
 
-        if (next_tok == stop_token) {
-            if (ctx->params.verbosity >= 1) {
-                fprintf(stderr, "indextts: stop token at step %d\n", step);
-            }
+    auto save_fn = [](indextts_context* c) -> KvSnap* {
+        auto* s = new KvSnap();
+        s->k_data.resize(ggml_nbytes(c->kv_k));
+        s->v_data.resize(ggml_nbytes(c->kv_v));
+        ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, s->k_data.size());
+        ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, s->v_data.size());
+        return s;
+    };
+
+    auto restore_fn = [](indextts_context* c, KvSnap* s) {
+        ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
+        ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
+    };
+
+    auto snap_free_fn = [](KvSnap* s) { delete s; };
+
+    // Step function: embed one mel token, run GPT, apply rep penalty, return logits
+    int beam_mel_pos = 0;
+    auto step_fn = [&beam_mel_pos, mel_vocab](indextts_context* c, int32_t tok, int n_past_step) -> float* {
+        beam_mel_pos++;
+        std::vector<float> emb = build_mel_token_embed(c, tok, beam_mel_pos);
+        float* lg = run_gpt2_kv(c, emb.data(), 1, n_past_step);
+        if (!lg)
+            return nullptr;
+        // Apply repetition penalty (Python default: 10.0)
+        // The beam_decode helper picks top-K from these logits, so we
+        // penalize tokens that appeared in the recent KV context.
+        // Since we don't track per-beam history here, use a simple
+        // "penalize the just-generated token" approach.
+        float rep = c->params.repetition_penalty;
+        if (rep > 1.0f && tok >= 0 && tok < mel_vocab) {
+            lg[tok] = (lg[tok] > 0) ? lg[tok] / rep : lg[tok] * rep;
+        }
+        return lg;
+    };
+
+    core_beam_decode::Config beam_cfg;
+    beam_cfg.max_new_tokens = max_mel;
+    beam_cfg.eos_id = stop_token;
+    beam_cfg.vocab_size = mel_vocab;
+    beam_cfg.beam_size = 1; // greedy via beam (use rep penalty for quality)
+    beam_cfg.prompt_len = prefill_len;
+
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: beam search (beam_size=%d, max=%d)\n", beam_cfg.beam_size, max_mel);
+    }
+
+    // Apply repetition penalty to prefill logits before beam search
+    // (Python's HuggingFace generate applies rep penalty at every step)
+    // For the prefill, no tokens have been generated yet, so no penalty.
+
+    auto beam_result =
+        core_beam_decode::run_with_probs_branched(ctx, logits, save_fn, restore_fn, snap_free_fn, step_fn, beam_cfg);
+    free(logits);
+    logits = nullptr;
+
+    // Collect tokens (strip EOS if present)
+    for (size_t i = 0; i < beam_result.tokens.size(); i++) {
+        if (beam_result.tokens[i] == stop_token)
             break;
-        }
+        mel_codes.push_back(beam_result.tokens[i]);
+    }
 
-        mel_codes.push_back(next_tok);
-        recent_tokens.push_back(next_tok);
-        // Keep recent tokens window for rep penalty
-        if (recent_tokens.size() > 64) {
-            recent_tokens.erase(recent_tokens.begin());
-        }
-
-        if (ctx->params.verbosity >= 2) {
-            fprintf(stderr, "  step %d: mel code %d\n", step, (int)next_tok);
-        }
-
-        // Build embedding for next token
-        // mel_pos starts at 1 (0 was used for start_mel in prefill)
-        std::vector<float> tok_embed = build_mel_token_embed(ctx, next_tok, step + 1);
-
-        // Run single-token decode
-        logits = run_gpt2_kv(ctx, tok_embed.data(), 1, n_past);
-        if (!logits) {
-            fprintf(stderr, "indextts: decode step %d failed\n", step);
-            break;
-        }
-        n_past += 1;
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "indextts: stop token at step %d\n", (int)mel_codes.size());
     }
 
     if (logits) {
