@@ -595,16 +595,24 @@ static wvad_result wvad_forward(whisper_vad_encdec_context* ctx, const float* me
         return {};
     }
 
-    // Set mel input — need to transpose from [n_mels, T_mel] to [T_mel*2, n_mels]
-    // and pad to 3000 frames (whisper convention: 30s = 3000 frames at hop=160)
-    std::vector<float> mel_transposed(3000 * m.n_mels, 0);
+    // Set mel input. The graph tensor was created as ne[0]=3000 (time, fast)
+    // and ne[1]=n_mels (channel, slow), which is what conv_1d expects:
+    // input layout [iw, ic, b] with iw innermost. Source buffer layout from
+    // wvad_compute_mel is [n_mels, n_frames] with `mel[m*n_frames + t]`, i.e.
+    // time is innermost on both sides — so we just memcpy each mel row into
+    // the 3000-wide window (zero-padded if the actual mel is shorter).
+    //
+    // The previous fill `dst[t*n_mels + m] = src[m*n_frames + t]` swapped
+    // the axes and made conv_1d see scrambled mel input, which is what
+    // produced near-zero per-frame probabilities (issue #83).
+    std::vector<float> mel_padded((size_t)3000 * m.n_mels, 0);
     int T_mel = std::min(n_frames, 3000);
-    for (int m_idx = 0; m_idx < m.n_mels; m_idx++)
-        for (int t = 0; t < T_mel; t++)
-            mel_transposed[(size_t)t * m.n_mels + m_idx] = mel_data[(size_t)m_idx * n_frames + t];
+    for (int m_idx = 0; m_idx < m.n_mels; m_idx++) {
+        memcpy(&mel_padded[(size_t)m_idx * 3000], &mel_data[(size_t)m_idx * n_frames], (size_t)T_mel * sizeof(float));
+    }
 
     ggml_tensor* mel_t = ggml_graph_get_tensor(gf, "mel");
-    ggml_backend_tensor_set(mel_t, mel_transposed.data(), 0, mel_transposed.size() * sizeof(float));
+    ggml_backend_tensor_set(mel_t, mel_padded.data(), 0, mel_padded.size() * sizeof(float));
 
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "whisper_vad_encdec: graph compute failed\n");
@@ -679,16 +687,69 @@ extern "C" int whisper_vad_encdec_detect(struct whisper_vad_encdec_context* ctx,
         }
     }
 
-    auto mel = wvad_compute_mel(samples, n_samples, hann.data(), fb.data(), 400, 160, 80);
-    int T_mel = (int)(mel.size() / 80);
+    // Process the audio in 30-second windows. The whisper-base encoder is fixed
+    // at 1500 frames (= 30 s at 20 ms / frame); a single forward pass therefore
+    // only ever produces probabilities for the first 30 s of audio. Pre-#83 the
+    // call below ran once on the full clip and silently truncated to 30 s, so
+    // anything past 30 s was treated as silence. Per-window mel computation
+    // also matches Whisper's per-segment log-mel normalization (clip to
+    // max-8 dB, rescale by /4) — global normalization over a long file
+    // distorts each window's local dynamic range.
+    constexpr int kSampleRate = 16000;
+    constexpr int kWinSamples = 30 * kSampleRate; // 30 s = 480000 samples
+    constexpr int kProbHopSamples = 320;          // 20 ms / prob frame
+    const int n_windows = (n_samples + kWinSamples - 1) / kWinSamples;
 
-    // Forward pass
-    auto fwd = wvad_forward(ctx, mel.data(), T_mel);
-    if (fwd.probs.empty())
-        return -1;
-    auto& probs = fwd.probs;
+    std::vector<float> probs;
+    probs.reserve((size_t)((int64_t)n_samples / kProbHopSamples + n_windows));
+
+    std::vector<float> first_window_enc;
+
+    std::vector<float> win_pcm(kWinSamples);
+    for (int w = 0; w < n_windows; w++) {
+        const int s_off = w * kWinSamples;
+        const int s_len = std::min(kWinSamples, n_samples - s_off);
+        std::fill(win_pcm.begin(), win_pcm.end(), 0.0f);
+        memcpy(win_pcm.data(), samples + s_off, (size_t)s_len * sizeof(float));
+
+        // Compute mel (log10 + per-window normalization). With kWinSamples
+        // samples padded to 30 s, this produces exactly 3000 frames.
+        auto mel = wvad_compute_mel(win_pcm.data(), kWinSamples, hann.data(), fb.data(), 400, 160, 80);
+        const int T_mel = (int)(mel.size() / 80);
+
+        auto fwd = wvad_forward(ctx, mel.data(), T_mel);
+        if (fwd.probs.empty())
+            return -1;
+
+        // Only keep the prob frames that overlap real (non-zero-padded) samples.
+        // 1 prob frame = 2 mel frames = 320 samples = 20 ms.
+        const int probs_with_signal = std::min((int)fwd.probs.size(), (s_len + kProbHopSamples - 1) / kProbHopSamples);
+        probs.insert(probs.end(), fwd.probs.begin(), fwd.probs.begin() + probs_with_signal);
+
+        if (w == 0)
+            first_window_enc = std::move(fwd.enc_emb);
+    }
 
     int nf = (int)probs.size();
+
+    // Diagnostic stats — same format as firered_vad so the two are easy
+    // to compare side-by-side (issue #83).
+    {
+        float max_p = 0.0f, mean_p = 0.0f;
+        int speech_frames = 0;
+        for (int t = 0; t < nf; t++) {
+            if (probs[t] > max_p)
+                max_p = probs[t];
+            mean_p += probs[t];
+            if (probs[t] > threshold)
+                speech_frames++;
+        }
+        mean_p = nf > 0 ? mean_p / nf : 0.0f;
+        fprintf(stderr,
+                "whisper_vad_encdec: %d frames over %d window(s), "
+                "max_prob=%.4f, mean_prob=%.4f, speech(>%.2f)=%d\n",
+                nf, n_windows, max_p, mean_p, threshold, speech_frames);
+    }
 
     // Output raw probabilities if requested
     if (probs_out) {
@@ -699,13 +760,15 @@ extern "C" int whisper_vad_encdec_detect(struct whisper_vad_encdec_context* ctx,
         *n_frames_out = nf;
 
     // Output encoder embeddings if requested (fine-tuned encoder output (NOT reusable for whisper ASR),
-    // can be injected into whisper's cross-attention state to skip the ASR encoder pass)
-    if (encoder_out && !fwd.enc_emb.empty()) {
-        *encoder_out = (float*)malloc(fwd.enc_emb.size() * sizeof(float));
-        memcpy(*encoder_out, fwd.enc_emb.data(), fwd.enc_emb.size() * sizeof(float));
+    // can be injected into whisper's cross-attention state to skip the ASR encoder pass).
+    // Only the first 30 s window is returned — callers that need the full
+    // sequence should re-run the encoder themselves.
+    if (encoder_out && !first_window_enc.empty()) {
+        *encoder_out = (float*)malloc(first_window_enc.size() * sizeof(float));
+        memcpy(*encoder_out, first_window_enc.data(), first_window_enc.size() * sizeof(float));
     }
     if (encoder_out_size)
-        *encoder_out_size = (int)fwd.enc_emb.size();
+        *encoder_out_size = (int)first_window_enc.size();
 
     // Extract segments with hysteresis
     float neg_thresh = std::max(threshold - 0.15f, 0.01f);
