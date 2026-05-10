@@ -171,6 +171,18 @@ target_link_libraries(crispasr-diff PRIVATE
 install(TARGETS crispasr-diff RUNTIME BUNDLE DESTINATION bin)
 
 # ---------------------------------------------------------------------------
+# crispasr-lid — standalone text language identification (GlotLID, LID-176).
+# Reads UTF-8 text from --text or stdin, prints top-k label\tscore lines.
+# ---------------------------------------------------------------------------
+add_executable(crispasr-lid crispasr_lid_main.cpp)
+target_link_libraries(crispasr-lid PRIVATE
+    crispasr
+    lid-fasttext
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+install(TARGETS crispasr-lid RUNTIME BUNDLE DESTINATION bin)
+
+# ---------------------------------------------------------------------------
 # mimo-tokenizer-smoke — finiteness/magnitude smoke test for the MiMo
 # tokenizer encoder forward path. Used during PLAN #51 step 2 development
 # while the upstream safetensors download is in flight.

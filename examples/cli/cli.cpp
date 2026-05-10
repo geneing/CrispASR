@@ -11,6 +11,7 @@
 #include "crispasr_output.h"  // crispasr_make_disp_segments — split-on-punct (#29)
 #include "crispasr_server.h"  // crispasr_run_server()
 #include "crispasr_vad_cli.h" // crispasr_resolve_vad_model — auto-DL silero (#33)
+#include "lid_fasttext.h"     // text LID for --lid-on-transcript
 
 #include <cmath>
 #include <algorithm>
@@ -386,6 +387,8 @@ static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, 
         params.lid_backend = ARGV_NEXT;
     } else if (arg == "--lid-model") {
         params.lid_model = ARGV_NEXT;
+    } else if (arg == "--lid-on-transcript") {
+        params.lid_on_transcript = ARGV_NEXT;
     } else if (arg == "--diarize-method") {
         params.diarize_method = ARGV_NEXT;
     } else if (arg == "--sherpa-bin") {
@@ -733,6 +736,9 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
         params.lid_backend.c_str());
     fprintf(stderr, "  --lid-model FNAME                 [%-7s] optional LID model path (default ggml-tiny.bin)\n",
             params.lid_model.c_str());
+    fprintf(stderr, "  --lid-on-transcript FNAME         [%-7s] post-ASR text LID: run lid-fasttext (GlotLID/LID-176) "
+                    "on the final transcript and emit lang=<code> to stderr\n",
+            params.lid_on_transcript.c_str());
     fprintf(stderr,
             "  --diarize-method NAME             [%-7s] diarize method: energy|xcorr|vad-turns|sherpa|pyannote|ecapa\n",
             params.diarize_method.c_str());
@@ -2048,6 +2054,39 @@ int main(int argc, char** argv) {
 
             if (fout_factory.is_stdout && !fout_factory.used_stdout) {
                 fprintf(stderr, "warning: '--output-file -' used without any other '--output-*'");
+            }
+        }
+    }
+
+    // Post-ASR text LID: if --lid-on-transcript was set, run the
+    // fastText classifier on the assembled transcript and emit
+    // `lang=<code>\tconf=<score>` to stderr. Errors are logged but
+    // never fail the run — the transcript output stays the source of
+    // truth.
+    if (!params.lid_on_transcript.empty()) {
+        std::vector<crispasr_segment> lid_segs = cli_whisper_collect_segments(ctx);
+        std::string transcript;
+        for (const auto& s : lid_segs) {
+            if (!transcript.empty())
+                transcript.push_back(' ');
+            transcript += s.text;
+        }
+        if (transcript.empty()) {
+            if (!params.no_prints)
+                fprintf(stderr, "crispasr[lid-on-transcript]: empty transcript, skipping\n");
+        } else {
+            lid_fasttext_context* lid = lid_fasttext_init_from_file(params.lid_on_transcript.c_str(), 1);
+            if (!lid) {
+                fprintf(stderr, "crispasr[lid-on-transcript]: failed to load '%s'\n",
+                        params.lid_on_transcript.c_str());
+            } else {
+                float conf = 0.f;
+                const char* lab = lid_fasttext_predict(lid, transcript.c_str(), &conf);
+                if (lab)
+                    fprintf(stderr, "lang=%s\tconf=%.6f\n", lab, conf);
+                else
+                    fprintf(stderr, "crispasr[lid-on-transcript]: prediction failed\n");
+                lid_fasttext_free(lid);
             }
         }
     }

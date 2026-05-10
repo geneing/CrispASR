@@ -163,6 +163,13 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # writes (or a directory containing it). Cross-checks against the
     # pycld3 oracle and refuses to dump on argmax mismatch.
     "lid-cld3":   "reference_backends.lid_cld3",
+    # GlotLID V3 (cis-lmu/glotlid, Apache-2.0): fastText supervised LID
+    # over 2102 ISO 639-3 + script labels. Text-only; audio arg ignored.
+    # Input text comes from GLOTLID_TEXT env var. Same backend module
+    # serves Facebook LID-176 via --backend lid-fasttext176 (model_dir
+    # points at the lid.176.bin directory).
+    "lid-glotlid":     "reference_backends.lid_glotlid",
+    "lid-fasttext176": "reference_backends.lid_glotlid",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import

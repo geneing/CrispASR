@@ -786,6 +786,21 @@ target_compile_features   (firered-lid PUBLIC cxx_std_17)
 target_link_libraries     (firered-lid PUBLIC crispasr-core ggml ggml-base ggml-cpu)
 
 # ---------------------------------------------------------------------------
+# lid-fasttext — fastText supervised LID (GlotLID-V3 + Facebook LID-176).
+# Text-only — runs on transcripts, not audio. Tiny F32/F16 forward
+# (manual gather + matmul + softmax), no ggml graph for the F32/F16 path;
+# quants will need a small ggml graph for the matmul.
+# ---------------------------------------------------------------------------
+add_library(lid-fasttext STATIC lid_fasttext.h lid_fasttext.cpp)
+set_target_properties(lid-fasttext PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(lid-fasttext PUBLIC .)
+target_compile_features   (lid-fasttext PUBLIC cxx_std_17)
+target_link_libraries     (lid-fasttext PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(lid-fasttext PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # firered-asr — FireRedASR2-AED (FireRedTeam/FireRedASR2-AED)
 # ---------------------------------------------------------------------------
 add_library(firered-asr STATIC firered_asr.h firered_asr.cpp)
@@ -935,6 +950,9 @@ if (TARGET crispasr-vad-encdec)
 endif()
 if (TARGET firered-lid)
     target_link_libraries(crispasr PUBLIC firered-lid)
+endif()
+if (TARGET lid-fasttext)
+    target_link_libraries(crispasr PUBLIC lid-fasttext)
 endif()
 if (TARGET omniasr)
     target_link_libraries(crispasr PUBLIC omniasr)

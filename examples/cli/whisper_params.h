@@ -128,6 +128,11 @@ struct whisper_params {
     int32_t chunk_seconds = 30;
     std::string lid_backend;
     std::string lid_model;
+    // Post-ASR text LID: when set, after transcription completes, run
+    // a fastText-supervised classifier (GlotLID / LID-176) on the
+    // assembled transcript and emit `lang=<code>\tconf=<score>` to
+    // stderr. Path points at a lid_fasttext.* GGUF.
+    std::string lid_on_transcript;
     std::string diarize_method;
     std::string sherpa_bin;
     std::string sherpa_segment_model;
