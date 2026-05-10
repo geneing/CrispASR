@@ -1408,8 +1408,13 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
             fprintf(stderr, "[%s] L=%d h=0 t=%d type=%s hd=%d:", tag, dump_layer, dump_n_past,
                     ggml_type_name(kv_t->type), hd_l);
             if (kv_t->type == GGML_TYPE_F16) {
+                // memcpy avoids the unsigned-char* → ggml_fp16_t* type-pun
+                // cast that trips cppcheck's dangerousTypeCast warning
+                // (paired with the F32 branch below; pattern matched).
                 for (int i = 0; i < std::min(8, hd_l); i++) {
-                    fprintf(stderr, " %.4f", ggml_fp16_to_fp32(((ggml_fp16_t*)raw.data())[i]));
+                    ggml_fp16_t h;
+                    std::memcpy(&h, raw.data() + i * sizeof(ggml_fp16_t), sizeof(ggml_fp16_t));
+                    fprintf(stderr, " %.4f", ggml_fp16_to_fp32(h));
                 }
             } else if (kv_t->type == GGML_TYPE_F32) {
                 for (int i = 0; i < std::min(8, hd_l); i++) {
@@ -2161,6 +2166,13 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
     // both on GPU, expected to be broken). CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU=1
     // tries the selective split (kept for future regression once the kernel
     // lands).
+    // cppcheck-suppress duplicateAssignExpression
+    // Both backend toggles intentionally start at the same default
+    // (params.use_gpu) and are flipped independently below depending
+    // on the user's CRISPASR_CHATTERBOX_* env knobs — the CPU-fallback
+    // path zeros only t3_use_gpu under the split mode, only s3gen
+    // under separate setups, etc. Coalescing into one variable would
+    // lose the per-backend dispatch granularity.
     bool t3_use_gpu = params.use_gpu;
     bool s3gen_use_gpu = params.use_gpu;
     if (params.use_gpu) {
