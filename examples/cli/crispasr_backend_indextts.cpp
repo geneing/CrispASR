@@ -159,9 +159,7 @@ public:
         cp.n_threads = p.n_threads;
         cp.verbosity = p.no_prints ? 0 : 1;
         cp.use_gpu = crispasr_backend_should_use_gpu(p);
-        if (p.temperature > 0.0f) {
-            cp.temperature = p.temperature;
-        }
+        cp.temperature = p.temperature; // 0 = greedy argmax, >0 = sampling
         ctx_ = indextts_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
             fprintf(stderr, "crispasr[indextts]: failed to load GPT model '%s'\n", p.model.c_str());

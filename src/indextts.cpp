@@ -1274,7 +1274,9 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
             for (float v : c->cond_latents) {
                 norm += v * v;
             }
-            fprintf(stderr, "indextts: Perceiver output: [%d, %d] norm=%.4f\n", D, n_latents, sqrtf(norm));
+            fprintf(stderr, "indextts: Perceiver output: [%d, %d] norm=%.4f first5=[%.6f,%.6f,%.6f,%.6f,%.6f]\n", D,
+                    n_latents, sqrtf(norm), c->cond_latents[0], c->cond_latents[1], c->cond_latents[2],
+                    c->cond_latents[3], c->cond_latents[4]);
         }
     }
 
@@ -1882,7 +1884,7 @@ extern "C" struct indextts_context_params indextts_context_default_params(void) 
     p.n_threads = 4;
     p.verbosity = 1;
     p.use_gpu = false;
-    p.temperature = 1.0f;         // Python default: 1.0
+    p.temperature = 0.0f;         // 0 = greedy argmax (reliable without beam search)
     p.top_p = 0.8f;               // Python default: 0.8
     p.top_k = 30;                 // Python default: 30
     p.repetition_penalty = 10.0f; // Python default: 10.0 (critical for quality)
@@ -2126,7 +2128,12 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
     }
 
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: generated %zu mel codes\n", mel_codes.size());
+        fprintf(stderr, "indextts: generated %zu mel codes:", mel_codes.size());
+        for (size_t i = 0; i < std::min(mel_codes.size(), (size_t)20); i++)
+            fprintf(stderr, " %d", mel_codes[i]);
+        if (mel_codes.size() > 20)
+            fprintf(stderr, "...");
+        fprintf(stderr, "\n");
     }
 
     // Return a copy
