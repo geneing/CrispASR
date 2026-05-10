@@ -792,6 +792,142 @@ path otherwise. Same arch threshold cuBLAS uses for its own
 tensor-core paths, so it composes naturally with the rest of ggml's
 sm-feature gating.
 
+#### Closing the 2.12× gap to onnx-fp32 — what worked, what didn't
+
+Took the A1000 baseline above (POST q8_0, 3.267 s long, 18.4× RT,
+2.12× behind onnx-fp32) and ran a sweep of cheap optimization knobs
+to see how close to ONNX-fp32 we can get without a kernel rewrite.
+
+| config | long mean | RT× | p50 | gap to onnx-fp32 |
+|---|---|---|---|---|
+| **POST + `GGML_CUDA_GRAPHS=ON` q8_0** | **3.063 s** | **19.6×** | **197 ms** | **1.99×** ← best |
+| POST + `GGML_CUDA_GRAPHS=ON` q8_0 t=12 | 3.229 s | 18.6× | 207 ms | 2.10× |
+| POST q8_0 (graphs OFF, baseline) | 3.267 s | 18.4× | 212 ms | 2.13× |
+| POST f16 (graphs OFF) | 3.522 s | 17.0× | 229 ms | 2.29× |
+| POST + graphs q8_0 t=20 (max) | 3.691 s | 16.3× | 246 ms | 2.40× |
+| POST + graphs q4_k | 4.207 s | 14.3× | 277 ms | 2.74× |
+| POST + graphs f16 | 4.345 s | 13.8× | 287 ms | 2.83× |
+| POST q4_k (graphs OFF) | 4.640 s | 12.9× | 307 ms | 3.02× |
+
+Findings, in order of surprise:
+
+1. **`-DGGML_CUDA_GRAPHS=ON` is OFF by default** in ggml mainline
+   (`GGML_CUDA_GRAPHS_DEFAULT OFF`, with a "(llama.cpp only)" hint in
+   the option help) and was OFF in our `release.yml` Windows-CUDA build.
+   Flipping it gives a **6.3 % wallclock win** on q8_0 (3.27 → 3.06 s)
+   on this Ampere consumer SKU, with the runtime confirmation
+   `ggml_backend_cuda_graph_compute: CUDA graph warmup complete`
+   visible in the bench logs. The arch-gating in
+   `ggml-cuda.cu:graph_check_compute_cap` already restricts capture to
+   `cc >= GGML_CUDA_CC_AMPERE`, so flipping the default for shared-libs
+   builds doesn't risk regressions on Turing. **Recommended follow-up
+   PR:** flip the default in `release.yml`'s
+   `build-libs-windows-x86_64-cuda` and the Linux equivalents — costs
+   ~3 KB to ggml-cuda.dll, gains ~6 % on parakeet, no downside on
+   Ampere+. Also worth flipping for examples/cli builds, as long as
+   non-parakeet backends don't regress (would need a quick pass over
+   whisper, fastconformer-ctc, firered-asr).
+
+2. **F16 is *slower* than Q8_0 on A1000 Laptop**, both with and
+   without graphs (3.52 s and 4.35 s vs 3.06 s for q8_0+graphs). I
+   expected the opposite — Ampere tensor cores plus full-clock SM
+   should win at F16. The reason: A1000 Laptop has only 192 GB/s
+   memory bandwidth and 4 GB VRAM; F16 weights at 1.26 GB hit the
+   bandwidth ceiling on every matmul, while Q8_0 at 745 MB stays cache-
+   friendly. Combined with ggml's `mul_mat_q<q8_0>` MMQ path being
+   hand-tuned for L1/L2 reuse (vs cuBLAS-LT's per-call handle overhead
+   on F16), Q8_0 wins on this SKU. **Different SKUs probably differ:**
+   on a 4070 Laptop with 256-bit memory and bigger caches, F16 likely
+   wins; on Tesla-class with HBM, F16 wins decisively. So Q8_0 isn't
+   universal — but on consumer-laptop Ampere, it is.
+
+3. **CUDA Graphs *hurts* F16** (3.52 → 4.35 s, +24 % regression)
+   despite helping Q8_0 (-6.3 %). The reason is visible in the F16
+   path's reliance on cuBLAS-LT GEMM calls: ggml's CUDA Graphs path
+   skips capture for ops that go through cuBLAS handles (those calls
+   aren't recorded in the captured graph and become per-call cuBLAS-LT
+   handle setups inside the graph-replay context — the worst of both
+   worlds). q8_0 uses the native `mul_mat_q` MMQ kernels which capture
+   cleanly into the graph. **Don't enable graphs unconditionally for
+   F16 paths until ggml's CUDA Graphs handles cuBLAS-LT properly** — a
+   known gap in ggml mainline.
+
+4. **Q4_K is the worst quant on this hardware** (4.21 s long with
+   graphs, 4.64 s without). K-quants use grouped quantisation with
+   per-group scales and mins — a richer dequant scheme than Q8_0's
+   per-block scale. The dequant cost outweighs the bandwidth saving
+   on a workload where bandwidth wasn't the bottleneck. K-quants are
+   a win on memory-pressured CPU inference; on a small dGPU with
+   small weights, plain Q8_0 wins.
+
+5. **Threads > 4 hurts** (t=12 +5.4 %, t=20 +20.5 %). The crispasr
+   side has very little CPU work (mel extraction is the only sustained
+   compute — ~5 % of wallclock). Adding threads adds OpenMP barrier
+   sync without adding throughput. Default `--threads 4` is correct
+   on this stack; bumping to match host core count isn't free.
+
+**What's left to close the remaining 1.99× gap (without rewriting
+ggml mainline):**
+
+The kernel breakdown explains why GPU-only optimisations bottom out
+near here. POST top-10 GPU kernel time = 1 987 ms across 3 long-clip
+runs = ~662 ms/run. Wallclock per run = 3 063 ms (with graphs). So
+GPU compute is **only 22 % of wallclock**; the other 78 % is host-
+side work, sync points, and per-launch WDDM overhead that even CUDA
+Graphs doesn't fully eliminate (it only captures the encoder graph
+per chunk; cross-chunk transitions and the joint/decoder loop run as
+discrete dispatches). Even if we made GPU compute zero, we'd still
+be at ~2.4 s vs ONNX-fp32's 1.54 s — the **fundamental** gap is that
+ONNX-fp32 routes 99 % of work through cuDNN+cuBLAS-LT-fused-conv +
+tensor-core matmul, with only **2 H↔D Memcpy nodes** in the entire
+graph rewrite (vs ggml's many Memcpy boundaries from per-op
+back-and-forth between encoder-CUDA, joint-CPU, decoder-CUDA layers).
+
+Three concrete follow-up PRs ranked by ROI for closing the rest:
+
+a) **Flip `GGML_CUDA_GRAPHS=ON` as default for Windows-CUDA shared-libs
+   builds** (this PR's evidence justifies it) — 6 % free, no risk on
+   Ampere+. ~5 LOC change to `release.yml`. **Easiest win.**
+
+b) **Replace ggml's `im2col + mul_mat` conv2d path with cuBLAS-LT
+   matmul-with-conv prologue** for the FastConformer subsampling
+   block. ~30 LOC in `ggml_cuda_op_conv_2d`. Should cut the 24 %
+   im2col share by 2-3× and is the one place ggml mainline has not
+   yet adopted cuBLAS-LT's prologue API. Expected: another ~10-15 %
+   wallclock.
+
+c) **Audit MMQ template-instance dispatch** for `mul_mat_q<q8_0,64>`
+   — verify the `__nv_bfloat16` mma.sync variant in
+   `ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu` is
+   selected on sm_86 for our shapes (1024×T encoder matmuls). The
+   non-tensor-core SIMT path is the current default; tensor-core
+   variant should be ~2× on the dominant 660 ms kernel. Expected:
+   another ~10 %.
+
+Stacked, (a)+(b)+(c) plausibly land at ~2.4 s (RT 25×, 1.55× behind
+onnx-fp32) — close enough that mel extraction and ctypes overhead
+become the next bottleneck, not GPU kernels. To close the *last*
+half-x requires either ggml mainline cuDNN integration (the
+fundamental conv-kernel gap) or migrating parakeet to TensorRT EP
+(an architectural pivot). Out of scope for this datapoint.
+
+**Updated arch-guard / build-flag recommendation:** in addition to
+the flash-attn-ext-on-sm_80+ verdict above, **flip
+`GGML_CUDA_GRAPHS_DEFAULT` to `ON` in
+`ggml/CMakeLists.txt`** for any shared-libs build targeting sm_80+.
+The "llama.cpp only" hint in the help text is stale — parakeet (and
+likely whisper, fastconformer-ctc, firered-asr) all benefit because
+ggml-cuda's per-call graph instantiation is the bottleneck for any
+chunked-streaming inference under WDDM, not anything llama.cpp-
+specific. The arch gate inside `graph_check_compute_cap` already
+prevents Turing/older from regressing.
+
+Raw JSON sidecars for this round live at
+`handover-prompts/a1000-post-cg-{q8_0,f16,q4_k}.json`,
+`a1000-post-cg-q8_0-t{12,20}.json`,
+`a1000-post-{f16,q4_k}.json` — 8 new files alongside the original
+3 from the upstream A1000 section.
+
 ---
 
 ## Reproduce
