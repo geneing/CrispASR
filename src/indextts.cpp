@@ -633,7 +633,7 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
     // fastest in memory: data[mel_band + t * 100].
     // ggml conv2d: input [W, H, C_in, batch], ne[0]=W varies fastest.
     // So W=100 (mel bands), H=T_mel (time steps).
-    ggml_tensor* mel = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, 100, T_mel, 1, 1);
+    ggml_tensor* mel = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, T_mel, 100, 1, 1);
     ggml_set_name(mel, "cond_mel");
     ggml_set_input(mel);
 
@@ -646,29 +646,34 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
         cur = ggml_add(ctx0, cur, bias_4d);
     }
 
-    // Conv2d output: [W_out=49, H_out=T_enc, C_out=512, 1]
-    // where W_out = (100-3)/2+1 = 49, H_out = (T_mel-3)/2+1 = T_enc
-    int H_enc = 49; // (100 - 3) / 2 + 1
+    // ggml_conv_2d output: [T_enc, 49, 512, 1] where ne[0]=T_enc, ne[1]=49, ne[2]=512
     int T_enc = ((T_mel - 3) / 2) + 1;
+    int H_enc = 49;
 
     ggml_set_name(cur, "dbg_conv2d_out");
     ggml_set_output(cur);
 
-    // Reshape to match Python's x.permute(0,2,1,3).reshape(B, T, C*H):
-    // cur is [W=49, H=T_enc, C=512, 1] in ggml ne order
-    // Python: [B, C_out=512, H_out=T_enc, W_out=49] → permute(0,2,1,3) → [B, T_enc, 512, 49]
-    //         → reshape → [B, T_enc, 512*49=25088]
-    // In memory, Python flattens C(=512) then W(=49) for each T position.
-    // ggml: we need [25088, T_enc] with dim ordering C*W for each T.
-    // From [W=49, H=T_enc, C=512, 1]:
-    // From [W=49, H=T_enc, C=512, 1], rearrange to [C*W, T]:
-    // Need each T position to have [C=512 values for each W=49 position] flattened.
-    // Permute: swap H(=T) to last, keep C and W contiguous → [W=49, C=512, T_enc, 1]
-    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3)); // [49, 512, T_enc, 1]
-    // Now reshape: for each T, we have [49, 512] which in ggml = C varies over ne[0]=49
-    // But Python has [512, 49] per T. Need to swap: permute first two dims
-    cur = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, cur, H_enc, 512, T_enc), 1, 0, 2, 3));
-    cur = ggml_reshape_2d(ctx0, cur, 512 * H_enc, T_enc); // [25088, T_enc]
+    // ggml: cur is [T_enc, 49, 512, 1]
+    // We need to match Python's flatten: [B, T_enc, 512, 49] → [B, T_enc, 25088]
+    // where the 25088 vector has 512 values for w=0, then 512 for w=1, etc.
+    // i.e. index = c + w * 512 (C varies fastest per W block)
+    //
+    // In ggml cur: ne[0]=T_enc, ne[1]=49(=H=W), ne[2]=512(=C)
+    // For a fixed T position t: the value at (h, c) is at data[t + h*T_enc + c*T_enc*49]
+    // Python wants: value at (c, w) at index c + w*512 = c + h*512
+    // So: data[t + h*T_enc + c*T_enc*49] should map to position c + h*512 in the flat vector
+    // This is NOT a simple permute — the T dimension is ne[0] (innermost).
+    // We need to move T to be the outermost: permute(1,2,0,3) → [49, 512, T_enc, 1]
+    // Then reshape to [25088, T_enc] — but then for each T: index = h + c*49
+    // Python wants index = c + h*512. Still wrong.
+    //
+    // permute(2,1,0,3) → [512, 49, T_enc, 1] → reshape [25088, T_enc]
+    // For each T: index = c + h*512 — wait no, after permute ne[0]=512, ne[1]=49.
+    // reshape merges ne[0] and ne[1]: flat_index = ne0_idx + ne1_idx * 512 = c + h*512 ✓
+    // Move T from ne[0] to ne[2]: permute(1,2,0,3) → [49, 512, T_enc, 1]
+    // Reshape to [25088, T_enc]: flat = h + c*49 — matches Python's flatten order
+    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 2, 0, 3)); // [49, 512, T_enc, 1]
+    cur = ggml_reshape_2d(ctx0, cur, 512 * H_enc, T_enc);       // [25088, T_enc]
 
     ggml_tensor* lin_w = core_gguf::try_get(ts, "cond_enc.embed.out.0.weight");
     ggml_tensor* lin_b = core_gguf::try_get(ts, "cond_enc.embed.out.0.bias");
@@ -676,6 +681,8 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
     if (lin_b) {
         cur = ggml_add(ctx0, cur, lin_b);
     }
+    ggml_set_name(cur, "dbg_linear_out");
+    ggml_set_output(cur);
 
     // Add sinusoidal positional encoding (stored as [512, 5000, 1], F16)
     ggml_tensor* pe_full = core_gguf::try_get(ts, "cond_enc.embed.pos_enc.pe");
@@ -1006,6 +1013,23 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
     // Step 1: Compute reference mel spectrogram
     int T_mel = 0;
     auto mel = compute_ref_mel(ref_pcm, ref_n_samples, &T_mel);
+
+    // Debug: override mel from file if INDEXTTS_MEL_FILE is set (MelsTime format)
+    const char* mel_file = getenv("INDEXTTS_MEL_FILE");
+    if (mel_file && mel_file[0]) {
+        FILE* f = fopen(mel_file, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            T_mel = (int)(sz / (100 * sizeof(float)));
+            mel.resize((size_t)100 * T_mel);
+            fread(mel.data(), 1, sz, f);
+            fclose(f);
+            fprintf(stderr, "indextts: DEBUG loaded mel from %s: %d frames\n", mel_file, T_mel);
+        }
+    }
+
     if (mel.empty() || T_mel <= 0) {
         fprintf(stderr, "indextts: failed to compute reference mel\n");
         c->cond_latents.assign((size_t)n_latents * D, 0.0f);
@@ -1045,17 +1069,8 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
             return true;
         }
 
-        // mel is [n_mels, T_mel] in MelsTime layout: data[t + mel_band * T_mel]
-        // ggml tensor is [100, T_mel, 1, 1]: needs data[mel_band + t * 100] (time-major)
-        // Transpose the data
-        std::vector<float> mel_transposed(mel.size());
-        for (int t = 0; t < T_mel; t++) {
-            for (int m = 0; m < 100; m++) {
-                mel_transposed[m + t * 100] = mel[t + m * T_mel];
-            }
-        }
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "cond_mel"), mel_transposed.data(), 0,
-                                mel_transposed.size() * sizeof(float));
+        // mel is [n_mels, T_mel] MelsTime: data[t + mel * T_mel]. Set directly.
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "cond_mel"), mel.data(), 0, mel.size() * sizeof(float));
 
         // Set positional encoding
         auto pos_data = core_conformer::make_pos_enc(cond_d, T_enc);
@@ -1088,6 +1103,20 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
                 fprintf(stderr, "indextts: conv2d_out rms=%.4f nan=%d/%d ne=(%lld,%lld,%lld,%lld)\n",
                         sqrtf(s2 / std::max(1, n - nnan)), nnan, n, (long long)dbg->ne[0], (long long)dbg->ne[1],
                         (long long)dbg->ne[2], (long long)dbg->ne[3]);
+            }
+        }
+        // Debug: check linear output (before PE)
+        {
+            ggml_tensor* dbg = ggml_graph_get_tensor(gf, "dbg_linear_out");
+            if (dbg) {
+                int n = (int)ggml_nelements(dbg);
+                std::vector<float> d(n);
+                ggml_backend_tensor_get(dbg, d.data(), 0, n * sizeof(float));
+                float s2 = 0;
+                for (float v : d)
+                    s2 += v * v;
+                fprintf(stderr, "indextts: linear_out rms=%.4f first5=[%.3f,%.3f,%.3f,%.3f,%.3f]\n",
+                        sqrtf(s2 / std::max(1, n)), d[0], d[1], d[2], d[3], d[4]);
             }
         }
         // Debug: check pre-transformer output
