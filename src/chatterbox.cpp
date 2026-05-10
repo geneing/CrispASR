@@ -1191,6 +1191,47 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     ggml_tensor* out = ggml_graph_get_tensor(gf, "logits");
     float* r = (float*)malloc((size_t)vocab * sizeof(float));
     ggml_backend_tensor_get(out, r, 0, (size_t)vocab * sizeof(float));
+
+    // Optional logit dump: print first 8 logit values for the cond pass
+    // at the requested n_past. Comparing CPU vs GPU under
+    // CRISPASR_CHATTERBOX_DUMP_LOGITS_AT=<n_past> localises drift in
+    // the prefill (n_past after prefill) vs accumulating over decode.
+    if (const char* e = std::getenv("CRISPASR_CHATTERBOX_DUMP_LOGITS_AT"); e && *e) {
+        const int dump_n_past = (int)std::strtol(e, nullptr, 10);
+        if (n_past + n_tokens > dump_n_past && n_past <= dump_n_past && (use_kv_k == nullptr || use_kv_k == c->kv_k)) {
+            fprintf(stderr, "[LGT] n_past=%d:", dump_n_past);
+            for (int i = 0; i < std::min(8, vocab); i++)
+                fprintf(stderr, " %.4f", r[i]);
+            fprintf(stderr, "\n");
+        }
+    }
+
+    // Optional KV cache snapshot for Metal-vs-CPU divergence debugging.
+    // CRISPASR_CHATTERBOX_DUMP_KV_AT=<n_past> dumps the layer-0 K cache
+    // contents for the row at the specified n_past offset to stderr,
+    // ONLY for the cond pass (use_kv_k == c->kv_k or null). Allows
+    // comparing on/off-GPU writes byte-by-byte at a single step.
+    if (const char* e = std::getenv("CRISPASR_CHATTERBOX_DUMP_KV_AT"); e && *e) {
+        const int dump_n_past = (int)std::strtol(e, nullptr, 10);
+        if (n_past + n_tokens > dump_n_past && n_past <= dump_n_past && (use_kv_k == nullptr || use_kv_k == c->kv_k)) {
+            const int hd_l = (int)c->hp.head_dim;
+            ggml_tensor* kv_t = c->kv_k;
+            const size_t row_bytes = (size_t)hd_l * ggml_type_size(kv_t->type);
+            const size_t off_bytes = (size_t)dump_n_past * kv_t->nb[1]; // layer 0, kv head 0, row dump_n_past
+            std::vector<uint8_t> raw(row_bytes);
+            ggml_backend_tensor_get(kv_t, raw.data(), off_bytes, row_bytes);
+            fprintf(stderr, "[KV] L=0 h=0 t=%d type=%s hd=%d:", dump_n_past, ggml_type_name(kv_t->type), hd_l);
+            if (kv_t->type == GGML_TYPE_F16) {
+                for (int i = 0; i < std::min(8, hd_l); i++) {
+                    fprintf(stderr, " %.4f", ggml_fp16_to_fp32(((ggml_fp16_t*)raw.data())[i]));
+                }
+            } else if (kv_t->type == GGML_TYPE_F32) {
+                for (int i = 0; i < std::min(8, hd_l); i++)
+                    fprintf(stderr, " %.4f", ((float*)raw.data())[i]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
     return r;
 }
 
@@ -1881,16 +1922,50 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
         }
     }
 
-    // Backend
+    // Backend. The chatterbox T3 graph accumulates ~1e-2 logit drift on
+    // Metal/GPU vs CPU per forward pass — small per pass but past ~16
+    // decode steps the multinomial sampler crosses a probability
+    // threshold and the whole sequence diverges into garbled / repeating
+    // speech. Confirmed reproducible at every chatterbox commit since
+    // voice cloning landed (`86ac98eb`); root cause is some op in the
+    // 30-layer Llama graph (mul_mat / flash_attn / norm path) where
+    // Metal accumulator order differs from CPU enough to bite the
+    // sampler. Until the responsible kernel is patched in ggml-metal,
+    // chatterbox auto-falls-back to CPU for the T3 forward — the user
+    // sees clean cloned speech instead of broken output.
+    //
+    // CRISPASR_CHATTERBOX_FORCE_GPU=1 disables the auto-fallback for
+    // users who want to experiment with the broken GPU path
+    // (e.g. for kernel-level debugging).
     c->backend_cpu = ggml_backend_cpu_init();
     if (!c->backend_cpu) {
         fprintf(stderr, "chatterbox: failed to init CPU backend\n");
         delete c;
         return nullptr;
     }
-    c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    bool effective_use_gpu = params.use_gpu;
+    if (effective_use_gpu) {
+        const char* force = std::getenv("CRISPASR_CHATTERBOX_FORCE_GPU");
+        const bool force_gpu = force && *force && std::strcmp(force, "0") != 0;
+        if (!force_gpu) {
+            // Always print the fallback warning (independent of verbosity)
+            // so users know why their --voice + GPU run gave clean speech.
+            fprintf(stderr, "chatterbox: forward auto-falling back to CPU — Metal/GPU has cumulative F16 drift "
+                            "that breaks chatterbox sampling past ~16 decode steps. Override with "
+                            "CRISPASR_CHATTERBOX_FORCE_GPU=1 (output may be garbled).\n");
+            effective_use_gpu = false;
+        } else {
+            fprintf(stderr, "chatterbox: forward forced to GPU (CRISPASR_CHATTERBOX_FORCE_GPU=1) — output may be "
+                            "garbled past ~16 decode steps due to Metal F16 drift.\n");
+        }
+    }
+    // Mirror the effective_use_gpu decision into c->params so the
+    // companion s3gen sub-context (created later via
+    // chatterbox_set_s3gen_path) also picks up the fallback.
+    c->params.use_gpu = effective_use_gpu;
+    c->backend = effective_use_gpu ? ggml_backend_init_best() : c->backend_cpu;
     if (!c->backend) {
-        if (params.verbosity >= 1 && params.use_gpu) {
+        if (params.verbosity >= 1 && effective_use_gpu) {
             fprintf(stderr, "chatterbox: GPU backend unavailable, falling back to CPU\n");
         }
         c->backend = c->backend_cpu;
@@ -2092,8 +2167,16 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
         token_hist.reserve(speech_tokens.size() + 1);
         token_hist.push_back((int32_t)ctx->hp.start_speech_token);
         token_hist.insert(token_hist.end(), speech_tokens.begin(), speech_tokens.end());
-        // Sample next token
-        int32_t tok = sample_token(blended.data(), V, ctx->params.temperature, ctx->params.min_p, ctx->params.top_p,
+        // Sample next token. CRISPASR_CHATTERBOX_TEMP overrides the
+        // configured temperature for divergence-debugging experiments
+        // (temperature=0 forces greedy argmax — eliminates multinomial
+        // sensitivity to small logit drifts so we can isolate kernel
+        // numerical issues from sampler boundary flips).
+        float temp_eff = ctx->params.temperature;
+        if (const char* e = std::getenv("CRISPASR_CHATTERBOX_TEMP"); e && *e) {
+            temp_eff = std::strtof(e, nullptr);
+        }
+        int32_t tok = sample_token(blended.data(), V, temp_eff, ctx->params.min_p, ctx->params.top_p,
                                    ctx->params.repetition_penalty, token_hist, ctx->rng_state);
         free(logits);
         logits = nullptr;

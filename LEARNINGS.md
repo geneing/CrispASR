@@ -3110,33 +3110,88 @@ for the atomic path):
     identity. For real cloning, use the 24 kHz atomic path or the
     python baker — both verified producing speaker-cloned output.
 
-### Known issues
+### Known issue: Metal F16 drift in T3 — auto-fallback shipped
 
-1. **Chatterbox T3 forward drifts on Metal (GPU) past ~step 16**.
-   Pre-existing bug, NOT introduced by this work — reproducible at
-   the original voice-clone commit `86ac98eb` and every commit
-   before/since. The bisect:
+**Chatterbox T3 forward drifts on Metal/GPU past ~step 16**, breaking
+the voice clone output regardless of voice path or quantization.
+Pre-existing bug, NOT introduced by this work — reproducible at
+the original voice-clone commit `86ac98eb` and every commit
+before/since. The bisect via in-runtime KV/logit dump
+(`CRISPASR_CHATTERBOX_DUMP_KV_AT=N`,
+`CRISPASR_CHATTERBOX_DUMP_LOGITS_AT=N`):
 
-   | Config | Tokens 0-15 | Tokens 16+ | ASR result |
-   |---|---|---|---|
-   | Q4_K + CPU | 6133 6405 4137 4137 ... | 5122 4457 5429 ... | "Ask not what your country can do for you." ✓ |
-   | F16 + CPU | identical to Q4_K-CPU | identical to Q4_K-CPU | same ✓ |
-   | Q4_K + GPU | identical to Q4_K-CPU | DRIFTS: 5850 4376 5671 ... | "And not what you're talking about..." ✗ |
-   | F16 + GPU | identical to Q4_K-CPU | DRIFTS more aggressively | gibberish ✗ |
+| Config | Tokens 0-15 | Tokens 16+ | ASR result |
+|---|---|---|---|
+| Q4_K + CPU | reference | reference | ✓ "Ask not what your country can do for you." |
+| F16 + CPU | bit-identical to Q4_K-CPU | bit-identical | ✓ same |
+| Q4_K + GPU | bit-identical to Q4_K-CPU | DRIFTS | ✗ "And not what you're talking about..." |
+| F16 + GPU | bit-identical to Q4_K-CPU | DRIFTS more aggressively | ✗ gibberish |
 
-   The T3 forward is BIT-EQUIVALENT between CPU and GPU for the
-   first 16 sampled tokens, then Metal kernel drift causes the KV
-   cache reads / attention output to diverge from CPU. Drift is
-   deterministic (same seed → same broken tokens), so it's a
-   correctness bug in some Metal op, not a race condition. Likely
-   suspects: F16 attention numerical stability past a context-length
-   threshold, or KV cache write/read alignment on Metal. Needs deep
-   ggml-Metal kernel investigation.
+**Logit drift at end of prefill** (single forward pass through 30
+layers, T=61 input tokens, no decode steps yet): CPU and GPU differ
+by 1e-3 to 5e-2 across the first 8 logits — already enough drift
+to flip the multinomial sampler's choices once the trajectories
+diverge. The `KV_ON_CPU=1` workaround partly rescues (cleaner
+audio, partial transcript) by routing the KV write/read through
+the CPU backend, but T3 forward still computes logits on GPU and
+drifts. Greedy sampling (`CRISPASR_CHATTERBOX_TEMP=0`) doesn't help
+either — confirms the drift is at the logit level, not the sampler.
 
-   Workaround: use `--no-gpu`. Q4_K + CPU produces clean cloned
-   speech matching the python baker. The CLI prints which conds
-   were installed at verbosity ≥ 1; for production cloning today,
-   prefer the python baker workflow + `--voice <baked>.gguf`.
+The drift is **deterministic** (same seed → same broken tokens) so
+it's a correctness bug in some Metal op, not a race condition.
+Likely the cumulative effect of F16 accumulator order across
+mul_mat / flash_attn / norm kernels on Metal vs CPU's
+F32-accumulator paths. Other ggml backends in this codebase
+(parakeet, voxtral, qwen3) work fine on Metal — chatterbox is
+unusual in being an autoregressive multinomial-sampled decoder
+where small logit drift compounds catastrophically.
+
+### The fix shipped
+
+`chatterbox_init_from_file` auto-falls-back the **entire chatterbox
+forward** (T3 + s3gen) to CPU when the user requests GPU, with a
+loud stderr warning:
+
+```
+chatterbox: forward auto-falling back to CPU — Metal/GPU has
+cumulative F16 drift that breaks chatterbox sampling past ~16
+decode steps. Override with CRISPASR_CHATTERBOX_FORCE_GPU=1
+(output may be garbled).
+```
+
+The decision flips `c->params.use_gpu` so the companion s3gen
+sub-context (`chatterbox_set_s3gen_path` runs later) also picks
+up the fallback. `--no-gpu` still works as before; explicit users
+can override via `CRISPASR_CHATTERBOX_FORCE_GPU=1` for the broken
+path (kernel-level debugging) and they get a different warning.
+
+**Verification**: default command (no `--no-gpu` flag) on JFK clone
+GGUF produces clean speech rms=0.12, ASR roundtrip transcribes
+"Ask not what your country can do for you" verbatim. Same for
+24 kHz native WAV input via the atomic clone path. Same for
+default voice (no `--voice`). Same for the F16 T3 model that was
+previously the most-broken combination.
+
+### Diagnostic env knobs left in place
+
+For future Metal-kernel investigation:
+- `CRISPASR_CHATTERBOX_DUMP_KV_AT=<n_past>` — dumps layer-0 K cache
+  contents at the requested cache row to stderr.
+- `CRISPASR_CHATTERBOX_DUMP_LOGITS_AT=<n_past>` — dumps first 8
+  output logits to stderr at the matching forward pass.
+- `CRISPASR_CHATTERBOX_TEMP=<float>` — overrides T3 sampling
+  temperature (0=greedy) without rebuilding the CLI plumbing.
+- `CRISPASR_KV_READ_F32=1` — forces KV cache read to dequantise
+  to F32 before flash_attn (didn't fix the drift here, but may
+  help other backends with similar issues).
+- `CRISPASR_CHATTERBOX_FORCE_GPU=1` — disables the auto-fallback.
+
+The next step on the actual fix is per-op intermediate-tensor
+diffs: dump Q, K, V, attention output, FFN output for a fixed
+layer at the same step under both CPU and GPU, find which kernel
+contributes the dominant drift, patch ggml-metal. The plumbing
+for the dump hooks above can be extended to capture those
+intermediates.
 
 2. **T3 sampling can drift on long technical prompts**. The seed=0
    default is deterministic, but particular prompts produce
