@@ -138,9 +138,9 @@ here so the upstream-PR question stays visible.
 | # | File(s) | Symptom upstream | Status |
 | - | --- | --- | --- |
 | 1 | `ggml-cpu/{vec.cpp, vec.h, ggml-cpu.c, simd-mappings.h}` | `MUL_MAT(F16, F32)` quantises F32→F16 first; activations >65504 saturate to ±Inf and propagate NaN. Issue #38. | Carrying |
-| 2 | `ggml-cuda/im2col.cu` | `OW > 65535` aborts CUDA dispatch (e.g. SEANet at 11s × 16kHz → OW=176000); applies to both 2D and 3D im2col kernels. | Carrying |
+| 2 | `ggml-cuda/im2col.cu` | `OW > 65535` aborts CUDA dispatch (e.g. SEANet at 11s × 16kHz → OW=176000); applies to both 2D and 3D im2col kernels. | Carrying, filed upstream as [PR #1485](https://github.com/ggml-org/ggml/pull/1485) (2026-05-10) |
 | 3 | `ggml-cuda/cpy.cu` | `cpy_scalar_transpose` asserts `grid_y < USHRT_MAX`; qwen3-tts codec hits T_pcm=2.88M on CUDA. GH issue #65. | Carrying |
-| 4 | `ggml-metal/ggml-metal.metal` | `kernel_conv_transpose_1d` iterates full IL per output, ~64× wasted work; trips macOS GPU watchdog on long qwen3-tts graphs. | Carrying |
+| 4 | `ggml-metal/ggml-metal.metal` | `kernel_conv_transpose_1d` iterates full IL per output, ~64× wasted work; trips macOS GPU watchdog on long qwen3-tts graphs. | ✅ merged upstream as [PR #1477](https://github.com/ggml-org/ggml/pull/1477) (2026-05-10); drop from local fork on next ggml bump |
 | 5 | `ggml.c` (`ggml_conv_1d`, `ggml_conv_1d_dw`, `ggml_conv_2d`, `ggml_conv_2d_dw`) | After (1) sets `vec_dot_type=F32` for F16, conv graph builders that hardcode F16 im2col + F16 weight produce `MUL_MAT(F16, F16)` which the CPU backend rejects. Cast kernel to F32 when im2col is F32. | Carrying |
 
 **Why these aren't upstream yet.** All five were found while shipping a
@@ -169,3 +169,13 @@ the original commit, cherry-pick the hunk.
 When any of these gets fixed upstream, drop a note here with the date
 and the upstream commit/PR link, and remove the workaround if no longer
 needed.
+
+### Upstream progress log
+
+- **2026-05-10** — Patch #4 (Metal conv_transpose_1d) merged upstream as
+  [ggml-org/ggml#1477](https://github.com/ggml-org/ggml/pull/1477). Drop
+  the `// CrispASR patch` hunk in `ggml-metal.metal` on the next ggml
+  subtree bump.
+- **2026-05-10** — Patch #2 (CUDA im2col OW > 65535) filed upstream as
+  [ggml-org/ggml#1485](https://github.com/ggml-org/ggml/pull/1485);
+  covers both `im2col_kernel` (2D) and `im2col_3d_kernel` (3D).
