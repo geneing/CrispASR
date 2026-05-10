@@ -594,6 +594,7 @@ Use it instead of the CLI when you want encoder-only timing without
 LID-model load, mel extraction, and the TDT decoder loop in the
 wallclock.
 
+<<<<<<< Updated upstream
 ### A1000 Ampere CUDA A/B (sm_86) — issue #81 (2026-05-10)
 
 Adds the missing Ampere datapoint to the issue #81 cross-comparison.
@@ -791,6 +792,89 @@ dispatch on `compute_capability_major >= 8`, fall back to the unfused
 path otherwise. Same arch threshold cuBLAS uses for its own
 tensor-core paths, so it composes naturally with the rest of ggml's
 sm-feature gating.
+=======
+### Kaggle T4 CUDA A/B (sm_75) — issue #81 (2026-05-10)
+
+First concrete CUDA-EP datapoint we have for parakeet TDT 0.6B v3.
+Built CrispASR twice on a Kaggle T4 — once at `c2423313~1` (PRE, no
+flash-attn fusion) and once at `c2423313` (POST, fusion enabled) — and
+ran `tools/benchmark_asr_engines.py` on both libs against onnx-asr
+0.11.0 with `CUDAExecutionProvider`. Same parakeet-tdt-0.6b-v3, same
+chunked-4 s window, 10 runs per cell, 1 warmup, prewarm on.
+Reproduce: `tools/kaggle-issue81-cuda-ab.py`. Raw JSON sidecar:
+`handover-prompts/kaggle_bench_parakeet_vs_onnx.json`.
+
+**Headline (60 s tiled-JFK clip, all CUDA):**
+
+| engine | quant | mean run | RT× | p50 / p95 |
+|---|---|---|---|---|
+| **crispasr PRE (`c2423313~1`)** | q8_0 | **5.64 s** | **10.6×** | 369 / 455 ms |
+| crispasr POST (`c2423313`)      | q8_0 | 6.15 s | 9.8× | 400 / 488 ms |
+| onnx-asr | int8 | 9.06 s | 6.6× | 595 / 646 ms |
+| **onnx-asr** | **fp32** | **0.87 s** | **69.3×** | 52 / 89 ms |
+
+**Three findings, in order of how much they change the issue #81
+framing:**
+
+**1. Flash-attn fusion `c2423313` regresses ~9–10 % on Turing (sm_75).**
+Both the 11 s short clip (1.04 → 1.14 s) and the 60 s long clip
+(5.64 → 6.15 s) get slower POST. The commit message asserted *"On GPU
+(CUDA/Vulkan) the improvement should be substantially larger"* than
+the ~10 % CPU win — that claim was speculative and **does not hold on
+T4**. Likely cause: ggml's `ggml_flash_attn_ext` CUDA path is tuned
+for sm_80+ (Ampere+) tensor-core paths and the fused kernel
+underperforms our three-matmul pre-fusion shape on Turing. The
+fusion is still a clear win on M1 Metal (1.61× per the
+"flash_attn_ext fusion (#81)" section above), so this is an
+arch-conditional regression, not a wrong commit. **Test on Ampere+
+(A100 / RTX 30/40-series sm_86+) before claiming a generic
+CUDA-side win.** A `GGML_CUDA_USE_FLASH_ATTN_EXT` opt-out or arch
+guard for sm_75 may be the right fix.
+
+**2. ONNX int8 is 10× *slower* than ONNX fp32 on CUDA EP** (9.06 s
+vs 0.87 s on the same clip). ONNX-Runtime's CUDA EP has thin int8
+GEMM coverage — cuBLAS lacks fast int8, and the int8 fallback paths
+shuttle between CUDA and CPU. fp32 hits cuDNN's optimised kernels
+directly. Implication: when comparing crispasr-Q8_0 against
+onnx-on-CUDA, the right ONNX cell is **fp32, not int8**. (Inverts on
+CPU EP, where int8 is faster — see the M1 numbers earlier in this
+section.) Comparing against the wrong ONNX quant flattered crispasr
+in the previous "onnx-asr cross-comparison" framing for this exact
+shape; the M1 conclusion (crispasr Metal wins because no working
+ONNX dGPU EP) is unchanged.
+
+**3. Hardware-normalised reproduction of the issue #81 reporter's
+4.6× claim.** Reporter saw onnx 0.628 s / crispasr 2.888 s on RTX
+4070 Laptop. We see onnx fp32 0.87 s / crispasr-PRE 5.64 s on T4
+(sm_75, ≈ 8 TFLOPS fp32 vs 4070 Laptop ≈ 15-20 TFLOPS). The ratio of
+crispasr-PRE / onnx-fp32 on T4 is **6.5×**; the reporter's
+crisp/onnx ratio on 4070 is **4.6×** — same ballpark once hardware
+is normalised, especially given the 4070 Laptop's larger memory-
+bandwidth advantage. **The gap is real and reproducible, and is
+exactly what the section above frames it as: ggml-cuda kernel
+coverage on the parakeet hot path.**
+
+**4. The reporter's rising-runs pattern (`[2.45, 2.83, 3.39]`) does
+NOT reproduce on Kaggle T4.** PRE long: stdev 0.027 s across 10
+runs (5.62, 5.64, 5.63, 5.63, 5.64, 5.63, 5.71, 5.63, 5.63, 5.62).
+POST similarly flat. So the reporter's monotonic latency growth is
+almost certainly 4070 Laptop thermal step-down (or a Lovelace/
+DirectML-specific allocator behaviour), not a crispasr bug.
+
+**Action items this generates:**
+
+- Add an arch guard or `GGML_CUDA_FA_EXT` opt-out so flash-attn-ext
+  doesn't regress sm_75. Keep it on for M1 Metal (proven win) and
+  validate on sm_86+ before keeping it as a CUDA default.
+- Update the previous "onnx-asr cross-comparison" framing's "1.32× /
+  1.58× wins" callout: those are M1-vs-onnx-CPU-EP results, not
+  generalisable to a working ONNX dGPU EP. Re-test on Ampere/Ada
+  before extrapolating.
+- Issue #81's underlying ask — "close the dGPU gap" — remains the
+  same: ggml-cuda kernel coverage for parakeet. Concrete next steps
+  in the "What we have that they don't" list above (decoder loop,
+  joint network, log-mel host→device transfer).
+>>>>>>> Stashed changes
 
 ---
 
