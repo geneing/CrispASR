@@ -3586,6 +3586,217 @@ Silero LID's `lang_dict_95.json` maps indices to "xx, Name" strings
 `silero_lid.lang_strs`. Downstream backends expect bare ISO codes.
 Must extract the part before the comma.
 
+## Text LID via fastText — GlotLID-V3 + LID-176 (May 2026)
+
+`src/lid_fasttext.{h,cpp}` ports both fastText supervised LID
+families behind one C ABI: GlotLID-V3 (flat softmax, 2102 ISO 639-3
++ script labels, Apache-2.0) and Facebook LID-176 (hierarchical
+softmax, 176 ISO 639-1 codes, **CC-BY-SA-3.0** — viral; redistributors
+of the .gguf inherit SA). Released as `cstr/glotlid-GGUF` and
+`cstr/fasttext-lid176-GGUF` on the Hub.
+
+Forward path is manual F32/F16 + on-the-fly dequant via
+`ggml_get_type_traits(type)->to_float`, no graph. The compute is
+~1 MFLOP per call; a graph would be pure overhead. K-quants land via
+`crispasr-quantize` post-processing.
+
+### `</s>` row injection in fastText supervised mode (the trap)
+
+fastText's `Dictionary::getLine` injects an `</s>` (always
+`input_matrix[0]`) at end-of-stream in supervised mode, and
+`initNgrams` skips subword expansion for it so its precomputed row
+list is just `[0]`. `model.f.tokenize(text)` does NOT return it — a
+manual reproduction that just iterates over tokenized words gets 11
+row IDs for `"the"` while `model.get_sentence_vector("the")` mean-pools
+12 rows.
+
+**Symptom**: cosine vs `model.get_sentence_vector` lands ~0.973
+instead of 1.0, with a non-constant ratio across dimensions (so it's
+not a divisor mistake — it's a missing row). Appending row 0 to the
+input list before mean-pooling brings cosine to 1.0 within float32
+epsilon. The C++ port in `src/lid_fasttext.cpp` defines a named
+`kEosRowId = 0` constant for this; the converter and reference dumper
+both must match.
+
+This bites every fastText port. If you use `m.get_subwords(word)` to
+build the input list and skip the trailing `</s>`, you end up with
+~3% accuracy loss that looks like quantization noise but isn't.
+
+### Hierarchical softmax — code-bit sign convention `(2c-1)·f`
+
+LID-176 uses HS (`loss=hs`), not flat softmax. The "output matrix"'s
+176 rows are NOT per-label scoring vectors; they parameterize internal
+nodes of a Huffman tree built deterministically from training-frequency
+label counts. Per-label log-probability:
+
+```
+log P(label_i) = Σ over (node, code) in path[i]:
+    log_sigmoid((2*code - 1) · (output[node] · hidden))
+```
+
+The right child gets `binary=1` in `Dictionary::initNgrams`, so walking
+right at training time means code=1 and contributes `log_sigmoid(+f)`;
+walking left contributes `log_sigmoid(-f)`. The unified formula is
+`(2c-1)·f`, **not** `(1-2c)·f`. Sign-flipping makes predictions land
+in the wrong subtree of the root — fastText says `fr/0.95` but your
+port says `en/0.88` for "Bonjour le monde". The cosine-vs-embedding-
+bag stage stays 1.0 (loss-agnostic), so the bug only surfaces at
+top-1 — verify by hand on a single short input first.
+
+The Huffman tree is **not stored in `model.bin`** — fastText rebuilds
+it at load time from the dictionary's per-label `count` field via
+`Model::buildTree`. fastText-python doesn't expose label counts, so
+the GGUF converter parses `lid.176.bin` directly (header layout in
+`src/dictionary.cc::save`) to extract them, then ports `buildTree`
+inline. GGUF schema additions:
+
+```
+lid_fasttext.loss              str    "softmax" | "hs"
+lid_fasttext.hs_path_offsets   i32[n_labels+1]   # CSR-style
+lid_fasttext.hs_paths          i32[total_steps]
+lid_fasttext.hs_codes          i8 [total_steps]
+```
+
+Memoize internal-node dot products inside the per-label loop —
+deeper labels share most of their path with siblings. For LID-176
+the average path length is 10.54 over 176 labels.
+
+### `crispasr-quantize`'s `is_weight` gate — tensor naming matters
+
+`examples/crispasr-quantize/main.cpp` only quantizes tensors whose
+names contain `"weight"` or end in `_w`:
+
+```cpp
+bool is_weight = (sname.find("weight") != npos) ||
+                 (sname.size() >= 2 && sname.substr(sname.size()-2) == "_w");
+```
+
+Tensors that don't match the gate get `f16, copying... done` —
+silently passed through as F16 instead of quantized. The output GGUF
+has the same byte count as the F16 input minus a few metadata bytes,
+which is the most confusing diagnostic surface possible.
+
+**Symptom**: `crispasr-quantize input.gguf output-q4_k.gguf q4_k`
+"succeeds" with output the same size as input. Look at the tool's
+log lines: `quantizing to q4_K... done` is good; `copying... done`
+means the tensor failed the gate.
+
+**Fix**: name the tensor `<prefix>.weight` (kokoro/parakeet/voxtral
+convention). The lid-fasttext converter writes
+`lid_fasttext.embedding.weight` and `lid_fasttext.output.weight`;
+the runtime loader keeps a backward-compat fallback to bare
+`lid_fasttext.embedding` / `lid_fasttext.output` since the first
+release used those names before this trap was identified.
+
+### Q4_K below 0.999 cosine floor on intermediate stages, top-1 stable
+
+The diff harness tracks per-stage cosine against a Python F32
+reference. For GlotLID quants:
+
+| Quant | embedding_bag cos | logits cos | softmax cos | top-1 |
+|-------|-------------------|------------|-------------|-------|
+| F16   | 1.000000          | 1.000000   | 1.000000    | exact |
+| Q8_0  | 0.999990          | 0.999991   | 1.000000    | exact |
+| Q6_K  | 0.999898          | 0.999883   | 1.000000    | exact |
+| Q5_K  | 0.999440          | 0.999530   | 1.000000    | exact |
+| Q4_K  | 0.998303          | 0.998356   | 1.000000    | exact |
+| Q4_0  | 0.997176          | 0.997357   | 1.000000    | exact |
+
+Q4_K and Q4_0 fail the standard 0.999 cosine floor on `embedding_bag`
+and `logits`. But softmax compresses the logit noise by ~3-4 orders
+of magnitude (max_abs goes from 1.6 on logits to 6.1e-5 on softmax),
+so the top-1 prediction is identical to F16 across an 8-language
+multilingual smoke test. **Conclusion**: for shallow LID classifiers,
+the conventional 0.999 cosine threshold is conservative — softmax
+absorbs much more quant noise than it does for deep transformer
+stacks. Q4_K is functionally fine; ship it but document the
+intermediate-stage drift.
+
+(Contrast with kokoro: Q4_K breaks the German backbone via the
+predictor LSTM accumulating over multiple steps. Shallow networks
+tolerate quant noise better.)
+
+### `gguf` Python's K-quant gap — fallback to `crispasr-quantize`
+
+`gguf.quantize()` only handles F32, F16, BF16, Q8_0. K-quants
+(`Q5_K`, `Q4_K`, `Q6_K`, etc.) raise `NotImplementedError` from
+`gguf/quants.py:129`. The right path for K-quants is to write F16
+from the converter, then re-quantize via `crispasr-quantize` (which
+calls into `ggml_quantize_chunk`). The C++ runtime side is
+type-agnostic via `ggml_get_type_traits(type)->to_float`, so any
+quant produced by `crispasr-quantize` "just works" without runtime
+changes.
+
+### LID-176's `dim=16` makes K-quants unproductive
+
+K-quants need 256-element row alignment. LID-176 has `dim=16`, so
+`crispasr-quantize` falls back to legacy Q4_0/Q5_0/Q8_0 for those
+rows. Combined with the model already being 63 MB at F16 (the input
+matrix is `2,040,010 × 16`), quants don't save meaningful space.
+Ship F16 only for LID-176; quants make sense for GlotLID
+(`1,634,361 × 256` = 1.6 GB at F32).
+
+### `crispasr-quantize` is the right tool, not `whisper-quantize`
+
+`build/bin/whisper-quantize` is the legacy whisper-binary-format
+quantizer. It rejects GGUF input with `bad magic`. The GGUF-aware
+tool is `crispasr-quantize` at `examples/crispasr-quantize/main.cpp`,
+not previously discoverable from a casual `find -name "*quantize*"`.
+Always check `build-ninja-compile/bin/crispasr-quantize` first; the
+help text shows the supported quant types.
+
+### HF upload — `hf upload-large-folder` with symlink staging
+
+Per `.claude/CLAUDE.md`'s recipe: stage GGUFs as symlinks under
+`/tmp/hf-staging-<repo>/` and run `hf upload-large-folder
+cstr/<repo>-GGUF .` — uploaded 1.8 GB across 4 GlotLID quants in
+9:42 wall time on the first attempt, including Xet pre-upload + commit.
+Smaller LID-176 (63 MB) finished in under a minute.
+
+The `--include` flag accepts multiple patterns (`"*.gguf" "*.md"`).
+The CC-BY-SA-3.0 SA notice for LID-176 must be surfaced in the
+README's metadata block AND in a license-warning section above the
+Files table — downstream redistributors of the GGUF inherit the
+SA terms, which is more restrictive than most ASR/LID models on
+the Hub.
+
+### CLD3 (`google/cld3`) is a separate architecture, not n=1,2,3 bags
+
+The brief described CLD3 as "separate hashed embedding bags for
+n ∈ {1,2,3}, concatenated → FC + ReLU → softmax". The actual model
+in `src/cld_3/lang_id_nn_params.cc` (1.76 MB embedded weight file)
+declares **six** embedding columns, not three:
+
+```cpp
+const int LangIdNNParams::kEmbeddingsNumRows[] = {1000, 5000, 12, 103, 5000, 100};
+const int LangIdNNParams::kEmbeddingsNumCols[] = {16, 16, 8, 8, 16, 16};
+const int32 LangIdNNParams::kConcatOffsetValues[] = {0, 16, 32, 40, 48, 64};
+```
+
+Six features → concat to 80-d → hidden + softmax over ~107 langs.
+Weights stored as `float16` (Google's specific representation, as
+`uint16` literals in C++ source). Each feature is a different
+extractor (probably {char-1grams, char-2grams, script-type,
+relevant-script, char-3grams, punctuation} per CLD3's feature
+function registry). Porting CLD3 is meaningfully more work than
+porting fastText was — six feature extractors + their text-normalisation
+quirks live in `src/feature_extractor.{h,cc}` and the full set isn't
+trivially expressible without building (or vendoring) libcld3.
+
+Pragmatic plan if CLD3 becomes priority later: parse
+`lang_id_nn_params.cc` directly via regex (the floats are in
+plain-text C++ array literals — skip the `float16` ones, decode the
+`uint16` literals via `ggml_compute_fp16_to_fp32`); replicate the
+six feature extractors from `src/feature_extractor.cc` in C++; port
+the matmul + ReLU + softmax. Full session of work, not an
+afternoon-add-on.
+
+**Update (May 2026):** CLD3 shipped — see the next section,
+"## Text LID via CLD3", for the actual port. The plan above held
+up: regex-parse → six feature extractors → matmul + ReLU + softmax.
+The traps were elsewhere (bf16-style float16, MurmurHash2 not
+CityHash, ULScript values guessed wrong).
+
 ## Text LID via CLD3 — Google compact language detector (May 2026)
 
 `src/lid_cld3.{h,cpp}` ports Google's CLD3
