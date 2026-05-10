@@ -3387,3 +3387,78 @@ fra_Latn	0.983436   (lid-fasttext glotlid-v3, dim=256, 2102 labels)
 $ crispasr-lid -m lid-fasttext176-f16.gguf --text "..."
 fr	0.958174       (lid-fasttext fasttext-lid176, dim=16, 176 labels)
 ```
+
+### §84 — PLAN #89 flash_attn field migration (2026-05-10)
+
+Mechanical struct-field plumbing across every backend whose
+`*_context_params` already carried `use_gpu`. Each gained a
+`flash_attn` field (default true), threaded through
+`*_default_params()` and into `crispasr_session_open_explicit`'s
+arm via `g_open_flash_attn_tls`. The **compute graphs do not yet
+branch on the flag** — that's PLAN #86, lands per backend
+incrementally. After this slice every backend ACCEPTS the toggle
+at session-open time; honouring it at the kernel level is
+follow-up work.
+
+Backends touched (12 of 12):
+
+| Backend | Pre-existing field | New field | Notes |
+|---|---|---|---|
+| parakeet | `use_flash` | — | TLS routes to existing field |
+| canary | `use_flash` | — | TLS routes to existing field |
+| cohere | `use_flash` | — | TLS routes to existing field |
+| qwen3 (asr) | — | `flash_attn` | new |
+| voxtral | — | `flash_attn` | new |
+| voxtral4b | — | `flash_attn` | new + arm cleanup (was hard-coding verbosity=0) |
+| granite_speech | — | `flash_attn` | new |
+| vibevoice | — | `flash_attn` | new |
+| qwen3_tts | — | `flash_attn` | new |
+| orpheus | — | `flash_attn` | new |
+| kokoro | — | `flash_attn` | new |
+| chatterbox | — | `flash_attn` | new |
+
+Commit `0b7dd749`. Pairs with the open-params v2 work in §85's
+companion patch. Closes the prerequisite for PLAN #86.
+
+### §85 — PLAN #88 Kokoro length_scale + VibeVoice runtime tts_steps (2026-05-10)
+
+Two TTS backend-internal refactors that close the cross-repo
+deferred items from CrisperWeaver's May 2026 parity sweep.
+
+**Kokoro length-scale** (per-phoneme speaking-rate scalar):
+* New `length_scale` field on `kokoro_context_params` (default
+  1.0). Applied to the duration-predictor output BEFORE the
+  banker's-round + clamp-min-1 in the "durations" stage extractor
+  in `kokoro_run_predictor`, so PyTorch's `torch.round` semantics
+  (round-half-to-even) are preserved.
+* New `kokoro_set_length_scale(ctx, scale)` runtime setter clamps
+  to [0.25, 4.0]. Read on every `kokoro_synthesize` call so post-
+  init mutation just changes the next call's pacing.
+
+**VibeVoice runtime tts_steps**:
+* The `tts_steps` field (DPM-Solver++ inference steps, default 20)
+  has been on `vibevoice_context_params` since the original
+  vibevoice port, but was init-time only. New
+  `vibevoice_set_tts_steps(ctx, steps)` runtime setter mutates the
+  pre-existing field; clamps to [4, 100]. `vibevoice_synthesize`
+  reads `ctx->params.tts_steps` on every call so the setter just
+  changes the next call's schedule density.
+
+**Unified API** (`crispasr_c_api.cpp`):
+* New `crispasr_session_set_length_scale(s, scale)` export routes
+  to `kokoro_set_length_scale` on kokoro sessions; rc=-2 on
+  backends without a duration model.
+* `crispasr_session_set_tts_steps` extended to also route to
+  vibevoice (was chatterbox-only).
+* Dart binding: new `CrispasrSession.setLengthScale()` method,
+  `providesSymbol`-gated for pre-0.6.2 compatibility.
+
+Commit `cda44359`. CrisperWeaver picks this up automatically —
+the existing TTS *speed* slider on the Synthesize screen now
+drives `setLengthScale(1/speed)` IN ADDITION to the client-side
+resampler. On kokoro the duration model produces a clean
+stretch/squeeze; on every other TTS backend the client-side
+resample is the fallback.
+
+Closes PLAN #88 entirely. Both kokoro + vibevoice runtime knobs
+now reachable from any C-ABI consumer.

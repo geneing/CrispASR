@@ -46,8 +46,8 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **DEFERRED** | [#81 Nemotron-Speech-Streaming-EN-0.6B](#81-nemotron-speech-streaming-en-06b--first-cache-aware-streaming-native-asr) | M-L | NVOML license, ~60–75 % reuse from parakeet/canary; the new bit is cache-aware FastConformer streaming. Wait for `--stream-json` (issue #84) to settle + a second user request (only mention so far is issue #85) before starting. |
 | **MEDIUM** | [#86 Per-backend flash-attention wiring](#86-per-backend-flash-attention-wiring-crisperweaver-driven) | 2–3 days | Plumbing shipped 0.6.2; kernel-level wiring per backend is the remaining work. Whisper done; orpheus/chatterbox-T3 are the next-best pickings. |
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
-| **MEDIUM** | [#88 Kokoro length-scale + vibevoice diffusion steps](#88-kokoro-length-scale--vibevoice-diffusion-step-runtime-knobs) | 1 day combined | Two backend-internal refactors; CrisperWeaver Synthesize screen already has placeholder sliders (client-side resample / no-op today). |
-| **MEDIUM** | [#89 Flash-attn field migration](#89-per-backend-flash_attn-field-migration-preq-for-86) | ~2 hours | Mechanical struct-field plumbing across the 12 backends with `use_gpu`; prereq for #86. |
+| **DONE** | #88 Kokoro length-scale + vibevoice diffusion steps | 1 day combined | Both backend-internal refactors shipped → [HISTORY §85](HISTORY.md). `kokoro_set_length_scale` + `vibevoice_set_tts_steps` runtime setters on the per-backend API; `crispasr_session_set_length_scale` + `_set_tts_steps` on the unified API. CrisperWeaver's TTS speed slider drives both. |
+| **DONE** | #89 Flash-attn field migration | ~2 hours | Mechanical plumbing across 12 backends shipped → [HISTORY §84](HISTORY.md). Prereq for #86 closed. |
 
 **Recently completed** (full write-ups in HISTORY.md): **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 
@@ -2453,67 +2453,10 @@ done as a separate phased PR, one backend per commit.
 
 ---
 
-## 88. Kokoro length-scale + vibevoice diffusion-step runtime knobs
-
-**Status:** open. Each is its own backend-internal refactor.
-
-### Kokoro (length-scale / speaking rate)
-
-Today `kokoro_context_params` only has `use_gpu` + `n_threads` (set
-via `kokoro_set_n_threads`). The duration-predictor inside StyleTTS2
-emits per-phoneme frame counts that get scaled to mel frames; there's
-no runtime scalar to multiply that count.
-
-**Approach:** add `float length_scale` to `kokoro_context_params`
-(default 1.0). In the duration-predictor forward (find the
-`predicted_dur = ...` line in `kokoro.cpp`), multiply each frame
-count by `cparams.length_scale` before allocating the mel buffer.
-Add `kokoro_set_length_scale(ctx, scale)` runtime setter; route
-through `crispasr_session_set_length_scale(s, scale)` on the
-unified API. Surface as a "speed" slider in CrisperWeaver's
-Synthesize screen (already has client-side resample as a fallback).
-
-**Effort:** half a day. Pure `kokoro.cpp` change; no other backends
-involved.
-
-### VibeVoice (diffusion-step count)
-
-Today vibevoice's diffusion step count is locked into its session
-config when the GGUF loads. The schedule + step count are baked
-into a tensor named `cfm_schedule` (or similar) in the GGUF.
-
-**Approach:** expose `int diffusion_steps` on
-`vibevoice_context_params` (default = whatever the schedule tensor
-encodes). At synth time, if `cparams.diffusion_steps > 0`, sub-
-sample the schedule down to that many steps (linear interpolation
-in t-space — same trick HF diffusers uses). New
-`vibevoice_set_diffusion_steps(ctx, n)` runtime setter; route on
-the session API.
-
-**Effort:** half a day. Quality-vs-latency check needed: <10 steps
-typically degrades fidelity sharply, so document a sensible
-[5, 50] range.
+## ~~88. Kokoro length-scale + vibevoice diffusion-step runtime knobs~~ — **DONE → [HISTORY §85](HISTORY.md)**
 
 ---
 
-## 89. Per-backend `flash_attn` field migration (preq for #86)
-
-**Status:** prerequisite for #86. Mechanical refactor.
-
-Each backend with a `*_context_params` struct that today has
-`use_gpu` needs a `flash_attn` field added next to it (default
-true), threaded through `*_default_params()`, and stored on the
-context for the compute graph to read. Same pattern as the existing
-`use_gpu` plumbing.
-
-Backends to touch (12 of them — every one with `use_gpu`):
-parakeet, canary, qwen3, cohere, granite_speech, voxtral,
-voxtral4b (has its own struct), vibevoice, qwen3_tts, orpheus,
-kokoro, chatterbox.
-
-**Effort:** ~2 hours total — one mechanical edit per backend,
-repeated 12 times. Can land in a single commit since it's all
-struct-field plumbing with no semantic change yet (the field
-exists but the compute graph doesn't branch on it; that's #86).
+## ~~89. Per-backend `flash_attn` field migration~~ — **DONE → [HISTORY §84](HISTORY.md)**
 
 ---
