@@ -55,6 +55,7 @@
 #include "mimo_tokenizer.h"
 #include "orpheus_snac.h"
 #include "chatterbox.h"
+#include "lid_cld3.h"
 
 #include "common-crispasr.h"
 
@@ -2497,11 +2498,59 @@ int main(int argc, char** argv) {
             free(our_data);
         }
         snac_decoder_free(ctx);
+    } else if (backend_name == "lid-cld3") {
+        // CLD3 text-LID. Input text rides in ref metadata under "input_text"
+        // (set by tools/reference_backends/lid_cld3.py from LID_TEXT or
+        // CLD3_TEXT env). Audio arg is unused. The C++ lid-cld3 runtime
+        // does its own text cleanup, feature extraction, and forward — we
+        // diff every intermediate stage against the Python reference at
+        // F32 precision; F16 weights pass through tensor_to_f32 at load
+        // time so the cosine compare measures the C++/Python algorithmic
+        // gap, not the F16 quantization noise.
+        const std::string text = ref.meta("input_text");
+        if (text.empty()) {
+            fprintf(stderr, "lid-cld3: reference dump is missing the 'input_text' metadata key. "
+                            "Re-run tools/dump_reference.py --backend lid-cld3 with LID_TEXT set.\n");
+            return 4;
+        }
+        lid_cld3_context* ctx = lid_cld3_init_from_file(model_path.c_str(), 1);
+        if (!ctx) {
+            fprintf(stderr, "failed to load lid-cld3 model '%s'\n", model_path.c_str());
+            return 4;
+        }
+        // Stages match DEFAULT_STAGES in tools/reference_backends/lid_cld3.py.
+        static const char* lid_stages[] = {
+            "embedding_bag_0", "embedding_bag_1", "embedding_bag_2", "embedding_bag_3",
+            "embedding_bag_4", "embedding_bag_5", "concat",          "hidden_pre",
+            "hidden_out",      "logits",          "softmax",
+        };
+        for (const char* stage : lid_stages) {
+            int n_stage = 0;
+            float* our_data = lid_cld3_extract_stage(ctx, text.c_str(), stage, &n_stage);
+            if (!our_data) {
+                printf("[ERR ] %-22s  extract returned null\n", stage);
+                n_fail++;
+                continue;
+            }
+            auto rep = ref.compare(stage, our_data, (size_t)n_stage);
+            print_row(stage, rep, COS_THRESHOLD);
+            record(rep);
+            free(our_data);
+        }
+        float conf = 0.f;
+        const char* pred = lid_cld3_predict(ctx, text.c_str(), &conf);
+        const std::string ref_label = ref.meta("top1_label");
+        printf("[INFO] top1_label             ours='%s' (%.4f)  ref='%s'\n", pred ? pred : "(null)", conf,
+               ref_label.c_str());
+        if (pred && !ref_label.empty() && ref_label != pred) {
+            n_fail++;
+        }
+        lid_cld3_free(ctx);
     } else {
         fprintf(stderr,
                 "crispasr-diff: backend '%s' is not recognised. "
                 "Supported: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, granite-4.1, "
-                "granite-nle, parakeet, canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus.\n",
+                "granite-nle, parakeet, canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, lid-cld3.\n",
                 backend_name.c_str());
         return 5;
     }

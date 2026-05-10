@@ -837,6 +837,21 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# lid-cld3 — Google CLD3 (Apache-2.0) text-LID, 109 ISO 639-1 labels
+# Sibling backend to lid-fasttext; the auto-routing dispatcher in
+# examples/cli/text_lid_dispatch.cpp picks between them by reading the
+# GGUF's general.architecture key. Pure manual F32 forward, no ggml graph.
+# ---------------------------------------------------------------------------
+add_library(lid-cld3 STATIC lid_cld3.h lid_cld3.cpp)
+set_target_properties(lid-cld3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(lid-cld3 PUBLIC .)
+target_compile_features   (lid-cld3 PUBLIC cxx_std_17)
+target_link_libraries     (lid-cld3 PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(lid-cld3 PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # fireredpunc — FireRedPunc BERT-based punctuation restoration
 # ---------------------------------------------------------------------------
 add_library(fireredpunc STATIC fireredpunc.h fireredpunc.cpp)
@@ -978,6 +993,11 @@ endif()
 # Silero LID engine used by crispasr_lid.cpp's native Silero path.
 if (TARGET silero-lid)
     target_link_libraries(crispasr PUBLIC silero-lid)
+endif()
+# CLD3 text-LID — sibling of lid-fasttext, routed via the auto-routing
+# text-LID dispatcher in examples/cli/text_lid_dispatch.cpp.
+if (TARGET lid-cld3)
+    target_link_libraries(crispasr PUBLIC lid-cld3)
 endif()
 
 install(TARGETS crispasr LIBRARY)
