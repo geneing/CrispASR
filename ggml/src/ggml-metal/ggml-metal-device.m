@@ -93,6 +93,15 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
     return pipeline.pipeline->obj.maxTotalThreadsPerThreadgroup;
 }
 
+// CrispASR patch (PLAN #88 / CrisperWeaver §5.18): forward
+// declarations for the pipeline-cache accessors. The full
+// `struct ggml_metal_device` lives further down in this file
+// because of historical ordering; the library functions above
+// can't peek into it directly, so they go through these tiny
+// accessors. Both return nil / no-op when caching is disabled.
+static id<MTLBinaryArchive> crispasr_metal_device_archive(ggml_metal_device_t dev);
+static void crispasr_metal_device_mark_archive_dirty(ggml_metal_device_t dev);
+
 struct ggml_metal_library {
     id<MTLLibrary> obj;
 
@@ -418,8 +427,44 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
         }
 
         id<MTLDevice> device = ggml_metal_device_get_obj(lib->dev);
-        id<MTLComputePipelineState> obj = [device newComputePipelineStateWithFunction:mtl_function error:&error];
 
+        // CrispASR patch (PLAN #88 / CrisperWeaver §5.18): pipeline
+        // cache hookup. When the device's binary archive is open,
+        // attach it via `MTLComputePipelineDescriptor.binaryArchives`
+        // so Metal first checks the archive for a matching PSO and
+        // skips the shader compiler on hit. After successful
+        // creation we add the descriptor BACK to the archive so the
+        // next process startup sees it on disk. Failures here are
+        // intentionally non-fatal — pipeline compile already
+        // succeeded (`obj` is valid), and the worst case for an
+        // add-to-archive miss is a missed cache entry on the next
+        // run, not a broken inference today.
+        id<MTLComputePipelineState> obj = nil;
+        MTLComputePipelineDescriptor * pdesc = [MTLComputePipelineDescriptor new];
+        pdesc.computeFunction = mtl_function;
+        id<MTLBinaryArchive> archive = crispasr_metal_device_archive(lib->dev);
+        if (archive) {
+            pdesc.binaryArchives = @[archive];
+        }
+        obj = [device newComputePipelineStateWithDescriptor:pdesc
+                                                    options:MTLPipelineOptionNone
+                                                 reflection:nil
+                                                      error:&error];
+
+        if (obj && archive) {
+            NSError * add_err = nil;
+            if ([archive addComputePipelineFunctionsWithDescriptor:pdesc error:&add_err]) {
+                crispasr_metal_device_mark_archive_dirty(lib->dev);
+            } else if (add_err) {
+                // Logged at DEBUG because some functions can't be
+                // archived (linker-resolved ones, MPS-backed paths)
+                // and that's neither rare nor a real problem.
+                GGML_LOG_DEBUG("%s: add-to-archive skipped for '%s': %s\n",
+                        __func__, name, [[add_err description] UTF8String]);
+            }
+        }
+
+        [pdesc release];
         [mtl_function release];
 
         if (!obj) {
@@ -540,6 +585,26 @@ struct ggml_metal_device {
 
     // virtual address for GPU memory allocations
     atomic_uintptr_t addr_virt;
+
+    // CrispASR patch (PLAN #88 / CrisperWeaver §5.18): persistent
+    // Metal pipeline cache via Apple's `MTLBinaryArchive`. When the
+    // process opens a Metal device for the first time, ggml-metal
+    // JITs every compute pipeline state object (PSO) from MSL source
+    // — that's the ~30–60 s "cold start" tax visible on every
+    // CrispASR / CrisperWeaver process spawn. The archive lets us
+    // serialise the compiled PSOs to disk on shutdown and reload
+    // them on the next launch, so the second+ run skips the JIT
+    // entirely for any shape the first run already touched.
+    //
+    // Storage layout: one `.archive` file per device, keyed by the
+    // device's user-visible name (spaces normalised to underscores).
+    // Default path is `~/Library/Caches/ggml-metal/<device>.archive`;
+    // override with `GGML_METAL_PIPELINE_CACHE`. Set
+    // `GGML_METAL_PIPELINE_CACHE_DISABLE=1` to skip the cache (e.g.
+    // when chasing a stale-PSO bug).
+    id<MTLBinaryArchive> binary_archive;
+    NSURL * binary_archive_url;
+    bool binary_archive_dirty; // true when we added at least one PSO since the last serialise
 };
 
 //
@@ -635,6 +700,149 @@ void ggml_metal_rsets_free(ggml_metal_rsets_t rsets) {
     free(rsets);
 }
 
+// ───────────────────────────────────────────────────────────────────
+// CrispASR patch (PLAN #88 / CrisperWeaver §5.18): MTLBinaryArchive
+// helpers for the persistent pipeline cache. Free functions kept
+// file-static so they don't appear in the public ggml-metal ABI.
+// ───────────────────────────────────────────────────────────────────
+
+// Resolve the on-disk path for this device's pipeline archive.
+// `GGML_METAL_PIPELINE_CACHE` (a directory) overrides the default
+// `~/Library/Caches/ggml-metal/`. The leaf filename is the device's
+// `name` property with spaces normalised to underscores. Returns nil
+// when path resolution failed entirely.
+static NSURL * crispasr_metal_pipeline_cache_url(NSString * device_name) {
+    NSFileManager * fm = [NSFileManager defaultManager];
+
+    NSURL * cache_dir = nil;
+    const char * env_dir = getenv("GGML_METAL_PIPELINE_CACHE");
+    if (env_dir && env_dir[0] != '\0') {
+        cache_dir = [NSURL fileURLWithPath:[NSString stringWithUTF8String:env_dir]];
+    } else {
+        NSURL * libcache = [fm URLForDirectory:NSCachesDirectory
+                                     inDomain:NSUserDomainMask
+                            appropriateForURL:nil
+                                       create:YES
+                                        error:nil];
+        if (!libcache) {
+            return nil;
+        }
+        cache_dir = [libcache URLByAppendingPathComponent:@"ggml-metal" isDirectory:YES];
+    }
+
+    // Ensure the directory exists; first run will create it.
+    NSError * mkdir_err = nil;
+    if (![fm createDirectoryAtURL:cache_dir
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:&mkdir_err]) {
+        GGML_LOG_WARN("%s: pipeline-cache dir %s unwritable (%s) — caching disabled\n",
+                __func__,
+                [[cache_dir path] UTF8String],
+                mkdir_err ? [[mkdir_err description] UTF8String] : "unknown");
+        return nil;
+    }
+
+    // Normalise the device name so it's a safe filename: lowercase
+    // spaces and ` / \ : * ? " | < >` are all replaced with `_`.
+    NSMutableCharacterSet * unsafe = [NSMutableCharacterSet whitespaceCharacterSet];
+    [unsafe addCharactersInString:@"/\\:*?\"|<>"];
+    NSArray<NSString *> * parts = [device_name componentsSeparatedByCharactersInSet:unsafe];
+    NSString * safe = [parts componentsJoinedByString:@"_"];
+    if (safe.length == 0) {
+        safe = @"unknown-device";
+    }
+
+    NSString * filename = [NSString stringWithFormat:@"%@.archive", safe];
+    return [cache_dir URLByAppendingPathComponent:filename];
+}
+
+// Create or load the device's binary archive. On the first run
+// (or after a delete) the file doesn't exist yet and we hand
+// `MTLBinaryArchiveDescriptor` a nil URL — Metal returns a fresh,
+// empty archive we'll fill in as pipelines compile. On subsequent
+// runs the existing file gets mapped in; pipelines whose function
+// hash is already serialised inside get loaded straight from disk.
+//
+// Sets `dev->binary_archive` + `dev->binary_archive_url`. Both stay
+// nil when caching is disabled, the cache file is corrupt (load
+// failed), or the device doesn't support binary archives.
+static void crispasr_metal_pipeline_cache_open(ggml_metal_device_t dev) {
+    const char * disable = getenv("GGML_METAL_PIPELINE_CACHE_DISABLE");
+    if (disable && disable[0] != '\0' && disable[0] != '0') {
+        GGML_LOG_INFO("%s: GGML_METAL_PIPELINE_CACHE_DISABLE set — skipping pipeline cache\n", __func__);
+        return;
+    }
+
+    NSURL * url = crispasr_metal_pipeline_cache_url([dev->mtl_device name]);
+    if (!url) {
+        return;
+    }
+
+    MTLBinaryArchiveDescriptor * desc = [MTLBinaryArchiveDescriptor new];
+    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:[url path]];
+    if (exists) {
+        desc.url = url;
+    } // else nil → fresh archive
+
+    NSError * err = nil;
+    id<MTLBinaryArchive> archive = [dev->mtl_device newBinaryArchiveWithDescriptor:desc error:&err];
+    [desc release];
+
+    if (!archive) {
+        // Failure is non-fatal — caching is purely a perf optimisation.
+        // The most common cause is a stale archive from a different
+        // ggml-metal build (kernel hashes changed); delete-and-retry
+        // with a fresh archive.
+        if (exists) {
+            GGML_LOG_WARN("%s: cached archive %s rejected by Metal (%s) — discarding and starting fresh\n",
+                    __func__,
+                    [[url path] UTF8String],
+                    err ? [[err description] UTF8String] : "unknown");
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+            err = nil;
+            MTLBinaryArchiveDescriptor * fresh = [MTLBinaryArchiveDescriptor new];
+            archive = [dev->mtl_device newBinaryArchiveWithDescriptor:fresh error:&err];
+            [fresh release];
+        }
+        if (!archive) {
+            GGML_LOG_WARN("%s: pipeline-cache init failed (%s) — caching disabled\n",
+                    __func__,
+                    err ? [[err description] UTF8String] : "unknown");
+            return;
+        }
+    }
+
+    dev->binary_archive = archive;        // retained by newBinary...
+    dev->binary_archive_url = [url retain];
+    dev->binary_archive_dirty = false;
+    GGML_LOG_INFO("%s: pipeline cache %s — %s\n",
+            __func__,
+            exists ? "loaded" : "created",
+            [[url path] UTF8String]);
+}
+
+// Flush the in-memory archive to disk. Called from
+// `ggml_metal_device_free`. No-op when caching is disabled or
+// nothing was added since the last serialise.
+static void crispasr_metal_pipeline_cache_flush(ggml_metal_device_t dev) {
+    if (!dev->binary_archive || !dev->binary_archive_url || !dev->binary_archive_dirty) {
+        return;
+    }
+    NSError * err = nil;
+    if ([dev->binary_archive serializeToURL:dev->binary_archive_url error:&err]) {
+        GGML_LOG_INFO("%s: pipeline cache serialised → %s\n",
+                __func__,
+                [[dev->binary_archive_url path] UTF8String]);
+        dev->binary_archive_dirty = false;
+    } else {
+        GGML_LOG_WARN("%s: pipeline cache serialise failed for %s (%s)\n",
+                __func__,
+                [[dev->binary_archive_url path] UTF8String],
+                err ? [[err description] UTF8String] : "unknown");
+    }
+}
+
 ggml_metal_device_t ggml_metal_device_init(int device) {
     ggml_metal_device_t dev = calloc(1, sizeof(struct ggml_metal_device));
 
@@ -648,6 +856,14 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
             if (dev->mtl_queue == nil) {
                 GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
             }
+
+            // CrispASR patch (PLAN #88 / CrisperWeaver §5.18): open the
+            // pipeline cache before any PSO gets JIT'd — including the
+            // tensor-API-probe dummy_kernel further down. Cache hits
+            // skip the Metal shader compiler entirely; misses fall
+            // through to JIT and get added to the archive on the way
+            // out, so the next run starts warm.
+            crispasr_metal_pipeline_cache_open(dev);
 
             dev->addr_virt = 0x000000400ULL;
 
@@ -877,6 +1093,21 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
 void ggml_metal_device_free(ggml_metal_device_t dev) {
     assert(dev != NULL);
 
+    // CrispASR patch (PLAN #88 / CrisperWeaver §5.18): flush the
+    // binary archive BEFORE the library + device go away. Once
+    // `mtl_device` is released we can't talk to the archive any
+    // more. The flush is a no-op when nothing was added since the
+    // last serialise — typical for read-only "warm" runs.
+    crispasr_metal_pipeline_cache_flush(dev);
+    if (dev->binary_archive) {
+        [dev->binary_archive release];
+        dev->binary_archive = nil;
+    }
+    if (dev->binary_archive_url) {
+        [dev->binary_archive_url release];
+        dev->binary_archive_url = nil;
+    }
+
     ggml_metal_rsets_free(dev->rsets);
 
     ggml_metal_library_free(dev->library);
@@ -901,6 +1132,21 @@ void * ggml_metal_device_get_obj(ggml_metal_device_t dev) {
 
 void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
     return dev->mtl_queue;
+}
+
+// CrispASR patch (PLAN #88 / CrisperWeaver §5.18): the pipeline-
+// cache accessors. Kept file-static + forward-declared near the
+// top of this file so the library-compile path (above the struct
+// definition) can read/write the archive without seeing the
+// internals.
+static id<MTLBinaryArchive> crispasr_metal_device_archive(ggml_metal_device_t dev) {
+    return dev ? dev->binary_archive : nil;
+}
+
+static void crispasr_metal_device_mark_archive_dirty(ggml_metal_device_t dev) {
+    if (dev) {
+        dev->binary_archive_dirty = true;
+    }
 }
 
 ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev) {
