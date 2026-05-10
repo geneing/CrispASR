@@ -3275,6 +3275,59 @@ QKV/output/FFN projections with `ggml_mul_mat_set_prec(...,
 GGML_PREC_F32)` so they use the precise kernel; other backends keep
 the existing legacy half-multiply behaviour and pay no perf tax.
 
+### Attempted patch (2026-05-10) — did not fix the drift
+
+Implemented the above plan: added `kernel_mul_mm_hp` template alongside
+the legacy kernel (8192-byte sa offset, `simdgroup_float8x8` tiles for
+both operands, `*(threadgroup float2x4 *)(sb + ...) = *((device
+float2x4 *) y)` with no F16 cast). Wired up F32, F16, Q4_K, Q5_K, Q6_K,
+Q8_0 host_name instantiations. Patched `mul_mm` dispatch to append
+`_hp` to the pipeline name when `prec_f32 && !has_tensor && tsrc1 ==
+F32`. Added a graph-walk in chatterbox `build_graph_t3_kv` /
+`build_graph_t3_gpt2_kv` that calls `ggml_mul_mat_set_prec(...,
+GGML_PREC_F32)` on every `GGML_OP_MUL_MAT` node post-build.
+
+Verified the hp pipeline IS dispatched for the chatterbox K projection
+(q4_K × f32, ne00=1024, ne01=1024, ne11=46) via a one-shot debug
+print, AND that the kernel actually runs (overwriting `mc[0]` with a
+known constant changed the LGT output away from the legacy GPU
+values). But the K[L0,h0,t=45] cache values were **bit-for-bit
+identical** to the pre-patch GPU run — same 1e-3 drift vs CPU.
+
+Possible explanations:
+
+1. **Apple's `simdgroup_float8x8` MAC silently downconverts.** The HW
+   tensor cores on M1-M4 may multiply in half precision regardless of
+   operand declared type, with float only for the accumulator. There
+   is no public docs guarantee that `simdgroup_multiply_accumulate
+   (simdgroup_float8x8&, simdgroup_float8x8, simdgroup_float8x8,
+   simdgroup_float8x8)` is bit-equivalent to a pure F32 dot product —
+   it may be implemented as `float8x8 = float(half(a) × half(b)) +
+   float8x8`.
+2. **The cache write happens via a different code path.** The KV cache
+   in chatterbox is allocated `on cpu` (verbose log line). The
+   ggml-backend scheduler may route the K projection mul_mat to CPU
+   (since its consumer — the cpy to CPU cache — runs on CPU), bypassing
+   the hp kernel. But the empirical CPU vs GPU divergence (~1e-3 even
+   with FORCE_GPU=1) suggests this isn't the case for at least the
+   path that the dump observes.
+3. **Drift is somewhere else entirely.** RMSNorm reduction order,
+   rope sin/cos precision, or the F32→F16 cast in the cpy kernel —
+   though we ruled out the F16 cast via `CRISPASR_KV_QUANT=F32`.
+
+Decision: keep the hp kernel + dispatch infrastructure in place — it
+costs no perf when prec is not F32 (default), and provides a
+foundation for future investigation. Auto-fallback to CPU remains the
+working path for chatterbox.
+
+The next investigation step is a proper per-op intermediate-tensor
+dump: compare `norm(x)` output, `K_proj` output (pre-rope), and
+`K_rope` output element-by-element between CPU and GPU at layer 0
+position 45. That will identify which specific op contributes the
+drift. The dump hooks at `chatterbox.cpp:1199-1234` can be extended
+with a similar `CRISPASR_CHATTERBOX_DUMP_NORM_AT` /
+`DUMP_KPROJ_AT` / `DUMP_KROPE_AT`.
+
 Tracked as a follow-up in PLAN.md #83.
 
 2. **T3 sampling can drift on long technical prompts**. The seed=0

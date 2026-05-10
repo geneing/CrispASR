@@ -1136,6 +1136,21 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
     cur = ggml_mul_mat(ctx0, c->t3.speech_head_w, cur);
     ggml_set_name(cur, "logits");
     ggml_build_forward_expand(gf, cur);
+
+    // PLAN #83: tag every mul_mat in the T3 graph with GGML_PREC_F32 so the
+    // ggml-metal mul_mm dispatcher picks the _hp (F32 simdgroup-tile) kernel
+    // for the chatterbox-relevant weight quants (F32, F16, Q4_K, Q5_K, Q6_K,
+    // Q8_0). Other backends (CPU, CUDA, Vulkan) ignore or already honour
+    // PREC_F32 — this is the Metal-side fix for the F16 input-rounding drift
+    // documented in LEARNINGS §"Root cause located — ggml-metal kernel_mul_mm
+    // legacy path".
+    for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+        ggml_tensor* t = ggml_graph_node(gf, i);
+        if (t->op == GGML_OP_MUL_MAT) {
+            ggml_mul_mat_set_prec(t, GGML_PREC_F32);
+        }
+    }
+
     ggml_free(ctx0);
     return gf;
 }
@@ -1675,6 +1690,17 @@ static ggml_cgraph* build_graph_t3_gpt2_kv(chatterbox_context* c, int n_past, in
     }
     ggml_set_name(cur, "logits");
     ggml_build_forward_expand(gf, cur);
+
+    // PLAN #83: tag every mul_mat with GGML_PREC_F32 — Metal mul_mm picks the
+    // _hp (F32 simdgroup-tile) kernel and avoids the F16 input rounding that
+    // breaks chatterbox sampling. (Same hint as the Llama path above.)
+    for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+        ggml_tensor* t = ggml_graph_node(gf, i);
+        if (t->op == GGML_OP_MUL_MAT) {
+            ggml_mul_mat_set_prec(t, GGML_PREC_F32);
+        }
+    }
+
     ggml_free(ctx0);
     return gf;
 }

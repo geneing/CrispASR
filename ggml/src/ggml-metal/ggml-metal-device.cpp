@@ -687,7 +687,38 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
         ? (op->ne[0] % NRA != 0 || op->ne[1] % NRB != 0)
         : (op->ne[0] % 64  != 0 || op->ne[1] % 32  != 0);
 
-    snprintf(base, 256, "kernel_mul_mm_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
+    // CrispASR patch (#83): if the op asks for F32 precision and the F32 input
+    // path is implicated (T1 == F32, legacy half-tile path active), pick the
+    // _hp kernel that keeps F32 in shmem and uses simdgroup_float8x8 tiles.
+    // Mirrors how Vulkan honours GGML_PREC_F32 — Metal mul_mm previously
+    // ignored it. See LEARNINGS §"Root cause located — ggml-metal kernel_mul_mm
+    // legacy path".
+    const enum ggml_prec prec = (enum ggml_prec) ggml_get_op_params_i32(op, 0);
+    const bool prec_f32 = (prec == GGML_PREC_F32);
+    bool use_hp = false;
+    if (prec_f32 && !has_tensor && tsrc1 == GGML_TYPE_F32) {
+        // Only a small subset of weight types is wired up for the _hp path;
+        // others fall through to the half-tile kernel without warning.
+        switch (tsrc0) {
+            case GGML_TYPE_F32:
+            case GGML_TYPE_F16:
+            case GGML_TYPE_Q4_K:
+            case GGML_TYPE_Q5_K:
+            case GGML_TYPE_Q6_K:
+            case GGML_TYPE_Q8_0:
+                use_hp = true;
+                break;
+            default:
+                use_hp = false;
+                break;
+        }
+    }
+
+    if (use_hp) {
+        snprintf(base, 256, "kernel_mul_mm_%s_%s_hp", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
+    } else {
+        snprintf(base, 256, "kernel_mul_mm_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
+    }
     snprintf(name, 256, "%s_bci=%d_bco=%d", base, bc_inp, bc_out);
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
@@ -712,7 +743,14 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
         res.nr0 = 64;
         res.nr1 = 32;
 
-        res.smem = bc_out ? 8192 : (4096 + 2048);
+        if (use_hp) {
+            // _hp layout: sa = 64*32*sizeof(float) = 8192,
+            //             sb = 32*32*sizeof(float) = 4096,
+            //             total = 12288 (covers temp_str at 8192 too).
+            res.smem = 12288;
+        } else {
+            res.smem = bc_out ? 8192 : (4096 + 2048);
+        }
     }
 
     res.nsg = N_MM_SIMD_GROUP_X * N_MM_SIMD_GROUP_Y;
