@@ -175,12 +175,31 @@ install(TARGETS crispasr-diff RUNTIME BUNDLE DESTINATION bin)
 # Auto-routes between fastText (GlotLID-V3, LID-176) and Google CLD3 by
 # peeking the GGUF's general.architecture key at load time. One binary
 # for any text-LID GGUF.
+#
+# Link order: text-lid-dispatch BEFORE crispasr because the dispatch
+# static library has unresolved references to crispasr_registry_lookup
+# / crispasr_cache::ensure_cached_file (in crispasr_model_registry.cpp
+# / crispasr_cache.cpp inside the main `crispasr` library), and MinGW's
+# GNU ld processes static libraries strictly left-to-right — listing
+# the consumer first lets ld pick up the missing definitions when it
+# subsequently scans `crispasr`. Without this, msys2 UCRT64 build.yml
+# fails with `undefined reference to crispasr_registry_lookup` etc.
+# (Windows MSVC and Linux gcc are forgiving here; only MinGW UCRT64
+# enforces order strictly enough to surface the bug.)
+#
+# Windows networking libs match crispasr-cli's set: winhttp for
+# auto-download (text-lid GGUFs come from HF over HTTPS), ws2_32 +
+# crypt32 because httplib.h's #pragma comment line auto-links them on
+# MSVC but MinGW silently ignores those pragmas.
 # ---------------------------------------------------------------------------
 add_executable(crispasr-lid crispasr_lid_main.cpp)
 target_link_libraries(crispasr-lid PRIVATE
-    crispasr
     text-lid-dispatch
+    crispasr
     ${CMAKE_THREAD_LIBS_INIT}
+    $<$<BOOL:${WIN32}>:winhttp>
+    $<$<BOOL:${WIN32}>:ws2_32>
+    $<$<BOOL:${WIN32}>:crypt32>
 )
 install(TARGETS crispasr-lid RUNTIME BUNDLE DESTINATION bin)
 
