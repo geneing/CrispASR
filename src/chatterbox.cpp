@@ -2069,26 +2069,46 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
         delete c;
         return nullptr;
     }
-    bool effective_use_gpu = params.use_gpu;
-    if (effective_use_gpu) {
-        const char* force = std::getenv("CRISPASR_CHATTERBOX_FORCE_GPU");
-        const bool force_gpu = force && *force && std::strcmp(force, "0") != 0;
-        if (!force_gpu) {
-            // Always print the fallback warning (independent of verbosity)
-            // so users know why their --voice + GPU run gave clean speech.
-            fprintf(stderr, "chatterbox: forward auto-falling back to CPU — Metal/GPU has cumulative F16 drift "
-                            "that breaks chatterbox sampling past ~16 decode steps. Override with "
-                            "CRISPASR_CHATTERBOX_FORCE_GPU=1 (output may be garbled).\n");
-            effective_use_gpu = false;
-        } else {
-            fprintf(stderr, "chatterbox: forward forced to GPU (CRISPASR_CHATTERBOX_FORCE_GPU=1) — output may be "
+    // PLAN #83: BOTH T3 and s3gen drift on Metal/GPU vs CPU on M1-M4.
+    // Verified: T3 K-projection drifts ~1e-3 per element (LEARNINGS
+    // §"Methodical bisect, round 2"); enabling s3gen on GPU while keeping
+    // T3 on CPU also produces broken audio (low-RMS noise instead of
+    // intelligible speech), so s3gen has the same kind of mul_mat
+    // algorithmic divergence. Until a bespoke kernel_mul_mv_q4_K_q8_K
+    // Metal kernel lands that mirrors CPU's Q8_K-quantised-input dot
+    // product, both halves of chatterbox auto-fall-back to CPU.
+    //
+    // CRISPASR_CHATTERBOX_FORCE_GPU=1 keeps the legacy override (T3+s3gen
+    // both on GPU, expected to be broken). CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU=1
+    // tries the selective split (kept for future regression once the kernel
+    // lands).
+    bool t3_use_gpu = params.use_gpu;
+    bool s3gen_use_gpu = params.use_gpu;
+    if (params.use_gpu) {
+        const char* force_gpu_env = std::getenv("CRISPASR_CHATTERBOX_FORCE_GPU");
+        const bool force_gpu = force_gpu_env && *force_gpu_env && std::strcmp(force_gpu_env, "0") != 0;
+        const char* split_env = std::getenv("CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU");
+        const bool split = split_env && *split_env && std::strcmp(split_env, "0") != 0;
+
+        if (force_gpu) {
+            fprintf(stderr, "chatterbox: T3+s3gen forced to GPU (CRISPASR_CHATTERBOX_FORCE_GPU=1) — output may be "
                             "garbled past ~16 decode steps due to Metal F16 drift.\n");
+        } else if (split) {
+            fprintf(stderr, "chatterbox: T3 → CPU, s3gen → GPU (CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU=1). "
+                            "WARNING: s3gen also drifts on GPU; expect broken audio.\n");
+            t3_use_gpu = false;
+        } else {
+            fprintf(stderr, "chatterbox: T3+s3gen auto-falling back to CPU — Metal/GPU has cumulative F16 "
+                            "drift that breaks chatterbox sampling past ~16 decode steps. Override with "
+                            "CRISPASR_CHATTERBOX_FORCE_GPU=1 (output may be garbled).\n");
+            t3_use_gpu = false;
+            s3gen_use_gpu = false;
         }
     }
-    // Mirror the effective_use_gpu decision into c->params so the
-    // companion s3gen sub-context (created later via
-    // chatterbox_set_s3gen_path) also picks up the fallback.
-    c->params.use_gpu = effective_use_gpu;
+    // c->params.use_gpu controls the s3gen sub-context backend (set later
+    // via chatterbox_set_s3gen_path). c->backend is the T3 backend.
+    c->params.use_gpu = s3gen_use_gpu;
+    bool effective_use_gpu = t3_use_gpu;
     c->backend = effective_use_gpu ? ggml_backend_init_best() : c->backend_cpu;
     if (!c->backend) {
         if (params.verbosity >= 1 && effective_use_gpu) {
