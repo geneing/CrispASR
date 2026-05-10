@@ -410,6 +410,23 @@ extern "C" void orpheus_set_n_threads(struct orpheus_context* ctx, int n_threads
     }
 }
 
+// Runtime temperature setter — the orpheus AR loop reads
+// `ctx->params.temperature` on every sample (see sample_logits call
+// in orpheus_synthesize), so mutating it between synth calls is safe.
+// 0.0 = greedy / reproducible.
+extern "C" void orpheus_set_temperature(struct orpheus_context* ctx, float temperature) {
+    if (!ctx) {
+        return;
+    }
+    if (temperature < 0.0f) {
+        temperature = 0.0f;
+    }
+    if (temperature > 4.0f) {
+        temperature = 4.0f;
+    }
+    ctx->params.temperature = temperature;
+}
+
 extern "C" int orpheus_set_codec_path(struct orpheus_context* ctx, const char* path) {
     if (!ctx || !path) {
         return -1;

@@ -843,6 +843,31 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
 // as adding it to the per-backend API, plus one more: a case in the big
 // switch statement in `crispasr_session_open_explicit`.
 
+// ─────────────────────────────────────────────────────────────────────
+// Open-time params (CrispASR 0.6.1). The previous open ABI took only
+// `(model_path, backend, n_threads)`; backend-specific knobs like
+// `use_gpu` were either compile-time (CMake flags) or default-true.
+// To let host apps toggle at runtime we now thread two extra flags
+// through `crispasr_session_open_explicit` via thread-local storage:
+// the new `crispasr_session_open_with_params` export sets them
+// before delegating, then resets them on the way out.
+//
+// Why thread-locals instead of an explicit parameter? `open_explicit`
+// is the central choke-point used by the auto-detect path
+// (`crispasr_session_open` → detect → open_explicit) and by every
+// language binding. Adding a 4th positional arg would break those
+// callers; appending another ABI is its own risk. A thread-local pair
+// lets the new export set defaults for its own call without disturbing
+// the existing API surface, and the helpers below ensure the values
+// reset to their static defaults afterwards.
+//
+// `use_gpu` defaults to true so unmodified callers behave like
+// pre-0.6.1 builds (which always passed GPU-on params). `verbosity`
+// defaults to 0 (silent) for the same reason.
+// ─────────────────────────────────────────────────────────────────────
+static thread_local bool g_open_use_gpu_tls = true;
+static thread_local int g_open_verbosity_tls = 0;
+
 struct crispasr_session {
     std::string backend; // "whisper", "parakeet", ...
     std::string model_path;
@@ -1140,7 +1165,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "parakeet") {
         parakeet_context_params pp = parakeet_context_default_params();
         pp.n_threads = s->n_threads;
-        pp.verbosity = 0;
+        pp.verbosity = g_open_verbosity_tls;
+        pp.use_gpu = g_open_use_gpu_tls;
         s->parakeet_ctx = parakeet_init_from_file(model_path, pp);
         if (!s->parakeet_ctx) {
             delete s;
@@ -1153,7 +1179,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "canary") {
         canary_context_params p = canary_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->canary_ctx = canary_init_from_file(model_path, p);
         if (!s->canary_ctx) {
             delete s;
@@ -1166,7 +1193,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "qwen3") {
         qwen3_asr_context_params p = qwen3_asr_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->qwen3_ctx = qwen3_asr_init_from_file(model_path, p);
         if (!s->qwen3_ctx) {
             delete s;
@@ -1179,7 +1207,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "cohere") {
         cohere_context_params p = cohere_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->cohere_ctx = cohere_init_from_file(model_path, p);
         if (!s->cohere_ctx) {
             delete s;
@@ -1192,7 +1221,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "granite" || s->backend == "granite-4.1" || s->backend == "granite-4.1-plus") {
         granite_speech_context_params p = granite_speech_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->granite_ctx = granite_speech_init_from_file(model_path, p);
         if (!s->granite_ctx) {
             delete s;
@@ -1218,7 +1248,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "voxtral") {
         voxtral_context_params p = voxtral_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->voxtral_ctx = voxtral_init_from_file(model_path, p);
         if (!s->voxtral_ctx) {
             delete s;
@@ -1256,8 +1287,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         s->backend = "vibevoice";
         vibevoice_context_params p = vibevoice_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
-        p.use_gpu = true;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->vibevoice_ctx = vibevoice_init_from_file(model_path, p);
         if (!s->vibevoice_ctx) {
             delete s;
@@ -1270,7 +1301,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "qwen3-tts" || s->backend == "qwen3_tts" || s->backend == "qwen3tts") {
         qwen3_tts_context_params p = qwen3_tts_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 0;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->qwen3_tts_ctx = qwen3_tts_init_from_file(model_path, p);
         if (!s->qwen3_tts_ctx) {
             delete s;
@@ -1368,6 +1400,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "orpheus" || s->backend == "orpheus-tts") {
         s->backend = "orpheus";
         orpheus_context_params p = orpheus_context_default_params();
+        p.use_gpu = g_open_use_gpu_tls;
+        p.verbosity = g_open_verbosity_tls;
         s->orpheus_ctx = orpheus_init_from_file(model_path, p);
         if (!s->orpheus_ctx) {
             delete s;
@@ -1383,6 +1417,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     if (s->backend == "kokoro" || s->backend == "kokoro-tts") {
         s->backend = "kokoro";
         kokoro_context_params p = kokoro_context_default_params();
+        p.use_gpu = g_open_use_gpu_tls;
         s->kokoro_ctx = kokoro_init_from_file(model_path, p);
         if (!s->kokoro_ctx) {
             delete s;
@@ -1400,7 +1435,11 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         s->backend = "chatterbox";
         chatterbox_context_params p = chatterbox_context_default_params();
         p.n_threads = s->n_threads;
-        p.verbosity = 1;
+        // Chatterbox's verbosity default is 1 (chatty); honour the user
+        // override when set, otherwise keep the upstream "tell me what
+        // you're doing" log level so first-time bake users see progress.
+        p.verbosity = g_open_verbosity_tls > 0 ? g_open_verbosity_tls : 1;
+        p.use_gpu = g_open_use_gpu_tls;
         s->chatterbox_ctx = chatterbox_init_from_file(model_path, p);
         if (!s->chatterbox_ctx) {
             delete s;
@@ -1467,6 +1506,80 @@ CA_EXPORT crispasr_session* crispasr_session_open(const char* model_path, int n_
             return nullptr;
     }
     return crispasr_session_open_explicit(model_path, detected, n_threads);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Open with explicit runtime params (CrispASR 0.6.1).
+//
+// Layout-stable struct via a leading version int — host languages
+// can extend by reading the version field and skipping unknown
+// trailing bytes. Pass `version = 1` for the v1 layout below; future
+// versions append fields and bump the int. NULL = use historical
+// defaults (use_gpu=true, verbosity=0).
+//
+// `backend` may be "" / NULL to delegate to GGUF arch detection
+// (same path as `crispasr_session_open`).
+// ─────────────────────────────────────────────────────────────────
+struct crispasr_open_params_v1 {
+    int abi_version; // = 1
+    int n_threads;
+    int use_gpu;   // 0 = CPU only, non-zero = GPU when available
+    int verbosity; // 0 = silent, 1+ = chatty
+    int reserved[8];
+};
+
+CA_EXPORT crispasr_session* crispasr_session_open_with_params(const char* model_path, const char* backend_name,
+                                                              const crispasr_open_params_v1* params) {
+    if (!model_path)
+        return nullptr;
+
+    // Default values mirror the pre-0.6.1 behaviour so a NULL params
+    // (or one whose version we don't recognise yet) lands you in the
+    // same place crispasr_session_open does.
+    int n_threads = 4;
+    bool use_gpu = true;
+    int verbosity = 0;
+    if (params && params->abi_version >= 1) {
+        n_threads = params->n_threads > 0 ? params->n_threads : 4;
+        use_gpu = params->use_gpu != 0;
+        verbosity = params->verbosity;
+    }
+
+    // Stash the runtime overrides for the duration of the open call.
+    // Reset on the way out so subsequent calls that don't pass params
+    // see the static defaults again. RAII would be tidier but the
+    // function has multiple early-return paths through delete-and-fail
+    // and this scoped pair is the simplest correct shape.
+    const bool prev_use_gpu = g_open_use_gpu_tls;
+    const int prev_verbosity = g_open_verbosity_tls;
+    g_open_use_gpu_tls = use_gpu;
+    g_open_verbosity_tls = verbosity;
+
+    crispasr_session* s = nullptr;
+    if (backend_name && backend_name[0] != '\0') {
+        s = crispasr_session_open_explicit(model_path, backend_name, n_threads);
+    } else {
+        // Explicit-detection path matches `crispasr_session_open`.
+        char detected[64] = {0};
+        if (crispasr_detect_backend_from_gguf(model_path, detected, (int)sizeof(detected)) > 0) {
+            s = crispasr_session_open_explicit(model_path, detected, n_threads);
+        } else {
+            // Whisper GGML magic check (legacy non-GGUF format).
+            FILE* f = fopen(model_path, "rb");
+            if (f) {
+                char magic[4] = {0};
+                if (fread(magic, 1, 4, f) == 4 &&
+                    (memcmp(magic, "lmgg", 4) == 0 || memcmp(magic, "ggjt", 4) == 0)) {
+                    s = crispasr_session_open_explicit(model_path, "whisper", n_threads);
+                }
+                fclose(f);
+            }
+        }
+    }
+
+    g_open_use_gpu_tls = prev_use_gpu;
+    g_open_verbosity_tls = prev_verbosity;
+    return s;
 }
 
 CA_EXPORT const char* crispasr_session_backend(crispasr_session* s) {
@@ -3902,6 +4015,140 @@ CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temper
     if (s->moonshine_ctx) {
         // moonshine's setter takes (ctx, temperature) — no seed parameter.
         moonshine_set_temperature((moonshine_context*)s->moonshine_ctx, temperature);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_ORPHEUS
+    if (s->orpheus_ctx) {
+        // Orpheus AR sampler reads ctx->params.temperature on every
+        // sample; the runtime setter (added 2026-05) just mutates it.
+        // No seed argument — orpheus uses its own RNG bound at init.
+        orpheus_set_temperature((orpheus_context*)s->orpheus_ctx, temperature);
+        (void)seed;
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_temperature((chatterbox_context*)s->chatterbox_ctx, temperature);
+        (void)seed;
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CrispASR 0.6.1 parity additions — TTS sampling knobs reachable at
+// runtime so the CrisperWeaver Synthesize screen can drive them
+// without reopening the session per setting change.
+// ─────────────────────────────────────────────────────────────────
+
+// Set the diffusion / CFM step count for diffusion-based TTS
+// backends. Today only chatterbox honours this (its CFM mel-decoder
+// is a 10-step Euler solver by default; raising to 20-30 trades
+// latency for fidelity). Other TTS backends silently no-op (rc=-2).
+CA_EXPORT int crispasr_session_set_tts_steps(crispasr_session* s, int steps) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_cfm_steps((chatterbox_context*)s->chatterbox_ctx, steps);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Set the top-p nucleus-sampling threshold. Honoured by chatterbox;
+// other backends no-op (their AR loops use top-k or hardcoded
+// sampling parameters today).
+CA_EXPORT int crispasr_session_set_top_p(crispasr_session* s, float top_p) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_top_p((chatterbox_context*)s->chatterbox_ctx, top_p);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Set the min-p sampling threshold. Honoured by chatterbox.
+CA_EXPORT int crispasr_session_set_min_p(crispasr_session* s, float min_p) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_min_p((chatterbox_context*)s->chatterbox_ctx, min_p);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Set the repetition penalty (1.0 = no penalty). Honoured by
+// chatterbox.
+CA_EXPORT int crispasr_session_set_repetition_penalty(crispasr_session* s, float r) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_repetition_penalty((chatterbox_context*)s->chatterbox_ctx, r);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Set the classifier-free-guidance weight (chatterbox). 0 disables
+// CFG; 0.5 is the upstream default; values up to 2.0 amplify the
+// conditional path.
+CA_EXPORT int crispasr_session_set_cfg_weight(crispasr_session* s, float cfg_weight) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_cfg_weight((chatterbox_context*)s->chatterbox_ctx, cfg_weight);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Set the emotion-exaggeration scalar (chatterbox). 0.5 is the
+// upstream default; raise for more dramatic delivery, lower for
+// flat / monotone.
+CA_EXPORT int crispasr_session_set_exaggeration(crispasr_session* s, float exaggeration) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_exaggeration((chatterbox_context*)s->chatterbox_ctx, exaggeration);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Set the upper bound on speech tokens generated per synthesize call
+// (chatterbox AR loop). Default 1000 ≈ 20 s of audio at 50 Hz codes.
+// Raise for very long single-shot synth; lower to bound runaway
+// hallucinations.
+CA_EXPORT int crispasr_session_set_max_speech_tokens(crispasr_session* s, int n) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_max_speech_tokens((chatterbox_context*)s->chatterbox_ctx, n);
         touched++;
     }
 #endif

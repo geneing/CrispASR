@@ -1571,6 +1571,76 @@ class CrispasrSession {
     }
   }
 
+  /// Open a session with explicit runtime knobs (CrispASR 0.6.1+).
+  ///
+  /// Wraps `crispasr_session_open_with_params`. Use this when the host
+  /// app wants to toggle GPU offload or verbosity per session — the
+  /// historical [open] factory always defaulted to GPU-on / silent.
+  ///
+  /// `useGpu = false` forces every backend that has a `use_gpu` field
+  /// in its context_params to take the CPU path. Backends without that
+  /// field (whisper-via-context, kyutai-stt, firered-asr, glm-asr,
+  /// moonshine-streaming, gemma4-e2b, m2m100, mimo-asr, omniasr,
+  /// canary-ctc, voxtral4b, wav2vec2) ignore the toggle silently —
+  /// their GPU path is decided at compile time.
+  ///
+  /// Throws [UnsupportedError] when the loaded dylib predates 0.6.1
+  /// (no `crispasr_session_open_with_params` symbol). Falls back to
+  /// the regular [open] in that case via the binding's caller, not
+  /// here.
+  factory CrispasrSession.openWithParams(
+    String modelPath, {
+    int nThreads = 4,
+    bool useGpu = true,
+    int verbosity = 0,
+    String? backend,
+    String? libPath,
+  }) {
+    final lib = DynamicLibrary.open(libPath ?? CrispASR.defaultLibName());
+    if (!lib.providesSymbol('crispasr_session_open_with_params')) {
+      throw UnsupportedError(
+          'crispasr_session_open_with_params missing — needs CrispASR 0.6.1+. '
+          'Use CrispasrSession.open() for older builds.');
+    }
+    // ABI struct layout (see crispasr_open_params_v1 in
+    // src/crispasr_c_api.cpp): int32 abi_version, n_threads, use_gpu,
+    // verbosity + 8 reserved int32. Total 48 bytes.
+    final paramsPtr = calloc<Uint8>(48);
+    final ints = paramsPtr.cast<Int32>();
+    ints[0] = 1;          // abi_version
+    ints[1] = nThreads;   // n_threads
+    ints[2] = useGpu ? 1 : 0;
+    ints[3] = verbosity;
+    final pathPtr = modelPath.toNativeUtf8();
+    final bePtr = backend != null && backend.isNotEmpty
+        ? backend.toNativeUtf8()
+        : nullptr;
+    try {
+      final fn = lib.lookupFunction<
+          Pointer<Void> Function(
+              Pointer<Utf8>, Pointer<Utf8>, Pointer<Uint8>),
+          Pointer<Void> Function(Pointer<Utf8>, Pointer<Utf8>,
+              Pointer<Uint8>)>('crispasr_session_open_with_params');
+      final handle = fn(pathPtr, bePtr.cast<Utf8>(), paramsPtr);
+      if (handle == nullptr) {
+        throw Exception(
+            'crispasr_session_open_with_params returned null — either the '
+            'GGUF backend isn\'t one of ${_availableBackends(lib).join(", ")} '
+            'or the file is unreadable.');
+      }
+      final backendFn = lib.lookupFunction<
+          Pointer<Utf8> Function(Pointer<Void>),
+          Pointer<Utf8> Function(Pointer<Void>)>('crispasr_session_backend');
+      final bp = backendFn(handle);
+      final be = bp == nullptr ? '' : bp.toDartString();
+      return CrispasrSession._(lib, handle, be);
+    } finally {
+      calloc.free(pathPtr);
+      if (bePtr != nullptr) calloc.free(bePtr);
+      calloc.free(paramsPtr);
+    }
+  }
+
   /// List of backend names compiled into the loaded libwhisper.
   /// Always includes 'whisper'. Non-Whisper backends are added as they
   /// get linked in (parakeet, canary, qwen3, …).
@@ -1976,6 +2046,97 @@ class CrispasrSession {
     // rc == -2 means no backend in this session supports temperature — soft no-op.
     if (rc != 0 && rc != -2) {
       throw Exception('setTemperature failed (rc=$rc)');
+    }
+  }
+
+  /// Set the diffusion / CFM step count for diffusion-based TTS
+  /// backends (chatterbox today). Higher = better fidelity, slower.
+  /// Returns silently when the active backend has no diffusion stage
+  /// (rc=-2 from the C side maps to a soft no-op here).
+  void setTtsSteps(int steps) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_tts_steps')) {
+      // Older libcrispasr without the symbol — silent no-op so the
+      // UI slider still works when bound against pre-0.6.1 dylibs.
+      return;
+    }
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_set_tts_steps');
+    final rc = fn(_handle, steps);
+    if (rc != 0 && rc != -2) {
+      throw Exception('setTtsSteps failed (rc=$rc)');
+    }
+  }
+
+  /// Top-p nucleus sampling threshold (0.0..1.0). Honoured by
+  /// chatterbox; other backends no-op.
+  void setTopP(double topP) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_top_p')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Float),
+        int Function(Pointer<Void>, double)>('crispasr_session_set_top_p');
+    final rc = fn(_handle, topP);
+    if (rc != 0 && rc != -2) throw Exception('setTopP failed (rc=$rc)');
+  }
+
+  /// Min-p sampling threshold (0.0..1.0). Honoured by chatterbox.
+  void setMinP(double minP) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_min_p')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Float),
+        int Function(Pointer<Void>, double)>('crispasr_session_set_min_p');
+    final rc = fn(_handle, minP);
+    if (rc != 0 && rc != -2) throw Exception('setMinP failed (rc=$rc)');
+  }
+
+  /// Repetition penalty (1.0 = no penalty; >1 discourages repeats).
+  void setRepetitionPenalty(double r) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_repetition_penalty')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Float),
+            int Function(Pointer<Void>, double)>(
+        'crispasr_session_set_repetition_penalty');
+    final rc = fn(_handle, r);
+    if (rc != 0 && rc != -2) {
+      throw Exception('setRepetitionPenalty failed (rc=$rc)');
+    }
+  }
+
+  /// Classifier-free-guidance weight (chatterbox). 0 disables CFG;
+  /// 0.5 is the upstream default.
+  void setCfgWeight(double cfg) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_cfg_weight')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Float),
+        int Function(Pointer<Void>, double)>('crispasr_session_set_cfg_weight');
+    final rc = fn(_handle, cfg);
+    if (rc != 0 && rc != -2) throw Exception('setCfgWeight failed (rc=$rc)');
+  }
+
+  /// Emotion-exaggeration scalar (chatterbox). 0.5 default.
+  void setExaggeration(double exaggeration) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_exaggeration')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Float),
+            int Function(Pointer<Void>, double)>(
+        'crispasr_session_set_exaggeration');
+    final rc = fn(_handle, exaggeration);
+    if (rc != 0 && rc != -2) {
+      throw Exception('setExaggeration failed (rc=$rc)');
+    }
+  }
+
+  /// Upper bound on speech tokens generated per synthesize call
+  /// (chatterbox). Default 1000 ≈ 20 s.
+  void setMaxSpeechTokens(int n) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_max_speech_tokens')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Int32),
+            int Function(Pointer<Void>, int)>(
+        'crispasr_session_set_max_speech_tokens');
+    final rc = fn(_handle, n);
+    if (rc != 0 && rc != -2) {
+      throw Exception('setMaxSpeechTokens failed (rc=$rc)');
     }
   }
 

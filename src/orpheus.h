@@ -96,6 +96,11 @@ void orpheus_free(struct orpheus_context* ctx);
 
 void orpheus_set_n_threads(struct orpheus_context* ctx, int n_threads);
 
+// Runtime sampling temperature. 0.0 = greedy (default 0.6 in
+// orpheus_context_default_params). Read on every AR sample, so safe
+// to mutate between synthesize() calls.
+void orpheus_set_temperature(struct orpheus_context* ctx, float temperature);
+
 #ifdef __cplusplus
 }
 #endif

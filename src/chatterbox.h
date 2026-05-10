@@ -115,6 +115,15 @@ void chatterbox_set_cfg_weight(struct chatterbox_context* ctx, float cfg_weight)
 // Set number of CFM denoising steps (1–100).
 void chatterbox_set_cfm_steps(struct chatterbox_context* ctx, int steps);
 
+// Runtime sampling knobs — read on every chatterbox_synthesize call,
+// so mutation between calls is safe. Pre-sweep the call site already
+// reads `ctx->params.X` on each AR sample, hence the runtime path.
+void  chatterbox_set_temperature(struct chatterbox_context* ctx, float temperature);
+void  chatterbox_set_top_p(struct chatterbox_context* ctx, float top_p);
+void  chatterbox_set_min_p(struct chatterbox_context* ctx, float min_p);
+void  chatterbox_set_repetition_penalty(struct chatterbox_context* ctx, float r);
+void  chatterbox_set_max_speech_tokens(struct chatterbox_context* ctx, int n);
+
 void chatterbox_tokens_free(int32_t* tokens);
 void chatterbox_pcm_free(float* pcm);
 
