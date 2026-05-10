@@ -2054,13 +2054,32 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
 
     // Step 4: Compute speaker embedding from reference audio via ECAPA-TDNN
     // ECAPA-TDNN speaker embedding for vocoder conditioning.
-    // NOTE: currently disabled — the ECAPA output has 3.4x the norm of
-    // Python's reference (2.89 vs 0.85), which overwhelms the vocoder.
-    // The Conformer+Perceiver conditioning for the GPT still works.
-    // TODO: debug ECAPA BatchNorm / output scaling to match Python.
     float* spk_emb = nullptr;
-    (void)ref_pcm;
-    (void)ref_n_samples;
+    if (ref_pcm && ref_n_samples > 0 && ctx->voc) {
+        spk_emb = indextts_voc_speaker_embed(ctx->voc, ref_pcm, ref_n_samples);
+        if (spk_emb) {
+            // L2-normalize the speaker embedding to match Python's output magnitude (~0.9).
+            // Our ECAPA BN produces 3x-4x the norm of Python's, likely due to
+            // subtle BatchNorm differences. Normalizing prevents the vocoder from
+            // being overwhelmed by the speaker conditioning signal.
+            float norm = 0.0f;
+            for (int i = 0; i < 512; i++)
+                norm += spk_emb[i] * spk_emb[i];
+            norm = sqrtf(norm);
+            if (norm > 1e-6f) {
+                float target_norm = 0.9f; // Python's typical speaker embedding norm
+                float scale = target_norm / norm;
+                for (int i = 0; i < 512; i++)
+                    spk_emb[i] *= scale;
+            }
+            if (ctx->params.verbosity >= 1) {
+                float n2 = 0;
+                for (int i = 0; i < 512; i++)
+                    n2 += spk_emb[i] * spk_emb[i];
+                fprintf(stderr, "indextts: speaker embedding norm = %.4f (normalized)\n", sqrtf(n2));
+            }
+        }
+    }
 
     // Debug: override latent from file if INDEXTTS_LATENT_FILE is set
     const char* lat_file = getenv("INDEXTTS_LATENT_FILE");
