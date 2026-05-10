@@ -32,10 +32,25 @@ Two GGUF files are needed: the **GPT model** (conditioning + text → mel codes 
 
 | File | Quant | Size | Notes |
 |---|---|---:|---|
-| `indextts-gpt.gguf`       | F16  | 2.2 GB | GPT-2 + Conformer + Perceiver + ECAPA — reference quality |
-| `indextts-bigvgan.gguf`   | F32  | 256 MB | BigVGAN vocoder (F32 required for audio quality) |
+| `indextts-gpt-q8_0.gguf`  | Q8_0 | 613 MB | GPT-2 + Conformer + Perceiver — **recommended** |
+| `indextts-gpt-q4_k.gguf`  | Q4_K | 347 MB | GPT-2 + Conformer + Perceiver — smallest |
+| `indextts-gpt.gguf`       | F16  | 2.2 GB | GPT-2 + Conformer + Perceiver — reference quality, bit-exact Python parity |
+| `indextts-bigvgan.gguf`   | F16  | 256 MB | BigVGAN vocoder (shared across all GPT quants) |
+
+All quant levels produce correct speech (ASR roundtrip = "Hello world!"). F16 gives 100% mel-code parity with Python; Q8_0 is the best quality/size trade-off.
 
 ## Quick start
+
+```bash
+# Easiest: auto-download (~870 MB on first run)
+./build/bin/crispasr --backend indextts -m auto \
+    --voice reference_speaker.wav \
+    --tts "Hello world, this is IndexTTS speaking."
+
+# Output: tts_output.wav (24 kHz mono)
+```
+
+Or with explicit paths:
 
 ```bash
 # 1. Build CrispASR
@@ -44,18 +59,16 @@ cd CrispASR
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j --target crispasr-cli
 
-# 2. Pull both model files
-huggingface-cli download cstr/indextts-1.5-GGUF indextts-gpt.gguf --local-dir .
+# 2. Pull model files (pick your preferred quant)
+huggingface-cli download cstr/indextts-1.5-GGUF indextts-gpt-q8_0.gguf --local-dir .
 huggingface-cli download cstr/indextts-1.5-GGUF indextts-bigvgan.gguf --local-dir .
 
-# 3. Synthesise with voice cloning (provide any WAV as reference voice)
+# 3. Synthesise with voice cloning
 ./build/bin/crispasr --backend indextts \
-    -m indextts-gpt.gguf \
+    -m indextts-gpt-q8_0.gguf \
     --codec-model indextts-bigvgan.gguf \
     --voice reference_speaker.wav \
     --tts "Hello world, this is IndexTTS speaking."
-
-# Output: tts_output.wav (24 kHz mono)
 ```
 
 ## Features
@@ -67,7 +80,7 @@ huggingface-cli download cstr/indextts-1.5-GGUF indextts-bigvgan.gguf --local-di
 
 ## Accuracy
 
-With the same conditioning input, C++ mel codes match Python 100% (56/56 tokens identical). End-to-end with the native conditioning pipeline, first 14/55 mel codes match before F16 beam search precision causes minor divergence. ASR roundtrip produces intelligible, content-matching speech.
+With the F16 model, C++ mel codes match Python **100%** (55/55 tokens identical to the Python greedy reference). Conditioning norm matches Python within 0.001%. All quantization levels (Q8_0, Q4_K) produce correct speech verified via ASR roundtrip.
 
 ## Architecture details
 
