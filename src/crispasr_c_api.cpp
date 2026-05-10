@@ -1558,9 +1558,9 @@ struct crispasr_open_params_v1 {
     // ── v2 (0.6.2) additions ───────────────────────────────────────
     // Set abi_version >= 2 to opt into these fields. v1 callers
     // get the historical defaults.
-    int flash_attn;    // 0 = off, non-zero = on (default on)
-    int n_gpu_layers;  // -1 = max, 0 = CPU-only LLM, >0 = bound
-    int reserved[6];   // future-compat padding (was 8 in v1; -2 here)
+    int flash_attn;   // 0 = off, non-zero = on (default on)
+    int n_gpu_layers; // -1 = max, 0 = CPU-only LLM, >0 = bound
+    int reserved[6];  // future-compat padding (was 8 in v1; -2 here)
 };
 
 CA_EXPORT crispasr_session* crispasr_session_open_with_params(const char* model_path, const char* backend_name,
@@ -1617,8 +1617,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_with_params(const char* model_
             FILE* f = fopen(model_path, "rb");
             if (f) {
                 char magic[4] = {0};
-                if (fread(magic, 1, 4, f) == 4 &&
-                    (memcmp(magic, "lmgg", 4) == 0 || memcmp(magic, "ggjt", 4) == 0)) {
+                if (fread(magic, 1, 4, f) == 4 && (memcmp(magic, "lmgg", 4) == 0 || memcmp(magic, "ggjt", 4) == 0)) {
                     s = crispasr_session_open_explicit(model_path, "whisper", n_threads);
                 }
                 fclose(f);

@@ -28,8 +28,8 @@ struct granite_speech_context;
 
 struct granite_speech_context_params {
     int n_threads;
-    int verbosity; // 0=silent 1=normal 2=verbose
-    bool use_gpu;  // false => force CPU backend
+    int verbosity;   // 0=silent 1=normal 2=verbose
+    bool use_gpu;    // false => force CPU backend
     bool flash_attn; // PLAN #89 plumbing — Conformer encoder + Granite
                      // LLM SA blocks.
 };

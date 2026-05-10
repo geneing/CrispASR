@@ -1066,8 +1066,7 @@ static float* kokoro_run_predictor(kokoro_context* c, const int32_t* raw_ids, in
         // round so the round-half-to-even semantics are preserved
         // (>1.0 stretches the audio; <1.0 squeezes). 1.0 = upstream
         // default = no-op.
-        const float length_scale =
-            c->params.length_scale > 0.0f ? c->params.length_scale : 1.0f;
+        const float length_scale = c->params.length_scale > 0.0f ? c->params.length_scale : 1.0f;
         float* r = (float*)std::malloc((size_t)L * sizeof(float));
         if (!r)
             return nullptr;

@@ -28,8 +28,8 @@ struct voxtral4b_context;
 
 struct voxtral4b_context_params {
     int n_threads;
-    int verbosity; // 0=silent 1=normal 2=verbose
-    bool use_gpu;  // false => force CPU backend
+    int verbosity;   // 0=silent 1=normal 2=verbose
+    bool use_gpu;    // false => force CPU backend
     bool flash_attn; // PLAN #89 plumbing — causal encoder + SWA
                      // decoder. Streaming-realtime path benefits
                      // most from kernel-level flash-attn (PLAN #86).
