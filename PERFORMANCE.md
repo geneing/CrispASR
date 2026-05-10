@@ -928,6 +928,114 @@ Raw JSON sidecars for this round live at
 `a1000-post-{f16,q4_k}.json` — 8 new files alongside the original
 3 from the upstream A1000 section.
 
+#### Phase 0 / Phase 1 — root-causing the remaining 1.99× gap
+
+Followed up the gap-closing addendum above with a directed nsys profile
+of the best config (POST+CG q8_0 long) plus `GGML_SCHED_DEBUG=2` to
+identify *exactly* where the remaining wallclock is going. Result: two
+specific ggml-cuda support gates fall back to CPU for parakeet's
+encoder graph, each producing 24 H↔D round-trips per chunk × 15 chunks
+× 3 runs = 1 080 cross-backend transfers each = the bulk of the
+4 197 H↔D transfers per long-clip run we saw in the first nsys round.
+
+**Wallclock breakdown of crispasr-post+CG q8_0 long (3.063 s/run)
+from `nsys stats cuda_api_sum`:**
+
+| cost bucket | ms/run | % of wallclock | what it is |
+|---|---|---|---|
+| `cudaStreamSynchronize` | 808 | 26 % | host blocking for GPU; 8 723 calls/run |
+| `cudaMemcpyAsync` (host API) | 339 | 11 % | 12 590 calls/run |
+| actual H↔D GPU time | 190 | 6 % | 4 197 transfers/run (1 549 H2D + 2 648 D2H) |
+| `cudaLaunchKernel` | 23 | 1 % | -12× from no-graphs (graphs work) |
+| GPU kernel compute | ~660 | 22 % | from `cuda_gpu_kern_sum` |
+| ~~remaining host~~ | ~1 050 | 34 % | Python, ctypes, mel-extract, sched-orchestration |
+
+So **less than a quarter of wallclock is actual GPU compute** — the
+fight is over the other 3/4. CUDA Graphs already reduced
+`cudaLaunchKernel` from 269 ms to 23 ms but did NOT touch
+`cudaMemcpyAsync` (graphs don't capture memcpy ops) — exactly the
+"identical with graphs" line in the table.
+
+**`GGML_SCHED_DEBUG=2` of the encoder graph (291 splits per chunk):**
+
+| op falling to CPU | layers affected | trigger |
+|---|---|---|
+| **`GGML_OP_FLASH_ATTN_EXT`** | all 24 conformer layers | `ggml_cuda_get_best_fattn_kernel` rejects when `mask->ne[2] != 1`. Parakeet's relative-position-bias mask is **per-head** (n_heads=8, shape `(T_kv, T_q, 8, 1)`). This guard at `ggml/src/ggml-cuda/fattn.cu:423` is the dominant CPU-fallback. |
+| **`GGML_OP_UNARY`** (sigmoid on GLU gate) | all 24 conformer layers | `ggml-cuda.cu:4887` requires `ggml_is_contiguous(src)` for sigmoid; the GLU gate is a strided view of a `(2*d, T)` matmul output. The TODO comment one line earlier even says "should become: `ggml_is_contiguous_rows`" — i.e. the maintainers already know the check is too strict. |
+
+Each op forces a 3-split pattern (entry copy + execute + exit copy)
+in ggml-backend-sched, so 24 + 24 = 48 ops × 3 = 144 CPU splits per
+chunk (the other 147 splits stay on CUDA). 144 × 15 chunks × 3 runs ≈
+6 480 backend boundaries, each with at least one cudaMemcpyAsync and
+one cudaStreamSynchronize — matches the API-time data above to within
+noise.
+
+**Phase 1 experiments tried (all regressed):**
+
+1. **`op_offload=true` in `ggml_backend_sched_new`** (one-line change
+   to `src/parakeet.cpp` flipping the 6th arg). Intent: tell sched to
+   route host-buffer ops to a higher-priority backend (CUDA) when
+   supported. Result: **+87 % regression** (3.063 → 5.727 s). Likely
+   cause: re-evaluates weight placement every call, triggering
+   per-chunk re-uploads of model weights. Reverted.
+
+2. **`ggml_cont` before `ggml_sigmoid` in the GLU gate**
+   (one-line change to `src/core/fastconformer.h:268-269`). Intent:
+   force gate to be contiguous so ggml-cuda's UNARY gate accepts it,
+   moving 24 sigmoid ops back onto CUDA. Result: **+60 % regression**
+   (3.063 → 4.893 s). Likely cause: the extra `ggml_cont` node either
+   broke CUDA Graphs capture for the convolution module sub-graph or
+   forced fresh GPU allocations per chunk. Reverted.
+
+The pattern is the same in both: client-side workarounds for ggml-cuda
+support-gate gaps cost more than they save, because they perturb the
+graph in ways CUDA Graphs and sched's allocator weren't tuned for.
+**The real fixes belong inside ggml-cuda**, not in the model code.
+
+**Concrete upstream-ggml PR targets, ranked by ROI:**
+
+a) **Loosen `ggml_cuda_get_best_fattn_kernel`'s per-head mask check**
+   (`ggml/src/ggml-cuda/fattn.cu:423`). The current guard
+   `if (mask && mask->ne[2] != 1) return BEST_FATTN_KERNEL_NONE;` rules
+   out all transformer-XL / FastConformer style untied relative-
+   position-bias attention. Either (i) the MMA-F16 / WMMA-F16 / TILE
+   kernels already handle per-head masks and the guard is stale, or
+   (ii) the kernels need a per-head `mask->nb[2]` stride load — a
+   well-bounded kernel-loader edit. Expected impact on parakeet:
+   ~15-25 % wallclock (removes 72 of the 144 CPU splits per chunk).
+
+b) **Loosen `GGML_OP_UNARY`'s contiguity check** (`ggml-cuda.cu:4887`,
+   `return ggml_is_contiguous(op->src[0]);`). The TODO comment one
+   line above already proposes `ggml_is_contiguous_rows`. Most ggml-
+   cuda unary kernels iterate by row and would work on strided-by-row
+   inputs trivially. Expected impact: another ~10-15 % wallclock
+   (the other 72 CPU splits).
+
+c) **Capture `cudaMemcpyAsync` in CUDA Graphs**. ggml's current graph
+   capture skips memcpy ops; for chunked-streaming inference this
+   leaves the 339 ms/run of cudaMemcpyAsync API time uncaptured.
+   Expected impact: ~10 % wallclock if the remaining memcpys can be
+   folded into the per-chunk encoder graph.
+
+Stacked, (a)+(b)+(c) plausibly close the long-clip gap from 3.063 s
+to ~2.0 s (RT ~30×, ~1.30× behind onnx-fp32). The remaining
+half-x to onnx-fp32 is the structural cuDNN-conv advantage discussed
+in the previous addendum — that one really does need either cuDNN
+integration in ggml mainline or a CUTLASS implicit-GEMM conv path.
+
+**For now: 1.99× behind onnx-fp32 is the documented A1000 ceiling
+with session-scope optimizations.** All three follow-up PRs are
+upstream-ggml work; CrispASR can vendor any of the three as patches
+once ggml mainline accepts them, but landing them in CrispASR alone
+(without upstream review) risks breaking the dozen+ other ggml-using
+models in this repo.
+
+Raw nsys reports for this Phase 0/1 round live at
+`bench-issue81/results/nsys-crispasr-post-cg.nsys-rep` and
+`bench-issue81/sched-debug.log` (locally, gitignored). The two failed
+Phase 1 experiments' JSON sidecars are
+`handover-prompts/a1000-post-cg-{offload,glucont}.json`.
+
 ---
 
 ## Reproduce
