@@ -572,7 +572,7 @@ static std::vector<float> compute_ref_mel(const float* pcm, int n_samples, int* 
     }
 
     const int n_freqs = n_fft / 2 + 1;
-    auto mel_fb = core_mel::build_slaney_fb(sr, n_fft, n_mels, fmin, fmax);
+    auto mel_fb = core_mel::build_htk_fb(sr, n_fft, n_mels, fmin, fmax);
 
     core_mel::Params p;
     p.n_fft = n_fft;
@@ -627,9 +627,13 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
     ggml_context* ctx0 = ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, n_nodes, false);
 
-    // Input: mel [n_mels=100, T_mel] as a 4D tensor [T_mel, 100, 1, 1]
-    // Conv2d expects [W, H, C_in, batch]
-    ggml_tensor* mel = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, T_mel, 100, 1, 1);
+    // Input: mel [n_mels=100, T_mel] in MelsTime layout.
+    // Data is stored as data[t + mel_band * T_mel] (time varies fastest per band).
+    // PyTorch Conv2d expects [B, C_in=1, H=T_mel, W=100], where W=100 varies
+    // fastest in memory: data[mel_band + t * 100].
+    // ggml conv2d: input [W, H, C_in, batch], ne[0]=W varies fastest.
+    // So W=100 (mel bands), H=T_mel (time steps).
+    ggml_tensor* mel = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, 100, T_mel, 1, 1);
     ggml_set_name(mel, "cond_mel");
     ggml_set_input(mel);
 
@@ -642,18 +646,29 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
         cur = ggml_add(ctx0, cur, bias_4d);
     }
 
-    // T_enc = floor((T_mel - 3) / 2) + 1, H_enc = floor((100 - 3) / 2) + 1 = 49
-    int T_enc = ((T_mel - 3) / 2) + 1;
+    // Conv2d output: [W_out=49, H_out=T_enc, C_out=512, 1]
+    // where W_out = (100-3)/2+1 = 49, H_out = (T_mel-3)/2+1 = T_enc
     int H_enc = 49; // (100 - 3) / 2 + 1
+    int T_enc = ((T_mel - 3) / 2) + 1;
 
     ggml_set_name(cur, "dbg_conv2d_out");
     ggml_set_output(cur);
 
-    // Reshape to [H_enc * 512, T_enc] then linear → [512, T_enc]
-    // cur is [W=T_enc, H=H_enc, C=512, batch=1]
-    // Permute to [W, C, H, batch] → reshape to [H*C, T_enc]
-    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3)); // [T_enc, 512, H_enc, 1]
-    cur = ggml_reshape_2d(ctx0, cur, H_enc * 512, T_enc);       // [25088, T_enc]
+    // Reshape to match Python's x.permute(0,2,1,3).reshape(B, T, C*H):
+    // cur is [W=49, H=T_enc, C=512, 1] in ggml ne order
+    // Python: [B, C_out=512, H_out=T_enc, W_out=49] → permute(0,2,1,3) → [B, T_enc, 512, 49]
+    //         → reshape → [B, T_enc, 512*49=25088]
+    // In memory, Python flattens C(=512) then W(=49) for each T position.
+    // ggml: we need [25088, T_enc] with dim ordering C*W for each T.
+    // From [W=49, H=T_enc, C=512, 1]:
+    // From [W=49, H=T_enc, C=512, 1], rearrange to [C*W, T]:
+    // Need each T position to have [C=512 values for each W=49 position] flattened.
+    // Permute: swap H(=T) to last, keep C and W contiguous → [W=49, C=512, T_enc, 1]
+    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3)); // [49, 512, T_enc, 1]
+    // Now reshape: for each T, we have [49, 512] which in ggml = C varies over ne[0]=49
+    // But Python has [512, 49] per T. Need to swap: permute first two dims
+    cur = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, cur, H_enc, 512, T_enc), 1, 0, 2, 3));
+    cur = ggml_reshape_2d(ctx0, cur, 512 * H_enc, T_enc); // [25088, T_enc]
 
     ggml_tensor* lin_w = core_gguf::try_get(ts, "cond_enc.embed.out.0.weight");
     ggml_tensor* lin_b = core_gguf::try_get(ts, "cond_enc.embed.out.0.bias");
@@ -998,10 +1013,7 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
     }
 
     // Limit mel to ~5s reference for ggml_conv_2d stability
-    if (T_mel > 500) {
-        T_mel = 500;
-        mel.resize((size_t)100 * T_mel); // MelsTime layout: [n_mels, T]
-    }
+    // No mel truncation needed — full reference audio is used for conditioning.
 
     if (c->params.verbosity >= 1) {
         fprintf(stderr, "indextts: ref mel: %d frames x 100 bands\n", T_mel);
@@ -1033,8 +1045,17 @@ static bool run_conditioning(indextts_context* c, const float* ref_pcm, int ref_
             return true;
         }
 
-        // mel is [n_mels, T_mel] in MelsTime layout — set as 4D [T_mel, 100, 1, 1]
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "cond_mel"), mel.data(), 0, mel.size() * sizeof(float));
+        // mel is [n_mels, T_mel] in MelsTime layout: data[t + mel_band * T_mel]
+        // ggml tensor is [100, T_mel, 1, 1]: needs data[mel_band + t * 100] (time-major)
+        // Transpose the data
+        std::vector<float> mel_transposed(mel.size());
+        for (int t = 0; t < T_mel; t++) {
+            for (int m = 0; m < 100; m++) {
+                mel_transposed[m + t * 100] = mel[t + m * T_mel];
+            }
+        }
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "cond_mel"), mel_transposed.data(), 0,
+                                mel_transposed.size() * sizeof(float));
 
         // Set positional encoding
         auto pos_data = core_conformer::make_pos_enc(cond_d, T_enc);
@@ -1747,11 +1768,11 @@ extern "C" struct indextts_context_params indextts_context_default_params(void) 
     p.n_threads = 4;
     p.verbosity = 1;
     p.use_gpu = false;
-    p.temperature = 0.8f;
-    p.top_p = 0.9f;
-    p.top_k = 50;
-    p.repetition_penalty = 1.2f;
-    p.max_mel_tokens = 1500;
+    p.temperature = 1.0f;         // Python default: 1.0
+    p.top_p = 0.8f;               // Python default: 0.8
+    p.top_k = 30;                 // Python default: 30
+    p.repetition_penalty = 10.0f; // Python default: 10.0 (critical for quality)
+    p.max_mel_tokens = 600;       // Python default: 600
     return p;
 }
 

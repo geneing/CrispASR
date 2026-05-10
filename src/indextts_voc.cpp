@@ -583,7 +583,7 @@ static std::vector<float> compute_ecapa_mel(const float* pcm, int n_samples, int
     }
 
     const int n_freqs = n_fft / 2 + 1;
-    auto mel_fb = core_mel::build_slaney_fb(sr, n_fft, n_mels, fmin, fmax);
+    auto mel_fb = core_mel::build_htk_fb(sr, n_fft, n_mels, fmin, fmax);
 
     core_mel::Params p;
     p.n_fft = n_fft;
