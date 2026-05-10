@@ -47,8 +47,17 @@ on:
           - full-ci
           - release-only
 
+# On main pushes the previous concurrency rule expanded to
+# `CI-${{ github.run_id }}` (the run_id is unique per workflow run),
+# which made every run land in its own group → cancel-in-progress
+# never fired → queued runs stacked up faster than the GitHub-hosted
+# pool could service them, eventually all getting mass-cancelled.
+# Aligning with ci.yml's rule (`workflow + ref`) so a new push to main
+# cancels the still-queued/running build.yml from the previous push
+# and only the latest commit's build matrix actually runs. PRs still
+# group by their own ref so concurrent PRs don't fight.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
