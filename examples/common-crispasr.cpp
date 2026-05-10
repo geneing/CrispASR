@@ -21,13 +21,18 @@
 #endif
 #endif
 
-#define MA_NO_DEVICE_IO
-#define MA_NO_THREADING
-#define MA_NO_ENCODING
-#define MA_NO_GENERATION
-#define MA_NO_RESOURCE_MANAGER
-#define MA_NO_NODE_GRAPH
-#define MINIAUDIO_IMPLEMENTATION
+// `src/crispasr_audio.cpp` already defines `MINIAUDIO_IMPLEMENTATION`
+// for the crispasr library (full version, with device IO for mic
+// capture). Defining it here too produced duplicate `ma_*` symbols
+// in both `common.lib` and `crispasr.lib`, causing MSVC LNK2005 on
+// crispasr-cli (release.yml `build-windows-cpu` / `-legacy`) and
+// MinGW-style multiple-definition errors that the previous
+// `--allow-multiple-definition` workaround patched (0f83a731) — but
+// the MSVC linker isn't covered by that hack. Drop the implementation
+// here; consumers of `common-crispasr.cpp` already link against
+// `crispasr` (which carries the symbols), so `ma_decoder_*` etc.
+// resolve at executable-link time. Header-only include keeps the
+// declarations visible.
 #include "miniaudio.h"
 
 #ifdef _WIN32
