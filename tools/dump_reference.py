@@ -158,6 +158,11 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # Chatterbox Turbo (GPT-2 T3 + meanflow S3Gen). Per-layer encoder
     # dumps for element-wise conformer attention validation.
     "chatterbox_turbo": "reference_backends.chatterbox_turbo",
+    # CLD3 text-LID. Text input rides in LID_TEXT (or CLD3_TEXT) env;
+    # audio arg unused. model_dir = the cld3-f32.gguf the converter
+    # writes (or a directory containing it). Cross-checks against the
+    # pycld3 oracle and refuses to dump on argmax mismatch.
+    "lid-cld3":   "reference_backends.lid_cld3",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import
@@ -368,7 +373,8 @@ def main() -> None:
     # Pass through env-configurable prompt/text/voice metadata so diff
     # harnesses on the C++ side can replay the exact synthesis context.
     for env_key in ("QWEN3_TTS_SYN_TEXT", "QWEN3_TTS_REF_TEXT", "QWEN3_TTS_LANG", "QWEN3_TTS_VOICE",
-                    "KOKORO_PHONEMES", "KOKORO_VOICE", "KOKORO_SEED", "CHATTERBOX_SYN_TEXT"):
+                    "KOKORO_PHONEMES", "KOKORO_VOICE", "KOKORO_SEED", "CHATTERBOX_SYN_TEXT",
+                    "LID_TEXT", "CLD3_TEXT"):
         val = os.environ.get(env_key)
         if val is not None:
             meta[env_key.lower()] = val
