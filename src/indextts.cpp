@@ -549,23 +549,24 @@ static std::vector<float> compute_ref_mel(const float* pcm, int n_samples, int* 
 
     // Resample 16kHz input to 24kHz
     auto pcm_24k = resample_16k_to_24k(pcm, n_samples);
-    const float* audio_ptr = pcm_24k.data();
     n_samples = (int)pcm_24k.size();
-    const int pad = (n_fft - hop) / 2; // 384
 
-    // Reflect-pad audio (use resampled audio_ptr, not original pcm!)
-    std::vector<float> audio_p(n_samples + 2 * pad, 0.0f);
-    for (int i = 0; i < pad; i++) {
-        audio_p[i] = audio_ptr[std::min(pad - i, n_samples - 1)];
-    }
-    for (int i = 0; i < n_samples; i++) {
-        audio_p[pad + i] = audio_ptr[i];
-    }
-    for (int i = 0; i < pad; i++) {
-        audio_p[pad + n_samples + i] = audio_ptr[std::max(n_samples - 2 - i, 0)];
+    // Debug: override resampled audio from file if INDEXTTS_AUDIO24K_FILE is set
+    const char* a24k_file = getenv("INDEXTTS_AUDIO24K_FILE");
+    if (a24k_file && a24k_file[0]) {
+        FILE* f = fopen(a24k_file, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            n_samples = (int)(ftell(f) / sizeof(float));
+            fseek(f, 0, SEEK_SET);
+            pcm_24k.resize(n_samples);
+            fread(pcm_24k.data(), sizeof(float), n_samples, f);
+            fclose(f);
+            fprintf(stderr, "indextts: DEBUG loaded 24kHz audio from %s (%d samples)\n", a24k_file, n_samples);
+        }
     }
 
-    // Periodic Hann window
+    // Periodic Hann window (matches PyTorch's torch.hann_window(n_fft, periodic=True))
     std::vector<float> hann(n_fft);
     for (int i = 0; i < n_fft; i++) {
         hann[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (float)n_fft));
@@ -584,14 +585,13 @@ static std::vector<float> compute_ref_mel(const float* pcm, int n_samples, int* 
     p.log_eps = 1e-7f;
     p.spec_kind = core_mel::SpecKind::Magnitude;
     p.norm = core_mel::Normalization::None;
-    // MelsTime layout: [n_mels, T] — needed for Conv2d subsampling
     p.layout = core_mel::Layout::MelsTime;
     p.fb_layout = core_mel::FbLayout::MelsFreqs;
     p.matmul = core_mel::MatmulPrecision::Double;
-    p.center_pad = false;
+    p.center_pad = true; // matches PyTorch center=True (pads n_fft//2 reflect on each side)
 
     int T = 0;
-    auto mel = core_mel::compute(audio_p.data(), (int)audio_p.size(), hann.data(), n_fft, mel_fb.data(), n_freqs,
+    auto mel = core_mel::compute(pcm_24k.data(), n_samples, hann.data(), n_fft, mel_fb.data(), n_freqs,
                                  core_fft::fft_radix2_wrapper, p, T);
     if (T_out) {
         *T_out = T;
