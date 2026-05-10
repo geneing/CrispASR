@@ -4119,6 +4119,15 @@ CA_EXPORT int crispasr_session_set_tts_steps(crispasr_session* s, int steps) {
         touched++;
     }
 #endif
+#ifdef CA_HAVE_VIBEVOICE
+    if (s->vibevoice_ctx) {
+        // VibeVoice's DPM-Solver++ step count — read on every
+        // synthesize() call, so post-init mutation changes the next
+        // call's schedule density.
+        vibevoice_set_tts_steps((vibevoice_context*)s->vibevoice_ctx, steps);
+        touched++;
+    }
+#endif
     return touched > 0 ? 0 : -2;
 }
 
@@ -4210,6 +4219,24 @@ CA_EXPORT int crispasr_session_set_max_speech_tokens(crispasr_session* s, int n)
 #ifdef CA_HAVE_CHATTERBOX
     if (s->chatterbox_ctx) {
         chatterbox_set_max_speech_tokens((chatterbox_context*)s->chatterbox_ctx, n);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Set the per-phoneme length-scale / speaking-rate scalar for TTS
+// backends that have a duration model. Today only kokoro consumes
+// it (PLAN #88). Other backends silently no-op (rc=-2). 1.0 =
+// upstream default; >1.0 = slower / longer; <1.0 = faster / shorter.
+// Clamped to [0.25, 4.0] inside the per-backend setter.
+CA_EXPORT int crispasr_session_set_length_scale(crispasr_session* s, float scale) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_KOKORO
+    if (s->kokoro_ctx) {
+        kokoro_set_length_scale((kokoro_context*)s->kokoro_ctx, scale);
         touched++;
     }
 #endif

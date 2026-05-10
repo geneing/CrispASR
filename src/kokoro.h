@@ -36,6 +36,14 @@ struct kokoro_context_params {
     bool flash_attn;      // PLAN #89 plumbing — kokoro StyleTTS2 has
                           // small attention layers in the predictor;
                           // wiring is lowest-priority in #86.
+    float length_scale;   // PLAN #88: per-phoneme duration multiplier.
+                          // 1.0 = upstream default; >1.0 = slower /
+                          // longer; <1.0 = faster / shorter. Applied
+                          // BEFORE banker's-round + clamp-min-1 in the
+                          // predictor, so the runtime preserves the
+                          // round-half-to-even semantics. Read on every
+                          // synthesize call; mutating between calls is
+                          // safe.
     bool gen_force_metal; // KOKORO_GEN_FORCE_METAL=1 — debug only; default false
                           // pins the iSTFTNet generator to backend_cpu to avoid
                           // a known Metal hang on stride-10 ConvTranspose1d
@@ -49,6 +57,14 @@ struct kokoro_context* kokoro_init_from_file(const char* path_model, struct koko
 
 void kokoro_free(struct kokoro_context* ctx);
 void kokoro_set_n_threads(struct kokoro_context* ctx, int n_threads);
+
+// Runtime length-scale setter (PLAN #88). 1.0 = upstream default;
+// >1.0 = slower / longer; <1.0 = faster / shorter. Multiplies the
+// duration-predictor output before banker's-round + clamp-min-1, so
+// each phoneme's frame count gets stretched / squeezed by the
+// scalar. Clamped to [0.25, 4.0] — outside that range the predictor
+// output goes unusable. Read on every kokoro_synthesize call.
+void kokoro_set_length_scale(struct kokoro_context* ctx, float scale);
 
 // Load a voice-pack GGUF (arch="kokoro-voice"). Each pack stores ONE
 // voice — single tensor `voice.pack[max_phon, 1, 256]`, plus

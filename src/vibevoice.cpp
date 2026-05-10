@@ -274,6 +274,20 @@ extern "C" struct vibevoice_context* vibevoice_init_from_file(const char* path_m
 // Free
 // ===========================================================================
 
+// Runtime setter for the DPM-Solver++ step count. The synth path
+// reads ctx->params.tts_steps inside vibevoice_synthesize on every
+// call, so post-init mutation just changes the next call's
+// schedule resolution.
+extern "C" void vibevoice_set_tts_steps(struct vibevoice_context* ctx, int steps) {
+    if (!ctx)
+        return;
+    if (steps < 4)
+        steps = 4;
+    if (steps > 100)
+        steps = 100;
+    ctx->params.tts_steps = steps;
+}
+
 extern "C" void vibevoice_free(struct vibevoice_context* ctx) {
     if (!ctx)
         return;

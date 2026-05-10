@@ -32,6 +32,13 @@ struct vibevoice_context* vibevoice_init_from_file(const char* path_model, struc
 
 void vibevoice_free(struct vibevoice_context* ctx);
 
+// Runtime setter for the DPM-Solver++ inference step count
+// (default 20). Read on every vibevoice_synthesize call (line ~3422
+// in vibevoice.cpp), so post-init mutation is safe. Clamps to
+// [4, 100]: below 4 the schedule is degenerate, above 100 you're
+// burning latency for inaudible quality gain.
+void vibevoice_set_tts_steps(struct vibevoice_context* ctx, int steps);
+
 // Transcribe raw 24kHz mono PCM audio.
 // Returns malloc'd UTF-8 string, caller frees with free().
 char* vibevoice_transcribe(struct vibevoice_context* ctx, const float* samples, int n_samples);

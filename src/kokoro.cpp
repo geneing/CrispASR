@@ -1062,11 +1062,17 @@ static float* kokoro_run_predictor(kokoro_context* c, const int32_t* raw_ids, in
         // Banker's rounding to match PyTorch's torch.round (R5).
         // fesetround(FE_TONEAREST) is already set globally for nearbyintf
         // to use round-half-to-even; we set it once at process init below.
+        // PLAN #88: per-phoneme length_scale is applied BEFORE the
+        // round so the round-half-to-even semantics are preserved
+        // (>1.0 stretches the audio; <1.0 squeezes). 1.0 = upstream
+        // default = no-op.
+        const float length_scale =
+            c->params.length_scale > 0.0f ? c->params.length_scale : 1.0f;
         float* r = (float*)std::malloc((size_t)L * sizeof(float));
         if (!r)
             return nullptr;
         for (int i = 0; i < L; i++) {
-            float v = std::nearbyintf(raw_dur[i]);
+            float v = std::nearbyintf(raw_dur[i] * length_scale);
             if (v < 1.0f)
                 v = 1.0f;
             r[i] = v;
@@ -2364,6 +2370,7 @@ extern "C" struct kokoro_context_params kokoro_context_default_params(void) {
     // Mirrors the QWEN3_TTS_CODEC_GPU pattern from the qwen3-tts codec.
     p.gen_force_metal = env_bool("KOKORO_GEN_FORCE_METAL") || env_bool("KOKORO_GEN_GPU");
     p.flash_attn = true;
+    p.length_scale = 1.0f;
     std::strncpy(p.espeak_lang, "en-us", sizeof(p.espeak_lang) - 1);
     return p;
 }
@@ -3042,6 +3049,21 @@ extern "C" void kokoro_set_n_threads(struct kokoro_context* ctx, int n_threads) 
     ctx->n_threads = n_threads;
     if (ctx->backend_cpu)
         ggml_backend_cpu_set_n_threads(ctx->backend_cpu, n_threads);
+}
+
+// Runtime length-scale setter (PLAN #88). The duration-predictor
+// output gets multiplied by this scalar BEFORE the banker's round +
+// clamp-min-1 in the "durations" stage extractor. Read on every
+// synthesize call, so post-init mutation just changes the next
+// call's pacing.
+extern "C" void kokoro_set_length_scale(struct kokoro_context* ctx, float scale) {
+    if (!ctx)
+        return;
+    if (scale < 0.25f)
+        scale = 0.25f;
+    if (scale > 4.0f)
+        scale = 4.0f;
+    ctx->params.length_scale = scale;
 }
 
 extern "C" void kokoro_free(struct kokoro_context* ctx) {

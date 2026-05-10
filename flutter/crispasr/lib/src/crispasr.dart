@@ -2152,6 +2152,23 @@ class CrispasrSession {
     }
   }
 
+  /// Per-phoneme length-scale / speaking-rate scalar for TTS
+  /// backends with a duration model. Honoured by kokoro today
+  /// (PLAN #88); other backends silently no-op. 1.0 = upstream
+  /// default; >1.0 = slower / longer; <1.0 = faster / shorter.
+  /// Clamped to [0.25, 4.0] on the C side.
+  void setLengthScale(double scale) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_length_scale')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Float),
+            int Function(Pointer<Void>, double)>(
+        'crispasr_session_set_length_scale');
+    final rc = fn(_handle, scale);
+    if (rc != 0 && rc != -2) {
+      throw Exception('setLengthScale failed (rc=$rc)');
+    }
+  }
+
   /// Text-to-text translation via this session's backend.
   ///
   /// Routes through the C-side `crispasr_session_translate_text`, which
