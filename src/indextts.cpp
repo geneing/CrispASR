@@ -2093,81 +2093,69 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
         fprintf(stderr, "\n");
     }
 
-    // 5. AR decode — beam search with KV replay
+    // 5. AR decode — greedy argmax with full-history repetition penalty.
+    // Python uses `do_sample=False, repetition_penalty=10.0` which applies
+    // rep penalty to ALL previously generated tokens before picking argmax.
     std::vector<int32_t> mel_codes;
     const int mel_vocab = (int)ctx->hp.mel_vocab_size;
     const int stop_token = (int)ctx->hp.stop_mel_token;
+    const float rep_penalty = ctx->params.repetition_penalty;
 
-    // Beam search with KV save/restore (branched variant — O(beam × T))
-    struct KvSnap {
-        std::vector<uint8_t> k_data, v_data;
-    };
-
-    auto save_fn = [](indextts_context* c) -> KvSnap* {
-        auto* s = new KvSnap();
-        s->k_data.resize(ggml_nbytes(c->kv_k));
-        s->v_data.resize(ggml_nbytes(c->kv_v));
-        ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, s->k_data.size());
-        ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, s->v_data.size());
-        return s;
-    };
-
-    auto restore_fn = [](indextts_context* c, KvSnap* s) {
-        ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
-        ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
-    };
-
-    auto snap_free_fn = [](KvSnap* s) { delete s; };
-
-    // Step function: embed one mel token, run GPT, apply rep penalty, return logits
-    int beam_mel_pos = 0;
-    auto step_fn = [&beam_mel_pos, mel_vocab](indextts_context* c, int32_t tok, int n_past_step) -> float* {
-        beam_mel_pos++;
-        std::vector<float> emb = build_mel_token_embed(c, tok, beam_mel_pos);
-        float* lg = run_gpt2_kv(c, emb.data(), 1, n_past_step);
-        if (!lg)
-            return nullptr;
-        // Apply repetition penalty (Python default: 10.0)
-        // The beam_decode helper picks top-K from these logits, so we
-        // penalize tokens that appeared in the recent KV context.
-        // Since we don't track per-beam history here, use a simple
-        // "penalize the just-generated token" approach.
-        float rep = c->params.repetition_penalty;
-        if (rep > 1.0f && tok >= 0 && tok < mel_vocab) {
-            lg[tok] = (lg[tok] > 0) ? lg[tok] / rep : lg[tok] * rep;
+    for (int step = 0; step < max_mel; step++) {
+        // Apply repetition penalty to ALL previously generated tokens
+        if (rep_penalty > 1.0f) {
+            for (int32_t tok : mel_codes) {
+                if (tok >= 0 && tok < mel_vocab) {
+                    logits[tok] = (logits[tok] > 0) ? logits[tok] / rep_penalty : logits[tok] * rep_penalty;
+                }
+            }
         }
-        return lg;
-    };
 
-    core_beam_decode::Config beam_cfg;
-    beam_cfg.max_new_tokens = max_mel;
-    beam_cfg.eos_id = stop_token;
-    beam_cfg.vocab_size = mel_vocab;
-    beam_cfg.beam_size = 1; // greedy via beam (use rep penalty for quality)
-    beam_cfg.prompt_len = prefill_len;
+        // Greedy argmax (with optional first-token override for debugging)
+        int32_t next_tok = 0;
+        float best_val = logits[0];
+        for (int i = 1; i < mel_vocab; i++) {
+            if (logits[i] > best_val) {
+                best_val = logits[i];
+                next_tok = i;
+            }
+        }
+        // Debug: force first code to Python's pick if env INDEXTTS_FIRST_CODE is set
+        if (step == 0) {
+            const char* fc = getenv("INDEXTTS_FIRST_CODE");
+            if (fc && fc[0]) {
+                next_tok = atoi(fc);
+                fprintf(stderr, "indextts: DEBUG forced first code to %d\n", next_tok);
+            }
+        }
+        free(logits);
+        logits = nullptr;
 
-    if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: beam search (beam_size=%d, max=%d)\n", beam_cfg.beam_size, max_mel);
-    }
-
-    // Apply repetition penalty to prefill logits before beam search
-    // (Python's HuggingFace generate applies rep penalty at every step)
-    // For the prefill, no tokens have been generated yet, so no penalty.
-
-    auto beam_result =
-        core_beam_decode::run_with_probs_branched(ctx, logits, save_fn, restore_fn, snap_free_fn, step_fn, beam_cfg);
-    free(logits);
-    logits = nullptr;
-
-    // Collect tokens (strip EOS if present)
-    for (size_t i = 0; i < beam_result.tokens.size(); i++) {
-        if (beam_result.tokens[i] == stop_token)
+        if (next_tok == stop_token) {
+            if (ctx->params.verbosity >= 1) {
+                fprintf(stderr, "indextts: stop token at step %d\n", step);
+            }
             break;
-        mel_codes.push_back(beam_result.tokens[i]);
+        }
+
+        mel_codes.push_back(next_tok);
+
+        if (ctx->params.verbosity >= 2) {
+            fprintf(stderr, "  step %d: mel code %d\n", step, (int)next_tok);
+        }
+
+        // Build embedding and decode next step
+        std::vector<float> tok_embed = build_mel_token_embed(ctx, next_tok, step + 1);
+        logits = run_gpt2_kv(ctx, tok_embed.data(), 1, n_past);
+        if (!logits) {
+            fprintf(stderr, "indextts: decode step %d failed\n", step);
+            break;
+        }
+        n_past += 1;
     }
 
-    if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "indextts: stop token at step %d\n", (int)mel_codes.size());
+    if (logits) {
+        free(logits);
     }
 
     if (logits) {
