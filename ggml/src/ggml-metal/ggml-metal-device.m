@@ -1153,6 +1153,21 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_ROLL:
             return true;
         case GGML_OP_FLASH_ATTN_EXT:
+            // CrispASR patch (#83): if the op carries PREC_F32, refuse to
+            // run it on Metal — Apple's FA kernel uses simdgroup_half8x8
+            // tiles for Q×K^T regardless of K type, leaking ~1e-4 drift vs
+            // CPU's full-F32 attention. Returning false routes the op to
+            // the CPU backend via the scheduler. Used by chatterbox T3
+            // (which sets PREC_F32 on every flash_attn_ext) so that the
+            // attention output is bit-identical CPU/GPU when paired with
+            // kernel_mul_mv_q4_K_q8_K. Other backends ignore PREC_F32 by
+            // design (it's only meaningful in this scope).
+            {
+                const enum ggml_prec fa_prec = (enum ggml_prec) ggml_get_op_params_i32(op, 3);
+                if (fa_prec == GGML_PREC_F32) {
+                    return false;
+                }
+            }
             // for new head sizes, add checks here
             if (op->src[0]->ne[0] != 32 &&
                 op->src[0]->ne[0] != 40 &&

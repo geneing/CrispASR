@@ -1115,10 +1115,12 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.attn_norm_w);
 
-        // PLAN #83 diag: name layer-0 intermediates so the per-op CPU/GPU bisect
-        // dump in run_t3_kv can fetch and compare them. Names are unique strings
-        // so only layer 0 leaks into ggml_graph_get_tensor lookups.
-        if (il == 0) {
+        // PLAN #83 diag: name layer-N intermediates so the per-op CPU/GPU bisect
+        // dump in run_t3_kv can fetch and compare them. Layer index is
+        // controllable via CRISPASR_CHATTERBOX_DUMP_LAYER (default 0).
+        const char* dbg_layer_env = std::getenv("CRISPASR_CHATTERBOX_DUMP_LAYER");
+        const int dbg_layer = dbg_layer_env ? (int)std::strtol(dbg_layer_env, nullptr, 10) : 0;
+        if ((int)il == dbg_layer) {
             ggml_set_name(x, "L0_norm_out");
             ggml_set_output(x);
             ggml_build_forward_expand(gf, x);
@@ -1151,6 +1153,20 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
                 ggml_set_name(K_rope_dbg, "L0_K_rope");
                 ggml_set_output(K_rope_dbg);
                 ggml_build_forward_expand(gf, K_rope_dbg);
+
+                // Q projection diag — same shape & path as K_dbg.
+                ggml_tensor* Q_dbg = ggml_mul_mat(ctx0, b.attn_q_w, x);
+                ggml_mul_mat_set_prec(Q_dbg, GGML_PREC_F32);
+                ggml_set_name(Q_dbg, "L0_Q_proj");
+                ggml_set_output(Q_dbg);
+                ggml_build_forward_expand(gf, Q_dbg);
+
+                // V projection diag.
+                ggml_tensor* V_dbg = ggml_mul_mat(ctx0, b.attn_v_w, x);
+                ggml_mul_mat_set_prec(V_dbg, GGML_PREC_F32);
+                ggml_set_name(V_dbg, "L0_V_proj");
+                ggml_set_output(V_dbg);
+                ggml_build_forward_expand(gf, V_dbg);
             }
         }
 
@@ -1158,10 +1174,14 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
             core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
                                     /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
                                     (T == 1) ? nullptr : causal_mask, use_kv_k, use_kv_v, (int)il, n_past, kvp);
-        if (il == 0 && std::getenv("CRISPASR_CHATTERBOX_DUMP_ATTN_AT")) {
-            ggml_set_name(attn, "L0_attn_out");
-            ggml_set_output(attn);
-            ggml_build_forward_expand(gf, attn);
+        if (std::getenv("CRISPASR_CHATTERBOX_DUMP_ATTN_AT")) {
+            const char* lyr_env = std::getenv("CRISPASR_CHATTERBOX_DUMP_LAYER");
+            const int dbg_layer = lyr_env ? (int)std::strtol(lyr_env, nullptr, 10) : 0;
+            if ((int)il == dbg_layer) {
+                ggml_set_name(attn, "DBG_attn_out");
+                ggml_set_output(attn);
+                ggml_build_forward_expand(gf, attn);
+            }
         }
         cur = ggml_add(ctx0, residual, attn);
 
@@ -1186,17 +1206,21 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
     ggml_set_name(cur, "logits");
     ggml_build_forward_expand(gf, cur);
 
-    // PLAN #83: tag every mul_mat in the T3 graph with GGML_PREC_F32 so the
-    // ggml-metal mul_mm dispatcher picks the _hp (F32 simdgroup-tile) kernel
-    // for the chatterbox-relevant weight quants (F32, F16, Q4_K, Q5_K, Q6_K,
-    // Q8_0). Other backends (CPU, CUDA, Vulkan) ignore or already honour
-    // PREC_F32 — this is the Metal-side fix for the F16 input-rounding drift
-    // documented in LEARNINGS §"Root cause located — ggml-metal kernel_mul_mm
-    // legacy path".
+    // PLAN #83: tag every mul_mat AND flash_attn_ext in the T3 graph with
+    // GGML_PREC_F32. ggml-metal-ops.cpp's mul_mat dispatch picks the bespoke
+    // kernel_mul_mv_q4_K_q8_K (mirrors CPU's Q8_K-input dot product
+    // bit-identical) for Q4_K weights, and falls through to
+    // kernel_mul_mv_ext (F32-precise dot) for other weight types. flash_attn
+    // is routed to the CPU backend via the supports_op gate when PREC_F32 is
+    // set on it (Metal's FA kernel uses simdgroup_half8x8 internally for
+    // Q×K^T regardless of K type, leaking ~1e-4 drift even with F32 KV).
+    // Other backends ignore PREC_F32 by design.
     for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
         ggml_tensor* t = ggml_graph_node(gf, i);
         if (t->op == GGML_OP_MUL_MAT) {
             ggml_mul_mat_set_prec(t, GGML_PREC_F32);
+        } else if (t->op == GGML_OP_FLASH_ATTN_EXT) {
+            ggml_flash_attn_ext_set_prec(t, GGML_PREC_F32);
         }
     }
 
@@ -1302,8 +1326,10 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     };
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_NORM_AT", "L0_norm_out", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KPROJ_AT", "L0_K_proj", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_QPROJ_AT", "L0_Q_proj", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_VPROJ_AT", "L0_V_proj", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KROPE_AT", "L0_K_rope", (int)c->hp.head_dim);
-    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_ATTN_AT", "L0_attn_out", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_ATTN_AT", "DBG_attn_out", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_FFN_AT", "L0_ffn_out", (int)c->hp.hidden_size);
 
     // Special: dump the dequantised K weight tensor (row 0).  Stride through
@@ -1801,13 +1827,14 @@ static ggml_cgraph* build_graph_t3_gpt2_kv(chatterbox_context* c, int n_past, in
     ggml_set_name(cur, "logits");
     ggml_build_forward_expand(gf, cur);
 
-    // PLAN #83: tag every mul_mat with GGML_PREC_F32 — Metal mul_mm picks the
-    // _hp (F32 simdgroup-tile) kernel and avoids the F16 input rounding that
-    // breaks chatterbox sampling. (Same hint as the Llama path above.)
+    // PLAN #83: tag every mul_mat AND flash_attn_ext with GGML_PREC_F32.
+    // (Same as the Llama path above.)
     for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
         ggml_tensor* t = ggml_graph_node(gf, i);
         if (t->op == GGML_OP_MUL_MAT) {
             ggml_mul_mat_set_prec(t, GGML_PREC_F32);
+        } else if (t->op == GGML_OP_FLASH_ATTN_EXT) {
+            ggml_flash_attn_ext_set_prec(t, GGML_PREC_F32);
         }
     }
 
