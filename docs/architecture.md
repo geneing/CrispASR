@@ -397,9 +397,13 @@ sinusoidal positional embeddings + cross-attention KV cache + greedy
 decode. en→de exact match to the Python reference; Q8_0 (~502 MB)
 preserves quality.
 
-**WMT21** (`wmt21-dense-24-wide-en-x`): Same architecture scaled to 4.7B
-parameters (24L encoder, wider FFN). Won the WMT21 News competition.
-Routes through the same m2m100 runtime.
+**WMT21** (`wmt21-dense-24-wide-en-x` + `wmt21-dense-24-wide-x-en`):
+Same architecture scaled to 4.7B parameters (24L encoder, wider FFN).
+Won the WMT21 News competition. Routes through the same m2m100
+runtime. **Two separate checkpoints**: `en-x` for English-source
+translation, `x-en` for English-target. Pick whichever matches your
+direction (`-sl`/`-tl`) — the auto-download path picks `en-x` by
+default; load `x-en` explicitly with `-m <path>` for X→English.
 
 ### madlad
 

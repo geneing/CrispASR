@@ -1979,6 +1979,63 @@ class CrispasrSession {
     }
   }
 
+  /// Text-to-text translation via this session's backend.
+  ///
+  /// Routes through the C-side `crispasr_session_translate_text`, which
+  /// dispatches to whichever translation-capable backend the session
+  /// loaded — `m2m100` (and `m2m-100` / `translate` aliases) today, plus
+  /// `gemma4-e2b` for backends that include a translation head. The
+  /// session must have been opened against a model that supports
+  /// translation; calling this on an ASR-only session returns `null`
+  /// (or an empty string on the C side).
+  ///
+  /// [srcLang] and [tgtLang] are ISO 639-1 codes (`en`, `de`, `fr`, …).
+  /// [maxTokens] caps the output length; pass 0 to use the C-side
+  /// default of 200.
+  ///
+  /// Throws [UnsupportedError] when the loaded dylib is pre-0.6.0 and
+  /// doesn't ship the symbol. Returns `null` when the C side rejects
+  /// the request (no translation-capable backend in this session).
+  String? translateText(String text, String srcLang, String tgtLang,
+      {int maxTokens = 0}) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_translate_text')) {
+      throw UnsupportedError(
+          'translateText not in this libcrispasr — needs CrispASR 0.6.0+');
+    }
+    final fn = _lib.lookupFunction<
+        Pointer<Utf8> Function(
+            Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32),
+        Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
+            Pointer<Utf8>, int)>('crispasr_session_translate_text');
+    final freeFn = _lib.providesSymbol('crispasr_session_free_text')
+        ? _lib.lookupFunction<Void Function(Pointer<Utf8>),
+            void Function(Pointer<Utf8>)>('crispasr_session_free_text')
+        : null;
+    final textPtr = text.toNativeUtf8();
+    final srcPtr = srcLang.toNativeUtf8();
+    final tgtPtr = tgtLang.toNativeUtf8();
+    try {
+      final res = fn(_handle, textPtr, srcPtr, tgtPtr, maxTokens);
+      if (res == nullptr) return null;
+      final out = res.toDartString();
+      // Older builds free with the same allocator that allocated; on
+      // builds that don't expose the symbol we fall back to `free` via
+      // calloc.free, which on glibc/macOS libc is byte-compatible with
+      // strdup-style malloc'd output.
+      if (freeFn != null) {
+        freeFn(res);
+      } else {
+        calloc.free(res);
+      }
+      return out;
+    } finally {
+      calloc.free(textPtr);
+      calloc.free(srcPtr);
+      calloc.free(tgtPtr);
+    }
+  }
+
   /// Auto-detect spoken language on raw 16 kHz mono PCM.
   ///
   /// `method`: 0=Whisper, 1=Silero (default), 2=Firered, 3=Ecapa.

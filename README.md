@@ -113,7 +113,7 @@ Driven by `--text "..." -sl <src> -tl <tgt>`.
 | Backend | Models | Architecture | Languages | License |
 |---|---|---|---|---|
 | **m2m100** | [`facebook/m2m100_418M`](https://huggingface.co/cstr/m2m100-418m-GGUF) | 12L enc + 12L dec transformer, SentencePiece 128K ([more](docs/architecture.md#m2m100--wmt21)) | 100 langs, any-to-any | MIT |
-| **m2m100-wmt21** | [`facebook/wmt21-dense-24-wide-en-x`](https://huggingface.co/cstr/wmt21-dense-24-wide-en-x-GGUF) | Same as m2m100, scaled to 4.7B (24L enc) ([more](docs/architecture.md#m2m100--wmt21)) | English → 7 langs | MIT |
+| **m2m100-wmt21** | [`facebook/wmt21-dense-24-wide-en-x`](https://huggingface.co/cstr/wmt21-dense-24-wide-en-x-GGUF) + [`facebook/wmt21-dense-24-wide-x-en`](https://huggingface.co/cstr/wmt21-dense-24-wide-x-en-GGUF) | Same as m2m100, scaled to 4.7B (24L enc) ([more](docs/architecture.md#m2m100--wmt21)) | English ↔ 7 langs (separate `en-x` / `x-en` checkpoints) | MIT |
 | **madlad** | [`google/madlad400-3b-mt`](https://huggingface.co/cstr/madlad400-3b-mt-GGUF) | T5 enc-dec (12L+12L, d=2048, gated-GELU, RMSNorm) ([more](docs/architecture.md#madlad)) | 419 languages | Apache-2.0 |
 
 ```bash
@@ -123,10 +123,18 @@ Driven by `--text "..." -sl <src> -tl <tgt>`.
     -sl en -tl de
 # → Hallo Welt, wie bist du heute?
 
-# WMT21 dense (English-to-X, 4.7B — auto-downloads ~2.5 GB)
+# WMT21 dense (English ↔ X, 4.7B — auto-downloads ~2.5 GB).
+# Two separate checkpoints: en-x for English-source, x-en for
+# English-target. Pick the one matching your `-sl`/`-tl` direction
+# (or pass an explicit `-m <path>` to load the other manually).
 ./build/bin/crispasr --backend m2m100-wmt21 -m auto \
     --text "The president said he would not attend." \
-    -sl en -tl de
+    -sl en -tl de   # uses wmt21-dense-24-wide-en-x
+
+./build/bin/crispasr --backend m2m100-wmt21 \
+    -m models/wmt21-dense-24-wide-x-en-q4_k.gguf \
+    --text "Le président a dit qu'il ne serait pas présent." \
+    -sl fr -tl en   # uses wmt21-dense-24-wide-x-en
 
 # MADLAD-400 3B (419 languages, bit-token-identical to Python SP)
 ./build/bin/crispasr --backend madlad -m auto \
