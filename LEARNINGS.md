@@ -3193,6 +3193,90 @@ contributes the dominant drift, patch ggml-metal. The plumbing
 for the dump hooks above can be extended to capture those
 intermediates.
 
+### Root cause located — ggml-metal `kernel_mul_mm` legacy path (May 2026)
+
+Bisect on chatterbox-base (Q4_K, --no-gpu vs `CRISPASR_CHATTERBOX_FORCE_GPU=1`,
+greedy seed=42, "Hello world", `CRISPASR_CHATTERBOX_DUMP_KV_AT=N`):
+
+| Step                                                | CPU K[L0,h0,t]                  | GPU K[L0,h0,t]                  | abs diff       |
+|-----------------------------------------------------|---------------------------------|---------------------------------|----------------|
+| t=45 (last prefill, **no decode yet**)              | -0.1699 -0.1520 -0.3115 0.0020  | -0.1711 -0.1503 -0.3127 0.0031  | **~1e-3**      |
+| t=46 (first decode K)                               | 0.1315 -0.0494  0.0238 -0.0616  | 0.1318 -0.0494  0.0226 -0.0604  | ~1e-3          |
+| t=50 (after 5 decode tokens — diverged trajectories)| -0.0811  0.1787  0.2081 0.1721  | 0.0555  0.1400  0.2847 0.1032   | ~1e-1          |
+
+CPU and GPU **already differ by ~1e-3 at the end of prefill** — long
+before any decode steps run. The drift originates in the prefill
+matmul, not in decode-loop accumulation.
+
+Setting `CRISPASR_KV_QUANT=F32` to take the F16 KV-cache cast out of
+the picture: GPU still differs from CPU by the **same** 1e-3. So it's
+not the F32→F16 cache write — the per-layer K projection is producing
+different F32 values on Metal.
+
+The Metal mul_mm dispatch for chatterbox prefill: ne11 = 46 > 8, ne00
+% 128 == 0, so `mul_mm` is selected (legacy path on M1-M4 because
+`has_tensor` is gated on M5/A19+ in `ggml-metal-device.m:669-676`).
+
+The bug is in `ggml/src/ggml-metal/ggml-metal.metal` legacy
+`kernel_mul_mm`, line 9590:
+
+```cpp
+*(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
+```
+
+For all `kernel_mul_mm_*_f32` instantiations, `S1=half` but `T1=float`.
+This **explicitly rounds the F32 input B to F16 when staging into
+shared memory** before the simdgroup matmul. The accumulator
+`mc[i] = simdgroup_float8x8` is F32 (correct), but both operands are
+half tiles (`S0_8x8 = S1_8x8 = simdgroup_half8x8`), so the product is
+half × half multiplied and F32-accumulated — the F16 input rounding
+loses precision the CPU path retains.
+
+Magnitude check: F16 has ~3e-4 relative spacing at value 0.1, so each
+of K=1024 input elements rounds with absolute error ~3e-5; summed
+over the dot product, RMS drift is √1024 × 3e-5 ≈ 1e-3. **Matches
+observation exactly.**
+
+CPU `ggml_compute_forward_mul_mat` performs F32 × F32 → F32 multiplies
+with no input rounding (the weight is dequantised to F32 then a
+plain dot product is run), which is why CPU is ~1e-3 closer to ground
+truth than Metal on M1-M4.
+
+### Why other models tolerate it
+
+Whisper, parakeet, qwen3, voxtral etc. also hit `kernel_mul_mm_*_f32`
+and the same 1e-3 drift on K-dim ~768-1024 dot products. They appear
+fine because (a) they run argmax / greedy / beam decoding, where logit
+drift below ~1e-2 doesn't flip the top token, and (b) the drift
+doesn't compound across decode steps when the sampled token is the
+same as the CPU-sampled one. Chatterbox is unique in this codebase
+because:
+
+1. multinomial sampling on a 8194-vocab speech-token distribution
+   amplifies tiny drifts into different sampled tokens once the
+   probability mass crosses ~5e-2 between candidates;
+2. the divergent token then enters the KV cache — so subsequent
+   decode steps see slightly different K, V values, drift compounds;
+3. unlike text models, the autoregressive speech decoder has no
+   self-correcting language-model prior pulling trajectories back
+   together.
+
+So the drift exists on every Metal user but only chatterbox notices.
+
+### The proper upstream fix
+
+Add `_hp` (high-precision) variants of `kernel_mul_mm_*_f32` that use
+`S0=S1=float` and `simdgroup_float8x8` operand tiles. The
+`simdgroup_multiply_accumulate(mc, mb, ma, mc)` then does
+F32 × F32 → F32 with no input rounding, matching CPU. Dispatch by
+honoring the existing `GGML_PREC_F32` `op_params[0]` flag in
+`ggml_metal_library_get_pipeline_mul_mm`. Mark the chatterbox T3
+QKV/output/FFN projections with `ggml_mul_mat_set_prec(...,
+GGML_PREC_F32)` so they use the precise kernel; other backends keep
+the existing legacy half-multiply behaviour and pay no perf tax.
+
+Tracked as a follow-up in PLAN.md #83.
+
 2. **T3 sampling can drift on long technical prompts**. The seed=0
    default is deterministic, but particular prompts produce
    degenerate output (e.g. "Stop, stop, stop" repetition or wholly
