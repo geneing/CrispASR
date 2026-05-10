@@ -527,23 +527,42 @@ static bool bind_model(indextts_context* c) {
 // mel spectrogram with 24kHz sample rate, 100 bands, hop=256, n_fft=1024.
 // Input audio is expected at 16kHz — upsampled to 24kHz internally.
 
-// Linear interpolation resampler (16kHz → 24kHz = ratio 3:2).
-// A proper sinc resampler would match torchaudio exactly, but linear
-// interpolation produces mel with ~25% lower RMS — the Conformer
-// normalizes this away after block 0.
+// Polyphase sinc resampler (16kHz → 24kHz) matching torchaudio.functional.resample.
+// sinc_interp_hann kernel, lowpass_filter_width=6, rolloff=0.99.
+// gcd(16000,24000)=8000 → orig_f=2, new_f=3, 3 phases × 16 taps.
 static std::vector<float> resample_16k_to_24k(const float* pcm, int n_samples) {
-    const double ratio = 24000.0 / 16000.0; // 1.5
-    int n_out = (int)(n_samples * ratio);
-    std::vector<float> out(n_out);
-    for (int i = 0; i < n_out; i++) {
-        double src_pos = i / ratio;
-        int idx = (int)src_pos;
-        double frac = src_pos - idx;
-        if (idx + 1 < n_samples) {
-            out[i] = (float)((1.0 - frac) * pcm[idx] + frac * pcm[idx + 1]);
-        } else if (idx < n_samples) {
-            out[i] = pcm[idx];
+    static const int ORIG_F = 2, NEW_F = 3, KW = 16, PAD = 7;
+    // clang-format off
+    static const float K[3][16] = {
+        {0.f, -2.4526139e-06f, 7.3377293e-04f, -2.5844171e-03f, 5.0710216e-03f, -7.5402437e-03f, 9.3416208e-03f, 9.9000001e-01f, 9.3416208e-03f, -7.5402437e-03f, 5.0710216e-03f, -2.5844171e-03f, 7.3377293e-04f, -2.4526139e-06f, 0.f, 0.f},
+        {0.f, 0.f, -5.4905243e-04f, 7.9238983e-03f, -2.6932398e-02f, 6.4122014e-02f, -1.4034304e-01f, 4.0603769e-01f, 8.1582844e-01f, -1.7843980e-01f, 7.6355681e-02f, -3.2585010e-02f, 1.0875782e-02f, -1.6146711e-03f, 0.f, 0.f},
+        {0.f, 0.f, 0.f, -1.6146711e-03f, 1.0875782e-02f, -3.2585010e-02f, 7.6355688e-02f, -1.7843981e-01f, 8.1582838e-01f, 4.0603778e-01f, -1.4034306e-01f, 6.4122021e-02f, -2.6932402e-02f, 7.9239001e-03f, -5.4905261e-04f, 0.f},
+    };
+    // clang-format on
+
+    // Pad: (PAD, PAD + ORIG_F) = (7, 9) zeros — matches torchaudio exactly
+    int padded_len = n_samples + PAD + PAD + ORIG_F;
+    std::vector<float> padded(padded_len, 0.0f);
+    std::memcpy(padded.data() + PAD, pcm, n_samples * sizeof(float));
+
+    // Conv1d: 3 output channels, stride=ORIG_F=2
+    int n_conv = (padded_len - KW) / ORIG_F + 1;
+    std::vector<float> conv_out(NEW_F * n_conv, 0.0f);
+    for (int phase = 0; phase < NEW_F; phase++) {
+        for (int i = 0; i < n_conv; i++) {
+            float sum = 0.0f;
+            for (int j = 0; j < KW; j++)
+                sum += K[phase][j] * padded[i * ORIG_F + j];
+            conv_out[phase * n_conv + i] = sum;
         }
+    }
+
+    // Interleave: [3, n_conv] → [n_conv, 3] → flatten, trim to target length
+    int target_len = (int)std::ceil((double)NEW_F * n_samples / ORIG_F);
+    std::vector<float> out(target_len);
+    for (int i = 0; i < target_len; i++) {
+        int ci = i / NEW_F, phase = i % NEW_F;
+        out[i] = (ci < n_conv) ? conv_out[phase * n_conv + ci] : 0.0f;
     }
     return out;
 }
