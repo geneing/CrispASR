@@ -226,5 +226,14 @@ bool speak_with_file(const std::string & command, const std::string & text, cons
 #endif
 }
 
-#undef STB_VORBIS_HEADER_ONLY
-#include "stb_vorbis.c"
+// Previously expanded the stb_vorbis.c implementation here so
+// miniaudio's Vorbis decoder (compiled in via MINIAUDIO_IMPLEMENTATION
+// above) had its underlying symbols. Now that
+// MINIAUDIO_IMPLEMENTATION is gone (delegated to
+// src/crispasr_audio.cpp), the Vorbis backend isn't compiled into
+// common-crispasr.cpp at all, and re-expanding stb_vorbis.c here
+// produced ld multiple-definition errors against the same set of
+// symbols already provided by crispasr_audio.cpp on Linux/macOS
+// (Release / build-linux + build-macos failures on v0.6.1 release.yml).
+// crispasr_audio.cpp's `#undef STB_VORBIS_HEADER_ONLY; #include
+// "../examples/stb_vorbis.c"` block remains the single owner.
