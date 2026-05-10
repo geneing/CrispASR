@@ -1335,6 +1335,38 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KROPE_AT", "L0_K_rope", (int)c->hp.head_dim);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_ATTN_AT", "DBG_attn_out", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_FFN_AT", "DBG_ffn_out", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CORE_ATTN_DUMP_FA_AT", "DBG_fa_reshaped", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CORE_ATTN_DUMP_Q_AT", "DBG_Q_post_rope", (int)c->hp.head_dim);
+
+    // Kfull/Vfull layout (hd, Lk, n_kv): T is axis 1 (not axis 2 as for
+    // post-rope K). Custom dumper using nb[1].
+    auto dump_kvfull = [&](const char* env_name, const char* tname) {
+        const char* e = std::getenv(env_name);
+        if (!e || !*e)
+            return;
+        const int row_id = (int)std::strtol(e, nullptr, 10);
+        if (n_past + n_tokens <= row_id || n_past > row_id)
+            return;
+        if (use_kv_k != nullptr && use_kv_k != c->kv_k)
+            return;
+        ggml_tensor* t = ggml_graph_get_tensor(gf, tname);
+        if (!t)
+            return;
+        const int local_row = row_id - n_past;
+        const int hd_l = (int)c->hp.head_dim;
+        const size_t row_bytes = (size_t)hd_l * sizeof(float);
+        const size_t off_bytes = (size_t)local_row * t->nb[1];
+        if (off_bytes + row_bytes > ggml_nbytes(t))
+            return;
+        std::vector<float> buf(hd_l);
+        ggml_backend_tensor_get(t, buf.data(), off_bytes, row_bytes);
+        fprintf(stderr, "[%s] t=%d:", tname, row_id);
+        for (int i = 0; i < std::min(8, hd_l); i++)
+            fprintf(stderr, " %.4f", buf[i]);
+        fprintf(stderr, "\n");
+    };
+    dump_kvfull("CRISPASR_CORE_ATTN_DUMP_KFULL_AT", "DBG_Kfull");
+    dump_kvfull("CRISPASR_CORE_ATTN_DUMP_VFULL_AT", "DBG_Vfull");
 
     // Special: dump the dequantised K weight tensor (row 0).  Stride through
     // the row in chunks to expose any per-block drift.
@@ -1360,26 +1392,25 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     // contents for the row at the specified n_past offset to stderr,
     // ONLY for the cond pass (use_kv_k == c->kv_k or null). Allows
     // comparing on/off-GPU writes byte-by-byte at a single step.
-    if (const char* e = std::getenv("CRISPASR_CHATTERBOX_DUMP_KV_AT"); e && *e) {
+    auto dump_kv_cache = [&](const char* env_name, const char* tag, ggml_tensor* kv_t) {
+        const char* e = std::getenv(env_name);
+        if (!e || !*e)
+            return;
         const int dump_n_past = (int)std::strtol(e, nullptr, 10);
         const char* lyr_env = std::getenv("CRISPASR_CHATTERBOX_DUMP_KV_LAYER");
         const int dump_layer = lyr_env ? (int)std::strtol(lyr_env, nullptr, 10) : 0;
         if (n_past + n_tokens > dump_n_past && n_past <= dump_n_past && (use_kv_k == nullptr || use_kv_k == c->kv_k)) {
             const int hd_l = (int)c->hp.head_dim;
-            ggml_tensor* kv_t = c->kv_k;
             const size_t row_bytes = (size_t)hd_l * ggml_type_size(kv_t->type);
             const size_t off_bytes = (size_t)dump_layer * kv_t->nb[3] + (size_t)dump_n_past * kv_t->nb[1];
             std::vector<uint8_t> raw(row_bytes);
             ggml_backend_tensor_get(kv_t, raw.data(), off_bytes, row_bytes);
-            fprintf(stderr, "[KV] L=%d h=0 t=%d type=%s hd=%d:", dump_layer, dump_n_past, ggml_type_name(kv_t->type), hd_l);
+            fprintf(stderr, "[%s] L=%d h=0 t=%d type=%s hd=%d:", tag, dump_layer, dump_n_past, ggml_type_name(kv_t->type), hd_l);
             if (kv_t->type == GGML_TYPE_F16) {
                 for (int i = 0; i < std::min(8, hd_l); i++) {
                     fprintf(stderr, " %.4f", ggml_fp16_to_fp32(((ggml_fp16_t*)raw.data())[i]));
                 }
             } else if (kv_t->type == GGML_TYPE_F32) {
-                // memcpy avoids the unsigned-char* → float* type-pun cast
-                // that trips cppcheck's invalidPointerCast portability
-                // warning. The buffer really is F32 in this branch.
                 for (int i = 0; i < std::min(8, hd_l); i++) {
                     float v;
                     std::memcpy(&v, raw.data() + i * sizeof(float), sizeof(float));
@@ -1388,7 +1419,11 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
             }
             fprintf(stderr, "\n");
         }
-    }
+    };
+    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_KV_AT",  "KV", c->kv_k);
+    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_VV_AT",  "VV", c->kv_v);
+
+    // Skip the legacy KV inline dump (now handled by the lambda above).
     return r;
 }
 

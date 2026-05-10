@@ -667,13 +667,48 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
         }
     }
 
+    // CrispASR debug hook (#83 bisect): when CRISPASR_CORE_ATTN_DUMP_FA_LAYER
+    // matches the current layer index, name + add the FA inputs and output as
+    // graph outputs so chatterbox.cpp's run_t3_kv post-compute dumper can
+    // fetch them. Negligible perf cost when the env knob is unset.
+    auto dbg_dump_il_env = std::getenv("CRISPASR_CORE_ATTN_DUMP_FA_LAYER");
+    const int dbg_dump_il = dbg_dump_il_env ? (int)std::strtol(dbg_dump_il_env, nullptr, 10) : -1;
+    const bool dbg_dump = ((int)il == dbg_dump_il);
+    if (dbg_dump) {
+        ggml_tensor* Q_pre = ggml_cont(ctx0, Q);
+        ggml_set_name(Q_pre, "DBG_Q_post_rope");
+        ggml_set_output(Q_pre);
+        ggml_build_forward_expand(gf, Q_pre);
+
+        ggml_tensor* Kfull_dbg = ggml_cast(ctx0, Kfull, GGML_TYPE_F32);
+        ggml_set_name(Kfull_dbg, "DBG_Kfull");
+        ggml_set_output(Kfull_dbg);
+        ggml_build_forward_expand(gf, Kfull_dbg);
+
+        ggml_tensor* Vfull_dbg = ggml_cast(ctx0, Vfull, GGML_TYPE_F32);
+        ggml_set_name(Vfull_dbg, "DBG_Vfull");
+        ggml_set_output(Vfull_dbg);
+        ggml_build_forward_expand(gf, Vfull_dbg);
+    }
+
     // ---- Permute Q to (hd, T, n_q) for flash-attn ----
     Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
 
     // ---- Flash attention + reshape + output projection ----
     ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, Kfull, Vfull, causal_mask, p.attn_scale, /*max_bias*/ 0.0f,
                                             /*logit_softcap*/ 0.0f);
+    if (dbg_dump) {
+        ggml_set_name(attn, "DBG_fa_out");
+        ggml_set_output(attn);
+        ggml_build_forward_expand(gf, attn);
+    }
     attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
+
+    if (dbg_dump) {
+        ggml_set_name(attn, "DBG_fa_reshaped");
+        ggml_set_output(attn);
+        ggml_build_forward_expand(gf, attn);
+    }
 
     ggml_tensor* out = ggml_mul_mat(ctx0, o_w, attn);
     if (o_b)
