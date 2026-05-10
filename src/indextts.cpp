@@ -784,6 +784,7 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
 
         ggml_tensor* attn_out =
             ggml_flash_attn_ext(ctx0, ggml_cont(ctx0, Q_u), ggml_cont(ctx0, K_), V_, BD_mask, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn_out, GGML_PREC_F32);
         attn_out = ggml_reshape_2d(ctx0, attn_out, d, T_enc);
         attn_out = mm_bias(core_gguf::try_get(ts, fmt("sa.linear_out.weight").c_str()), attn_out,
                            core_gguf::try_get(ts, fmt("sa.linear_out.bias").c_str()));
@@ -964,6 +965,7 @@ static ggml_cgraph* build_perceiver_graph(indextts_context* c, int T_enc) {
         const float scale_p = 1.0f / sqrtf((float)head_dim_p);
         ggml_tensor* attn = ggml_flash_attn_ext(ctx0, ggml_cont(ctx0, Q), ggml_cont(ctx0, K_p), ggml_cont(ctx0, V_p),
                                                 nullptr, scale_p, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
         attn = ggml_reshape_2d(ctx0, attn, d_q, n_latents); // [512, 32]
 
         // Output projection: [512, 32] → [1280, 32]
