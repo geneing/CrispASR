@@ -1158,12 +1158,22 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
             core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
                                     /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
                                     (T == 1) ? nullptr : causal_mask, use_kv_k, use_kv_v, (int)il, n_past, kvp);
+        if (il == 0 && std::getenv("CRISPASR_CHATTERBOX_DUMP_ATTN_AT")) {
+            ggml_set_name(attn, "L0_attn_out");
+            ggml_set_output(attn);
+            ggml_build_forward_expand(gf, attn);
+        }
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
         x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.ffn_norm_w);
         ggml_tensor* mlp = core_ffn::swiglu(ctx0, x, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
+        if (il == 0 && std::getenv("CRISPASR_CHATTERBOX_DUMP_FFN_AT")) {
+            ggml_set_name(mlp, "L0_ffn_out");
+            ggml_set_output(mlp);
+            ggml_build_forward_expand(gf, mlp);
+        }
         cur = ggml_add(ctx0, residual, mlp);
     }
 
@@ -1293,6 +1303,8 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_NORM_AT", "L0_norm_out", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KPROJ_AT", "L0_K_proj", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KROPE_AT", "L0_K_rope", (int)c->hp.head_dim);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_ATTN_AT", "L0_attn_out", (int)c->hp.hidden_size);
+    dump_intermediate("CRISPASR_CHATTERBOX_DUMP_FFN_AT", "L0_ffn_out", (int)c->hp.hidden_size);
 
     // Special: dump the dequantised K weight tensor (row 0).  Stride through
     // the row in chunks to expose any per-block drift.

@@ -493,6 +493,37 @@ typedef struct {
     int16_t  r3;
 } ggml_metal_kargs_mul_mv_ext;
 
+// CrispASR patch (#83): kargs for Q8_K input quantize + Q4_K×Q8_K matmul.
+// Pre-step kernel_quantize_q8_K_f32 packs F32 input into block_q8_K format
+// matching CPU's quantize_row_q8_K_ref output. Main kernel
+// kernel_mul_mv_q4_K_q8_K then mirrors ggml_vec_dot_q4_K_q8_K_generic
+// bit-for-bit (CPU's Q4_K × Q8_K-quantised input → F32). Used when an op
+// carries GGML_PREC_F32 — see LEARNINGS §"Methodical bisect, round 2".
+typedef struct {
+    int32_t  ne00;     // hidden dim (must be % 256 == 0)
+    int32_t  ne01;     // num input rows = ne11 of the parent matmul
+    int32_t  ne02;
+    uint64_t nb01;     // input row stride (bytes), src
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  num_blocks_per_row; // ne00 / 256
+} ggml_metal_kargs_quantize_q8_K;
+
+typedef struct {
+    int32_t  ne00;     // K dim (hidden)
+    int32_t  ne01;     // M dim (output rows)
+    int32_t  ne02;
+    uint64_t nb01;     // weight row stride (bytes), src0
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne11;     // N dim (input cols / output cols)
+    int32_t  ne12;
+    int32_t  ne0;      // dst stride along M
+    int32_t  ne1;      // dst stride along N (== ne11)
+    int16_t  r2;
+    int16_t  r3;
+} ggml_metal_kargs_mul_mv_q4_K_q8_K;
+
 typedef struct {
     int32_t  ne02;
     int32_t  ne10;

@@ -7865,6 +7865,212 @@ kernel void kernel_mul_mv_q4_K_f32(
     kernel_mul_mv_q4_K_f32_impl<N_R0_Q4_K, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
 }
 
+// CrispASR patch (#83): Q8_K input quantize kernel.
+//
+// Mirrors quantize_row_q8_K_ref in ggml-quants.c exactly. Each threadgroup
+// processes 1 Q8_K block (256 F32 elements) of one input column. 32 threads
+// per group, each handles 8 elements. simd_shuffle_xor reduces to find amax
+// (and the corresponding signed max). Bsums computed via pair-wise simd
+// shuffle (each pair of threads covers one 16-element bsum group).
+//
+// Used as a pre-step for kernel_mul_mv_q4_K_q8_K so GPU mat-vec mul matches
+// CPU's reference (which uses Q8_K-quantised input) bit-for-bit.
+//
+// dispatch grid: (num_blocks_per_row, ne01_input_rows, ne02 * ne03_batches).
+// dispatch threads: 32 per group.
+//
+// dst layout: stride = num_blocks_per_row * sizeof(block_q8_K) per
+// (col, batch) tuple, contiguous along block_idx.
+[[host_name("kernel_quantize_q8_K_f32")]]
+kernel void kernel_quantize_q8_K_f32(
+        constant ggml_metal_kargs_quantize_q8_K & args,
+        device const char * src,
+        device       char * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiisg [[thread_index_in_simdgroup]]) {
+    constexpr int QK = 256;
+    constexpr int TPG = 32;
+    constexpr int EPT = QK / TPG;  // 8 elements per thread
+
+    const uint block_idx = tgpig.x;
+    const uint col       = tgpig.y;
+    const uint batch     = tgpig.z;
+
+    // Source pointer: F32 input at column `col`, batch, block `block_idx`.
+    const uint64_t src_off = batch * args.nb03 + col * args.nb01 + (uint64_t)block_idx * QK * sizeof(float);
+    device const float * x = (device const float *)(src + src_off);
+
+    // Each thread reads 8 contiguous elements
+    float my_x[EPT];
+    float my_amax = 0.0f;
+    float my_max  = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < EPT; ++i) {
+        my_x[i] = x[tiisg * EPT + i];
+        float a = fabs(my_x[i]);
+        if (a > my_amax) {
+            my_amax = a;
+            my_max  = my_x[i];
+        }
+    }
+
+    // simd-reduce: find global amax + corresponding signed max.
+    // Tree reduction via shuffle_xor.
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        float oa = simd_shuffle_xor(my_amax, offset);
+        float om = simd_shuffle_xor(my_max,  offset);
+        if (oa > my_amax) {
+            my_amax = oa;
+            my_max  = om;
+        }
+    }
+    const float amax = simd_broadcast(my_amax, 0);
+    const float max_v = simd_broadcast(my_max,  0);
+
+    // Mirror CPU's quantize_row_q8_K_ref: iscale = -127.f / max (note sign).
+    const float iscale = (amax > 0.0f) ? (-127.0f / max_v) : 0.0f;
+    const float d      = (amax > 0.0f) ? (1.0f / iscale)   : 0.0f;
+
+    // Output block pointer.
+    const uint64_t out_blocks_per_col = (uint64_t)args.num_blocks_per_row;
+    const uint64_t out_off =
+        (((uint64_t)batch * args.ne01 + col) * out_blocks_per_col + block_idx) * sizeof(block_q8_K);
+    device block_q8_K * out = (device block_q8_K *)(dst + out_off);
+
+    if (tiisg == 0) {
+        out->d = d;
+    }
+
+    // Quantize 8 elements per thread, accumulate partial sum.
+    int total_sum = 0;
+    #pragma unroll
+    for (int i = 0; i < EPT; ++i) {
+        int v = int(round(iscale * my_x[i]));
+        v = min(v, 127);
+        out->qs[tiisg * EPT + i] = (int8_t)v;
+        total_sum += v;
+    }
+
+    // bsums: 16 sums per block, each covers 16 elements. With 8 elements
+    // per thread, two adjacent threads cover one bsum group.
+    int partner_sum = simd_shuffle_xor(total_sum, 1);
+    if ((tiisg & 1) == 0) {
+        out->bsums[tiisg / 2] = (int16_t)(total_sum + partner_sum);
+    }
+}
+
+// CrispASR patch (#83): Q4_K × Q8_K mat-vec multiply, F32 output.
+//
+// Mirrors ggml_vec_dot_q4_K_q8_K_generic (ggml-cpu/quants.c:645) exactly so
+// that GPU output matches CPU bit-for-bit when both use Q4_K weights and the
+// F32 input has been pre-quantised to Q8_K via kernel_quantize_q8_K_f32.
+//
+// Each thread computes one output element [row, col, batch]. Pure scalar
+// integer arithmetic; no simdgroup matmul. Slow vs the legacy F32-input
+// kernel but correct.
+//
+// dispatch grid: (ceil(ne01/TG), ne11, ne02*ne03).
+// dispatch threads: 32 per group. row = tgpig.x*32 + tiitg.
+[[host_name("kernel_mul_mv_q4_K_q8_K")]]
+kernel void kernel_mul_mv_q4_K_q8_K(
+        constant ggml_metal_kargs_mul_mv_q4_K_q8_K & args,
+        device const char * src0,    // Q4_K weights
+        device const char * src1,    // Q8_K input (pre-quantised)
+        device       char * dst,     // F32 output
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiitg [[thread_index_in_threadgroup]]) {
+    constexpr int QK = 256;
+    constexpr int TPG = 32;
+
+    const uint row   = tgpig.x * TPG + tiitg;
+    const uint col   = tgpig.y;
+    const uint batch = tgpig.z;
+
+    if ((int)row >= args.ne01) {
+        return;
+    }
+
+    const int nb = args.ne00 / QK;
+
+    constexpr uint32_t kmask1 = 0x3f3f3f3f;
+    constexpr uint32_t kmask2 = 0x0f0f0f0f;
+    constexpr uint32_t kmask3 = 0x03030303;
+
+    const uint i12 = batch % args.ne12;
+    const uint i13 = batch / args.ne12;
+
+    device const block_q4_K * x = (device const block_q4_K *)
+        (src0 + (uint64_t)row * args.nb01
+              + (uint64_t)(i12 / args.r2) * args.nb02
+              + (uint64_t)(i13 / args.r3) * args.nb03);
+
+    device const block_q8_K * y = (device const block_q8_K *)
+        (src1 + ((uint64_t)batch * args.ne11 + col) * (uint64_t)nb * sizeof(block_q8_K));
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        // Unpack the 12-byte Q4_K scales table into 8 scale + 8 min uchars.
+        uint32_t utmp[4];
+        device const uint32_t * scales32 = (device const uint32_t *)x[i].scales;
+        utmp[0] = scales32[0];
+        utmp[1] = scales32[1];
+        utmp[2] = scales32[2];
+        utmp[3] = ((utmp[2] >> 4) & kmask2) | (((utmp[1] >> 6) & kmask3) << 4);
+        const uint32_t uaux = utmp[1] & kmask1;
+        utmp[1] = (utmp[2] & kmask2) | (((utmp[0] >> 6) & kmask3) << 4);
+        utmp[2] = uaux;
+        utmp[0] &= kmask1;
+
+        thread const uint8_t * scales = (thread const uint8_t *)&utmp[0];
+        thread const uint8_t * mins   = (thread const uint8_t *)&utmp[2];
+
+        // Unpack 256 Q4_K nibbles into thread-private int8 buffer.
+        int8_t a[QK];
+        device const uchar * q4 = x[i].qs;
+        thread int8_t * ap = &a[0];
+        for (int j = 0; j < QK / 64; ++j) {
+            for (int l = 0; l < 32; ++l) ap[l]      = (int8_t)(q4[l] & 0x0F);
+            for (int l = 0; l < 32; ++l) ap[l + 32] = (int8_t)(q4[l] >> 4);
+            ap += 64; q4 += 32;
+        }
+
+        // dmin contribution: -dmin_q4 * y_d * sum_y where sum_y uses bsums × mins.
+        int sumi = 0;
+        for (int j = 0; j < QK / 16; ++j) {
+            sumi += (int)y[i].bsums[j] * (int)mins[j / 2];
+        }
+
+        // 8 int32 accumulators, one per "lane" position within an 8-element chunk.
+        int aux32[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        device const int8_t * q8 = y[i].qs;
+        ap = &a[0];
+        int is = 0;
+        for (int j = 0; j < QK / 32; ++j) {  // 8 sub-blocks of 32 elements each
+            int32_t scale = scales[is++];
+            #pragma unroll
+            for (int chunk = 0; chunk < 4; ++chunk) {
+                #pragma unroll
+                for (int l = 0; l < 8; ++l) {
+                    aux32[l] += scale * (int)q8[l] * (int)ap[l];
+                }
+                q8 += 8; ap += 8;
+            }
+        }
+
+        const float d_combined = (float)x[i].d * y[i].d;
+        for (int l = 0; l < 8; ++l) {
+            sumf += d_combined * (float)aux32[l];
+        }
+        const float dmin_combined = (float)x[i].dmin * y[i].d;
+        sumf -= dmin_combined * (float)sumi;
+    }
+
+    // Output position: dst is F32, layout (ne0, ne1, batch).
+    device float * dst_f32 = (device float *)dst;
+    dst_f32[(uint64_t)batch * args.ne0 * args.ne1 + (uint64_t)col * args.ne0 + row] = sumf;
+}
+
 template<int nr0, typename args_t>
 void kernel_mul_mv_q5_K_f32_impl(
         args_t args,

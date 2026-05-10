@@ -2062,6 +2062,98 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
     const enum ggml_prec prec = (enum ggml_prec) ggml_get_op_params_i32(op, 0);
     const bool prec_f32 = (prec == GGML_PREC_F32);
 
+    // CrispASR patch (#83): the deepest fix path — when PREC_F32 is set with
+    // Q4_K weights × F32 input and ne00 % 256 == 0, mirror CPU's
+    // `ggml_vec_dot_q4_K_q8_K_generic` exactly: pre-quantise the F32 input
+    // column to Q8_K via `kernel_quantize_q8_K_f32`, then dispatch the
+    // bespoke `kernel_mul_mv_q4_K_q8_K` matmul. Bit-identical CPU/GPU
+    // output (verified by comparing K-projection dump). Used for chatterbox
+    // T3 where mul_mv_ext's F32-input dot product still drifts vs CPU's
+    // Q8_K-input integer dot product.
+    if (prec_f32 &&
+        op->src[0]->type == GGML_TYPE_Q4_K &&
+        op->src[1]->type == GGML_TYPE_F32 &&
+        ne00 % 256 == 0) {
+        const int nb_per_row = ne00 / 256;
+
+        // The temp Q8_K buffer was reserved by
+        // ggml_metal_op_mul_mat_extra_q8_K and lives at the tail of dst.
+        ggml_metal_buffer_id bid_dst  = ggml_metal_get_buffer_id(op);
+        ggml_metal_buffer_id bid_src0 = ggml_metal_get_buffer_id(op->src[0]);
+        ggml_metal_buffer_id bid_src1 = ggml_metal_get_buffer_id(op->src[1]);
+        ggml_metal_buffer_id bid_tmp  = bid_dst;
+        bid_tmp.offs += ggml_nbytes(op);
+
+        // Step 1: F32 input → Q8_K blocks.
+        {
+            ggml_metal_kargs_quantize_q8_K args_q = {
+                /* ne00               */ ne00,
+                /* ne01               */ ne11,  // num input rows = ne11 of parent matmul
+                /* ne02               */ ne12,
+                /* nb01               */ nb11,  // input row stride
+                /* nb02               */ nb12,
+                /* nb03               */ nb13,
+                /* num_blocks_per_row */ nb_per_row,
+            };
+
+            ggml_metal_pipeline_with_params p_q =
+                ggml_metal_library_get_pipeline(lib, "kernel_quantize_q8_K_f32");
+            if (!p_q.pipeline) {
+                p_q = ggml_metal_library_compile_pipeline(
+                    lib, "kernel_quantize_q8_K_f32", "kernel_quantize_q8_K_f32", nullptr);
+            }
+
+            ggml_metal_encoder_set_pipeline(enc, p_q);
+            ggml_metal_encoder_set_bytes  (enc, &args_q, sizeof(args_q), 0);
+            ggml_metal_encoder_set_buffer (enc, bid_src1, 1);
+            ggml_metal_encoder_set_buffer (enc, bid_tmp,  2);
+
+            ggml_metal_encoder_dispatch_threadgroups(
+                enc, nb_per_row, ne11, ne12 * ne13, 32, 1, 1);
+        }
+
+        // Sync between the two kernels.
+        ggml_metal_op_concurrency_reset(ctx);
+
+        // Step 2: Q4_K weights × Q8_K input → F32 output.
+        {
+            ggml_metal_kargs_mul_mv_q4_K_q8_K args_m = {
+                /* ne00 */ ne00,
+                /* ne01 */ ne01,
+                /* ne02 */ ne02,
+                /* nb01 */ nb01,
+                /* nb02 */ nb02,
+                /* nb03 */ nb03,
+                /* ne11 */ ne11,
+                /* ne12 */ ne12,
+                /* ne0  */ ne0,
+                /* ne1  */ ne1,
+                /* r2   */ r2,
+                /* r3   */ r3,
+            };
+
+            ggml_metal_pipeline_with_params p_m =
+                ggml_metal_library_get_pipeline(lib, "kernel_mul_mv_q4_K_q8_K");
+            if (!p_m.pipeline) {
+                p_m = ggml_metal_library_compile_pipeline(
+                    lib, "kernel_mul_mv_q4_K_q8_K", "kernel_mul_mv_q4_K_q8_K", nullptr);
+            }
+
+            ggml_metal_encoder_set_pipeline(enc, p_m);
+            ggml_metal_encoder_set_bytes  (enc, &args_m, sizeof(args_m), 0);
+            ggml_metal_encoder_set_buffer (enc, bid_src0, 1);
+            ggml_metal_encoder_set_buffer (enc, bid_tmp,  2);
+            ggml_metal_encoder_set_buffer (enc, bid_dst,  3);
+
+            constexpr int TPG = 32;
+            const int n_groups_x = (ne01 + TPG - 1) / TPG;
+            ggml_metal_encoder_dispatch_threadgroups(
+                enc, n_groups_x, ne11, ne12 * ne13, TPG, 1, 1);
+        }
+
+        return 1;
+    }
+
     const ggml_type tsrc0 = op->src[0]->type;
     const bool ext_basic_q =
         tsrc0 == GGML_TYPE_F32  || tsrc0 == GGML_TYPE_F16  || tsrc0 == GGML_TYPE_BF16  ||
@@ -2274,6 +2366,36 @@ size_t ggml_metal_op_mul_mat_id_extra_tpe(const ggml_tensor * op) {
     const int64_t ne02 = op->src[0]->ne[2]; // n_expert
 
     return ggml_type_size(GGML_TYPE_I32)*ne02;
+}
+
+// CrispASR patch (#83): extra Q8_K-quantised input buffer for the
+// kernel_quantize_q8_K_f32 + kernel_mul_mv_q4_K_q8_K path. Reserves
+// (ne11 × ne12 × ne13 × num_blocks_per_row) block_q8_K records past the
+// matmul's dst, accessible via `bid_tmp.offs += ggml_nbytes(op)` at
+// dispatch time.
+size_t ggml_metal_op_mul_mat_extra_q8_K(const ggml_tensor * op) {
+    if (op->op != GGML_OP_MUL_MAT) {
+        return 0;
+    }
+    if (op->src[0]->type != GGML_TYPE_Q4_K) {
+        return 0;
+    }
+    if (op->src[1]->type != GGML_TYPE_F32) {
+        return 0;
+    }
+    if (op->src[0]->ne[0] % 256 != 0) {
+        return 0;
+    }
+    const enum ggml_prec prec = (enum ggml_prec) ggml_get_op_params_i32(op, 0);
+    if (prec != GGML_PREC_F32) {
+        return 0;
+    }
+
+    const int64_t nb   = op->src[0]->ne[0] / 256;
+    const int64_t ne11 = op->src[1]->ne[1];
+    const int64_t ne12 = op->src[1]->ne[2];
+    const int64_t ne13 = op->src[1]->ne[3];
+    return (size_t)ne11 * ne12 * ne13 * nb * ggml_type_size(GGML_TYPE_Q8_K);
 }
 
 size_t ggml_metal_op_mul_mat_id_extra_ids(const ggml_tensor * op) {

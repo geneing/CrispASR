@@ -43,6 +43,11 @@ size_t ggml_metal_op_flash_attn_ext_extra_pad(const struct ggml_tensor * op);
 size_t ggml_metal_op_flash_attn_ext_extra_blk(const struct ggml_tensor * op);
 size_t ggml_metal_op_flash_attn_ext_extra_tmp(const struct ggml_tensor * op);
 
+// CrispASR patch (#83): extra Q8_K-quantized input buffer when an op
+// carries GGML_PREC_F32 with Q4_K weights × F32 input. Used by the
+// kernel_quantize_q8_K_f32 + kernel_mul_mv_q4_K_q8_K dispatch path.
+size_t ggml_metal_op_mul_mat_extra_q8_K(const struct ggml_tensor * op);
+
 int ggml_metal_op_concat            (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_repeat            (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_acc               (ggml_metal_op_t ctx, int idx);
