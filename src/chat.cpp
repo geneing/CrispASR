@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -261,6 +262,9 @@ extern "C" crispasr_chat_session_t crispasr_chat_open(const char* model_path, co
         return nullptr;
     }
 
+    // cppcheck-suppress legacyUninitvar
+    // ^ false positive: `new (std::nothrow) T{}` value-initializes; `s` is
+    //   either nullptr or fully zeroed before the null check below.
     auto* s = new (std::nothrow) crispasr_chat_session{};
     if (!s) {
         llama_free(ctx);

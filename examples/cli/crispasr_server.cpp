@@ -1072,15 +1072,10 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             const std::string reply = out;
             crispasr_chat_string_free(out);
             std::ostringstream js;
-            js << "{\"id\": \"" << completion_id << "\", "
-               << "\"object\": \"chat.completion\", "
-               << "\"created\": " << created_str << ", "
-               << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
-               << "\"choices\": [{"
-               << "\"index\": 0, "
-               << "\"message\": {\"role\": \"assistant\", \"content\": \"" << crispasr_json_escape(reply) << "\"}, "
-               << "\"finish_reason\": \"stop\""
-               << "}]}";
+            js << "{\"id\": \"" << completion_id << "\", " << "\"object\": \"chat.completion\", "
+               << "\"created\": " << created_str << ", " << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
+               << "\"choices\": [{" << "\"index\": 0, " << "\"message\": {\"role\": \"assistant\", \"content\": \""
+               << crispasr_json_escape(reply) << "\"}, " << "\"finish_reason\": \"stop\"" << "}]}";
             res.set_content(js.str(), "application/json");
             return;
         }
@@ -1113,22 +1108,17 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         std::ostringstream sse;
         for (const auto& delta : state.deltas) {
             std::ostringstream js;
-            js << "{\"id\": \"" << completion_id << "\", "
-               << "\"object\": \"chat.completion.chunk\", "
-               << "\"created\": " << created_str << ", "
-               << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
-               << "\"choices\": [{\"index\": 0, "
-               << "\"delta\": {\"content\": \"" << crispasr_json_escape(delta) << "\"}, "
-               << "\"finish_reason\": null}]}";
+            js << "{\"id\": \"" << completion_id << "\", " << "\"object\": \"chat.completion.chunk\", "
+               << "\"created\": " << created_str << ", " << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
+               << "\"choices\": [{\"index\": 0, " << "\"delta\": {\"content\": \"" << crispasr_json_escape(delta)
+               << "\"}, " << "\"finish_reason\": null}]}";
             sse << "data: " << js.str() << "\n\n";
         }
         // Final stop chunk + DONE marker.
         {
             std::ostringstream js;
-            js << "{\"id\": \"" << completion_id << "\", "
-               << "\"object\": \"chat.completion.chunk\", "
-               << "\"created\": " << created_str << ", "
-               << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
+            js << "{\"id\": \"" << completion_id << "\", " << "\"object\": \"chat.completion.chunk\", "
+               << "\"created\": " << created_str << ", " << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
                << "\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}";
             sse << "data: " << js.str() << "\n\n";
         }
