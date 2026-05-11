@@ -2044,6 +2044,29 @@ class CrispasrSession {
     if (rc != 0) throw Exception('setBestOf failed (rc=$rc)');
   }
 
+  /// Beam-search width. `n > 1` enables beam search on backends whose
+  /// session-API transcribe path consults `s->beam_size` — whisper
+  /// today, with the other beam-capable backends per the feature
+  /// matrix (granite, voxtral, qwen3, glm-asr, kyutai-stt, firered,
+  /// moonshine, omniasr) tracked as a follow-up that needs per-
+  /// backend high-level-transcribe API surface for beam_size before
+  /// the session wrapper can plumb it through. `n <= 1` (the default)
+  /// keeps greedy sampling, and `setBestOf(N)` still controls the
+  /// alternate "N greedy decodes, pick highest-confidence" path on
+  /// every other backend. Setter is unconditional — backends that
+  /// don't consume `beam_size` just see no behaviour change.
+  void setBeamSize(int n) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_beam_size')) {
+      throw UnsupportedError(
+          'crispasr_session_set_beam_size not present in this libcrispasr build');
+    }
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_set_beam_size');
+    final rc = fn(_handle, n);
+    if (rc != 0) throw Exception('setBeamSize failed (rc=$rc)');
+  }
+
   /// Set decoder temperature on backends that support runtime control
   /// (canary, cohere, parakeet, moonshine). Other backends silently no-op.
   /// `seed` is the RNG seed; pass 0 for time-based.

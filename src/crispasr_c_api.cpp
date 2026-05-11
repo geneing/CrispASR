@@ -902,6 +902,20 @@ struct crispasr_session {
     // one. Only effective when temperature > 0. Default 1 (no resampling).
     int best_of = 1;
 
+    // Beam search width. Default 1 (= greedy, no beam search). When > 1
+    // the dispatch path switches whisper into beam-search sampling
+    // (`wparams.strategy = BEAM_SEARCH; wparams.beam_search.beam_size =
+    // s->beam_size`). Other beam-capable backends per the feature
+    // matrix (granite, voxtral, qwen3, glm-asr, kyutai-stt, firered,
+    // moonshine, omniasr/omniasr-llm) currently expose beam search
+    // only through their CLI wrappers + `core_beam_decode::run_*` —
+    // their high-level transcribe APIs don't take a beam_size yet, so
+    // setting `s->beam_size` is a silent no-op for them (the setter
+    // still returns 0 so wrappers don't need to special-case backends).
+    // Wiring each into the session dispatch is tracked as PLAN
+    // follow-up: "expose per-call beam_size on session-API backends."
+    int beam_size = 1;
+
     // Exactly one of these pointers is non-null based on `backend`.
     whisper_context* whisper_ctx = nullptr;
 #ifdef CA_HAVE_PARAKEET
@@ -1992,15 +2006,26 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
     r->backend = s->backend;
 
     if (s->backend == "whisper" && s->whisper_ctx) {
-        whisper_full_params wparams = whisper_full_default_params(CRISPASR_SAMPLING_GREEDY);
+        // Beam search vs greedy. The session API's sticky `beam_size`
+        // selects the strategy: > 1 → beam search with that width;
+        // otherwise stay greedy and let `best_of` drive sampling
+        // breadth (best_of and beam_size are alternative knobs in
+        // upstream whisper.cpp — beam search uses `beam_search.beam_size`,
+        // greedy uses `greedy.best_of`).
+        const bool use_beam = s->beam_size > 1;
+        whisper_full_params wparams =
+            whisper_full_default_params(use_beam ? CRISPASR_SAMPLING_BEAM_SEARCH : CRISPASR_SAMPLING_GREEDY);
         wparams.print_progress = false;
         wparams.print_realtime = false;
         wparams.print_timestamps = false;
         wparams.print_special = false;
         wparams.n_threads = s->n_threads;
-        // Best-of-N for whisper greedy sampling.
-        if (s->best_of > 1)
+        if (use_beam) {
+            wparams.beam_search.beam_size = s->beam_size;
+        } else if (s->best_of > 1) {
+            // Best-of-N for whisper greedy sampling.
             wparams.greedy.best_of = s->best_of;
+        }
         // Per-call language hint wins; sticky source_language is the
         // fallback (PLAN #59 unblock).
         if (lang_set)
@@ -4246,6 +4271,26 @@ CA_EXPORT int crispasr_session_set_best_of(crispasr_session* s, int n) {
     if (!s)
         return -1;
     s->best_of = n > 0 ? n : 1;
+    return 0;
+}
+
+// Sticky beam_size for beam-search sampling. > 1 enables beam search on
+// backends whose session-API transcribe path consults `s->beam_size`
+// (whisper today; granite / voxtral / qwen3 / glm-asr / kyutai-stt /
+// firered / moonshine / omniasr have CLI-level beam search via their
+// internal `core_beam_decode` integrations but no high-level
+// session-API surface for it yet — wiring those is tracked separately).
+//
+// Returns 0 unconditionally on a non-null session — backends that don't
+// consume the field just see no behaviour change. The "this setter
+// would no-op on the active backend" answer is communicated through
+// the live feature matrix (`crispasr --list-backends-json`), not
+// through the setter's rc, so wrapper code doesn't have to special-
+// case per-backend support gates.
+CA_EXPORT int crispasr_session_set_beam_size(crispasr_session* s, int n) {
+    if (!s)
+        return -1;
+    s->beam_size = n > 0 ? n : 1;
     return 0;
 }
 
