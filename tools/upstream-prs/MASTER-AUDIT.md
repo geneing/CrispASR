@@ -20,7 +20,7 @@ Two notes worth keeping in mind:
 | 04 | Metal conv_transpose_1d | Vulnerable / inefficient. `ggml-metal.metal:4860-4861` still iterates full IL with the in-loop `if`. | Apply as drafted. |
 | 05 | CUDA per-row-contiguous unary | Vulnerable (Phase 1 of A1000-issue-#81 work). | Branch `issue81-phase1-uar-wip`; see `RESUME-A1000-phase1.md`. |
 | 06 | CUDA per-head mask in `flash_attn_ext` | Vulnerable; same branch. | Same; pair with 05 before filing. |
-| 07 | Metal `kernel_aa_snake_beta` (NEW OP) | N/A — adds a new op (`GGML_OP_AA_SNAKE_BETA`). No upstream conflict but expects design ack first. | RFC scope only; do not file before 01/05/06. |
+| 07 | Metal `kernel_aa_snake_beta` (NEW OP) | N/A — adds a new op (`GGML_OP_AA_SNAKE_BETA`). No upstream conflict but expects design ack first. Integrated locally on `main` as `d9ecc9b9` (phase 1 / CPU forward) + `87d0e38f` (phase 2 / Metal kernel). | RFC scope only; do not file before 01/05/06. Other GPU backends fall through to `default: return false` in their `supports_op` switches — sched routes to CPU forward automatically. |
 
 ## What changed in master since v0.10.0 (relevant to our patches)
 
