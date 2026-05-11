@@ -6,8 +6,8 @@ Redacted descriptions in own voice.
 | # | Subject | Code provenance | Status |
 | - | --- | --- | --- |
 | 01 | `ggml-cpu : avoid F16 saturation in MUL_MAT(F16, F32) on ARM NEON` | yours (5eef4e2 + the older conv-cast hunks) — bundles type-traits change with conv-graph kernel cast in one PR | drafted |
-| 02 | `ggml-cuda : handle OW > 65535 in im2col (2D and 3D)` | yours (1552434, re-applied in ca6c523) | filed [#1485](https://github.com/ggml-org/ggml/pull/1485) 2026-05-10 |
-| 03 | `ggml-cuda : tile cpy_scalar_transpose along grid_y` | AI-authored (2639461) — re-derive yourself before sending | gated on #1485 merge |
+| 02 | `CUDA: handle OW > 65535 in im2col (2D and 3D)` | yours (1552434, re-applied in ca6c523) | ggml-org/ggml#1485 closed (wrong repo); refiled at [ggml-org/llama.cpp#22944](https://github.com/ggml-org/llama.cpp/pull/22944) 2026-05-11 |
+| 03 | `CUDA: tile cpy_scalar_transpose along grid_y` | AI-authored (2639461) — re-derive yourself before sending | gated on llama.cpp#22944 merge |
 | 04 | `metal : tighten input-position loop in kernel_conv_transpose_1d` | yours (4990da8) | ✅ merged [#1477](https://github.com/ggml-org/ggml/pull/1477) 2026-05-10 |
 | 05 | `ggml-cuda : per-row-contiguous unary (Phase 1 UAR)` | WIP on branch `issue81-phase1-uar-wip` | drafted, not yet filed |
 | 06 | `ggml-cuda : per-head mask in flash_attn_ext` | WIP on branch `issue81-phase1-uar-wip` | drafted, not yet filed |
@@ -24,31 +24,63 @@ have been fixed upstream. Note: `im2col` gained a second target
 site (`im2col_3d_kernel`) since v0.10.0; the PR 02 patch covers
 both kernels.
 
+## Which repo to file against
+
+CUDA changes belong in **ggml-org/llama.cpp**, not ggml-org/ggml. ggml's
+own README says "some of the development is currently happening in the
+llama.cpp and whisper.cpp repos," and the `src/ggml-cuda/` commit log
+on ggml master is 100% `(llama/NNNNN)` sync commits — i.e., CUDA work
+flows llama.cpp → ggml, never the other way. Reviewers (slaren,
+JohannesGaessler, …) live in llama.cpp's queue. Confirmed 2026-05-11
+when @CISC closed-with-comment on #02 here and redirected us.
+
+| Patch touches | File against | Why |
+| --- | --- | --- |
+| `src/ggml-cuda/**` | **ggml-org/llama.cpp** | CUDA reviewers concentrate there; auto-syncs back |
+| `src/ggml-metal/**` | ggml-org/ggml (direct) or llama.cpp | Both work; PR #1477 landed direct in ggml |
+| `src/ggml-vulkan/**` | **ggml-org/llama.cpp** | same pattern as CUDA per commit log |
+| `src/ggml-cpu/**`, `src/ggml.c`, type-traits | ggml-org/ggml | core lib stays in ggml |
+| Standalone ggml examples / build | ggml-org/ggml | repo-local |
+
+Title convention differs by repo:
+- ggml-org/ggml: `<module> : <description>` (space around colon)
+- ggml-org/llama.cpp: `CUDA: …` / `vulkan: …` (no space) — see recent master commits
+
+llama.cpp also has a much stricter AI-content policy (AGENTS.md +
+CONTRIBUTING.md): prohibits AI-written PR descriptions / commit
+messages / reviewer responses, requires disclosure when AI
+meaningfully contributed, threatens account bans for repeated
+violations. Author your own prose; disclose mechanical AI assistance
+explicitly in the Requirements section.
+
 ## Sending
 
-Send sequentially, not concurrent (new-contributor cap = 1 open PR).
-Order — easiest reviewer call first:
+Send sequentially, not concurrent (new-contributor cap = 1 open PR per
+repo). Order — easiest reviewer call first:
 
-1. ✅ **04** Metal perf — bit-identical, easy bench → merged as [#1477](https://github.com/ggml-org/ggml/pull/1477) 2026-05-10
-2. 📤 **02** CUDA im2col — matches existing binbcast unravel pattern → filed as [#1485](https://github.com/ggml-org/ggml/pull/1485) 2026-05-10 (awaiting review)
-3. **03** CUDA cpy — only after re-deriving the kernel-tiling code yourself; wait for #1485 to merge first
-4. **01** CPU F16 — real correctness bug; one PR but five files (4 in `ggml-cpu/`, plus `ggml.c` for the conv builders that pair with the type-traits change). Design discussion expected; consider opening an issue first to get a maintainer ack on the shape before posting the PR.
+1. ✅ **04** Metal perf → merged at ggml-org/ggml as [#1477](https://github.com/ggml-org/ggml/pull/1477) 2026-05-10
+2. 📤 **02** CUDA im2col → filed at ggml-org/llama.cpp as [#22944](https://github.com/ggml-org/llama.cpp/pull/22944) 2026-05-11 (after ggml#1485 was redirected)
+3. **03** CUDA cpy → file at ggml-org/llama.cpp after #22944 merges; re-derive the kernel-tiling code yourself first
+4. **01** CPU F16 → file at ggml-org/ggml (touches ggml-cpu/ + ggml.c); design-discussion expected, consider opening an issue first
 
 Per upstream:
 
-- Squash-merge, title format `<module> : <description>`
+- Squash-merge, title format per repo convention (see above)
 - Run `test-backend-ops` against the touched op on at least two backends
 - Run local CI from `ci/README.md` if practical
 
 ## Workflow
 
 ```bash
-gh repo fork ggml-org/ggml --clone --remote
-cd ggml
-git checkout -b <module>-<short>          # e.g. metal-conv-transpose-1d
+# pick the right repo per the table above; example for CUDA:
+gh repo fork ggml-org/llama.cpp --clone --remote
+cd llama.cpp
+git checkout -b cuda-<short>              # e.g. cuda-im2col-ow
 # apply your re-authored hunk to the file (don't `git am` the .patch
 # directly; use it as reference)
-git commit -am "<module> : <description>"
+git commit -m "CUDA: <description>"       # author your own message
 git push -u origin HEAD
-gh pr create --web                          # write the body in your own voice
+gh pr create --web                        # author your own body; fill
+                                          # the AI-usage disclosure
+                                          # in Requirements honestly
 ```
