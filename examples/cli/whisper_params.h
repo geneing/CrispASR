@@ -143,6 +143,12 @@ struct whisper_params {
     std::string sherpa_segment_model;
     std::string sherpa_embedding_model;
     int sherpa_num_clusters = 0;
+
+    // Speaker identification via TitaNet embeddings + profile DB.
+    std::string speaker_db;         // path to speaker profile directory
+    std::string enroll_speaker;     // enrollment mode: save embedding as this name
+    std::string titanet_model;      // TitaNet GGUF path or "auto"
+    float speaker_threshold = 0.7f; // cosine similarity threshold for matching
     bool stream = false;
     bool mic = false;
     bool stream_continuous = false;

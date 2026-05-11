@@ -2595,3 +2595,125 @@ class PuncModel {
     _handle = nullptr;
   }
 }
+
+// =========================================================================
+// TitaNet speaker verification
+// =========================================================================
+
+/// TitaNet-Large speaker embedding extractor (192-d, L2-normalized).
+class CrispasrTitaNet {
+  late final DynamicLibrary _lib;
+  Pointer<Void> _handle = nullptr;
+
+  CrispasrTitaNet(DynamicLibrary lib, String modelPath, {int nThreads = 4})
+      : _lib = lib {
+    final initFn = lib.lookupFunction<
+        Pointer<Void> Function(Pointer<Utf8>, Int32),
+        Pointer<Void> Function(Pointer<Utf8>, int)>('crispasr_titanet_init');
+    final mp = modelPath.toNativeUtf8();
+    _handle = initFn(mp, nThreads);
+    malloc.free(mp);
+    if (_handle == nullptr) {
+      throw Exception('Failed to load TitaNet model: $modelPath');
+    }
+  }
+
+  /// Extract 192-d speaker embedding from 16 kHz mono float32 PCM.
+  Float32List embed(Float32List pcm16k) {
+    final embedFn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<Float>, Int32, Pointer<Float>),
+        int Function(Pointer<Void>, Pointer<Float>, int, Pointer<Float>)>(
+        'crispasr_titanet_embed');
+    final pcmPtr = malloc<Float>(pcm16k.length);
+    pcmPtr.asTypedList(pcm16k.length).setAll(0, pcm16k);
+    final outPtr = malloc<Float>(192);
+    final dim = embedFn(_handle, pcmPtr, pcm16k.length, outPtr);
+    malloc.free(pcmPtr);
+    if (dim <= 0) {
+      malloc.free(outPtr);
+      throw Exception('TitaNet embedding failed');
+    }
+    final result = Float32List.fromList(outPtr.asTypedList(dim));
+    malloc.free(outPtr);
+    return result;
+  }
+
+  void close() {
+    if (_handle == nullptr) return;
+    final freeFn = _lib.lookupFunction<
+        Void Function(Pointer<Void>),
+        void Function(Pointer<Void>)>('crispasr_titanet_free');
+    freeFn(_handle);
+    _handle = nullptr;
+  }
+}
+
+/// File-based speaker profile database.
+class CrispasrSpeakerDB {
+  late final DynamicLibrary _lib;
+  Pointer<Void> _handle = nullptr;
+  final String dirPath;
+
+  CrispasrSpeakerDB(DynamicLibrary lib, this.dirPath) : _lib = lib {
+    final loadFn = lib.lookupFunction<
+        Pointer<Void> Function(Pointer<Utf8>),
+        Pointer<Void> Function(Pointer<Utf8>)>('crispasr_speaker_db_load');
+    final dp = dirPath.toNativeUtf8();
+    _handle = loadFn(dp);
+    malloc.free(dp);
+  }
+
+  int get count {
+    final countFn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>),
+        int Function(Pointer<Void>)>('crispasr_speaker_db_count');
+    return countFn(_handle);
+  }
+
+  /// Match embedding against DB. Returns (name, score) or (null, score).
+  (String?, double) match(Float32List embedding, {double threshold = 0.7}) {
+    final matchFn = _lib.lookupFunction<
+        Float Function(Pointer<Void>, Pointer<Float>, Int32, Float,
+            Pointer<Utf8>, Int32),
+        double Function(Pointer<Void>, Pointer<Float>, int, double,
+            Pointer<Utf8>, int)>('crispasr_speaker_db_match');
+    final embPtr = malloc<Float>(embedding.length);
+    embPtr.asTypedList(embedding.length).setAll(0, embedding);
+    final nameBuf = malloc<Uint8>(256);
+    final score = matchFn(
+        _handle, embPtr, embedding.length, threshold, nameBuf.cast(), 256);
+    malloc.free(embPtr);
+    String? name;
+    if (score >= threshold) {
+      name = nameBuf.cast<Utf8>().toDartString();
+    }
+    malloc.free(nameBuf);
+    return (name, score);
+  }
+
+  /// Enroll a speaker with the given name and embedding.
+  bool enroll(String name, Float32List embedding) {
+    final enrollFn = _lib.lookupFunction<
+        Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Float>, Int32),
+        int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Float>, int)>(
+        'crispasr_speaker_db_enroll');
+    final dp = dirPath.toNativeUtf8();
+    final np = name.toNativeUtf8();
+    final embPtr = malloc<Float>(embedding.length);
+    embPtr.asTypedList(embedding.length).setAll(0, embedding);
+    final rc = enrollFn(dp, np, embPtr, embedding.length);
+    malloc.free(dp);
+    malloc.free(np);
+    malloc.free(embPtr);
+    return rc == 0;
+  }
+
+  void close() {
+    if (_handle == nullptr) return;
+    final freeFn = _lib.lookupFunction<
+        Void Function(Pointer<Void>),
+        void Function(Pointer<Void>)>('crispasr_speaker_db_free');
+    freeFn(_handle);
+    _handle = nullptr;
+  }
+}

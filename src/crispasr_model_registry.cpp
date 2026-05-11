@@ -119,6 +119,9 @@ constexpr Entry k_registry[] = {
     {"gemma4-e2b", "gemma4-e2b-it-q4_k.gguf",
      "https://huggingface.co/cstr/gemma4-e2b-it-GGUF/resolve/main/gemma4-e2b-it-q4_k.gguf",
      "~2.5 GB", nullptr, nullptr},
+    {"titanet", "titanet-large.gguf",
+     "https://huggingface.co/cstr/titanet-large-GGUF/resolve/main/titanet-large.gguf",
+     "~45 MB", nullptr, nullptr},
     // parakeet-ja: F16 is the auto-download default — Q4_K of this
     // model is quantisation-sensitive (joint.pred / decoder.embed
     // dimensions fall back to q4_0 inside q4_k mode) and the talker

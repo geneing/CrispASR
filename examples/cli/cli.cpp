@@ -399,6 +399,14 @@ static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, 
         params.sherpa_embedding_model = ARGV_NEXT;
     } else if (arg == "--sherpa-num-clusters") {
         params.sherpa_num_clusters = std::stoi(ARGV_NEXT);
+    } else if (arg == "--speaker-db") {
+        params.speaker_db = ARGV_NEXT;
+    } else if (arg == "--enroll-speaker") {
+        params.enroll_speaker = ARGV_NEXT;
+    } else if (arg == "--titanet-model" || arg == "--spk-model") {
+        params.titanet_model = ARGV_NEXT;
+    } else if (arg == "--speaker-threshold" || arg == "-st") {
+        params.speaker_threshold = std::stof(ARGV_NEXT);
     } else if (arg == "--cache-dir") {
         params.cache_dir = ARGV_NEXT;
     } else if (arg == "--alt") {
@@ -1681,6 +1689,17 @@ int main(int argc, char** argv) {
         fprintf(stderr, "error: no input files specified\n");
         whisper_print_usage(argc, argv, params);
         return 2;
+    }
+
+    // Speaker enrollment: extract TitaNet embedding from audio, save to DB, exit.
+    // This is a standalone operation that doesn't need any ASR backend.
+    if (!params.enroll_speaker.empty() && !params.fname_inp.empty()) {
+        // Enrollment needs: audio → TitaNet → speaker_db_enroll → exit
+        // Route through the unified dispatch which has the enrollment code.
+        if (params.backend.empty())
+            params.backend = "whisper"; // any backend, enrollment exits before init
+        const int rc = crispasr_run_backend(params);
+        return rc;
     }
 
     // crispasr backend dispatch ---------------------------------------------

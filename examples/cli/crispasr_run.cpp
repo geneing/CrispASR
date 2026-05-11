@@ -23,6 +23,8 @@
 #include "crispasr_mem.h"
 #include "whisper_params.h"
 #include "fireredpunc.h"
+#include "titanet.h"
+#include "speaker_db.h"
 
 #include "common-crispasr.h" // read_audio_data
 
@@ -193,6 +195,41 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     if (!params.no_prints) {
         fprintf(stderr, "crispasr: audio: %d samples (%.1f s) @ %d Hz, %d threads\n", (int)samples.size(),
                 (double)samples.size() / SR, SR, params.n_threads);
+    }
+
+    // Speaker enrollment mode: extract TitaNet embedding, save to DB, exit.
+    if (!params.enroll_speaker.empty()) {
+        std::string tmodel = params.titanet_model;
+        if (tmodel.empty() || tmodel == "auto") {
+            tmodel =
+                crispasr_resolve_model("auto", "titanet", params.no_prints, params.cache_dir, params.auto_download, "");
+        }
+        if (tmodel.empty()) {
+            fprintf(stderr, "crispasr: error: cannot resolve TitaNet model for enrollment\n");
+            return 21;
+        }
+        auto* tctx = titanet_init(tmodel.c_str(), params.n_threads);
+        if (!tctx) {
+            fprintf(stderr, "crispasr: error: failed to load TitaNet model '%s'\n", tmodel.c_str());
+            return 22;
+        }
+        float emb[192];
+        int dim = titanet_embed(tctx, samples.data(), (int)samples.size(), emb);
+        titanet_free(tctx);
+        if (dim <= 0) {
+            fprintf(stderr, "crispasr: error: TitaNet embedding extraction failed\n");
+            return 23;
+        }
+        std::string db_dir = params.speaker_db;
+        if (db_dir.empty())
+            db_dir = params.cache_dir.empty()
+                         ? std::string(getenv("HOME") ? getenv("HOME") : ".") + "/.cache/crispasr/speakers"
+                         : params.cache_dir + "/speakers";
+        if (!speaker_db_enroll(db_dir.c_str(), params.enroll_speaker.c_str(), emb, dim)) {
+            fprintf(stderr, "crispasr: error: failed to enroll speaker '%s'\n", params.enroll_speaker.c_str());
+            return 24;
+        }
+        return 0;
     }
 
     // Optional language-identification pre-step.
@@ -385,6 +422,37 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
                 std::vector<float> mono_slice(samples.begin() + sl.start, samples.begin() + sl.end);
                 crispasr_apply_diarize(mono_slice, mono_slice,
                                        /*is_stereo=*/false, sl.t0_cs, segs, params);
+            }
+        }
+
+        // Speaker identification: match diarized speakers against profile DB.
+        // Also supports standalone speaker ID (without diarize) when --speaker-db is set.
+        if (!params.speaker_db.empty() && !segs.empty()) {
+            static titanet_context* spk_ctx = nullptr;
+            static speaker_db* spk_db = nullptr;
+            if (!spk_ctx) {
+                std::string tm = params.titanet_model;
+                if (tm.empty() || tm == "auto")
+                    tm = crispasr_resolve_model("auto", "titanet", params.no_prints, params.cache_dir,
+                                                params.auto_download, "");
+                if (!tm.empty())
+                    spk_ctx = titanet_init(tm.c_str(), params.n_threads);
+            }
+            if (!spk_db)
+                spk_db = speaker_db_load(params.speaker_db.c_str());
+            if (spk_ctx && spk_db && speaker_db_count(spk_db) > 0) {
+                // Extract embedding for the whole slice and match
+                float emb[192];
+                int dim = titanet_embed(spk_ctx, samples.data() + sl.start, sl.end - sl.start, emb);
+                if (dim > 0) {
+                    float score = 0;
+                    const char* name = speaker_db_match(spk_db, emb, dim, params.speaker_threshold, &score);
+                    if (name) {
+                        std::string label = std::string("(") + name + ") ";
+                        for (auto& seg : segs)
+                            seg.speaker = label;
+                    }
+                }
             }
         }
 

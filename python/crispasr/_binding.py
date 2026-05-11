@@ -1787,3 +1787,123 @@ class PuncModel:
 
     def __exit__(self, *exc):
         self.close()
+
+
+# =========================================================================
+# TitaNet speaker verification + speaker profile DB
+# =========================================================================
+
+class TitaNet:
+    """TitaNet-Large speaker embedding extractor (192-d, L2-normalized)."""
+
+    def __init__(self, model_path: str, n_threads: int = 4, lib_path: str = None):
+        self._lib = ctypes.CDLL(lib_path or _find_lib())
+        self._lib.crispasr_titanet_init.argtypes = [ctypes.c_char_p, ctypes.c_int32]
+        self._lib.crispasr_titanet_init.restype = ctypes.c_void_p
+        self._lib.crispasr_titanet_free.argtypes = [ctypes.c_void_p]
+        self._lib.crispasr_titanet_free.restype = None
+        self._lib.crispasr_titanet_embed.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        self._lib.crispasr_titanet_embed.restype = ctypes.c_int32
+        self._lib.crispasr_titanet_cosine_sim.argtypes = [
+            ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
+        ]
+        self._lib.crispasr_titanet_cosine_sim.restype = ctypes.c_float
+        self._ctx = self._lib.crispasr_titanet_init(model_path.encode(), n_threads)
+        if not self._ctx:
+            raise RuntimeError(f"Failed to load TitaNet model: {model_path}")
+
+    def embed(self, pcm_16k):
+        """Extract 192-d speaker embedding from 16 kHz mono float32 PCM."""
+        import numpy as np
+        pcm = np.ascontiguousarray(pcm_16k, dtype=np.float32)
+        out = np.zeros(192, dtype=np.float32)
+        dim = self._lib.crispasr_titanet_embed(
+            self._ctx,
+            pcm.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(pcm),
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+        if dim <= 0:
+            raise RuntimeError("TitaNet embedding extraction failed")
+        return out[:dim]
+
+    @staticmethod
+    def cosine_sim(a, b, lib_path=None):
+        """Cosine similarity between two embeddings (dot product for L2-normed)."""
+        import numpy as np
+        return float(np.dot(a, b))
+
+    def close(self):
+        if self._ctx:
+            self._lib.crispasr_titanet_free(self._ctx)
+            self._ctx = None
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class SpeakerDB:
+    """File-based speaker profile database for speaker identification."""
+
+    def __init__(self, dir_path: str, lib_path: str = None):
+        self._lib = ctypes.CDLL(lib_path or _find_lib())
+        self._lib.crispasr_speaker_db_load.argtypes = [ctypes.c_char_p]
+        self._lib.crispasr_speaker_db_load.restype = ctypes.c_void_p
+        self._lib.crispasr_speaker_db_free.argtypes = [ctypes.c_void_p]
+        self._lib.crispasr_speaker_db_free.restype = None
+        self._lib.crispasr_speaker_db_count.argtypes = [ctypes.c_void_p]
+        self._lib.crispasr_speaker_db_count.restype = ctypes.c_int32
+        self._lib.crispasr_speaker_db_match.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
+            ctypes.c_float, ctypes.c_char_p, ctypes.c_int32,
+        ]
+        self._lib.crispasr_speaker_db_match.restype = ctypes.c_float
+        self._lib.crispasr_speaker_db_enroll.argtypes = [
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
+        ]
+        self._lib.crispasr_speaker_db_enroll.restype = ctypes.c_int32
+        self._db = self._lib.crispasr_speaker_db_load(dir_path.encode())
+        self._dir = dir_path
+
+    @property
+    def count(self):
+        return self._lib.crispasr_speaker_db_count(self._db) if self._db else 0
+
+    def match(self, embedding, threshold=0.7):
+        """Match embedding against DB. Returns (name, score) or (None, score)."""
+        import numpy as np
+        emb = np.ascontiguousarray(embedding, dtype=np.float32)
+        name_buf = ctypes.create_string_buffer(256)
+        score = self._lib.crispasr_speaker_db_match(
+            self._db, emb.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(emb), threshold, name_buf, 256,
+        )
+        name = name_buf.value.decode() if score >= threshold else None
+        return name, float(score)
+
+    def enroll(self, name, embedding):
+        """Enroll a speaker with the given name and embedding."""
+        import numpy as np
+        emb = np.ascontiguousarray(embedding, dtype=np.float32)
+        rc = self._lib.crispasr_speaker_db_enroll(
+            self._dir.encode(), name.encode(),
+            emb.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), len(emb),
+        )
+        return rc == 0
+
+    def close(self):
+        if self._db:
+            self._lib.crispasr_speaker_db_free(self._db)
+            self._db = None
+
+    def __del__(self):
+        self.close()

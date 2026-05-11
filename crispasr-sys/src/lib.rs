@@ -504,4 +504,34 @@ extern "C" {
         out_picked: *mut c_char,
         out_picked_len: c_int,
     ) -> c_int;
+
+    // TitaNet speaker verification
+    pub fn crispasr_titanet_init(model_path: *const c_char, n_threads: i32) -> *mut c_void;
+    pub fn crispasr_titanet_free(ctx: *mut c_void);
+    pub fn crispasr_titanet_embed(
+        ctx: *mut c_void,
+        pcm_16k: *const c_float,
+        n_samples: i32,
+        out: *mut c_float,
+    ) -> i32;
+    pub fn crispasr_titanet_cosine_sim(a: *const c_float, b: *const c_float, dim: i32) -> c_float;
+
+    // Speaker profile database
+    pub fn crispasr_speaker_db_load(dir_path: *const c_char) -> *mut c_void;
+    pub fn crispasr_speaker_db_free(db: *mut c_void);
+    pub fn crispasr_speaker_db_count(db: *const c_void) -> i32;
+    pub fn crispasr_speaker_db_match(
+        db: *const c_void,
+        embedding: *const c_float,
+        dim: i32,
+        threshold: c_float,
+        out_name: *mut c_char,
+        out_cap: i32,
+    ) -> c_float;
+    pub fn crispasr_speaker_db_enroll(
+        dir_path: *const c_char,
+        name: *const c_char,
+        embedding: *const c_float,
+        dim: i32,
+    ) -> i32;
 }
