@@ -251,13 +251,19 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Build (shared libs, Metal)
+      - name: Build (shared libs, Metal + Accelerate)
+        # Add Apple Accelerate BLAS so the GPU-not-eligible matmuls fall
+        # back to Accelerate's vDSP/cblas paths instead of stock ggml-cpu.
+        # Mirrors CrispEmbed's macos-arm64 posture; meaningful speedup on
+        # the larger ASR encoder bodies (Voxtral 4B, Qwen3-ASR).
         run: |
           cmake -S . -B build-libs \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_METAL=ON \
             -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_BLAS=ON \
+            -DGGML_BLAS_VENDOR=Apple \
             -DCRISPASR_BUILD_TESTS=OFF \
             -DCRISPASR_BUILD_EXAMPLES=OFF \
             -DCRISPASR_BUILD_SERVER=OFF
@@ -950,8 +956,71 @@ jobs:
   # For v0.6.1 we observed publish blocked for ~30 min waiting on the
   # 3 CUDA jobs (slow, not failing); meanwhile the 11 fast builds had
   # produced their artifacts and were sitting unused in run storage.
+  # ── Android arm64-v8a shared libs + headers ──────────────────────────────────
+  # Release-tier Android build (the ci.yml `android:` job is CI-only and
+  # builds STATIC + only configures, doesn't package). This one ships
+  # libwhisper.so + per-backend .so + ggml backends + headers as a
+  # tarball Android-NDK apps can drop straight into `jniLibs/arm64-v8a/`.
+  #
+  # Limited to arm64-v8a for now — CrispASR's larger backends (Voxtral 4B,
+  # Qwen3-ASR) haven't been verified on 32-bit ARM and would need separate
+  # validation before shipping armeabi-v7a.
+  build-android-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Build (shared libs)
+        run: |
+          cmake -S . -B build-android \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=OFF \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build-android --config Release -j $(nproc) --target crispasr
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          OUT=release/crispasr-android-arm64-v8a
+          mkdir -p "$OUT/lib" "$OUT/include"
+          # Core libs (preserve symlinks for SOVERSION).
+          cp -P build-android/src/libcrispasr*.so* "$OUT/lib/" 2>/dev/null || true
+          [ -e build-android/src/libwhisper.so ] && cp -P build-android/src/libwhisper.so* "$OUT/lib/"
+          # Per-backend libs (parakeet, canary, voxtral, qwen3_asr, …).
+          find build-android/src -maxdepth 1 -name 'lib*.so*' \( -type f -o -type l \) \
+            ! -name 'libcrispasr*' ! -name 'libwhisper*' \
+            -exec cp -P {} "$OUT/lib/" \;
+          # ggml backends (CPU only — no Metal/CUDA/Vulkan on Android).
+          find build-android/ggml/src -name 'libggml*.so*' \( -type f -o -type l \) \
+            -exec cp -P {} "$OUT/lib/" \;
+          # Headers for JNI authors who want to bind directly without
+          # vendoring the whole repo.
+          cp include/crispasr.h "$OUT/include/"
+          cp ggml/include/*.h   "$OUT/include/" 2>/dev/null || true
+          cp LICENSE "$OUT/"
+          cd release && tar czf crispasr-android-arm64-v8a.tar.gz crispasr-android-arm64-v8a/
+          ls -lh crispasr-android-arm64-v8a.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-android-arm64-v8a
+          path: release/crispasr-android-arm64-v8a.tar.gz
+
   publish:
-    needs: [build-linux, build-linux-arm64, build-python-linux, build-python-linux-arm64, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-arm64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan]
+    needs: [build-linux, build-linux-arm64, build-python-linux, build-python-linux-arm64, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-arm64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan, build-android-arm64]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
