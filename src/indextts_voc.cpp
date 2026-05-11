@@ -150,8 +150,7 @@ namespace {
 
 // Anti-aliased SnakeBeta as a custom ggml op.
 // Input x: [T, C] (time-first). Output: same shape.
-static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* src, int /*ith*/, int /*nth*/,
-                             void* userdata) {
+static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* src, int ith, int nth, void* userdata) {
     const auto* p = (const aa_snake_params*)userdata;
     const int T = (int)src->ne[0];
     const int C = (int)src->ne[1];
@@ -164,7 +163,11 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
     const int ds_pad_left = K / 2 - 1;                     // 5
     const int ds_pad_right = K / 2;                        // 6
 
-    for (int c = 0; c < C; c++) {
+    // Distribute channels across threads
+    const int c_start = (C * ith) / nth;
+    const int c_end = (C * (ith + 1)) / nth;
+
+    for (int c = c_start; c < c_end; c++) {
         float alpha_c = (c < p->C) ? p->alpha[c] : 1.0f;
         float inv_beta_c = (c < p->C) ? (1.0f / p->beta[c]) : 1.0f;
 
@@ -270,7 +273,7 @@ static ggml_tensor* aa_snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor
         p->ds_filter = p->us_filter;
     }
 
-    return ggml_map_custom1(ctx, x, aa_snake_beta_op, 1, p);
+    return ggml_map_custom1(ctx, x, aa_snake_beta_op, GGML_N_TASKS_MAX, p);
 }
 
 // Raw SnakeBeta without anti-aliasing (kept for reference / fallback)
@@ -543,31 +546,13 @@ static ggml_cgraph* build_ecapa_graph(indextts_voc_context* c, int T_mel) {
 // Compute 100-band mel spectrogram for ECAPA-TDNN.
 // Input: mono float32 PCM at 24kHz.
 // Output: (T, 100) row-major float32 mel, T written to *T_out.
-// Simple linear interpolation resampler (16kHz → 24kHz)
-static std::vector<float> resample_16k_to_24k_voc(const float* pcm, int n_samples) {
-    const double ratio = 24000.0 / 16000.0;
-    int n_out = (int)(n_samples * ratio);
-    std::vector<float> out(n_out);
-    for (int i = 0; i < n_out; i++) {
-        double src_pos = i / ratio;
-        int idx = (int)src_pos;
-        double frac = src_pos - idx;
-        if (idx + 1 < n_samples)
-            out[i] = (float)((1.0 - frac) * pcm[idx] + frac * pcm[idx + 1]);
-        else if (idx < n_samples)
-            out[i] = pcm[idx];
-    }
-    return out;
-}
-
 static std::vector<float> compute_ecapa_mel(const float* pcm, int n_samples, int* T_out) {
     const int n_fft = 1024, hop = 256, n_mels = 100, sr = 24000;
     const float fmin = 0.0f, fmax = 12000.0f;
 
-    // Resample 16kHz input to 24kHz
-    auto pcm_24k = resample_16k_to_24k_voc(pcm, n_samples);
-    pcm = pcm_24k.data();
-    n_samples = (int)pcm_24k.size();
+    // Input is already 24kHz (resampled by the backend caller).
+    // No further resampling needed — the ECAPA-TDNN in IndexTTS's BigVGAN
+    // vocoder operates at 24kHz natively.
 
     const int pad = (n_fft - hop) / 2; // 384
 
