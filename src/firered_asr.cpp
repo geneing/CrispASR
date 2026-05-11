@@ -212,6 +212,16 @@ extern "C" struct firered_asr_context_params firered_asr_context_default_params(
     return {/*n_threads=*/4, /*verbosity=*/1, /*use_gpu=*/true, /*beam_size=*/3};
 }
 
+// PLAN §90: runtime beam-size setter so session-API consumers
+// (crispasr_session_set_beam_size → s->beam_size → here) can pin a
+// beam width without having to close + reopen the context. Clamps
+// to >= 1; the actual decode at line 1744 enforces a separate
+// is_lid bypass.
+extern "C" void firered_asr_set_beam_size(struct firered_asr_context* ctx, int beam_size) {
+    if (ctx)
+        ctx->params.beam_size = (beam_size > 0) ? beam_size : 1;
+}
+
 // --- Tensor loading helpers ---
 
 static void load_ffn(const std::map<std::string, ggml_tensor*>& ts, const char* prefix, firered_enc_ffn& ffn) {

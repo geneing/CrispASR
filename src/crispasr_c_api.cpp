@@ -2713,6 +2713,10 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
 #ifdef CA_HAVE_GLMASR
     if ((s->backend == "glm-asr" || s->backend == "glmasr" || s->backend == "glm" || s->backend == "glm_asr") &&
         s->glmasr_ctx) {
+        // PLAN §90: session beam_size → glm-asr's per-context setter.
+        if (s->beam_size > 1) {
+            glm_asr_set_beam_size((glm_asr_context*)s->glmasr_ctx, s->beam_size);
+        }
         glm_asr_result* gr = glm_asr_transcribe_with_probs((glm_asr_context*)s->glmasr_ctx, pcm, n_samples);
         if (!gr || !gr->text) {
             if (gr)
@@ -2801,6 +2805,10 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
 #endif
 #ifdef CA_HAVE_FIRERED
     if ((s->backend == "firered-asr" || s->backend == "firered") && s->firered_ctx) {
+        // PLAN §90: session beam_size → firered's per-context setter.
+        if (s->beam_size > 1) {
+            firered_asr_set_beam_size((firered_asr_context*)s->firered_ctx, s->beam_size);
+        }
         firered_asr_result* fr =
             firered_asr_transcribe_with_probs((firered_asr_context*)s->firered_ctx, pcm, n_samples);
         if (!fr || !fr->text) {

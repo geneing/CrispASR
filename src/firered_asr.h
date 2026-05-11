@@ -41,6 +41,11 @@ char* firered_asr_transcribe(struct firered_asr_context* ctx, const float* sampl
 // Token text lookup.
 const char* firered_asr_token_text(struct firered_asr_context* ctx, int id);
 
+// Runtime beam-size override (mutates ctx->params.beam_size). Used by
+// the session API's crispasr_session_set_beam_size — PLAN §90. Pass
+// 0 or negative to reset to the safe default (1 = greedy).
+void firered_asr_set_beam_size(struct firered_asr_context* ctx, int beam_size);
+
 // Result of `firered_asr_transcribe_with_probs`: full transcript + parallel
 // arrays of token ids + per-token softmax probabilities (winning beam only).
 // `n_tokens` excludes SOS and EOS. `text` is the post-processed UTF-8

@@ -2467,34 +2467,42 @@ May 2026:
   * Shipped `crispasr_session_set_beam_size` (commit 958e6bd7).
   * Whisper consumes it natively (switches sampling strategy to
     BEAM_SEARCH with the supplied width).
-  * Kyutai-STT / moonshine / omniasr wired via the existing
-    `<backend>_set_beam_size` C setters: `transcribe_single` in
-    `crispasr_c_api.cpp` now calls `<backend>_set_beam_size(ctx,
-    s->beam_size)` when `s->beam_size > 1` and the active backend
-    matches. CrisperWeaver's batch worker pool drives this through
-    its sticky-setter protocol — beamSearch is pool-eligible
-    end-to-end for all four backends.
+  * **Five backends wired** via runtime `<backend>_set_beam_size`
+    setters in their per-backend C API:
+    - kyutai-stt (also kyutai / moshi-stt aliases) — setter
+      pre-existed; just needed to be called from
+      `transcribe_single`.
+    - moonshine — same.
+    - omniasr (LLM variant; CTC ignores) — same.
+    - **glm-asr** — added `glm_asr_set_beam_size` (new public
+      symbol) + dispatch wire.
+    - **firered** — added `firered_asr_set_beam_size` (new
+      public symbol) + dispatch wire.
+  * CrisperWeaver's batch worker pool drives all six (whisper +
+    five) end-to-end via its sticky-setter protocol; beamSearch
+    is pool-eligible across that whole set.
+  * `nm libcrispasr` confirms all five `<backend>_set_beam_size`
+    plus the unified `crispasr_session_set_beam_size` are
+    exported.
 
-Still gapped — these backends' high-level transcribe APIs don't
-expose beam_size yet, only their CLI wrappers do. Each needs new C
-surface before the session wrapper can plumb `s->beam_size`
-through:
+**Still gapped** — three backend families need new C surface on
+their high-level transcribe API before the session wrapper can
+plumb `s->beam_size` through. Each is more substantial than the
+"add a runtime setter" pattern above because the beam-decode
+path doesn't live in the backend library; the CLI wraps it
+externally:
 
 | Backend | What's needed |
 |---|---|
-| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | `granite_speech_transcribe_with_beam(ctx, samples, n_samples, beam_size)` or grow `granite_speech_transcribe` to take an options struct. CLI wrapper at `crispasr_backend_granite.cpp` already calls `core_beam_decode::run_with_probs(ctx_, logits, replay, cfg)` with `cfg.beam_size = params.beam_size` — the work is exposing that path on the public C API. |
-| voxtral / voxtral4b | Add `voxtral_transcribe_with_params(ctx, samples, n_samples, voxtral_decode_params{beam_size, ...})`. CLI uses an internal `voxtral_decode_beam`. |
-| qwen3-asr | Same pattern — options struct or `_with_beam` overload. |
-| glm-asr | CLI uses `cp.beam_size = params.beam_size > 0 ? params.beam_size : 1;` against the internal `glm_asr_*` API. Confirm + expose via session dispatch. |
-| firered | `cp.beam_size` set per-call in CLI wrapper against `firered_asr_*` internal API. Confirm + expose. |
+| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | The granite library exposes `granite_speech_transcribe(ctx, samples, n_samples)` — no beam, no params struct, just text. The CLI wrapper at `crispasr_backend_granite.cpp` runs its OWN beam decode via `core_beam_decode::run_with_probs(ctx_, logits, replay, cfg)` after pulling logits out of granite. Wiring beam search into the session API needs either: (a) move the `core_beam_decode` call into the granite library + new public `granite_speech_transcribe_with_beam(ctx, samples, n_samples, beam_size)`, or (b) expose granite's logits + replay buffer publicly so the session dispatcher can run `core_beam_decode` itself. Option (a) is cleaner — ~3-4 hours per granite variant. |
+| voxtral / voxtral4b | Beam search via internal `voxtral_decode_beam` (not exposed). Same options: (a) public `voxtral_transcribe_with_params(ctx, samples, n_samples, voxtral_decode_params{beam_size, ...})` or (b) expose internal beam decoder. |
+| qwen3-asr | Same shape — internal beam, no public surface. |
 
-Each backend is ~2-3 hours: write the new C surface, wire from
-`transcribe_single`, add a Catch2 smoke test confirming
-`setBeamSize(5)` followed by `transcribe(jfk.wav)` produces non-
-degenerate output. Total estimate: ~1-2 days for the remaining
-five. Pre-requisites are each backend's owner / maintainer
-familiarity with their internal beam logic — none are blocked on
-third-party changes.
+Each needs ~3-4 hours of careful per-backend work (read beam
+path, decide a/b, write the new surface, wire from
+`transcribe_single`, add a Catch2 smoke test). Total estimate
+~1-1.5 days for the remaining three families. Each is
+independent — can ship one at a time.
 
 ---
 

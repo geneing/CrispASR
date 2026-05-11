@@ -759,6 +759,15 @@ extern "C" void glm_asr_set_seed(struct glm_asr_context* ctx, unsigned int seed)
         srand(seed);
 }
 
+// PLAN §90: runtime beam-size setter so crispasr_session_set_beam_size
+// reaches glm-asr's decoder. Mutates ctx->params.beam_size, which the
+// transcribe path at line 629 then consults to pick greedy vs replay-
+// from-prefix beam search.
+extern "C" void glm_asr_set_beam_size(struct glm_asr_context* ctx, int beam_size) {
+    if (ctx)
+        ctx->params.beam_size = (beam_size > 0) ? beam_size : 1;
+}
+
 extern "C" void glm_asr_result_free(struct glm_asr_result* r) {
     if (!r)
         return;
