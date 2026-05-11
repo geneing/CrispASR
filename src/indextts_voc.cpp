@@ -385,17 +385,143 @@ static ggml_tensor* aa_snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor
     return ggml_map_custom1(ctx, x, aa_snake_beta_op, AA_SCRATCH_MAX_THREADS, p);
 }
 
-// Native-ggml-ops AA path — attempted, deferred. See
-// `tools/upstream-prs/07-metal-aa-snake-beta.md` and the related
-// LEARNINGS.md entry: a "zero-stuff + ggml_conv_1d" port of the AA chain
-// runs into (a) length mismatch vs PyTorch conv_transpose1d (needs
-// asymmetric pad) and (b) `ggml_add_inplace` shape-broadcast assertions
-// from downstream BigVGAN bias adds. Both fixable; not blocking — Step A
-// already keeps the audio clean at 6.6 s vocoder. Deferring to a
-// dedicated session: needs a small bench harness that walks one AA layer in
-// isolation and diffs against the CPU custom-op output before we plug it
-// into the full BigVGAN graph. The Metal-kernel route (Step C) is the
-// higher-payoff GPU win regardless of whether Step B ever lands.
+// ── Step B (v2): native-ggml-ops AA path ────────────────────────
+//
+// Same semantics as `aa_snake_beta_op` but expressed entirely from native
+// ggml primitives so the chain can run on the same backend as the rest of
+// the BigVGAN graph (Metal, CUDA, CPU — wherever ggml supports `conv_1d`,
+// `concat`, `scale`, `sin/exp/mul/add`). Gated behind
+// INDEXTTS_AA_BACKEND=native; default stays on the proven CPU custom op.
+//
+// Two fixes vs the first attempt:
+//
+// 1. **Output length.** The earlier "zero-stuff + stride-1 conv1d" mismatch
+//    against PyTorch's `conv_transpose1d(K=12, stride=2)` is closed by
+//    using `p0 = K - 1 = 11` on the upsample `ggml_conv_1d`. Output length
+//    `(2·T_p + 22 - 12)/1 + 1 = 2·T_p + 11`, which after cropping
+//    `up_pad_left + (up_pad_right+1)` reduces to `2·T` — matching torch.
+//
+// 2. **Reshape after truncating view.** `ggml_view_3d` that narrows ne[0]
+//    leaves a non-contiguous tensor; downstream `ggml_reshape_2d` then
+//    silently re-strides into wrong layout. Fixed by `ggml_cont` between
+//    every truncating view and the following reshape.
+//
+// Key trick: `ggml_conv_1d` treats `ne[2]` of its data input as a batch
+// dim and applies the same kernel independently to each batch. Reshape
+// [T, C] → [T, 1, C] and use the `[K, 1, 1]` filter shipped in the GGUF
+// — depthwise-equivalent, zero filter blowup.
+//
+// All shape inputs:
+//   x        : [T, C]    F32, time-fastest channel-major (ggml convention)
+//   log_alpha: [C]       F32
+//   log_beta : [C]       F32
+//   us_filter: [K, 1, 1] F32  (12-tap Kaiser sinc, sum=1)
+//   ds_filter: [K, 1, 1] F32  (12-tap Kaiser sinc, sum=1)
+// Returns: [T, C] F32 — same shape as input, so the BigVGAN graph after AA
+//                       sees no shape drift.
+static ggml_tensor* aa_snake_beta_native(ggml_context* ctx, ggml_tensor* x, ggml_tensor* log_alpha,
+                                         ggml_tensor* log_beta, ggml_tensor* us_filter, ggml_tensor* ds_filter) {
+    if (!log_alpha || !log_beta || !us_filter || !ds_filter) {
+        return x;
+    }
+    const int T = (int)x->ne[0];
+    const int C = (int)x->ne[1];
+    const int K = (int)us_filter->ne[0]; // 12
+
+    // Mirror Activation1d (`alias_free_activation/torch/resample.py`).
+    const int up_pad = K / 2 - 1;                          // 5
+    const int up_pad_left = up_pad * 2 + (K - 2) / 2;      // 15
+    const int up_pad_right = up_pad * 2 + (K - 2 + 1) / 2; // 15
+    const int ds_pad_left = K / 2 - 1;                     // 5
+    const int ds_pad_right = K / 2;                        // 6
+    const int conv1d_pad_up = K - 1; // 11 — closes the K-1 length gap vs torch conv_transpose_1d
+
+    // ── 1. Replicate-pad x by up_pad along ne[0] ──────────────────
+    ggml_tensor* x_first = ggml_view_2d(ctx, x, 1, C, x->nb[1], 0);
+    ggml_tensor* x_last = ggml_view_2d(ctx, x, 1, C, x->nb[1], (size_t)(T - 1) * x->nb[0]);
+
+    ggml_tensor* tmpl_pad = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, up_pad, C);
+    ggml_tensor* lefts = ggml_repeat(ctx, x_first, tmpl_pad);
+    ggml_tensor* rights = ggml_repeat(ctx, x_last, tmpl_pad);
+
+    ggml_tensor* x_p = ggml_concat(ctx, lefts, x, /*dim=*/0);
+    x_p = ggml_concat(ctx, x_p, rights, /*dim=*/0);
+    x_p = ggml_cont(ctx, x_p); // [T_p, C]
+    const int T_p = T + 2 * up_pad;
+
+    // ── 2. Zero-stuff upsample 2× ─────────────────────────────────
+    // [T_p, C] → [1, T_p, 1, C] → concat-axis-0 with zero copy → [2, T_p, 1, C]
+    //   → reshape to [2·T_p, 1, C].  Putting the "stuff bit" on ne[0] makes
+    //   the flatten interleave correctly.
+    ggml_tensor* x_4 = ggml_reshape_4d(ctx, x_p, 1, T_p, 1, C);
+    ggml_tensor* zeros4 = ggml_scale(ctx, x_4, 0.0f);
+    ggml_tensor* stf4 = ggml_concat(ctx, x_4, zeros4, /*dim=*/0); // [2, T_p, 1, C]
+    stf4 = ggml_cont(ctx, stf4);
+    ggml_tensor* stf3 = ggml_reshape_3d(ctx, stf4, 2 * T_p, 1, C); // [2·T_p, 1, C]
+
+    // ── 3. Upsample FIR: conv_1d K=12 stride 1 pad=K-1=11 ────────
+    // Bake the ×2 zero-stuff gain into the filter.
+    // Output: (2·T_p + 22 - 12)/1 + 1 = 2·T_p + 11.  After crop (up_pad_left +
+    // up_pad_right + 1) → 2·T_p - 30 = 2·T (since T_p = T + 10).
+    ggml_tensor* us_x2 = ggml_scale(ctx, us_filter, 2.0f);
+    ggml_tensor* up_3 = ggml_conv_1d(ctx, us_x2, stf3, /*s*/ 1, /*p*/ conv1d_pad_up, /*d*/ 1);
+    const int T_up_full = (int)up_3->ne[0];
+    // We want exactly T_cropped = 2·T = T_up_full - up_pad_left - (up_pad_right + 1).
+    const int crop_right = up_pad_right + (T_up_full - up_pad_left - up_pad_right - 2 * T);
+    const int T_crop = T_up_full - up_pad_left - crop_right;
+    if (T_crop != 2 * T) {
+        // Sanity: shapes off → graceful fallback to raw SnakeBeta (no AA).
+        return snake_beta_raw(ctx, x, log_alpha, log_beta);
+    }
+    up_3 = ggml_cont(ctx, up_3);
+    ggml_tensor* up_crop3 =
+        ggml_view_3d(ctx, up_3, T_crop, 1, C, up_3->nb[1], up_3->nb[2], (size_t)up_pad_left * up_3->nb[0]);
+    up_crop3 = ggml_cont(ctx, up_crop3); // Fix #2 — cont AFTER truncating view
+    ggml_tensor* up_2d = ggml_reshape_2d(ctx, up_crop3, T_crop, C);
+
+    // ── 4. SnakeBeta (native ggml ops) ────────────────────────────
+    ggml_tensor* a2d = ggml_reshape_2d(ctx, log_alpha, 1, C);
+    ggml_tensor* b2d = ggml_reshape_2d(ctx, log_beta, 1, C);
+    ggml_tensor* ea = ggml_exp(ctx, a2d);
+    ggml_tensor* inveb = ggml_exp(ctx, ggml_neg(ctx, b2d));
+    ggml_tensor* xa = ggml_mul(ctx, up_2d, ea);
+    ggml_tensor* s = ggml_sin(ctx, xa);
+    ggml_tensor* s2 = ggml_mul(ctx, s, s);
+    ggml_tensor* term = ggml_mul(ctx, s2, inveb);
+    ggml_tensor* x_sb = ggml_add(ctx, up_2d, term); // [T_crop, C]
+
+    // ── 5. Replicate-pad for downsample ───────────────────────────
+    ggml_tensor* xsb_first = ggml_view_2d(ctx, x_sb, 1, C, x_sb->nb[1], 0);
+    ggml_tensor* xsb_last = ggml_view_2d(ctx, x_sb, 1, C, x_sb->nb[1], (size_t)(T_crop - 1) * x_sb->nb[0]);
+
+    ggml_tensor* tmpl_dl = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ds_pad_left, C);
+    ggml_tensor* tmpl_dr = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ds_pad_right, C);
+    ggml_tensor* ds_l = ggml_repeat(ctx, xsb_first, tmpl_dl);
+    ggml_tensor* ds_r = ggml_repeat(ctx, xsb_last, tmpl_dr);
+
+    ggml_tensor* xsb_p = ggml_concat(ctx, ds_l, x_sb, /*dim=*/0);
+    xsb_p = ggml_concat(ctx, xsb_p, ds_r, /*dim=*/0);
+    xsb_p = ggml_cont(ctx, xsb_p);
+    const int T_dsp = T_crop + ds_pad_left + ds_pad_right;
+
+    // ── 6. Stride-2 downsample FIR ───────────────────────────────
+    // Output: (T_dsp - K)/2 + 1 = (2·T + 5 + 6 - 12)/2 + 1 = T.
+    ggml_tensor* xsb_p3 = ggml_reshape_3d(ctx, xsb_p, T_dsp, 1, C);
+    ggml_tensor* down3 = ggml_conv_1d(ctx, ds_filter, xsb_p3, /*s*/ 2, /*p*/ 0, /*d*/ 1);
+    const int T_out = (int)down3->ne[0];
+    if (T_out != T) {
+        return snake_beta_raw(ctx, x, log_alpha, log_beta);
+    }
+    down3 = ggml_cont(ctx, down3); // Fix #2 — cont before reshape
+    return ggml_reshape_2d(ctx, down3, T, C);
+}
+
+// Dispatch by env: INDEXTTS_AA_BACKEND=native picks the ggml-native path;
+// anything else (or unset) stays on the proven CPU custom-op path.
+static bool aa_use_native() {
+    const char* v = getenv("INDEXTTS_AA_BACKEND");
+    return v && (v[0] == 'n' || v[0] == 'N');
+}
 
 // ── ECAPA-TDNN speaker encoder ──────────────────────────────────
 //
@@ -941,7 +1067,11 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
                     ggml_tensor* usf1 = T(ts, key);
                     std::snprintf(key, sizeof(key), "resb.%d.act.%d.ds.filter", rb_idx, act_idx_1);
                     ggml_tensor* dsf1 = T(ts, key);
-                    x = aa_snake_beta(ctx0, x, alpha1, beta1, usf1, dsf1, c->aa_params);
+                    if (aa_use_native()) {
+                        x = aa_snake_beta_native(ctx0, x, alpha1, beta1, usf1, dsf1);
+                    } else {
+                        x = aa_snake_beta(ctx0, x, alpha1, beta1, usf1, dsf1, c->aa_params);
+                    }
                 } else {
                     x = snake_beta_raw(ctx0, x, alpha1, beta1);
                 }
@@ -969,7 +1099,11 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
                     ggml_tensor* usf2 = T(ts, key);
                     std::snprintf(key, sizeof(key), "resb.%d.act.%d.ds.filter", rb_idx, act_idx_2);
                     ggml_tensor* dsf2 = T(ts, key);
-                    x = aa_snake_beta(ctx0, x, alpha2, beta2, usf2, dsf2, c->aa_params);
+                    if (aa_use_native()) {
+                        x = aa_snake_beta_native(ctx0, x, alpha2, beta2, usf2, dsf2);
+                    } else {
+                        x = aa_snake_beta(ctx0, x, alpha2, beta2, usf2, dsf2, c->aa_params);
+                    }
                 } else {
                     x = snake_beta_raw(ctx0, x, alpha2, beta2);
                 }
@@ -1012,7 +1146,11 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
         if (c->use_aa) {
             ggml_tensor* usf_post = T(ts, "activation_post.us.filter");
             ggml_tensor* dsf_post = T(ts, "activation_post.ds.filter");
-            x = aa_snake_beta(ctx0, x, alpha_post, beta_post, usf_post, dsf_post, c->aa_params);
+            if (aa_use_native()) {
+                x = aa_snake_beta_native(ctx0, x, alpha_post, beta_post, usf_post, dsf_post);
+            } else {
+                x = aa_snake_beta(ctx0, x, alpha_post, beta_post, usf_post, dsf_post, c->aa_params);
+            }
         } else {
             x = snake_beta_raw(ctx0, x, alpha_post, beta_post);
         }
@@ -1159,7 +1297,9 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
         return nullptr;
     }
     const bool force_gpu_with_aa = getenv("INDEXTTS_VOC_FORCE_GPU") && getenv("INDEXTTS_VOC_FORCE_GPU")[0] == '1';
-    const bool aa_blocks_gpu = c->use_aa && !force_gpu_with_aa;
+    // Native-ops AA (Step B) runs on whichever backend owns the graph — no Metal↔CPU
+    // sync at each AA site. So the auto-CPU fallback only applies to the custom-op path.
+    const bool aa_blocks_gpu = c->use_aa && !aa_use_native() && !force_gpu_with_aa;
     const bool effective_use_gpu = use_gpu && !aa_blocks_gpu;
     c->backend = effective_use_gpu ? ggml_backend_init_best() : c->backend_cpu;
     if (!c->backend) {

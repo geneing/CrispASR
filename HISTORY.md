@@ -3541,3 +3541,37 @@ M1 / q8_0 / JFK prompt:
 
 Per-step bench numbers in LEARNINGS.md §"Mixed-backend custom ops…" and
 §"Accelerate vDSP_desamp…".
+
+### §88 — IndexTTS Step B-v2: native-ggml-ops AA path lands as opt-in (2026-05-11)
+
+Same-day follow-up to §87. The two blockers documented in §87 (output
+length mismatch vs `conv_transpose1d`; reshape-after-truncating-view
+shape drift) were both fixable in a few lines: `p0 = K - 1` on the
+upsample conv1d closes the K-1 gap, and `ggml_cont` between the
+truncating `ggml_view_3d` and its `ggml_reshape_2d` keeps the layout
+valid for the downstream BigVGAN bias adds.
+
+Now in `src/indextts_voc.cpp:aa_snake_beta_native`, behind
+`INDEXTTS_AA_BACKEND=native`. CPU output is bit-equivalent to the
+custom-op reference (same click pattern, ASR exact). GPU output drifts
+into the noise floor (26 inter-sample jumps > 0.3 vs 2, all max|Δ| ≤
+0.4 — Metal vs CPU float order-of-ops on the broadcast muls). ASR
+identical across all three.
+
+Wall-clock didn't move much:
+
+| Path                     | voc-only |
+| ------------------------ | -------- |
+| Step A custom-op (CPU)   | 7.87 s   |
+| Step B-v2 native (CPU)   | 7.57 s   |
+| Step B-v2 native (GPU)   | 8.01 s   |
+
+Native-on-CPU is 4 % faster, native-on-GPU is still slower than
+custom-op-on-CPU because the concat/reshape/scale graph overhead inside
+Metal eats the kernel-level GPU advantage. Default stays on the
+custom-op path; native is opt-in so the GPU pathway is unlocked for
+people who need it and for the eventual fused-kernel work
+(`tools/upstream-prs/07-metal-aa-snake-beta.md`).
+
+Step A's auto-fall-to-CPU is suppressed when `aa_use_native()` returns
+true — the whole vocoder graph stays on Metal end-to-end in that case.

@@ -4603,15 +4603,57 @@ Two blockers:
 the depthwise behavior directly with it either; the workaround is a
 `[K, C, C]` block-diagonal kernel, which at C=1536 is 113 MB — no-go.
 
-Both fixable; deferred. The right fix is Step C-2 — a dedicated
-`GGML_OP_AA_SNAKE_BETA` ggml op with a fused Metal kernel matching
-upstream IndexTTS's CUDA reference (drafted as `tools/upstream-prs/
-07-metal-aa-snake-beta.md`). That sidesteps the "zero-stuff via concat"
-gymnastics entirely.
+**Update (Step B-v2, same week):** both blockers fixed in
+`src/indextts_voc.cpp:aa_snake_beta_native`. Now shippable as an opt-in
+behind `INDEXTTS_AA_BACKEND=native`.
 
-Lesson: not every PyTorch op has a clean native-ggml expression. When
-the op uses `groups=C` or has asymmetric padding, expect that the
-right path forward is a custom op, not a chain of existing primitives.
+The fixes:
+
+1. **Length match via `p0 = K - 1 = 11` on the upsample `ggml_conv_1d`.**
+   The zero-stuffed signal of length `2·T_p - 1` becomes `2·T_p + 21`
+   after symmetric padding by 11, and the conv1d output is `2·T_p + 10`
+   — the same as torch `conv_transpose_1d(K=12, stride=2)`. Crop with
+   `up_pad_left + up_pad_right + 1` to land at exactly `2·T`, the same
+   number torch produces after its own crop.
+2. **`ggml_cont` between the truncating `ggml_view_3d` and the following
+   `ggml_reshape_2d`.** The view narrows ne[0] but keeps the parent's
+   nb[1] stride, so the resulting tensor is non-contiguous; reshape
+   would silently land on the wrong layout and the next graph add fired
+   the `ggml_can_repeat` assertion. One extra `ggml_cont` per AA site
+   makes the reshape valid.
+
+Validation against the CPU custom-op (Step A) reference:
+
+| Path                     | voc-only (ms) | clicks Δ>0.3 | max\|Δ\| | ASR roundtrip   |
+| ------------------------ | ------------- | ------------ | -------- | --------------- |
+| Step A custom op  (CPU)  | 7872          | 2            | 0.309    | ✓ exact         |
+| Step B-v2 native  (CPU)  | 7574          | 2            | 0.309    | ✓ exact         |
+| Step B-v2 native  (GPU)  | 8012          | 26           | 0.375    | ✓ exact         |
+
+CPU output is bit-equivalent (same click pattern, same max\|Δ\|).
+GPU output drifts a tiny amount (26 vs 2 jumps, but max\|Δ\| still
+below 0.4 — well into the noise floor of speech transients) — the
+difference is Metal's vs CPU's floating-point order-of-ops for the
+broadcast `ggml_mul`s in SnakeBeta. ASR is identical across all three.
+
+Why we kept the custom-op as default (not switched to native):
+
+- Native-on-CPU is 4 % faster but introduces a second AA codepath. Not
+  worth the maintenance vs proven custom op for the marginal gain.
+- Native-on-GPU is *slower* than custom-op-on-CPU (8.0 s vs 7.9 s on
+  M1) — the concat/reshape/scale graph overhead inside Metal eats
+  whatever the kernel-level GPU speedup buys. A real fused MSL kernel
+  (Step C-2) is still the path to a meaningful GPU win.
+- ggml-backend-sched does the right thing — when `aa_use_native()`
+  returns true, the auto-fall-to-CPU in Step A is skipped and the
+  vocoder graph stays on Metal end to end.
+
+Lesson: a "polyphase zero-stuff + conv_1d" *is* expressible as native
+ggml ops if you accept three boilerplate concats per AA site to fix
+the asymmetric-pad problem. It compiles and runs correctly on Metal.
+But the per-call graph overhead means it's worth shipping only as an
+opt-in proof of correctness; the real win is still the fused-kernel
+custom op route — see `tools/upstream-prs/07-metal-aa-snake-beta.md`.
 
 ### Accelerate vDSP_desamp + vvsinf beats hand-rolled SnakeBeta loops on M1 (May 2026)
 

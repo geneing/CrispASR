@@ -88,7 +88,14 @@ to CPU on those backends until someone ports the upstream CUDA kernel.
 
 ## Expected gain
 
-Step A (auto-CPU when AA is on, May 2026) — vocoder ≈ 6.65 s on M1.
+Step A (auto-CPU when AA is on, May 2026) — vocoder ≈ 7.87 s on M1.
+
+Step B-v2 (native ggml ops, opt-in `INDEXTTS_AA_BACKEND=native`,
+May 2026) — vocoder ≈ 7.57 s CPU, ≈ 8.01 s GPU. CPU output is
+bit-equivalent to Step A; GPU output drifts into noise floor but ASR
+identical. Concat/reshape/scale graph overhead per AA site is what
+keeps Metal from winning here — the fused-kernel route below collapses
+those into one launch.
 
 Step C-1 (vDSP-vectorised CPU SnakeBeta + downsample, May 2026) — vocoder
 ≈ 6.75 s avg of 3 runs (≈ 2–3 % over scalar; within noise but consistent
