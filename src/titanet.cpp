@@ -407,8 +407,14 @@ static void fft_radix2(float* re, float* im, int n) {
     }
 }
 
-// NeMo-compatible mel spectrogram: Hann window, center=True (reflect pad),
-// n_fft=512, hop=160, win=400. Uses embedded mel filterbank and window.
+// NeMo-compatible mel spectrogram matching FilterbankFeatures.forward():
+//   1. Pre-emphasis: x[t] = x[t] - 0.97 * x[t-1]  (NeMo default)
+//   2. STFT: center=True with pad_mode="constant" (zero-pad), periodic Hann,
+//      n_fft=512, hop=160, win=400, window centered in frame
+//   3. Power spectrum: |STFT|^2
+//   4. Mel filterbank: fb @ power
+//   5. Log: log(x + 2^-24)
+//   6. Per-feature normalization: (x - mean) / (std + 1e-5)
 static std::vector<float> compute_mel_spectrogram(const titanet_model_cache& c, const float* pcm, int n_samples,
                                                   int& T_out) {
     T_out = 0;
@@ -418,16 +424,18 @@ static std::vector<float> compute_mel_spectrogram(const titanet_model_cache& c, 
     const int n_mels = c.n_mels;      // 80
     const int n_bins = n_fft / 2 + 1; // 257
 
-    // Center=True: reflect pad by n_fft/2 on each side
+    // Pre-emphasis: x[t] = x[t] - 0.97 * x[t-1], x[0] = x[0] - 0.97 * x[0]
+    // NeMo masks beyond seq_len but for single utterance all samples are valid.
+    std::vector<float> preemph(n_samples);
+    preemph[0] = pcm[0] - 0.97f * pcm[0]; // = pcm[0] * 0.03
+    for (int i = 1; i < n_samples; i++)
+        preemph[i] = pcm[i] - 0.97f * pcm[i - 1];
+
+    // Center=True with pad_mode="constant" (zero-pad, NeMo default)
     const int pad = n_fft / 2; // 256
     const int n_padded = n_samples + 2 * pad;
-    std::vector<float> padded(n_padded);
-    // Reflect padding
-    for (int i = 0; i < pad; i++)
-        padded[pad - 1 - i] = pcm[std::min(i + 1, n_samples - 1)];
-    std::memcpy(padded.data() + pad, pcm, n_samples * sizeof(float));
-    for (int i = 0; i < pad; i++)
-        padded[pad + n_samples + i] = pcm[std::max(n_samples - 2 - i, 0)];
+    std::vector<float> padded(n_padded, 0.0f);
+    std::memcpy(padded.data() + pad, preemph.data(), n_samples * sizeof(float));
 
     int T = (n_padded - n_fft) / hop + 1;
     if (T <= 0)
