@@ -2758,6 +2758,13 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
 #endif
 #ifdef CA_HAVE_KYUTAI
     if ((s->backend == "kyutai-stt" || s->backend == "kyutai" || s->backend == "moshi-stt") && s->kyutai_ctx) {
+        // PLAN §90: forward sticky session beam_size into kyutai-stt's
+        // per-context setter so session-API consumers (CrisperWeaver's
+        // worker pool, Rust/Node bindings) get the same beam search
+        // the CLI does. 1 = greedy = no-op at the backend level.
+        if (s->beam_size > 1) {
+            kyutai_stt_set_beam_size((kyutai_stt_context*)s->kyutai_ctx, s->beam_size);
+        }
         kyutai_stt_result* kr = kyutai_stt_transcribe_with_probs((kyutai_stt_context*)s->kyutai_ctx, pcm, n_samples);
         if (!kr || !kr->text) {
             if (kr)
@@ -2831,6 +2838,10 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
 #endif
 #ifdef CA_HAVE_MOONSHINE
     if (s->backend == "moonshine" && s->moonshine_ctx) {
+        // PLAN §90: session beam_size → moonshine's per-context setter.
+        if (s->beam_size > 1) {
+            moonshine_set_beam_size((moonshine_context*)s->moonshine_ctx, s->beam_size);
+        }
         moonshine_result* mr = moonshine_transcribe_with_probs((moonshine_context*)s->moonshine_ctx, pcm, n_samples);
         if (!mr || !mr->text) {
             if (mr)
@@ -2857,6 +2868,12 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
 #endif
 #ifdef CA_HAVE_OMNIASR
     if ((s->backend.rfind("omniasr", 0) == 0) && s->omniasr_ctx) {
+        // PLAN §90: session beam_size → omniasr's per-context setter.
+        // Effective only on the LLM variant (CTC has no beam path);
+        // the CTC fall-through below silently ignores the setting.
+        if (s->beam_size > 1) {
+            omniasr_set_beam_size((omniasr_context*)s->omniasr_ctx, s->beam_size);
+        }
         // LLM variant produces per-token probs; CTC variant returns nullptr
         // here — fall through to the plain-text path below.
         omniasr_result* oar = omniasr_transcribe_with_probs((omniasr_context*)s->omniasr_ctx, pcm, n_samples);

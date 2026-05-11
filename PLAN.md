@@ -2461,45 +2461,40 @@ done as a separate phased PR, one backend per commit.
 
 ---
 
-## 90. Session-API beam_size — per-backend wiring follow-up
+## 90. Session-API beam_size — per-backend wiring
 
-May 2026: shipped `crispasr_session_set_beam_size` + the whisper
-side consumes it natively (switches sampling strategy to
-BEAM_SEARCH with the supplied width). CrisperWeaver's batch worker
-pool drives this through its sticky-setter protocol so parallel
-whisper batches with beam search now work.
+May 2026:
+  * Shipped `crispasr_session_set_beam_size` (commit 958e6bd7).
+  * Whisper consumes it natively (switches sampling strategy to
+    BEAM_SEARCH with the supplied width).
+  * Kyutai-STT / moonshine / omniasr wired via the existing
+    `<backend>_set_beam_size` C setters: `transcribe_single` in
+    `crispasr_c_api.cpp` now calls `<backend>_set_beam_size(ctx,
+    s->beam_size)` when `s->beam_size > 1` and the active backend
+    matches. CrisperWeaver's batch worker pool drives this through
+    its sticky-setter protocol — beamSearch is pool-eligible
+    end-to-end for all four backends.
 
-What's still gapped — per the feature matrix the other
-beam-capable backends DO support beam search, but only via their
-CLI wrappers calling into `core_beam_decode::run_with_probs` or
-per-backend internal beam logic. Their high-level transcribe APIs
-don't take a beam_size yet, so the session wrapper can't plumb
-`s->beam_size` through. Wiring each is its own scoped increment:
+Still gapped — these backends' high-level transcribe APIs don't
+expose beam_size yet, only their CLI wrappers do. Each needs new C
+surface before the session wrapper can plumb `s->beam_size`
+through:
 
-| Backend | Current CLI surface | What's needed |
-|---|---|---|
-| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | `crispasr_backend_granite.cpp` calls `core_beam_decode::run_with_probs(ctx_, logits, replay, cfg)` with `cfg.beam_size = params.beam_size` | `granite_speech_transcribe_with_beam(ctx, samples, n_samples, beam_size)` or grow `granite_speech_transcribe` to take an options struct |
-| voxtral / voxtral4b | Beam search via internal `voxtral_decode_beam` | Add `voxtral_transcribe_with_params(ctx, samples, n_samples, voxtral_decode_params{beam_size, ...})` |
-| qwen3-asr | Per-call beam width in CLI dispatch | Same pattern — options struct or `_with_beam` overload |
-| glm-asr | Already uses `cp.beam_size = params.beam_size > 0 ? params.beam_size : 1;` in CLI; the underlying `glm_asr_*` API likely has it as a struct field | Confirm + expose via session dispatch |
-| kyutai-stt | Beam search via `kyutai_stt_set_beam_size` (exists per `nm` of libcrispasr) | Just call from `transcribe_single` when `s->beam_size > 1` and backend matches |
-| firered | `cp.beam_size` set per-call in CLI wrapper | Confirm `firered_asr` C surface accepts beam_size + wire |
-| moonshine | `moonshine_set_beam_size` exists per `nm` of libcrispasr | Same as kyutai-stt — call from session dispatch |
-| omniasr / omniasr-llm | `omniasr_set_beam_size` exists per `nm` of libcrispasr | Same pattern |
+| Backend | What's needed |
+|---|---|
+| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | `granite_speech_transcribe_with_beam(ctx, samples, n_samples, beam_size)` or grow `granite_speech_transcribe` to take an options struct. CLI wrapper at `crispasr_backend_granite.cpp` already calls `core_beam_decode::run_with_probs(ctx_, logits, replay, cfg)` with `cfg.beam_size = params.beam_size` — the work is exposing that path on the public C API. |
+| voxtral / voxtral4b | Add `voxtral_transcribe_with_params(ctx, samples, n_samples, voxtral_decode_params{beam_size, ...})`. CLI uses an internal `voxtral_decode_beam`. |
+| qwen3-asr | Same pattern — options struct or `_with_beam` overload. |
+| glm-asr | CLI uses `cp.beam_size = params.beam_size > 0 ? params.beam_size : 1;` against the internal `glm_asr_*` API. Confirm + expose via session dispatch. |
+| firered | `cp.beam_size` set per-call in CLI wrapper against `firered_asr_*` internal API. Confirm + expose. |
 
-Three of these (kyutai-stt, moonshine, omniasr) already have
-beam-size setters in their per-backend C API — they just need to
-be called from `transcribe_single` in `crispasr_c_api.cpp` when
-`s->beam_size > 1 && s->backend == "..."`. That's the quick win
-(~30 lines + tests). The rest need new C surface on their
-respective backend APIs first.
-
-Each backend is ~1 hour of careful work + a Catch2 smoke test
-confirming `setBeamSize(5)` followed by `transcribe(jfk.wav)`
-produces non-degenerate output. Total estimate: half a day to
-get the three "already have a setter" backends + log a per-
-backend issue for each of the remaining ones that needs new C
-surface.
+Each backend is ~2-3 hours: write the new C surface, wire from
+`transcribe_single`, add a Catch2 smoke test confirming
+`setBeamSize(5)` followed by `transcribe(jfk.wav)` produces non-
+degenerate output. Total estimate: ~1-2 days for the remaining
+five. Pre-requisites are each backend's owner / maintainer
+familiarity with their internal beam logic — none are blocked on
+third-party changes.
 
 ---
 
