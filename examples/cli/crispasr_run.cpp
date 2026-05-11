@@ -21,6 +21,7 @@
 #include "crispasr_lid.h" // crispasr_lid_free_cache()
 #include "crispasr_diarize_cli.h"
 #include "crispasr_mem.h"
+#include "crispasr_stream_finalize.h"
 #include "whisper_params.h"
 #include "fireredpunc.h"
 #include "titanet.h"
@@ -1361,37 +1362,17 @@ int crispasr_run_backend(const whisper_params& params_in) {
                         if ((int64_t)utterance_pcm.size() > want)
                             utterance_pcm.resize((size_t)want);
                     }
-                    // Stitch a final_text from the prefix-mode accumulator
-                    // (`prefix_committed` LCP + last partial tail). Used as
-                    // primary in `prefix` mode, and as fallback in `redecode`
-                    // mode whenever the redecode pass is skipped or returns
-                    // empty — otherwise a non-empty partial visible to a UI
-                    // would get replaced by an empty final, blanking the row.
-                    // (Round 4: CKwasd report 2026-05-11 "empty finals on
-                    // sub-2-s utterances". The kRedecodeMinSamples guard is
-                    // structural — moonshine/parakeet's first encoder conv
-                    // can't accept <2 s — so we can't just lower the floor.)
-                    auto stitch_from_partials = [&]() -> std::string {
-                        if (!last_partial_text.empty() && last_partial_text.size() >= prefix_committed.size() &&
-                            last_partial_text.compare(0, prefix_committed.size(), prefix_committed) == 0) {
-                            return last_partial_text;
-                        }
-                        if (prefix_committed.empty())
-                            return last_partial_text;
-                        if (last_partial_text.empty())
-                            return prefix_committed;
-                        return prefix_committed + " " + last_partial_text;
-                    };
+                    // Build final_text. In `redecode` mode the primary path
+                    // re-runs the backend on the VAD-trimmed utterance PCM;
+                    // when that's skipped (sub-2-s buffer below the encoder
+                    // min — see crispasr::kStreamRedecodeMinSamples) or
+                    // returns empty, fall back to the prefix-mode stitcher
+                    // so a non-empty partial visible to a UI never gets
+                    // replaced by an empty final. (Round 4 of #84: CKwasd
+                    // report 2026-05-11 "empty finals on sub-2-s utterances".)
                     std::string final_text;
                     if (params.stream_final_mode == "redecode") {
-                        // Same encoder-min guard as the straddling-slice
-                        // subrange decode in the slice loop above —
-                        // moonshine/parakeet/etc. abort with `OW > 0`
-                        // when handed input shorter than the encoder's
-                        // first conv kernel. Fall back to the prefix
-                        // stitcher below in that case.
-                        constexpr int kRedecodeMinSamples = 32000;
-                        if ((int)utterance_pcm.size() >= kRedecodeMinSamples) {
+                        if ((int)utterance_pcm.size() >= crispasr::kStreamRedecodeMinSamples) {
                             // Disable nested VAD: utterance_pcm is already
                             // the speech region we identified, no need to
                             // re-segment it (and the nested VAD path would
@@ -1409,13 +1390,11 @@ int crispasr_run_backend(const whisper_params& params_in) {
                             for (const auto& s : utt_segs)
                                 final_text += s.text;
                         }
-                        // Fall back to prefix stitching when redecode was
-                        // skipped (sub-2-s utterance) or returned empty.
                         if (final_text.empty())
-                            final_text = stitch_from_partials();
+                            final_text = crispasr::stitch_partial_accumulator(prefix_committed, last_partial_text);
                     } else {
                         // prefix mode: stitch committed prefix + last partial tail
-                        final_text = stitch_from_partials();
+                        final_text = crispasr::stitch_partial_accumulator(prefix_committed, last_partial_text);
                     }
                     const double t0 = (double)utterance_start_sample / (double)SR;
                     const double t1 = (double)last_speech_end_sample / (double)SR;
@@ -1683,28 +1662,11 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 if ((int64_t)utterance_pcm.size() > want)
                     utterance_pcm.resize((size_t)want);
             }
-            // Same partial-stitcher fallback as the in-loop finalize_utterance
-            // (Round 4): redecode can return empty (sub-2-s buffer or empty
-            // backend output) and we must not blank a previously-emitted
-            // non-empty partial on the same utterance_id.
-            auto eof_stitch_from_partials = [&]() -> std::string {
-                if (!last_partial_text.empty() && last_partial_text.size() >= prefix_committed.size() &&
-                    last_partial_text.compare(0, prefix_committed.size(), prefix_committed) == 0) {
-                    return last_partial_text;
-                }
-                if (prefix_committed.empty())
-                    return last_partial_text;
-                if (last_partial_text.empty())
-                    return prefix_committed;
-                return prefix_committed + " " + last_partial_text;
-            };
+            // EOF path: identical redecode→stitch-fallback contract to the
+            // in-loop finalize_utterance. See crispasr_stream_finalize.h.
             std::string final_text;
             if (params.stream_final_mode == "redecode") {
-                // Match the in-loop guard: sub-2-s buffers skip the redecode
-                // call entirely (moonshine/parakeet/etc. encoder min input)
-                // rather than risking a backend abort here.
-                constexpr int kRedecodeMinSamples = 32000;
-                if ((int)utterance_pcm.size() >= kRedecodeMinSamples) {
+                if ((int)utterance_pcm.size() >= crispasr::kStreamRedecodeMinSamples) {
                     whisper_params decode_params = params;
                     decode_params.vad = false;
                     decode_params.vad_model.clear();
@@ -1719,9 +1681,9 @@ int crispasr_run_backend(const whisper_params& params_in) {
                         final_text += s.text;
                 }
                 if (final_text.empty())
-                    final_text = eof_stitch_from_partials();
+                    final_text = crispasr::stitch_partial_accumulator(prefix_committed, last_partial_text);
             } else {
-                final_text = eof_stitch_from_partials();
+                final_text = crispasr::stitch_partial_accumulator(prefix_committed, last_partial_text);
             }
             const double t0 = (double)utterance_start_sample / (double)SR;
             const double t1 = last_speech_end_sample > 0 ? (double)last_speech_end_sample / (double)SR

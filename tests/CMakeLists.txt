@@ -189,6 +189,24 @@ catch_discover_tests(test-params
     PROPERTIES LABELS "unit"
 )
 
+# ─── test - stream - finalize — Catch2 unit tests for the streaming
+# `final.text` stitcher used by `--stream-json` finalize_utterance.
+# Header-only target (no crispasr lib needed): the helper is a pure
+# string function in examples/cli/crispasr_stream_finalize.h.
+add_executable(test-stream-finalize
+    test-stream-finalize.cpp
+)
+target_include_directories(test-stream-finalize PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-stream-finalize PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-stream-finalize
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;regression-84"
+)
+
 # ─── test - punctuation - policy — Catch2 unit tests for punctuation auto - enable
 #policy.Pure logic, no model load.
 add_executable(test-punctuation-policy
