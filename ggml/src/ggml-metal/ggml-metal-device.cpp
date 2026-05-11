@@ -1777,16 +1777,34 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_transpose_1
 }
 
 // CrispASR patch (PR #07-metal-aa-snake-beta) — MUST RE-APPLY after ggml bump.
+// INDEXTTS_AA_METAL_VARIANT selects among three semantically-equivalent
+// Metal kernels for the AA-SnakeBeta op. All three produce numerically-
+// identical output on F32 (verified: WAV rmsdiff == 0). On M1 the default
+// (zero-stuff + 12-tap FIR) measured fastest during the Phase 3 sweep;
+// the variants are kept reachable so the comparison can be re-run on
+// other Apple GPU families (M3, M4, …) without a recompile.
+//
+//   unset / `default` / `v1`     → kernel_aa_snake_beta_f32
+//   `polyphase` / `poly`         → kernel_aa_snake_beta_polyphase_f32
+//   `tgmem` / `tg` / `shared`    → kernel_aa_snake_beta_tgmem_f32
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_aa_snake_beta(ggml_metal_library_t lib, const ggml_tensor * op) {
     assert(op->op == GGML_OP_AA_SNAKE_BETA);
 
     GGML_ASSERT(op->type == GGML_TYPE_F32);
     GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
 
+    static const char * variant_name = []() -> const char * {
+        const char * v = getenv("INDEXTTS_AA_METAL_VARIANT");
+        if (!v || !*v)                                                                return "kernel_aa_snake_beta_f32";
+        if (v[0] == 'p' || v[0] == 'P')                                               return "kernel_aa_snake_beta_polyphase_f32";
+        if (v[0] == 't' || v[0] == 'T' || v[0] == 's' || v[0] == 'S')                 return "kernel_aa_snake_beta_tgmem_f32";
+        return "kernel_aa_snake_beta_f32";
+    }();
+
     char base[256];
     char name[256];
 
-    snprintf(base, 256, "kernel_aa_snake_beta_f32");
+    snprintf(base, 256, "%s", variant_name);
     snprintf(name, 256, "%s", base);
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);

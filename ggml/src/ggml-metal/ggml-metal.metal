@@ -5072,6 +5072,267 @@ template [[host_name("kernel_aa_snake_beta_f32")]]
 kernel aa_snake_beta_t kernel_aa_snake_beta_impl<float>;
 
 
+// ── CrispASR patch (PR #07-metal-aa-snake-beta) — opt-in variants ───
+// Two alternative kernels kept reachable via INDEXTTS_AA_METAL_VARIANT
+// so they can be re-benched on different Apple GPU families. Both
+// produce numerically-identical output to the default v1 kernel above
+// (verified: WAV rmsdiff == 0). On M1 both were measured slower than
+// the default during the Phase 3 sweep (see commit notes); on M3+ or
+// future architectures the tradeoff may flip.
+//
+// MUST RE-APPLY after every ggml bump.
+
+// Variant: polyphase upsample with a pre-loaded per-thread input
+// window. Halves the upsample mul count (6-tap × 2 phases vs 12-tap
+// zero-stuff FIR) and eliminates the ~392 B/thread `elements[]`
+// array. On M1 the irregular base-index pattern in the polyphase
+// loop empirically regressed th_max from 832 to 768 and wall-clock
+// by ~25 %.
+template <typename T>
+kernel void kernel_aa_snake_beta_polyphase_impl(
+        constant ggml_metal_kargs_aa_snake_beta & args      [[buffer(0)]],
+        device const T                          * src       [[buffer(1)]],
+        device const T                          * log_alpha [[buffer(2)]],
+        device const T                          * log_beta  [[buffer(3)]],
+        device const T                          * up_ftr    [[buffer(4)]],
+        device const T                          * down_ftr  [[buffer(5)]],
+        device T                                * dst       [[buffer(6)]],
+        uint3                                     tgpig     [[threadgroup_position_in_grid]],
+        uint3                                     tpitg     [[thread_position_in_threadgroup]]) {
+
+    const int seq_blk = (int) tgpig.x;
+    const int chan    = (int) tgpig.y;
+    const int tid     = (int) tpitg.x;
+    const int seq_len = args.T;
+
+    const int seq_offset = seq_blk * AA_THREADS_PER_TGRP * AA_BUFFER_SIZE
+                         + tid * AA_BUFFER_SIZE;
+
+    const int channel_offset = chan * seq_len;
+    device const T * src_ch  = src + channel_offset;
+    device       T * dst_ch  = dst + channel_offset;
+
+    const float seq_left  = (float) src_ch[0];
+    const float seq_right = (float) src_ch[seq_len - 1];
+
+    const float alpha_val = exp((float) log_alpha[chan]);
+    const float beta_val  = exp((float) log_beta[chan]);
+    const float inv_beta  = 1.0f / (beta_val + 1e-9f);
+
+    // Bake the ×2 zero-stuff gain into the upsample filter.
+    float up_filter[AA_FILTER_SIZE];
+    float down_filter[AA_FILTER_SIZE];
+    #pragma unroll
+    for (int k = 0; k < AA_FILTER_SIZE; k++) {
+        up_filter[k]   = 2.0f * (float) up_ftr[k];
+        down_filter[k] = (float) down_ftr[k];
+    }
+
+    // input_window[j] = input(seq_offset − HALF + j) with replicate-pad.
+    constexpr int AA_INPUT_WIN = AA_BUFFER_SIZE + 2 * AA_HALF_FILTER_SIZE;
+    float input_window[AA_INPUT_WIN] = {0};
+    #pragma unroll
+    for (int j = 0; j < AA_INPUT_WIN; j++) {
+        const int idx = seq_offset - AA_HALF_FILTER_SIZE + j;
+        if (idx >= 0 && idx < seq_len) {
+            input_window[j] = (float) src_ch[idx];
+        } else if (idx < 0 && idx >= -AA_UP_REP_PAD) {
+            input_window[j] = seq_left;
+        } else if (idx >= seq_len && idx < seq_len + AA_UP_REP_PAD) {
+            input_window[j] = seq_right;
+        }
+    }
+
+    float intermediates[2 * AA_FILTER_SIZE + 2 * AA_BUFFER_SIZE
+                        + AA_DS_REP_PAD_LEFT + AA_DS_REP_PAD_RIGHT] = {0};
+
+    #pragma unroll
+    for (int it = 0; it < (2 * AA_BUFFER_SIZE + 2 * AA_FILTER_SIZE); it++) {
+        const int p = it & 1;
+        const int base = (it + p) / 2;
+        float acc = 0.0f;
+        #pragma unroll
+        for (int kk = 0; kk < AA_FILTER_SIZE / 2; kk++) {
+            acc += up_filter[p + 2 * kk] * input_window[base + kk];
+        }
+        intermediates[it + AA_DS_REP_PAD_LEFT] = acc;
+    }
+
+    #pragma unroll
+    for (int it = 0; it < 2 * AA_BUFFER_SIZE + 2 * AA_FILTER_SIZE; it++) {
+        const float v = intermediates[it + AA_DS_REP_PAD_LEFT];
+        const float s = sin(alpha_val * v);
+        intermediates[it + AA_DS_REP_PAD_LEFT] = v + inv_beta * s * s;
+    }
+
+    #pragma unroll
+    for (int it = 0; it < AA_DS_REP_PAD_LEFT; it++) {
+        intermediates[it] = intermediates[AA_DS_REP_PAD_LEFT];
+    }
+    const int tail_first_p = AA_DS_REP_PAD_LEFT + 2 * AA_BUFFER_SIZE + 2 * AA_FILTER_SIZE;
+    #pragma unroll
+    for (int it = 0; it < AA_DS_REP_PAD_RIGHT; it++) {
+        intermediates[tail_first_p + it] = intermediates[tail_first_p - 1];
+    }
+
+    float output_p[AA_BUFFER_SIZE];
+    #pragma unroll
+    for (int it = 0; it < AA_BUFFER_SIZE; it++) {
+        float acc = 0.0f;
+        #pragma unroll
+        for (int f = 0; f < AA_FILTER_SIZE; f++) {
+            acc += down_filter[f] * intermediates[it * 2 + f + AA_DS_REP_PAD_RIGHT];
+        }
+        output_p[it] = acc;
+    }
+
+    #pragma unroll
+    for (int it = 0; it < AA_BUFFER_SIZE; it++) {
+        const int abs_idx = seq_offset + it;
+        if (abs_idx < seq_len) {
+            dst_ch[abs_idx] = (T) output_p[it];
+        }
+    }
+}
+
+template [[host_name("kernel_aa_snake_beta_polyphase_f32")]]
+kernel aa_snake_beta_t kernel_aa_snake_beta_polyphase_impl<float>;
+
+
+// Variant: threadgroup-shared input tile (cooperative load). Reduces
+// device-memory bandwidth to one chunk-wide read per threadgroup, at
+// the cost of a ~16 KB threadgroup allocation. On M1 the shared
+// allocation regressed th_max from 832 to 640 (the SM's register
+// budget competes with shared mem on Apple's tiled architecture) and
+// wall-clock by ~30 %.
+constant constexpr int AA_TILE_PAD_LEFT  = AA_HALF_FILTER_SIZE;
+constant constexpr int AA_TILE_PAD_RIGHT = AA_HALF_FILTER_SIZE + AA_FILTER_SIZE / 2;
+constant constexpr int AA_TILE_TOTAL     = AA_THREADS_PER_TGRP * AA_BUFFER_SIZE
+                                           + AA_TILE_PAD_LEFT + AA_TILE_PAD_RIGHT + 16;
+constant constexpr int AA_TILE_LOAD_ITERS = (AA_TILE_TOTAL + AA_THREADS_PER_TGRP - 1)
+                                           / AA_THREADS_PER_TGRP;
+
+template <typename T>
+kernel void kernel_aa_snake_beta_tgmem_impl(
+        constant ggml_metal_kargs_aa_snake_beta & args      [[buffer(0)]],
+        device const T                          * src       [[buffer(1)]],
+        device const T                          * log_alpha [[buffer(2)]],
+        device const T                          * log_beta  [[buffer(3)]],
+        device const T                          * up_ftr    [[buffer(4)]],
+        device const T                          * down_ftr  [[buffer(5)]],
+        device T                                * dst       [[buffer(6)]],
+        uint3                                     tgpig     [[threadgroup_position_in_grid]],
+        uint3                                     tpitg     [[thread_position_in_threadgroup]]) {
+
+    const int seq_blk = (int) tgpig.x;
+    const int chan    = (int) tgpig.y;
+    const int tid     = (int) tpitg.x;
+    const int seq_len = args.T;
+
+    const int chunk_start = seq_blk * AA_THREADS_PER_TGRP * AA_BUFFER_SIZE;
+    const int local_start = tid * AA_BUFFER_SIZE;
+    const int seq_offset  = chunk_start + local_start;
+
+    const int channel_offset = chan * seq_len;
+    device const T * src_ch  = src + channel_offset;
+    device       T * dst_ch  = dst + channel_offset;
+
+    threadgroup float input_tile[AA_TILE_TOTAL];
+
+    {
+        const float seq_left  = (float) src_ch[0];
+        const float seq_right = (float) src_ch[seq_len - 1];
+        #pragma unroll
+        for (int it = 0; it < AA_TILE_LOAD_ITERS; it++) {
+            const int local_idx = it * AA_THREADS_PER_TGRP + tid;
+            if (local_idx < AA_TILE_TOTAL) {
+                const int abs_idx = chunk_start + local_idx - AA_TILE_PAD_LEFT;
+                float val;
+                if (abs_idx >= 0 && abs_idx < seq_len) {
+                    val = (float) src_ch[abs_idx];
+                } else if (abs_idx < 0 && abs_idx >= -AA_UP_REP_PAD) {
+                    val = seq_left;
+                } else if (abs_idx >= seq_len && abs_idx < seq_len + AA_UP_REP_PAD) {
+                    val = seq_right;
+                } else {
+                    val = 0.0f;
+                }
+                input_tile[local_idx] = val;
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float alpha_val = exp((float) log_alpha[chan]);
+    const float beta_val  = exp((float) log_beta[chan]);
+    const float inv_beta  = 1.0f / (beta_val + 1e-9f);
+
+    float up_filter[AA_FILTER_SIZE];
+    float down_filter[AA_FILTER_SIZE];
+    #pragma unroll
+    for (int k = 0; k < AA_FILTER_SIZE; k++) {
+        up_filter[k]   = 2.0f * (float) up_ftr[k];
+        down_filter[k] = (float) down_ftr[k];
+    }
+
+    float intermediates[2 * AA_FILTER_SIZE + 2 * AA_BUFFER_SIZE
+                        + AA_DS_REP_PAD_LEFT + AA_DS_REP_PAD_RIGHT] = {0};
+
+    // AA_TILE_PAD_LEFT == AA_HALF_FILTER_SIZE so the (-HALF, +TILE_PAD)
+    // offsets cancel and tile_base reduces to local_start.
+    #pragma unroll
+    for (int it = 0; it < (2 * AA_BUFFER_SIZE + 2 * AA_FILTER_SIZE); it++) {
+        const int p = it & 1;
+        const int base = local_start + (it + p) / 2;
+        float acc = 0.0f;
+        #pragma unroll
+        for (int kk = 0; kk < AA_FILTER_SIZE / 2; kk++) {
+            acc += up_filter[p + 2 * kk] * input_tile[base + kk];
+        }
+        intermediates[it + AA_DS_REP_PAD_LEFT] = acc;
+    }
+
+    #pragma unroll
+    for (int it = 0; it < 2 * AA_BUFFER_SIZE + 2 * AA_FILTER_SIZE; it++) {
+        const float v = intermediates[it + AA_DS_REP_PAD_LEFT];
+        const float s = sin(alpha_val * v);
+        intermediates[it + AA_DS_REP_PAD_LEFT] = v + inv_beta * s * s;
+    }
+
+    #pragma unroll
+    for (int it = 0; it < AA_DS_REP_PAD_LEFT; it++) {
+        intermediates[it] = intermediates[AA_DS_REP_PAD_LEFT];
+    }
+    const int tail_first_t = AA_DS_REP_PAD_LEFT + 2 * AA_BUFFER_SIZE + 2 * AA_FILTER_SIZE;
+    #pragma unroll
+    for (int it = 0; it < AA_DS_REP_PAD_RIGHT; it++) {
+        intermediates[tail_first_t + it] = intermediates[tail_first_t - 1];
+    }
+
+    float output_t[AA_BUFFER_SIZE];
+    #pragma unroll
+    for (int it = 0; it < AA_BUFFER_SIZE; it++) {
+        float acc = 0.0f;
+        #pragma unroll
+        for (int f = 0; f < AA_FILTER_SIZE; f++) {
+            acc += down_filter[f] * intermediates[it * 2 + f + AA_DS_REP_PAD_RIGHT];
+        }
+        output_t[it] = acc;
+    }
+
+    #pragma unroll
+    for (int it = 0; it < AA_BUFFER_SIZE; it++) {
+        const int abs_idx = seq_offset + it;
+        if (abs_idx < seq_len) {
+            dst_ch[abs_idx] = (T) output_t[it];
+        }
+    }
+}
+
+template [[host_name("kernel_aa_snake_beta_tgmem_f32")]]
+kernel aa_snake_beta_t kernel_aa_snake_beta_tgmem_impl<float>;
+
+
 typedef void (conv_transpose_2d_t)(
         constant ggml_metal_kargs_conv_transpose_2d & args,
         device const float * src0,
