@@ -4545,3 +4545,107 @@ Lesson: comments claiming "negligible quality impact" age badly. When a
 paper introduces a deliberate signal-processing stage, it's almost
 always there for a reason; if you remove it, prove the absence of harm
 with `np.diff` or a spectrogram, not assertion.
+
+### Mixed-backend custom ops in ggml are a perf trap (BigVGAN AA, May 2026)
+
+`ggml_map_custom1` runs CPU-only. ggml-backend-sched faithfully routes the
+op back to CPU even when the rest of the graph is on Metal — but it costs
+a Metal → CPU → Metal sync per op site. For IndexTTS BigVGAN with ~20
+SnakeBeta sites per generate, that overhead dominates: GPU + AA measured
+≈ 25 % SLOWER than CPU + AA on M1 (8.5 s vs 6.65 s vocoder).
+
+Step A fix (`src/indextts_voc.cpp:indextts_voc_init`, commit `cd21faea`'s
+follow-up): when `use_aa = true`, override `use_gpu` and force the whole
+vocoder onto CPU. The GPT runs on its own backend; only the AMP-block
+chain pays the per-AMP-cost, and skipping the round-trip is the win.
+
+Override knob is `INDEXTTS_VOC_FORCE_GPU=1` for the people who want to
+reproduce the mixed-backend benchmark; default does the right thing.
+
+Lesson: if you reach for `ggml_map_custom1`, the right next step is
+*always* a real ggml op + Metal kernel — never assume the custom op is
+"only a tiny fraction" of the graph; the surrounding GPU stalls dominate
+once it's called from a hot loop.
+
+### Polyphase "zero-stuff + conv_1d" doesn't trivially port a torch conv_transpose_1d (May 2026)
+
+Attempted the native-ggml-ops AA path for IndexTTS (Step B in the
+optimisation plan). The idea: replace `ggml_map_custom1` with a
+ggml-graph that's identical math to the torch reference, expressed via
+`ggml_conv_1d` for both the upsample and downsample stages.
+
+PyTorch reference (`indextts/BigVGAN/alias_free_activation/torch/resample.py`):
+```python
+x = F.pad(x, (pad, pad), mode='replicate')
+x = ratio * F.conv_transpose1d(x, filter.expand(C,-1,-1), stride=2, groups=C)
+x = x[..., pad_left:-pad_right]
+```
+
+Two blockers:
+
+1. **Output-length mismatch.** `conv_transpose_1d(stride=2, K=12)` produces
+   `(T-1)·s + K` = `2T+10` for input T. The classical "zero-stuff + stride-1
+   conv1d" trick produces `2T - K + 1` = `2T - 11`. Closing the K-1 gap
+   requires *asymmetric* boundary padding (10 left, 11 right for K=12),
+   which `ggml_conv_1d`'s symmetric `p0` parameter can't express. You can
+   pre-pad the data with `ggml_concat`'d replicate columns and use `p0=0`,
+   but that adds three more graph nodes per AA site and the constants are
+   annoying.
+
+2. **Downstream-add broadcast assertion.** Even with lengths corrected
+   manually, runtime hit `GGML_ASSERT(ggml_can_repeat(b, a))` inside
+   `ggml_add_inplace` from the BigVGAN per-block bias adds — the
+   `ggml_reshape_2d` after the cropping `ggml_view_3d` doesn't always
+   see a contiguous tensor, and the resulting shape drifts in ways
+   `ggml_add`'s in-place fast path refuses to broadcast.
+
+`ggml_conv_transpose_1d` has no `groups` parameter, so we can't express
+the depthwise behavior directly with it either; the workaround is a
+`[K, C, C]` block-diagonal kernel, which at C=1536 is 113 MB — no-go.
+
+Both fixable; deferred. The right fix is Step C-2 — a dedicated
+`GGML_OP_AA_SNAKE_BETA` ggml op with a fused Metal kernel matching
+upstream IndexTTS's CUDA reference (drafted as `tools/upstream-prs/
+07-metal-aa-snake-beta.md`). That sidesteps the "zero-stuff via concat"
+gymnastics entirely.
+
+Lesson: not every PyTorch op has a clean native-ggml expression. When
+the op uses `groups=C` or has asymmetric padding, expect that the
+right path forward is a custom op, not a chain of existing primitives.
+
+### Accelerate vDSP_desamp + vvsinf beats hand-rolled SnakeBeta loops on M1 (May 2026)
+
+After the CPU AA op is correct, the bottleneck is the per-channel inner
+loops: K-tap scatter for upsample, sin+sqr+fma for SnakeBeta, K-tap dot
++ stride-2 decimate for downsample. The scalar inner loops are clean
+but the compiler's auto-vectorisation isn't always taking the FMA
+opportunity — especially across the `+=` loop-carried dependency in the
+upsample scatter.
+
+Step C-1 swaps the two stages that have direct Accelerate analogues:
+
+- SnakeBeta inner: `vDSP_vsmul → vvsinf → vDSP_vsq → vDSP_vsma` (one
+  vector mul, one vector sin, one vector square, one fused-multiply-add).
+- Downsample inner: `vDSP_desamp(decimation=2, filter)` fuses K-tap FIR
+  + stride-2 decimation into one Accelerate call backed by NEON.
+
+vDSP is `#ifdef __APPLE__` only; the scalar paths still compile and run
+elsewhere. Set `INDEXTTS_AA_SCALAR=1` to force the scalar paths for A/B.
+
+Measured speedup on M1 (q8_0 GPT, JFK voice prompt, ≈ 6.7 s of audio,
+average of 3 warm-cache runs):
+
+| Path                | voc-only |
+| ------------------- | -------- |
+| scalar (Step A)     | 6906 ms  |
+| Accelerate (Step C-1)| 6746 ms  |
+
+≈ 2-3 % on the full vocoder — small because AA SnakeBeta is one
+component alongside the MRF stack and the per-stage convs that
+dominate. The win is "free": opt-out flag exists, output is
+numerically equivalent to scalar (rmsdiff 1.3 × 10⁻⁵, well below int16
+quant noise), ASR roundtrip identical.
+
+Lesson: vDSP gives modest wins on already-cache-friendly inner loops.
+The big lever for IndexTTS GPU perf is still a Metal kernel — see
+`tools/upstream-prs/07-metal-aa-snake-beta.md`.

@@ -18,6 +18,9 @@ Two notes worth keeping in mind:
 | 02 | im2col grid_y > 65535 | Vulnerable, **two sites**. `im2col.cu:54` (existing 2D kernel). New since v0.10.0: `im2col_3d_kernel` at `im2col.cu:118` with `dim3 block_nums(num_blocks, OW, …)` at line 181 and unbounded `iow = blockIdx.y` at line 139. | Apply as drafted — patch covers both kernels. |
 | 03 | cpy_scalar_transpose grid_y | Vulnerable. `cpy.cu:222` still has `GGML_ASSERT(grid_y < USHRT_MAX)`. | Apply as drafted (re-derive code first per AI policy). |
 | 04 | Metal conv_transpose_1d | Vulnerable / inefficient. `ggml-metal.metal:4860-4861` still iterates full IL with the in-loop `if`. | Apply as drafted. |
+| 05 | CUDA per-row-contiguous unary | Vulnerable (Phase 1 of A1000-issue-#81 work). | Branch `issue81-phase1-uar-wip`; see `RESUME-A1000-phase1.md`. |
+| 06 | CUDA per-head mask in `flash_attn_ext` | Vulnerable; same branch. | Same; pair with 05 before filing. |
+| 07 | Metal `kernel_aa_snake_beta` (NEW OP) | N/A — adds a new op (`GGML_OP_AA_SNAKE_BETA`). No upstream conflict but expects design ack first. | RFC scope only; do not file before 01/05/06. |
 
 ## What changed in master since v0.10.0 (relevant to our patches)
 

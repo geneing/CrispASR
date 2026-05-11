@@ -9,6 +9,9 @@ Redacted descriptions in own voice.
 | 02 | `ggml-cuda : handle OW > 65535 in im2col (2D and 3D)` | yours (1552434, re-applied in ca6c523) | filed [#1485](https://github.com/ggml-org/ggml/pull/1485) 2026-05-10 |
 | 03 | `ggml-cuda : tile cpy_scalar_transpose along grid_y` | AI-authored (2639461) — re-derive yourself before sending | gated on #1485 merge |
 | 04 | `metal : tighten input-position loop in kernel_conv_transpose_1d` | yours (4990da8) | ✅ merged [#1477](https://github.com/ggml-org/ggml/pull/1477) 2026-05-10 |
+| 05 | `ggml-cuda : per-row-contiguous unary (Phase 1 UAR)` | WIP on branch `issue81-phase1-uar-wip` | drafted, not yet filed |
+| 06 | `ggml-cuda : per-head mask in flash_attn_ext` | WIP on branch `issue81-phase1-uar-wip` | drafted, not yet filed |
+| 07 | `metal : kernel_aa_snake_beta — fused AA SnakeBeta for BigVGAN v2` | drafted from upstream IndexTTS CUDA reference (Apache 2.0) — needs implementation | RFC scope only; new ggml op |
 
 The `.patch` files are clean diffs; they are reference shape, not
 literal `git am` payloads — line numbers are relative to our vendored

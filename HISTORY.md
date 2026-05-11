@@ -3503,3 +3503,41 @@ the bench; that's where the registry's `-m auto` path lands.
 
 Full A/B numbers + click-detector results: `LEARNINGS.md` §"BigVGAN v2
 SnakeBeta needs anti-aliasing".
+
+### §87 — IndexTTS BigVGAN AA: Step A auto-CPU + Step C-1 vDSP (2026-05-11)
+
+Follow-up to §86. Mixed-backend AA (CPU custom op inside a Metal vocoder
+graph) measured ≈ 25 % slower than CPU-only because of the
+Metal↔CPU sync per AMP block. Three optimisations attempted on the same
+M1 / q8_0 / JFK prompt:
+
+- **Step A (shipped):** when `use_aa=true`, override `use_gpu` in
+  `indextts_voc_init` and run the whole vocoder on CPU. Skips the
+  ~20 round-trips per generate. `INDEXTTS_VOC_FORCE_GPU=1` opts back into
+  the slow mixed path for benching. `INDEXTTS_BENCH=1` gate added to the
+  vocoder timing log per the repo's `<BACKEND>_BENCH` convention.
+- **Step B (attempted, deferred):** express the AA chain via native ggml
+  ops (replicate-pad + zero-stuff + `ggml_conv_1d` + SnakeBeta + replicate-pad
+  + stride-2 `ggml_conv_1d`). Blocked on (a) `ggml_conv_1d` only accepting
+  symmetric `p0`, which can't reproduce `conv_transpose_1d`'s `(T-1)·s + K`
+  output length without three extra concat nodes, and (b) `ggml_add_inplace`
+  shape-broadcast assertion firing on the downstream BigVGAN bias adds.
+  Documented in `src/indextts_voc.cpp` and LEARNINGS; the right fix is
+  Step C-2, not a different ggml-ops expression.
+- **Step C-1 (shipped):** Accelerate vDSP path inside the existing CPU
+  custom op — `vDSP_vsmul + vvsinf + vDSP_vsq + vDSP_vsma` for SnakeBeta,
+  `vDSP_desamp(decimation=2)` for the downsample FIR. ~2-3 % on the full
+  vocoder (small because AA is a fraction of the BigVGAN graph), but
+  numerically equivalent to scalar (rmsdiff ≈ 1.3 × 10⁻⁵) and free —
+  `INDEXTTS_AA_SCALAR=1` opts back to scalar for A/B.
+- **Step C-2 (drafted, not implemented):** new `GGML_OP_AA_SNAKE_BETA`
+  with a fused Metal kernel ported from upstream IndexTTS's CUDA
+  reference (`anti_alias_activation_cuda.cu`). RFC scope; one launch
+  does the whole sandwich in registers — projects vocoder ≈ 1.5-2 s on
+  M1, vs 6.65 s today (CPU). Drafted as PR slot 07 in
+  `tools/upstream-prs/07-metal-aa-snake-beta.md`. Slots 05 (CUDA per-row
+  contiguous unary) and 06 (CUDA per-head FA mask) reserved for the
+  in-flight `issue81-phase1-uar-wip` branch.
+
+Per-step bench numbers in LEARNINGS.md §"Mixed-backend custom ops…" and
+§"Accelerate vDSP_desamp…".

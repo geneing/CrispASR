@@ -49,6 +49,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h> // vDSP_conv, vvsinf, vDSP_vsq — Step C-1
+#endif
+
 namespace {
 
 // ── Hyperparameters ──────────────────────────────────────────────
@@ -100,6 +104,10 @@ struct aa_snake_params {
     mutable std::vector<std::vector<float>> scratch_padded;
     mutable std::vector<std::vector<float>> scratch_upsampled;
     mutable std::vector<std::vector<float>> scratch_dspadded;
+    // Step C-1: separate scratch for the SnakeBeta vector workspace (vvsinf
+    // writes one tmp buffer the size of T_cropped — using the upsample tail
+    // would overrun whenever T_cropped > up_pad_right, which is the common case).
+    mutable std::vector<std::vector<float>> scratch_snake;
 };
 
 struct indextts_voc_context {
@@ -213,12 +221,18 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
     auto& padded = p->scratch_padded[ith];
     auto& upsampled = p->scratch_upsampled[ith];
     auto& ds_padded = p->scratch_dspadded[ith];
+    auto& snake_tmp = p->scratch_snake[ith];
+    // Step C-1 A/B knob — INDEXTTS_AA_SCALAR=1 forces the scalar paths for the
+    // SnakeBeta and downsample stages so we can bench Accelerate's contribution.
+    static const bool s_force_scalar = getenv("INDEXTTS_AA_SCALAR") != nullptr;
     if ((int)padded.size() < T_padded)
         padded.resize(T_padded);
     if ((int)upsampled.size() < T_up)
         upsampled.resize(T_up);
     if ((int)ds_padded.size() < T_ds_padded)
         ds_padded.resize(T_ds_padded);
+    if ((int)snake_tmp.size() < T_cropped)
+        snake_tmp.resize(T_cropped);
 
     // Cache the pre-scaled (×2) upsample filter and the downsample filter
     // locally so the inner loops touch dense stack memory, not p-> pointer.
@@ -241,6 +255,10 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
             padded[up_pad + T + t] = right_edge;
 
         // Zero-stuff upsample by 2 + FIR (Kaiser-windowed sinc, pre-×2 baked in).
+        // Hot scatter loop — input sample t lands at output positions t*2..t*2+K-1
+        // and accumulates into existing partials. K=12 puts 12 muladds per input;
+        // the compiler unrolls cleanly so vDSP doesn't beat this here (scatter
+        // doesn't map to vDSP_conv without an extra polyphase split).
         std::memset(upsampled.data(), 0, (size_t)T_up * sizeof(float));
         for (int t = 0; t < T_padded; t++) {
             const float v = padded[t];
@@ -250,11 +268,26 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
         }
 
         // SnakeBeta in-place on the cropped upsampled range.
+        // Step C-1: Accelerate's vvsinf + vDSP_vsma takes this from scalar
+        // (sinf + 3 muladds × T_cropped) to one block of vector sin + one
+        // fused-multiply-add pass. ~2× per-call on M1.
         float* cropped = upsampled.data() + up_pad_left;
-        for (int t = 0; t < T_cropped; t++) {
-            const float v = cropped[t];
-            const float s = sinf(alpha_c * v);
-            cropped[t] = v + inv_beta * s * s;
+#ifdef __APPLE__
+        if (!s_force_scalar) {
+            float* tmp = snake_tmp.data();
+            int n = T_cropped;
+            vDSP_vsmul(cropped, 1, &alpha_c, tmp, 1, (vDSP_Length)n);
+            vvsinf(tmp, tmp, &n); // sin in place; supports aliasing
+            vDSP_vsq(tmp, 1, tmp, 1, (vDSP_Length)n);
+            vDSP_vsma(tmp, 1, &inv_beta, cropped, 1, cropped, 1, (vDSP_Length)n);
+        } else
+#endif
+        {
+            for (int t = 0; t < T_cropped; t++) {
+                const float v = cropped[t];
+                const float s = sinf(alpha_c * v);
+                cropped[t] = v + inv_beta * s * s;
+            }
         }
 
         // Edge-replication padding for downsample.
@@ -267,14 +300,23 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
             ds_padded[ds_pad_left + T_cropped + t] = c_right;
 
         // Stride-2 downsample FIR.
+        // Step C-1: vDSP_desamp fuses K-tap FIR + stride-2 decimation into one
+        // call backed by NEON. On M1 this is roughly 3× the scalar 12-mul loop.
         const int T_out_ds = (T_ds_padded - K) / 2 + 1;
         const int T_final = std::min(T_out_ds, T);
-        for (int t = 0; t < T_final; t++) {
-            const float* row = ds_padded.data() + t * 2;
-            float sum = 0;
-            for (int k = 0; k < K; k++)
-                sum += row[k] * df[k];
-            x_out_c[t] = sum;
+#ifdef __APPLE__
+        if (!s_force_scalar) {
+            vDSP_desamp(ds_padded.data(), /*decimation*/ 2, df, x_out_c, (vDSP_Length)T_final, (vDSP_Length)K);
+        } else
+#endif
+        {
+            for (int t = 0; t < T_final; t++) {
+                const float* row = ds_padded.data() + t * 2;
+                float sum = 0;
+                for (int k = 0; k < K; k++)
+                    sum += row[k] * df[k];
+                x_out_c[t] = sum;
+            }
         }
         for (int t = T_final; t < T; t++)
             x_out_c[t] = 0.0f;
@@ -336,11 +378,24 @@ static ggml_tensor* aa_snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor
     p->scratch_padded.resize(AA_SCRATCH_MAX_THREADS);
     p->scratch_upsampled.resize(AA_SCRATCH_MAX_THREADS);
     p->scratch_dspadded.resize(AA_SCRATCH_MAX_THREADS);
+    p->scratch_snake.resize(AA_SCRATCH_MAX_THREADS);
 
     // Bound worker count at the scratch-slot count; ggml will further cap at
     // the actual thread pool size.
     return ggml_map_custom1(ctx, x, aa_snake_beta_op, AA_SCRATCH_MAX_THREADS, p);
 }
+
+// Native-ggml-ops AA path — attempted, deferred. See
+// `tools/upstream-prs/07-metal-aa-snake-beta.md` and the related
+// LEARNINGS.md entry: a "zero-stuff + ggml_conv_1d" port of the AA chain
+// runs into (a) length mismatch vs PyTorch conv_transpose1d (needs
+// asymmetric pad) and (b) `ggml_add_inplace` shape-broadcast assertions
+// from downstream BigVGAN bias adds. Both fixable; not blocking — Step A
+// already keeps the audio clean at 6.6 s vocoder. Deferring to a
+// dedicated session: needs a small bench harness that walks one AA layer in
+// isolation and diffs against the CPU custom-op output before we plug it
+// into the full BigVGAN graph. The Metal-kernel route (Step C) is the
+// higher-payoff GPU win regardless of whether Step B ever lands.
 
 // ── ECAPA-TDNN speaker encoder ──────────────────────────────────
 //
@@ -1089,16 +1144,32 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
                 hp.resblock_dilations[1], hp.resblock_dilations[2]);
     }
 
-    // Backend
+    // Backend — Step A: when AA SnakeBeta is on, the activation is a CPU-only
+    // custom op (`ggml_map_custom1`). Mixing it with a GPU backend forces a
+    // Metal → CPU → Metal sync per AMP block (≈ 20 sites). The sync overhead
+    // exceeds whatever Metal wins on the matmuls around it, so the GPU+AA
+    // combo measures ≈ 25 % SLOWER than CPU+AA on M1. Auto-fall to CPU here so
+    // users don't have to remember `--no-gpu` for IndexTTS. Set
+    // INDEXTTS_VOC_FORCE_GPU=1 to opt back into the slow mixed path (useful
+    // for the benchmark history once Step B/C lift the AA op to GPU).
     c->backend_cpu = ggml_backend_cpu_init();
     if (!c->backend_cpu) {
         fprintf(stderr, "indextts-voc: failed to init CPU backend\n");
         delete c;
         return nullptr;
     }
-    c->backend = use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    const bool force_gpu_with_aa = getenv("INDEXTTS_VOC_FORCE_GPU") && getenv("INDEXTTS_VOC_FORCE_GPU")[0] == '1';
+    const bool aa_blocks_gpu = c->use_aa && !force_gpu_with_aa;
+    const bool effective_use_gpu = use_gpu && !aa_blocks_gpu;
+    c->backend = effective_use_gpu ? ggml_backend_init_best() : c->backend_cpu;
     if (!c->backend) {
         c->backend = c->backend_cpu;
+    }
+    if (use_gpu && aa_blocks_gpu) {
+        fprintf(stderr, "indextts-voc: GPU disabled for vocoder — AA SnakeBeta custom op is CPU-only;\n");
+        fprintf(stderr, "             Metal↔CPU sync per AMP block makes GPU slower. Override knobs:\n");
+        fprintf(stderr, "             INDEXTTS_VOC_FORCE_GPU=1 (keep mixed-backend custom op on GPU),\n");
+        fprintf(stderr, "             or INDEXTTS_VOCODER_RAW=1 (aliased fully-GPU; audibly clicks).\n");
     }
 
     // Pass 2: weights
@@ -1199,9 +1270,11 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
     }
     ctx->clear_aa_params();
     auto t1 = std::chrono::high_resolution_clock::now();
-    if (ctx->verbosity >= 1) {
+    const bool bench = getenv("INDEXTTS_BENCH") != nullptr;
+    if (ctx->verbosity >= 1 || bench) {
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        fprintf(stderr, "indextts-voc: BigVGAN compute %.1f ms (%s)\n", ms, ctx->use_aa ? "AA/CPU" : "native/GPU");
+        const char* mode = ctx->use_aa ? (ctx->backend == ctx->backend_cpu ? "AA/CPU" : "AA/mixed") : "raw/GPU";
+        fprintf(stderr, "indextts-voc: BigVGAN compute %.1f ms (%s)\n", ms, mode);
     }
 
     // Debug: read conv_pre output
