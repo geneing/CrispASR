@@ -170,6 +170,9 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # points at the lid.176.bin directory).
     "lid-glotlid":     "reference_backends.lid_glotlid",
     "lid-fasttext176": "reference_backends.lid_glotlid",
+    # TitaNet-Large speaker verification. model_dir = HF id or local .nemo.
+    # Audio arg is a single speaker utterance (16 kHz mono).
+    "titanet":         "reference_backends.titanet",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import

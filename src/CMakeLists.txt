@@ -680,6 +680,15 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# titanet — TitaNet-Large speaker verification + speaker profile DB
+# ---------------------------------------------------------------------------
+add_library(titanet STATIC titanet.h titanet.cpp speaker_db.h speaker_db.cpp)
+set_target_properties(titanet PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(titanet PUBLIC .)
+target_compile_features   (titanet PUBLIC cxx_std_17)
+target_link_libraries     (titanet PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+
+# ---------------------------------------------------------------------------
 # vibevoice — Microsoft VibeVoice-ASR (σ-VAE tokenizers + Qwen2 LM)
 # ---------------------------------------------------------------------------
 add_library(vibevoice STATIC vibevoice.h vibevoice.cpp)
@@ -979,6 +988,9 @@ if (TARGET vibevoice)
 endif()
 if (TARGET ecapa-lid)
     target_link_libraries(crispasr PUBLIC ecapa-lid)
+endif()
+if (TARGET titanet)
+    target_link_libraries(crispasr PUBLIC titanet)
 endif()
 if (TARGET moonshine)
     target_link_libraries(crispasr PUBLIC moonshine)

@@ -127,6 +127,11 @@
 #include "fireredpunc.h"
 #define CA_HAVE_FIREREDPUNC 1
 #endif
+#if __has_include("titanet.h")
+#include "titanet.h"
+#include "speaker_db.h"
+#define CA_HAVE_TITANET 1
+#endif
 
 #ifdef _WIN32
 #define CA_EXPORT extern "C" __declspec(dllexport)
@@ -4352,3 +4357,63 @@ CA_EXPORT int crispasr_session_detect_language(crispasr_session* s, const float*
         *out_prob = lid_out.confidence;
     return 0;
 }
+
+// =========================================================================
+// Speaker verification — TitaNet + speaker profile DB
+// =========================================================================
+
+#ifdef CA_HAVE_TITANET
+
+CA_EXPORT void* crispasr_titanet_init(const char* model_path, int32_t n_threads) {
+    return (void*)titanet_init(model_path, n_threads);
+}
+
+CA_EXPORT void crispasr_titanet_free(void* ctx) {
+    titanet_free((struct titanet_context*)ctx);
+}
+
+// Extract speaker embedding from PCM. Returns embedding dimension (192) on
+// success, 0 on error. `out` must hold at least 192 floats.
+CA_EXPORT int32_t crispasr_titanet_embed(void* ctx, const float* pcm_16k, int32_t n_samples, float* out) {
+    return (int32_t)titanet_embed((struct titanet_context*)ctx, pcm_16k, n_samples, out);
+}
+
+CA_EXPORT float crispasr_titanet_cosine_sim(const float* a, const float* b, int32_t dim) {
+    return titanet_cosine_sim(a, b, dim);
+}
+
+CA_EXPORT void* crispasr_speaker_db_load(const char* dir_path) {
+    return (void*)speaker_db_load(dir_path);
+}
+
+CA_EXPORT void crispasr_speaker_db_free(void* db) {
+    speaker_db_free((struct speaker_db*)db);
+}
+
+CA_EXPORT int32_t crispasr_speaker_db_count(const void* db) {
+    return (int32_t)speaker_db_count((const struct speaker_db*)db);
+}
+
+// Match embedding against speaker DB. Writes the speaker name into
+// `out_name` (up to `out_cap` bytes including NUL). Returns cosine
+// similarity score on match, or a negative value if no match.
+CA_EXPORT float crispasr_speaker_db_match(const void* db, const float* embedding, int32_t dim, float threshold,
+                                          char* out_name, int32_t out_cap) {
+    float score = -1.0f;
+    const char* name = speaker_db_match((const struct speaker_db*)db, embedding, dim, threshold, &score);
+    if (name && out_name && out_cap > 0) {
+        int len = (int)std::strlen(name);
+        if (len >= out_cap)
+            len = out_cap - 1;
+        std::memcpy(out_name, name, len);
+        out_name[len] = '\0';
+    }
+    return name ? score : -1.0f;
+}
+
+CA_EXPORT int32_t crispasr_speaker_db_enroll(const char* dir_path, const char* name, const float* embedding,
+                                             int32_t dim) {
+    return speaker_db_enroll(dir_path, name, embedding, dim) ? 0 : 1;
+}
+
+#endif // CA_HAVE_TITANET
