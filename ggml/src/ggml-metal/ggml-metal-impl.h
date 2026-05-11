@@ -634,6 +634,21 @@ typedef struct {
     uint64_t nb1;
 } ggml_metal_kargs_conv_transpose_1d;
 
+// CrispASR patch (PR #07-metal-aa-snake-beta): kargs for the fused
+// BigVGAN v2 anti-aliased SnakeBeta kernel. K is fixed at 12 by the
+// kernel — left in kargs only for sanity-checking on the host side.
+// MUST RE-APPLY after every ggml bump.
+typedef struct {
+    int32_t T;             // sequence length per channel
+    int32_t C;             // channels (input == output)
+    int32_t K;             // filter taps (always 12 in current kernel)
+    int32_t up_pad;        // 5  — replicate-pad before upsample
+    int32_t up_pad_left;   // 15 — left crop of upsample output
+    int32_t up_pad_right;  // 15 — right crop of upsample output
+    int32_t ds_pad_left;   // 5  — replicate-pad before downsample
+    int32_t ds_pad_right;  // 6
+} ggml_metal_kargs_aa_snake_beta;
+
 typedef struct {
     int32_t  IC;
     int32_t  IH;

@@ -390,6 +390,11 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_conv_transpose_1d(ctx, idx);
             } break;
+        // CrispASR patch (PR #07-metal-aa-snake-beta) — MUST RE-APPLY after ggml bump.
+        case GGML_OP_AA_SNAKE_BETA:
+            {
+                n_fuse = ggml_metal_op_aa_snake_beta(ctx, idx);
+            } break;
         case GGML_OP_CONV_TRANSPOSE_2D:
             {
                 n_fuse = ggml_metal_op_conv_transpose_2d(ctx, idx);
@@ -3967,6 +3972,64 @@ int ggml_metal_op_conv_transpose_1d(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
 
     ggml_metal_encoder_dispatch_threadgroups(enc, OL, OC, 1, 1, 1, 1);
+
+    return 1;
+}
+
+// CrispASR patch (PR #07-metal-aa-snake-beta): dispatch the fused
+// BigVGAN v2 anti-aliased SnakeBeta. Grid is
+// `(ceil(T / (128 * 32)), C, 1)` threadgroups × `(128, 1, 1)` threads;
+// kernel constants live in ggml-metal.metal.
+// MUST RE-APPLY after every ggml bump.
+int ggml_metal_op_aa_snake_beta(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    const int32_t T = op->src[0]->ne[0];
+    const int32_t C = op->src[0]->ne[1];
+    const int32_t K = op->src[3]->ne[0];
+
+    GGML_ASSERT(K == 12 && "aa_snake_beta Metal kernel hardcodes K=12");
+
+    // Pad layout mirrors the CPU forward in ggml-cpu/ops.cpp.
+    ggml_metal_kargs_aa_snake_beta args = {
+        /*.T            =*/ T,
+        /*.C            =*/ C,
+        /*.K            =*/ K,
+        /*.up_pad       =*/ K / 2 - 1,                  // 5
+        /*.up_pad_left  =*/ K / 2 - 1 + (K - 2) / 2 + (K - 2) / 2,  // unused on GPU
+        /*.up_pad_right =*/ 0,                          // unused on GPU
+        /*.ds_pad_left  =*/ K / 2 - 1,                  // 5
+        /*.ds_pad_right =*/ K / 2,                      // 6
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_aa_snake_beta(lib, op);
+
+    // Match the kernel-side constants in ggml-metal.metal. Upstream-CUDA
+    // layout: 128 threads/tgrp × 32 samples/thread = 4096 samples/tgrp.
+    // On Apple M1 the per-thread stack arrays (~900 bytes) force a partial
+    // register spill (th_max=832 < 1024), but reducing BUFFER_SIZE to 16
+    // empirically loses more in per-launch amortisation than it gains in
+    // register headroom — see PR #07-metal-aa-snake-beta notes.
+    constexpr int AA_THREADS_PER_TGRP = 128;
+    constexpr int AA_BUFFER_SIZE      = 32;
+    constexpr int AA_SAMPLES_PER_TGRP = AA_THREADS_PER_TGRP * AA_BUFFER_SIZE;  // 4096
+
+    const int seq_blocks = (T + AA_SAMPLES_PER_TGRP - 1) / AA_SAMPLES_PER_TGRP;
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args),                     0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]),    1);  // x
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]),    2);  // log_alpha
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[2]),    3);  // log_beta
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[3]),    4);  // us_filter
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[4]),    5);  // ds_filter
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),            6);  // dst
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, seq_blocks, C, 1,
+                                                  AA_THREADS_PER_TGRP, 1, 1);
 
     return 1;
 }
