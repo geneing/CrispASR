@@ -71,3 +71,16 @@ string(REPLACE ":"  "-"  GIT_COMMIT_SUBJECT "${GIT_COMMIT_SUBJECT}")
 # only manifested under MSVC's dependency-scan path with a CUDA-archs
 # quoting bug nearby, future shells may surface other splits.
 string(REPLACE "="  "-"  GIT_COMMIT_SUBJECT "${GIT_COMMIT_SUBJECT}")
+# CMake evaluates `$<...>` generator expressions inside
+# target_compile_definitions VALUES — even when those values came from a
+# string variable. A commit subject like
+#   "fix(build): pass chatterbox via $<TARGET_FILE:> so CMake ..."
+# becomes `CRISPASR_GIT_SUBJECT="...$<TARGET_FILE-> ..."` after the
+# `:` → `-` mapping above, and CMake then errors with
+#   Error evaluating generator expression: $<TARGET_FILE->
+#   Expression did not evaluate to a known generator expression
+# breaking ALL platforms in ci.yml + release.yml. Replace `<` / `>`
+# with `[` / `]` (matching the `(` / `)` mapping) so no `$<...>`
+# pattern can survive into the compile definition.
+string(REPLACE "<"  "["  GIT_COMMIT_SUBJECT "${GIT_COMMIT_SUBJECT}")
+string(REPLACE ">"  "]"  GIT_COMMIT_SUBJECT "${GIT_COMMIT_SUBJECT}")
