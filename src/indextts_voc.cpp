@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +85,15 @@ static ggml_tensor* T(const std::map<std::string, ggml_tensor*>& m, const std::s
 
 // ── Context ─────────────────────────────────────────────────────
 
+// Anti-aliased SnakeBeta params for the CPU path (INDEXTTS_VOCODER_AA=1)
+struct aa_snake_params {
+    std::vector<float> alpha;     // exp(log_alpha), per channel
+    std::vector<float> beta;      // exp(log_beta), per channel
+    std::vector<float> us_filter; // upsample filter [12]
+    std::vector<float> ds_filter; // downsample filter [12]
+    int C;
+};
+
 struct indextts_voc_context {
     bigvgan_hp hp;
 
@@ -99,8 +109,19 @@ struct indextts_voc_context {
 
     int n_threads = 4;
     int verbosity = 1;
+    bool use_aa = false; // INDEXTTS_VOCODER_AA=1 enables anti-aliased SnakeBeta (CPU)
+
+    // Anti-aliased SnakeBeta params (only used when use_aa=true)
+    std::vector<aa_snake_params*> aa_params;
+
+    void clear_aa_params() {
+        for (auto* p : aa_params)
+            delete p;
+        aa_params.clear();
+    }
 
     ~indextts_voc_context() {
+        clear_aa_params();
         if (sched) {
             ggml_backend_sched_free(sched);
         }
@@ -142,6 +163,122 @@ static ggml_tensor* snake_beta_raw(ggml_context* ctx, ggml_tensor* x, ggml_tenso
     ggml_tensor* sin2 = ggml_mul(ctx, sin_ax, sin_ax);
     ggml_tensor* term = ggml_div(ctx, sin2, beta);
     return ggml_add(ctx, x, term);
+}
+
+// ── Anti-aliased SnakeBeta (CPU, INDEXTTS_VOCODER_AA=1) ─────────
+//
+// Full Activation1d: upsample 2x → SnakeBeta → downsample 2x.
+// Higher quality but CPU-only (no CUDA depthwise conv_transpose).
+
+static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* src, int ith, int nth, void* userdata) {
+    const auto* p = (const aa_snake_params*)userdata;
+    const int T = (int)src->ne[0];
+    const int C = (int)src->ne[1];
+    const float* x_in = (const float*)src->data;
+    float* x_out = (float*)dst->data;
+    const int K = (int)p->us_filter.size();
+    const int up_pad = K / 2 - 1;
+    const int up_pad_left = up_pad * 2 + (K - 2) / 2;
+    const int up_pad_right = up_pad * 2 + (K - 2 + 1) / 2;
+    const int ds_pad_left = K / 2 - 1;
+    const int ds_pad_right = K / 2;
+
+    const int c_start = (C * ith) / nth;
+    const int c_end = (C * (ith + 1)) / nth;
+
+    for (int c = c_start; c < c_end; c++) {
+        float alpha_c = (c < p->C) ? p->alpha[c] : 1.0f;
+        float inv_beta_c = (c < p->C) ? (1.0f / p->beta[c]) : 1.0f;
+
+        int T_padded = T + 2 * up_pad;
+        std::vector<float> padded(T_padded);
+        for (int t = 0; t < up_pad; t++)
+            padded[t] = x_in[c * T];
+        for (int t = 0; t < T; t++)
+            padded[up_pad + t] = x_in[c * T + t];
+        for (int t = 0; t < up_pad; t++)
+            padded[up_pad + T + t] = x_in[c * T + (T - 1)];
+
+        int T_up = (T_padded - 1) * 2 + K;
+        std::vector<float> upsampled(T_up, 0.0f);
+        for (int t = 0; t < T_padded; t++) {
+            for (int k = 0; k < K; k++) {
+                upsampled[t * 2 + k] += padded[t] * p->us_filter[k] * 2.0f;
+            }
+        }
+
+        int T_cropped = T_up - up_pad_left - up_pad_right;
+        float* cropped = upsampled.data() + up_pad_left;
+
+        for (int t = 0; t < T_cropped; t++) {
+            float v = cropped[t];
+            float s = sinf(alpha_c * v);
+            cropped[t] = v + inv_beta_c * s * s;
+        }
+
+        int T_ds_padded = T_cropped + ds_pad_left + ds_pad_right;
+        std::vector<float> ds_padded(T_ds_padded);
+        for (int t = 0; t < ds_pad_left; t++)
+            ds_padded[t] = cropped[0];
+        for (int t = 0; t < T_cropped; t++)
+            ds_padded[ds_pad_left + t] = cropped[t];
+        for (int t = 0; t < ds_pad_right; t++)
+            ds_padded[ds_pad_left + T_cropped + t] = cropped[T_cropped - 1];
+
+        int T_out_ds = (T_ds_padded - K) / 2 + 1;
+        int T_final = std::min(T_out_ds, T);
+        for (int t = 0; t < T_final; t++) {
+            float sum = 0;
+            for (int k = 0; k < K; k++) {
+                sum += ds_padded[t * 2 + k] * p->ds_filter[k];
+            }
+            x_out[c * T + t] = sum;
+        }
+        for (int t = T_final; t < T; t++) {
+            x_out[c * T + t] = 0.0f;
+        }
+    }
+}
+
+static ggml_tensor* aa_snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor* log_alpha, ggml_tensor* log_beta,
+                                  ggml_tensor* us_filter_t, ggml_tensor* ds_filter_t,
+                                  std::vector<aa_snake_params*>& params_storage) {
+    if (!log_alpha || !log_beta) {
+        return x;
+    }
+
+    auto* p = new aa_snake_params();
+    params_storage.push_back(p);
+
+    int C = (int)log_alpha->ne[0];
+    p->C = C;
+    p->alpha.resize(C);
+    p->beta.resize(C);
+
+    std::vector<float> la(C), lb(C);
+    ggml_backend_tensor_get(log_alpha, la.data(), 0, C * sizeof(float));
+    ggml_backend_tensor_get(log_beta, lb.data(), 0, C * sizeof(float));
+    for (int i = 0; i < C; i++) {
+        p->alpha[i] = expf(la[i]);
+        p->beta[i] = expf(lb[i]);
+    }
+
+    if (us_filter_t) {
+        int flen = (int)ggml_nelements(us_filter_t);
+        p->us_filter.resize(flen);
+        ggml_backend_tensor_get(us_filter_t, p->us_filter.data(), 0, flen * sizeof(float));
+    } else {
+        p->us_filter.assign(12, 1.0f / 12.0f);
+    }
+    if (ds_filter_t) {
+        int flen = (int)ggml_nelements(ds_filter_t);
+        p->ds_filter.resize(flen);
+        ggml_backend_tensor_get(ds_filter_t, p->ds_filter.data(), 0, flen * sizeof(float));
+    } else {
+        p->ds_filter = p->us_filter;
+    }
+
+    return ggml_map_custom1(ctx, x, aa_snake_beta_op, GGML_N_TASKS_MAX, p);
 }
 
 // ── ECAPA-TDNN speaker encoder ──────────────────────────────────
@@ -678,12 +815,20 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
 
                 char key[80];
 
-                // SnakeBeta activation 1 (native ggml ops — runs on GPU)
+                // SnakeBeta activation 1
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.alpha", rb_idx, act_idx_1);
                 ggml_tensor* alpha1 = T(ts, key);
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.beta", rb_idx, act_idx_1);
                 ggml_tensor* beta1 = T(ts, key);
-                x = snake_beta_raw(ctx0, x, alpha1, beta1);
+                if (c->use_aa) {
+                    std::snprintf(key, sizeof(key), "resb.%d.act.%d.us.filter", rb_idx, act_idx_1);
+                    ggml_tensor* usf1 = T(ts, key);
+                    std::snprintf(key, sizeof(key), "resb.%d.act.%d.ds.filter", rb_idx, act_idx_1);
+                    ggml_tensor* dsf1 = T(ts, key);
+                    x = aa_snake_beta(ctx0, x, alpha1, beta1, usf1, dsf1, c->aa_params);
+                } else {
+                    x = snake_beta_raw(ctx0, x, alpha1, beta1);
+                }
 
                 // Conv1d with dilation
                 int pad1 = (rb_k * dil - dil) / 2;
@@ -698,12 +843,20 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
                     }
                 }
 
-                // SnakeBeta activation 2 (native ggml ops — runs on GPU)
+                // SnakeBeta activation 2
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.alpha", rb_idx, act_idx_2);
                 ggml_tensor* alpha2 = T(ts, key);
                 std::snprintf(key, sizeof(key), "resb.%d.act.%d.act.beta", rb_idx, act_idx_2);
                 ggml_tensor* beta2 = T(ts, key);
-                x = snake_beta_raw(ctx0, x, alpha2, beta2);
+                if (c->use_aa) {
+                    std::snprintf(key, sizeof(key), "resb.%d.act.%d.us.filter", rb_idx, act_idx_2);
+                    ggml_tensor* usf2 = T(ts, key);
+                    std::snprintf(key, sizeof(key), "resb.%d.act.%d.ds.filter", rb_idx, act_idx_2);
+                    ggml_tensor* dsf2 = T(ts, key);
+                    x = aa_snake_beta(ctx0, x, alpha2, beta2, usf2, dsf2, c->aa_params);
+                } else {
+                    x = snake_beta_raw(ctx0, x, alpha2, beta2);
+                }
 
                 // Conv2d (dilation=1)
                 int pad2 = (rb_k - 1) / 2;
@@ -736,11 +889,17 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
         ch = ch_out;
     }
 
-    // Final SnakeBeta activation (native ggml ops — runs on GPU)
+    // Final SnakeBeta activation
     {
         ggml_tensor* alpha_post = T(ts, "activation_post.act.alpha");
         ggml_tensor* beta_post = T(ts, "activation_post.act.beta");
-        x = snake_beta_raw(ctx0, x, alpha_post, beta_post);
+        if (c->use_aa) {
+            ggml_tensor* usf_post = T(ts, "activation_post.us.filter");
+            ggml_tensor* dsf_post = T(ts, "activation_post.ds.filter");
+            x = aa_snake_beta(ctx0, x, alpha_post, beta_post, usf_post, dsf_post, c->aa_params);
+        } else {
+            x = snake_beta_raw(ctx0, x, alpha_post, beta_post);
+        }
     }
 
     // conv_post: Conv1d(24, 1, k=7, pad=3)
@@ -776,6 +935,10 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
 
     auto* c = new indextts_voc_context();
     c->n_threads = n_threads > 0 ? n_threads : 4;
+
+    // INDEXTTS_VOCODER_AA=1 enables anti-aliased SnakeBeta (CPU, higher quality)
+    const char* aa_env = getenv("INDEXTTS_VOCODER_AA");
+    c->use_aa = (aa_env && aa_env[0] == '1');
 
     // Pass 1: metadata
     {
@@ -898,6 +1061,9 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
     }
 
     fprintf(stderr, "indextts-voc: loaded %zu tensors from '%s'\n", c->tensors.size(), path);
+    if (c->use_aa) {
+        fprintf(stderr, "indextts-voc: using ANTI-ALIASED SnakeBeta (CPU, INDEXTTS_VOCODER_AA=1)\n");
+    }
     return c;
 }
 
@@ -954,9 +1120,17 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
     }
 
     // Compute
+    auto t0 = std::chrono::high_resolution_clock::now();
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "indextts-voc: BigVGAN compute failed\n");
+        ctx->clear_aa_params();
         return nullptr;
+    }
+    ctx->clear_aa_params();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    if (ctx->verbosity >= 1) {
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        fprintf(stderr, "indextts-voc: BigVGAN compute %.1f ms (%s)\n", ms, ctx->use_aa ? "AA/CPU" : "native/GPU");
     }
 
     // Debug: read conv_pre output
