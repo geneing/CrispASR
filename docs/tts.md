@@ -447,5 +447,19 @@ BigVGAN vocoder (24 kHz).
 The `--voice` flag points to any mono WAV file (16 kHz or 24 kHz) of the
 target speaker. Longer clips (5-10 s) give better cloning fidelity.
 
+The BigVGAN vocoder runs anti-aliased SnakeBeta on the CPU by default
+(BigVGAN v2's upsample→activate→downsample sandwich; the raw activation
+emits harmonics above Nyquist that fold back as audible click/buzz). On
+M1 this adds ~5 % to the vocoder stage versus the aliased path. Two env
+knobs for power users:
+
+- `INDEXTTS_VOCODER_RAW=1` — opt out of AA; fully GPU-graphable but
+  produces ~2 k impossible inter-sample jumps on speech. Use only for
+  reproducing the legacy / aliased benchmark.
+- `--no-gpu` — keeps the whole vocoder graph on CPU. Recommended for
+  IndexTTS specifically: the GPT codes generate quickly either way, and
+  the AA custom op forces a GPU↔CPU sync per AMP block when mixed with
+  Metal, leaving GPU + AA the slowest of the four combinations.
+
 Set `INDEXTTS_DEBUG=1` for per-stage intermediate dumps (mel, conformer
 blocks, perceiver output) useful for diff-testing against Python.

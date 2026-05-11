@@ -85,13 +85,21 @@ static ggml_tensor* T(const std::map<std::string, ggml_tensor*>& m, const std::s
 
 // ── Context ─────────────────────────────────────────────────────
 
-// Anti-aliased SnakeBeta params for the CPU path (INDEXTTS_VOCODER_AA=1)
+// Anti-aliased SnakeBeta params for the CPU path.
+// Pre-scaled filters and per-thread scratch buffers eliminate the per-channel
+// std::vector allocations that used to dominate runtime.
 struct aa_snake_params {
-    std::vector<float> alpha;     // exp(log_alpha), per channel
-    std::vector<float> beta;      // exp(log_beta), per channel
-    std::vector<float> us_filter; // upsample filter [12]
-    std::vector<float> ds_filter; // downsample filter [12]
+    std::vector<float> alpha;        // exp(log_alpha), per channel
+    std::vector<float> beta;         // exp(log_beta), per channel
+    std::vector<float> us_filter_x2; // upsample filter * 2.0f, length K
+    std::vector<float> ds_filter;    // downsample filter, length K
     int C;
+
+    // Thread-local scratch (resized lazily on first use).
+    // Indexed by ith (worker id); access is single-writer per thread.
+    mutable std::vector<std::vector<float>> scratch_padded;
+    mutable std::vector<std::vector<float>> scratch_upsampled;
+    mutable std::vector<std::vector<float>> scratch_dspadded;
 };
 
 struct indextts_voc_context {
@@ -109,7 +117,12 @@ struct indextts_voc_context {
 
     int n_threads = 4;
     int verbosity = 1;
-    bool use_aa = false; // INDEXTTS_VOCODER_AA=1 enables anti-aliased SnakeBeta (CPU)
+    // BigVGAN v2 needs anti-aliased SnakeBeta — the raw `x + sin(αx)²/β`
+    // emits broadband aliases (squared-sine harmonics above Nyquist fold back as
+    // click-like artifacts; verified ~2k inter-sample jumps > 30 % FS on JFK
+    // prompt). AA is on by default. Set INDEXTTS_VOCODER_RAW=1 to opt out
+    // (e.g. for A/B benchmarking against the broken-but-faster GPU path).
+    bool use_aa = true;
 
     // Anti-aliased SnakeBeta params (only used when use_aa=true)
     std::vector<aa_snake_params*> aa_params;
@@ -147,10 +160,12 @@ namespace {
 // SnakeBeta: x + sin(α·x)² / β  where α=exp(log_alpha), β=exp(log_beta).
 // Expressed as native ggml ops so the entire BigVGAN graph stays on GPU.
 //
-// The original BigVGAN v2 wraps this in 2x anti-aliased resampling
-// (upsample → activate → downsample with a Kaiser-windowed sinc filter).
-// We omit the AA because ggml_conv_1d_dw has no CUDA kernel, and the
-// quality impact on TTS speech is negligible.
+// This is the RAW path — kept for opt-in benchmarking via
+// INDEXTTS_VOCODER_RAW=1. BigVGAN v2 paper wraps this activation in 2× AA
+// resampling (upsample → activate → downsample, Kaiser-windowed sinc) for a
+// reason: x + sin(α·x)² is non-band-limited, and on real TTS prompts the raw
+// path produces ~2k sample-to-sample jumps > 30 % FS — audible as broadband
+// click/buzz. AA is the default; see `aa_snake_beta` below.
 
 static ggml_tensor* snake_beta_raw(ggml_context* ctx, ggml_tensor* x, ggml_tensor* log_alpha, ggml_tensor* log_beta) {
     if (!log_alpha || !log_beta)
@@ -165,10 +180,12 @@ static ggml_tensor* snake_beta_raw(ggml_context* ctx, ggml_tensor* x, ggml_tenso
     return ggml_add(ctx, x, term);
 }
 
-// ── Anti-aliased SnakeBeta (CPU, INDEXTTS_VOCODER_AA=1) ─────────
+// ── Anti-aliased SnakeBeta (CPU, default; opt out via INDEXTTS_VOCODER_RAW=1)
 //
-// Full Activation1d: upsample 2x → SnakeBeta → downsample 2x.
-// Higher quality but CPU-only (no CUDA depthwise conv_transpose).
+// Full Activation1d: upsample 2× → SnakeBeta → downsample 2×.
+// CPU-only for now (the depthwise FIR doesn't have a ggml GPU kernel that we
+// trust on Metal). Hot-loop uses thread-local pre-allocated scratch + pre-×2
+// upsample filter to minimise overhead vs the raw GPU path.
 
 static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* src, int ith, int nth, void* userdata) {
     const auto* p = (const aa_snake_params*)userdata;
@@ -176,7 +193,7 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
     const int C = (int)src->ne[1];
     const float* x_in = (const float*)src->data;
     float* x_out = (float*)dst->data;
-    const int K = (int)p->us_filter.size();
+    const int K = (int)p->us_filter_x2.size();
     const int up_pad = K / 2 - 1;
     const int up_pad_left = up_pad * 2 + (K - 2) / 2;
     const int up_pad_right = up_pad * 2 + (K - 2 + 1) / 2;
@@ -186,57 +203,81 @@ static void aa_snake_beta_op(struct ggml_tensor* dst, const struct ggml_tensor* 
     const int c_start = (C * ith) / nth;
     const int c_end = (C * (ith + 1)) / nth;
 
+    // Grab this worker's scratch buffers (resized on first use; capacity sticks
+    // for the rest of the run since T is bounded by the largest BigVGAN layer).
+    const int T_padded = T + 2 * up_pad;
+    const int T_up = (T_padded - 1) * 2 + K;
+    const int T_cropped = T_up - up_pad_left - up_pad_right;
+    const int T_ds_padded = T_cropped + ds_pad_left + ds_pad_right;
+
+    auto& padded = p->scratch_padded[ith];
+    auto& upsampled = p->scratch_upsampled[ith];
+    auto& ds_padded = p->scratch_dspadded[ith];
+    if ((int)padded.size() < T_padded)
+        padded.resize(T_padded);
+    if ((int)upsampled.size() < T_up)
+        upsampled.resize(T_up);
+    if ((int)ds_padded.size() < T_ds_padded)
+        ds_padded.resize(T_ds_padded);
+
+    // Cache the pre-scaled (×2) upsample filter and the downsample filter
+    // locally so the inner loops touch dense stack memory, not p-> pointer.
+    const float* uf2 = p->us_filter_x2.data();
+    const float* df = p->ds_filter.data();
+
     for (int c = c_start; c < c_end; c++) {
-        float alpha_c = (c < p->C) ? p->alpha[c] : 1.0f;
-        float inv_beta_c = (c < p->C) ? (1.0f / p->beta[c]) : 1.0f;
+        const float alpha_c = (c < p->C) ? p->alpha[c] : 1.0f;
+        const float inv_beta = (c < p->C) ? (1.0f / p->beta[c]) : 1.0f;
+        const float* x_in_c = x_in + (size_t)c * T;
+        float* x_out_c = x_out + (size_t)c * T;
 
-        int T_padded = T + 2 * up_pad;
-        std::vector<float> padded(T_padded);
+        // Edge-replication padding for upsample.
+        const float left_edge = x_in_c[0];
+        const float right_edge = x_in_c[T - 1];
         for (int t = 0; t < up_pad; t++)
-            padded[t] = x_in[c * T];
-        for (int t = 0; t < T; t++)
-            padded[up_pad + t] = x_in[c * T + t];
+            padded[t] = left_edge;
+        std::memcpy(padded.data() + up_pad, x_in_c, (size_t)T * sizeof(float));
         for (int t = 0; t < up_pad; t++)
-            padded[up_pad + T + t] = x_in[c * T + (T - 1)];
+            padded[up_pad + T + t] = right_edge;
 
-        int T_up = (T_padded - 1) * 2 + K;
-        std::vector<float> upsampled(T_up, 0.0f);
+        // Zero-stuff upsample by 2 + FIR (Kaiser-windowed sinc, pre-×2 baked in).
+        std::memset(upsampled.data(), 0, (size_t)T_up * sizeof(float));
         for (int t = 0; t < T_padded; t++) {
-            for (int k = 0; k < K; k++) {
-                upsampled[t * 2 + k] += padded[t] * p->us_filter[k] * 2.0f;
-            }
+            const float v = padded[t];
+            float* dst_row = upsampled.data() + t * 2;
+            for (int k = 0; k < K; k++)
+                dst_row[k] += v * uf2[k];
         }
 
-        int T_cropped = T_up - up_pad_left - up_pad_right;
+        // SnakeBeta in-place on the cropped upsampled range.
         float* cropped = upsampled.data() + up_pad_left;
-
         for (int t = 0; t < T_cropped; t++) {
-            float v = cropped[t];
-            float s = sinf(alpha_c * v);
-            cropped[t] = v + inv_beta_c * s * s;
+            const float v = cropped[t];
+            const float s = sinf(alpha_c * v);
+            cropped[t] = v + inv_beta * s * s;
         }
 
-        int T_ds_padded = T_cropped + ds_pad_left + ds_pad_right;
-        std::vector<float> ds_padded(T_ds_padded);
+        // Edge-replication padding for downsample.
+        const float c_left = cropped[0];
+        const float c_right = cropped[T_cropped - 1];
         for (int t = 0; t < ds_pad_left; t++)
-            ds_padded[t] = cropped[0];
-        for (int t = 0; t < T_cropped; t++)
-            ds_padded[ds_pad_left + t] = cropped[t];
+            ds_padded[t] = c_left;
+        std::memcpy(ds_padded.data() + ds_pad_left, cropped, (size_t)T_cropped * sizeof(float));
         for (int t = 0; t < ds_pad_right; t++)
-            ds_padded[ds_pad_left + T_cropped + t] = cropped[T_cropped - 1];
+            ds_padded[ds_pad_left + T_cropped + t] = c_right;
 
-        int T_out_ds = (T_ds_padded - K) / 2 + 1;
-        int T_final = std::min(T_out_ds, T);
+        // Stride-2 downsample FIR.
+        const int T_out_ds = (T_ds_padded - K) / 2 + 1;
+        const int T_final = std::min(T_out_ds, T);
         for (int t = 0; t < T_final; t++) {
+            const float* row = ds_padded.data() + t * 2;
             float sum = 0;
-            for (int k = 0; k < K; k++) {
-                sum += ds_padded[t * 2 + k] * p->ds_filter[k];
-            }
-            x_out[c * T + t] = sum;
+            for (int k = 0; k < K; k++)
+                sum += row[k] * df[k];
+            x_out_c[t] = sum;
         }
-        for (int t = T_final; t < T; t++) {
-            x_out[c * T + t] = 0.0f;
-        }
+        for (int t = T_final; t < T; t++)
+            x_out_c[t] = 0.0f;
     }
 }
 
@@ -263,22 +304,42 @@ static ggml_tensor* aa_snake_beta(ggml_context* ctx, ggml_tensor* x, ggml_tensor
         p->beta[i] = expf(lb[i]);
     }
 
-    if (us_filter_t) {
-        int flen = (int)ggml_nelements(us_filter_t);
-        p->us_filter.resize(flen);
-        ggml_backend_tensor_get(us_filter_t, p->us_filter.data(), 0, flen * sizeof(float));
-    } else {
-        p->us_filter.assign(12, 1.0f / 12.0f);
+    {
+        std::vector<float> us(12, 1.0f / 12.0f);
+        if (us_filter_t) {
+            int flen = (int)ggml_nelements(us_filter_t);
+            us.resize(flen);
+            ggml_backend_tensor_get(us_filter_t, us.data(), 0, flen * sizeof(float));
+        }
+        // Bake the ×2 gain (from zero-stuff upsampling) into the filter so the
+        // hot loop is one mul, not two.
+        p->us_filter_x2.resize(us.size());
+        for (size_t i = 0; i < us.size(); ++i)
+            p->us_filter_x2[i] = us[i] * 2.0f;
     }
     if (ds_filter_t) {
         int flen = (int)ggml_nelements(ds_filter_t);
         p->ds_filter.resize(flen);
         ggml_backend_tensor_get(ds_filter_t, p->ds_filter.data(), 0, flen * sizeof(float));
     } else {
-        p->ds_filter = p->us_filter;
+        p->ds_filter.resize(p->us_filter_x2.size());
+        for (size_t i = 0; i < p->ds_filter.size(); ++i)
+            p->ds_filter[i] = p->us_filter_x2[i] * 0.5f;
     }
 
-    return ggml_map_custom1(ctx, x, aa_snake_beta_op, GGML_N_TASKS_MAX, p);
+    // Pre-allocate per-thread scratch slots. ggml_map_custom1 is invoked with
+    // up to ggml_cpu_n_threads() workers; AA_SCRATCH_MAX_THREADS is a fixed
+    // upper bound (GGML_N_TASKS_MAX is the sentinel −1, not a count). Each
+    // worker writes only its own slot, so the outer vector is fixed-size and
+    // race-free.
+    constexpr int AA_SCRATCH_MAX_THREADS = 64;
+    p->scratch_padded.resize(AA_SCRATCH_MAX_THREADS);
+    p->scratch_upsampled.resize(AA_SCRATCH_MAX_THREADS);
+    p->scratch_dspadded.resize(AA_SCRATCH_MAX_THREADS);
+
+    // Bound worker count at the scratch-slot count; ggml will further cap at
+    // the actual thread pool size.
+    return ggml_map_custom1(ctx, x, aa_snake_beta_op, AA_SCRATCH_MAX_THREADS, p);
 }
 
 // ── ECAPA-TDNN speaker encoder ──────────────────────────────────
@@ -936,9 +997,20 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
     auto* c = new indextts_voc_context();
     c->n_threads = n_threads > 0 ? n_threads : 4;
 
-    // INDEXTTS_VOCODER_AA=1 enables anti-aliased SnakeBeta (CPU, higher quality)
+    // BigVGAN v2 anti-aliased SnakeBeta is on by default — the raw activation
+    // produces audible aliasing (verified). Two env knobs:
+    //   INDEXTTS_VOCODER_RAW=1 → force raw SnakeBeta (legacy path; aliased)
+    //   INDEXTTS_VOCODER_AA=0  → same, alternate spelling
+    //   INDEXTTS_VOCODER_AA=1  → force AA (also the default)
+    const char* raw_env = getenv("INDEXTTS_VOCODER_RAW");
     const char* aa_env = getenv("INDEXTTS_VOCODER_AA");
-    c->use_aa = (aa_env && aa_env[0] == '1');
+    if (raw_env && raw_env[0] == '1') {
+        c->use_aa = false;
+    } else if (aa_env && aa_env[0] == '0') {
+        c->use_aa = false;
+    } else {
+        c->use_aa = true;
+    }
 
     // Pass 1: metadata
     {
@@ -1061,9 +1133,8 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
     }
 
     fprintf(stderr, "indextts-voc: loaded %zu tensors from '%s'\n", c->tensors.size(), path);
-    if (c->use_aa) {
-        fprintf(stderr, "indextts-voc: using ANTI-ALIASED SnakeBeta (CPU, INDEXTTS_VOCODER_AA=1)\n");
-    }
+    fprintf(stderr, "indextts-voc: SnakeBeta = %s\n",
+            c->use_aa ? "anti-aliased (CPU; default)" : "raw (aliased, faster; INDEXTTS_VOCODER_RAW=1)");
     return c;
 }
 

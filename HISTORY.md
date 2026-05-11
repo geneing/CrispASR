@@ -3462,3 +3462,44 @@ resample is the fallback.
 
 Closes PLAN #88 entirely. Both kokoro + vibevoice runtime knobs
 now reachable from any C-ABI consumer.
+
+### §86 — IndexTTS BigVGAN anti-aliased SnakeBeta on by default (2026-05-11)
+
+Spotted while A/B-benchmarking IndexTTS-1.5 across `{Q4_K, Q8_0, F16}` ×
+`{GPU, CPU, CPU+AA}` on M1. The non-AA outputs measured fine on peak/RMS
+but had ~2 000 sample-to-sample jumps exceeding 30 % FS (and several
+over 100 % FS — physically impossible for a 24 kHz band-limited signal);
+audible as broadband click/buzz on every quant. The AA path produced
+0–27 such jumps. The original `src/indextts_voc.cpp` comment claiming
+"quality impact on TTS speech is negligible" was wrong; BigVGAN v2's
+upsample→activate→downsample sandwich exists exactly to suppress the
+`sin²` harmonics SnakeBeta emits above Nyquist.
+
+Shipped:
+
+- AA is the default. `INDEXTTS_VOCODER_RAW=1` (or `INDEXTTS_VOCODER_AA=0`)
+  opts back into the aliased fast path; useful for the speed A/B and as
+  the legacy fallback if the AA op ever regresses.
+- Pre-allocated per-thread scratch (lifted three per-channel
+  `std::vector<float>` allocations out of the hot loop, capped at 64
+  workers since `GGML_N_TASKS_MAX` is the `-1` sentinel not a count).
+- Pre-scaled the upsample FIR by ×2 (zero-stuff gain) so the inner loop
+  is one mul, not two.
+- `std::memcpy`/`std::memset` replace per-element padding fills.
+
+Result on M1, JFK voice prompt, ≈ 6.7 s of audio: AA on CPU drops to
+6.65 s vocoder-only (was 6.7–9.3 s before optimization, ≈ 5 % over raw),
+and the click-detector reads 0–2 jumps > 30 % FS instead of 1 600–2 600.
+AA on GPU is 8.5 s — slowest because the CPU custom op forces a Metal →
+CPU → Metal sync per AMP block; recommend `--no-gpu` for IndexTTS until
+the AA sandwich is ported to native ggml ops (`ggml_conv_transpose_1d` +
+depthwise `ggml_conv_1d`, both Metal-capable via IM2COL).
+
+Stale GGUFs at `~/.cache/crispasr/` and `/Volumes/backups/ai/crispasr/`
+predated commit `99fca4c3` (`_shorten_gpt`) — tensor names up to 66 chars
+hit `GGML_MAX_NAME = 64` and `gguf.cpp:587` rejects the file. Re-pulled
+from `cstr/indextts-1.5-GGUF` (already ships the corrected names) for
+the bench; that's where the registry's `-m auto` path lands.
+
+Full A/B numbers + click-detector results: `LEARNINGS.md` §"BigVGAN v2
+SnakeBeta needs anti-aliasing".

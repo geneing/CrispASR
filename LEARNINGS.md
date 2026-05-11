@@ -4480,3 +4480,68 @@ The C++ originally applied rep penalty to raw logits BEFORE log_softmax,
 which changes beam dynamics. With `repetition_penalty=10.0`, this causes
 different beam paths to win. Fix: compute log_softmax first, then apply
 penalty to log-probs, matching HF's exact order.
+
+### BigVGAN v2 SnakeBeta needs anti-aliasing — "negligible" was wrong (May 2026)
+
+The raw SnakeBeta activation `y = x + sin(α·x)² / β` is not band-limited:
+`sin²` introduces harmonics at 2α·x, 4α·x, … For trained α values in
+BigVGAN v2 (the `_post` layer in particular has large α), those harmonics
+land well above Nyquist and fold back as broadband click/buzz. The
+original BigVGAN v2 paper wraps the activation in 2× upsample → activate
+→ 2× downsample (Kaiser-windowed sinc) specifically to suppress that
+aliasing.
+
+CrispASR's first cut omitted the AA "because `ggml_conv_1d_dw` has no
+CUDA kernel, and the quality impact on TTS speech is negligible." The
+quality claim was just wrong — on the JFK-cloned "quick brown fox …"
+prompt the raw path produced ~2 000 sample-to-sample jumps over 30 % FS
+and several over 100 % FS (physically impossible in a band-limited
+24 kHz signal), audible as steady click/buzz across every quant. The AA
+path measured 0–27 such jumps, max\|Δ\| ≤ 0.38 — clean speech.
+
+How we caught it: `np.diff(wav)` is the cheapest aliasing detector we
+have. Any `|Δsample|` exceeding `2·sin(π·f_max/fs)` for the band-limit
+`f_max` is impossible without aliasing. For 24 kHz 16-bit speech with
+voice content roughly below 12 kHz, `Δ > 0.5` is a hard ceiling; counts
+in the thousands == broken.
+
+What we shipped (`src/indextts_voc.cpp`):
+
+1. **AA is the default.** `INDEXTTS_VOCODER_RAW=1` (or `_AA=0`) opts back
+   into the aliased path for benchmarking. We kept the raw path because
+   it's the only fully-GPU-graphable activation we have today.
+2. **Pre-allocated thread-local scratch.** The original AA op allocated
+   three `std::vector<float>` per channel per call — at 1536 ch × 24
+   layers per generate, that was ~37 k mallocs of 100 KB+ on the hot
+   path. Lifted to per-thread (`ith`-indexed) scratch sized lazily on
+   first use; `GGML_N_TASKS_MAX` is the `-1` sentinel, not a count, so
+   we cap at 64 threads explicitly (`AA_SCRATCH_MAX_THREADS`) and pass
+   that to `ggml_map_custom1` as the task hint.
+3. **Pre-scaled upsample filter.** Multiply the FIR taps by 2 once at
+   init (cancels the zero-stuff gain), saving one mul in the inner loop.
+4. **`memcpy`/`memset` for the edge-replication padding** — small, but
+   the inner-loop trace was dominated by the C++ per-element copies the
+   original used.
+
+Result on M1, JFK voice prompt, ≈ 6.7 s of audio:
+
+| Vocoder config          | Δ>0.3 | max\|Δ\| | voc-only |
+| ----------------------- | ----- | -------- | -------- |
+| RAW / CPU (aliased)     | 1671  | 0.89     | 6.36 s   |
+| RAW / GPU (aliased)     | 2080  | 1.04     | 7.12 s   |
+| **AA / CPU (default)**  | **2** | **0.31** | 6.65 s   |
+| AA / GPU                | 26    | 0.38     | 8.52 s   |
+
+`AA / CPU` is the new sweet spot — only ~5 % slower than the broken-but-
+fast RAW / CPU. `AA / GPU` is slowest because the `ggml_map_custom1` op
+forces a Metal → CPU → Metal sync at every AMP block; if the rest of the
+vocoder graph is on Metal we trade GPU-friendly matmuls for cross-device
+copies and net-lose. Best operational answer until someone ports the AA
+sandwich to native ggml ops: tell IndexTTS users to pass `--no-gpu` if
+the prompt is short, or accept the ~25 % vocoder slowdown for the
+voice-cloning convenience of keeping the GPT on GPU.
+
+Lesson: comments claiming "negligible quality impact" age badly. When a
+paper introduces a deliberate signal-processing stage, it's almost
+always there for a reason; if you remove it, prove the absence of harm
+with `np.diff` or a spectrogram, not assertion.
