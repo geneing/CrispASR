@@ -486,8 +486,14 @@ static ggml_tensor* ecapa_asp(ggml_context* ctx, ggml_tensor* x, const std::map<
 static ggml_cgraph* build_ecapa_graph(indextts_voc_context* c, int T_mel) {
     auto& ts = c->tensors;
     const size_t n_nodes = 8192;
-    std::vector<uint8_t> meta(ggml_tensor_overhead() * n_nodes + ggml_graph_overhead_custom(n_nodes, false));
-    ggml_init_params ip = {meta.size(), meta.data(), true};
+    // Use persistent compute_meta buffer (same as BigVGAN graph) so the graph
+    // remains valid after this function returns.  A local vector would be freed
+    // on return, leaving dangling pointers in the returned graph.
+    const size_t need = ggml_tensor_overhead() * n_nodes + ggml_graph_overhead_custom(n_nodes, false);
+    if (c->compute_meta.size() < need) {
+        c->compute_meta.resize(need);
+    }
+    ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, n_nodes, false);
 

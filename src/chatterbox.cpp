@@ -1335,38 +1335,6 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_KROPE_AT", "L0_K_rope", (int)c->hp.head_dim);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_ATTN_AT", "DBG_attn_out", (int)c->hp.hidden_size);
     dump_intermediate("CRISPASR_CHATTERBOX_DUMP_FFN_AT", "DBG_ffn_out", (int)c->hp.hidden_size);
-    dump_intermediate("CRISPASR_CORE_ATTN_DUMP_FA_AT", "DBG_fa_reshaped", (int)c->hp.hidden_size);
-    dump_intermediate("CRISPASR_CORE_ATTN_DUMP_Q_AT", "DBG_Q_post_rope", (int)c->hp.head_dim);
-
-    // Kfull/Vfull layout (hd, Lk, n_kv): T is axis 1 (not axis 2 as for
-    // post-rope K). Custom dumper using nb[1].
-    auto dump_kvfull = [&](const char* env_name, const char* tname) {
-        const char* e = std::getenv(env_name);
-        if (!e || !*e)
-            return;
-        const int row_id = (int)std::strtol(e, nullptr, 10);
-        if (n_past + n_tokens <= row_id || n_past > row_id)
-            return;
-        if (use_kv_k != nullptr && use_kv_k != c->kv_k)
-            return;
-        ggml_tensor* t = ggml_graph_get_tensor(gf, tname);
-        if (!t)
-            return;
-        const int local_row = row_id - n_past;
-        const int hd_l = (int)c->hp.head_dim;
-        const size_t row_bytes = (size_t)hd_l * sizeof(float);
-        const size_t off_bytes = (size_t)local_row * t->nb[1];
-        if (off_bytes + row_bytes > ggml_nbytes(t))
-            return;
-        std::vector<float> buf(hd_l);
-        ggml_backend_tensor_get(t, buf.data(), off_bytes, row_bytes);
-        fprintf(stderr, "[%s] t=%d:", tname, row_id);
-        for (int i = 0; i < std::min(8, hd_l); i++)
-            fprintf(stderr, " %.4f", buf[i]);
-        fprintf(stderr, "\n");
-    };
-    dump_kvfull("CRISPASR_CORE_ATTN_DUMP_KFULL_AT", "DBG_Kfull");
-    dump_kvfull("CRISPASR_CORE_ATTN_DUMP_VFULL_AT", "DBG_Vfull");
 
     // Special: dump the dequantised K weight tensor (row 0).  Stride through
     // the row in chunks to expose any per-block drift.
@@ -1392,31 +1360,27 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
     // contents for the row at the specified n_past offset to stderr,
     // ONLY for the cond pass (use_kv_k == c->kv_k or null). Allows
     // comparing on/off-GPU writes byte-by-byte at a single step.
-    auto dump_kv_cache = [&](const char* env_name, const char* tag, ggml_tensor* kv_t) {
-        const char* e = std::getenv(env_name);
-        if (!e || !*e)
-            return;
+    if (const char* e = std::getenv("CRISPASR_CHATTERBOX_DUMP_KV_AT"); e && *e) {
         const int dump_n_past = (int)std::strtol(e, nullptr, 10);
         const char* lyr_env = std::getenv("CRISPASR_CHATTERBOX_DUMP_KV_LAYER");
         const int dump_layer = lyr_env ? (int)std::strtol(lyr_env, nullptr, 10) : 0;
         if (n_past + n_tokens > dump_n_past && n_past <= dump_n_past && (use_kv_k == nullptr || use_kv_k == c->kv_k)) {
             const int hd_l = (int)c->hp.head_dim;
+            ggml_tensor* kv_t = c->kv_k;
             const size_t row_bytes = (size_t)hd_l * ggml_type_size(kv_t->type);
             const size_t off_bytes = (size_t)dump_layer * kv_t->nb[3] + (size_t)dump_n_past * kv_t->nb[1];
             std::vector<uint8_t> raw(row_bytes);
             ggml_backend_tensor_get(kv_t, raw.data(), off_bytes, row_bytes);
-            fprintf(stderr, "[%s] L=%d h=0 t=%d type=%s hd=%d:", tag, dump_layer, dump_n_past,
-                    ggml_type_name(kv_t->type), hd_l);
+            fprintf(stderr, "[KV] L=%d h=0 t=%d type=%s hd=%d:", dump_layer, dump_n_past, ggml_type_name(kv_t->type),
+                    hd_l);
             if (kv_t->type == GGML_TYPE_F16) {
-                // memcpy avoids the unsigned-char* → ggml_fp16_t* type-pun
-                // cast that trips cppcheck's dangerousTypeCast warning
-                // (paired with the F32 branch below; pattern matched).
                 for (int i = 0; i < std::min(8, hd_l); i++) {
-                    ggml_fp16_t h;
-                    std::memcpy(&h, raw.data() + i * sizeof(ggml_fp16_t), sizeof(ggml_fp16_t));
-                    fprintf(stderr, " %.4f", ggml_fp16_to_fp32(h));
+                    fprintf(stderr, " %.4f", ggml_fp16_to_fp32(((ggml_fp16_t*)raw.data())[i]));
                 }
             } else if (kv_t->type == GGML_TYPE_F32) {
+                // memcpy avoids the unsigned-char* → float* type-pun cast
+                // that trips cppcheck's invalidPointerCast portability
+                // warning. The buffer really is F32 in this branch.
                 for (int i = 0; i < std::min(8, hd_l); i++) {
                     float v;
                     std::memcpy(&v, raw.data() + i * sizeof(float), sizeof(float));
@@ -1425,11 +1389,7 @@ static float* run_t3_kv(chatterbox_context* c, const float* embeds, int n_tokens
             }
             fprintf(stderr, "\n");
         }
-    };
-    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_KV_AT", "KV", c->kv_k);
-    dump_kv_cache("CRISPASR_CHATTERBOX_DUMP_VV_AT", "VV", c->kv_v);
-
-    // Skip the legacy KV inline dump (now handled by the lambda above).
+    }
     return r;
 }
 
@@ -2087,7 +2047,6 @@ extern "C" struct chatterbox_context_params chatterbox_context_default_params(vo
     p.top_p = 1.0f;
     p.max_speech_tokens = 1000;
     p.cfm_steps = 10;
-    p.flash_attn = true;
     return p;
 }
 
@@ -2167,19 +2126,8 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
     // both on GPU, expected to be broken). CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU=1
     // tries the selective split (kept for future regression once the kernel
     // lands).
-    // Both backend toggles intentionally start at the same default
-    // and are flipped independently below depending on the user's
-    // CRISPASR_CHATTERBOX_* env knobs — the CPU-fallback path zeros
-    // only t3_use_gpu under the split mode, only s3gen under the
-    // separate setups, both under the auto-fallback path. Going
-    // through a `default_use_gpu` constant (rather than two parallel
-    // assignments of `params.use_gpu`) avoids cppcheck's
-    // duplicateAssignExpression false-positive whose inline
-    // `// cppcheck-suppress` comments empirically don't take effect
-    // on the CI's cppcheck version.
-    const bool default_use_gpu = params.use_gpu;
-    bool t3_use_gpu = default_use_gpu;
-    bool s3gen_use_gpu = default_use_gpu;
+    bool t3_use_gpu = params.use_gpu;
+    bool s3gen_use_gpu = params.use_gpu;
     if (params.use_gpu) {
         const char* force_gpu_env = std::getenv("CRISPASR_CHATTERBOX_FORCE_GPU");
         const bool force_gpu = force_gpu_env && *force_gpu_env && std::strcmp(force_gpu_env, "0") != 0;
@@ -3288,67 +3236,6 @@ extern "C" void chatterbox_set_cfg_weight(struct chatterbox_context* ctx, float 
 extern "C" void chatterbox_set_cfm_steps(struct chatterbox_context* ctx, int steps) {
     if (ctx)
         ctx->params.cfm_steps = (steps > 0 && steps <= 100) ? steps : 10;
-}
-
-// Runtime sampling-knob setters. The chatterbox AR loop reads
-// `ctx->params.X` on every sample (see sample_token call site in
-// chatterbox_synthesize_codes), so post-init mutation is safe.
-// Each setter clamps to a sensible range and silently no-ops on
-// nonsense input rather than throwing — the C ABI surface stays
-// crash-free for thin wrappers like the Dart binding.
-extern "C" void chatterbox_set_temperature(struct chatterbox_context* ctx, float temperature) {
-    if (!ctx)
-        return;
-    // 0.0 = greedy (argmax). Allow up to 4.0; beyond that the softmax
-    // is essentially uniform and you're just sampling noise.
-    if (temperature < 0.0f)
-        temperature = 0.0f;
-    if (temperature > 4.0f)
-        temperature = 4.0f;
-    ctx->params.temperature = temperature;
-}
-
-extern "C" void chatterbox_set_top_p(struct chatterbox_context* ctx, float top_p) {
-    if (!ctx)
-        return;
-    if (top_p < 0.0f)
-        top_p = 0.0f;
-    if (top_p > 1.0f)
-        top_p = 1.0f;
-    ctx->params.top_p = top_p;
-}
-
-extern "C" void chatterbox_set_min_p(struct chatterbox_context* ctx, float min_p) {
-    if (!ctx)
-        return;
-    if (min_p < 0.0f)
-        min_p = 0.0f;
-    if (min_p > 1.0f)
-        min_p = 1.0f;
-    ctx->params.min_p = min_p;
-}
-
-extern "C" void chatterbox_set_repetition_penalty(struct chatterbox_context* ctx, float r) {
-    if (!ctx)
-        return;
-    // 1.0 = no penalty (Pytorch default). Below 1.0 *encourages* repeats.
-    if (r < 0.5f)
-        r = 0.5f;
-    if (r > 2.0f)
-        r = 2.0f;
-    ctx->params.repetition_penalty = r;
-}
-
-extern "C" void chatterbox_set_max_speech_tokens(struct chatterbox_context* ctx, int n) {
-    if (!ctx)
-        return;
-    // Default is 1000; allow up to 4000 (= ~80 s of speech tokens at
-    // 50 Hz). Anything below 32 is unusable.
-    if (n < 32)
-        n = 32;
-    if (n > 4000)
-        n = 4000;
-    ctx->params.max_speech_tokens = n;
 }
 
 extern "C" void chatterbox_tokens_free(int32_t* tokens) {
