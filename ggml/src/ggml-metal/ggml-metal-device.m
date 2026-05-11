@@ -768,6 +768,19 @@ static NSURL * crispasr_metal_pipeline_cache_url(NSString * device_name) {
 // nil when caching is disabled, the cache file is corrupt (load
 // failed), or the device doesn't support binary archives.
 static void crispasr_metal_pipeline_cache_open(ggml_metal_device_t dev) {
+    // MTLBinaryArchive + the descriptor-attached pipeline-creation
+    // form both require macOS 11.0 / iOS 14.0 / tvOS 14.0. Older
+    // systems silently skip caching (the rest of the code already
+    // handles `dev->binary_archive == nil` gracefully by falling
+    // back to the historical newComputePipelineStateWithFunction
+    // path inside the descriptor — Metal accepts a nil
+    // binaryArchives array).
+    if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+        // continue
+    } else {
+        return;
+    }
+
     const char * disable = getenv("GGML_METAL_PIPELINE_CACHE_DISABLE");
     if (disable && disable[0] != '\0' && disable[0] != '0') {
         GGML_LOG_INFO("%s: GGML_METAL_PIPELINE_CACHE_DISABLE set — skipping pipeline cache\n", __func__);

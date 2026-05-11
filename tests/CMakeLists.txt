@@ -242,6 +242,65 @@ catch_discover_tests(test-chatterbox-params
     PROPERTIES LABELS "unit;chatterbox"
 )
 
+# ─── test - flash - attn - defaults — Catch2 unit tests for the PLAN #89
+# flash_attn-field plumbing across every backend with use_gpu.
+# Auto-skips backends not built into the current libcrispasr slice
+# (each section is guarded by `__has_include("backend.h")`), so the
+# test runs on every CMake configuration without hand-tuning. ────────
+add_executable(test-flash-attn-defaults
+    test-flash-attn-defaults.cpp
+)
+target_include_directories(test-flash-attn-defaults PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+# Link every backend whose header we touch. CMake auto-skips
+# missing targets via the if(TARGET …) guards so a slim build
+# (e.g. iOS device-only with fewer backends) still configures.
+set(_flash_attn_test_libs Catch2::Catch2WithMain)
+foreach(_be parakeet canary cohere qwen3_asr voxtral voxtral4b
+             granite_speech vibevoice qwen3_tts orpheus kokoro
+             chatterbox)
+    if (TARGET ${_be})
+        list(APPEND _flash_attn_test_libs ${_be})
+    endif()
+endforeach()
+target_link_libraries(test-flash-attn-defaults PRIVATE ${_flash_attn_test_libs})
+unset(_flash_attn_test_libs)
+catch_discover_tests(test-flash-attn-defaults
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;flash_attn"
+)
+
+# ─── test - metal - pipeline - cache — Apple-only smoke test for the
+# persistent MTLBinaryArchive cache (PLAN #88 / CrisperWeaver §5.18).
+# Compiled with -ObjC++ when Metal is enabled; on Linux / Windows
+# the .mm body collapses to a single "skipped" TEST_CASE so the
+# binary still builds and registers cleanly. ────────
+if (APPLE AND GGML_METAL)
+    add_executable(test-metal-pipeline-cache
+        test-metal-pipeline-cache.mm
+    )
+    target_include_directories(test-metal-pipeline-cache PRIVATE
+        ${PROJECT_SOURCE_DIR}/ggml/include
+        ${PROJECT_SOURCE_DIR}/ggml/src/ggml-metal
+    )
+    target_link_libraries(test-metal-pipeline-cache PRIVATE
+        Catch2::Catch2WithMain
+        ggml
+    )
+    # Match the host C++ standard the rest of the tests use (the
+    # .mm file mixes Catch2 templates + filesystem with Obj-C
+    # frameworks, needs C++17 minimum for <filesystem>).
+    set_target_properties(test-metal-pipeline-cache PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+    )
+    catch_discover_tests(test-metal-pipeline-cache
+        TEST_SPEC "[unit]"
+        PROPERTIES LABELS "unit;metal;pipeline-cache"
+    )
+endif()
+
 # ─── test - math - consistency — Catch2 unit tests for math constants ────────
 add_executable(test-math-consistency
     test-math-consistency.cpp

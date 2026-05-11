@@ -2047,6 +2047,11 @@ extern "C" struct chatterbox_context_params chatterbox_context_default_params(vo
     p.top_p = 1.0f;
     p.max_speech_tokens = 1000;
     p.cfm_steps = 10;
+    // PLAN #89: flash_attn defaults to true (lost in commit ff5536ae;
+    // restored 2026-05-11). The compute-graph wiring per backend
+    // lands in PLAN #86; until then this is plumbing-only on
+    // chatterbox.
+    p.flash_attn = true;
     return p;
 }
 
@@ -3237,6 +3242,87 @@ extern "C" void chatterbox_set_cfg_weight(struct chatterbox_context* ctx, float 
 extern "C" void chatterbox_set_cfm_steps(struct chatterbox_context* ctx, int steps) {
     if (ctx)
         ctx->params.cfm_steps = (steps > 0 && steps <= 100) ? steps : 10;
+}
+
+// Runtime sampling-knob setters. The chatterbox AR loop reads
+// `ctx->params.X` on every sample (see sample_token call site in
+// chatterbox_synthesize_codes), so post-init mutation is safe.
+// Each setter clamps to a sensible range and silently no-ops on
+// nonsense input rather than throwing — the C ABI surface stays
+// crash-free for thin wrappers like the Dart binding.
+//
+// Restored 2026-05-11 — the original bodies (commit 95e2fdf7) were
+// accidentally dropped by the unrelated indextts ECAPA fix in
+// commit ff7bcc50 while the header / crispasr_c_api.cpp still
+// referenced them. Same content; lint sweep re-runs cleanly.
+extern "C" void chatterbox_set_temperature(struct chatterbox_context* ctx, float temperature) {
+    if (!ctx) {
+        return;
+    }
+    // 0.0 = greedy (argmax). Allow up to 4.0; beyond that the softmax
+    // is essentially uniform and you're just sampling noise.
+    if (temperature < 0.0f) {
+        temperature = 0.0f;
+    }
+    if (temperature > 4.0f) {
+        temperature = 4.0f;
+    }
+    ctx->params.temperature = temperature;
+}
+
+extern "C" void chatterbox_set_top_p(struct chatterbox_context* ctx, float top_p) {
+    if (!ctx) {
+        return;
+    }
+    if (top_p < 0.0f) {
+        top_p = 0.0f;
+    }
+    if (top_p > 1.0f) {
+        top_p = 1.0f;
+    }
+    ctx->params.top_p = top_p;
+}
+
+extern "C" void chatterbox_set_min_p(struct chatterbox_context* ctx, float min_p) {
+    if (!ctx) {
+        return;
+    }
+    if (min_p < 0.0f) {
+        min_p = 0.0f;
+    }
+    if (min_p > 1.0f) {
+        min_p = 1.0f;
+    }
+    ctx->params.min_p = min_p;
+}
+
+extern "C" void chatterbox_set_repetition_penalty(struct chatterbox_context* ctx, float r) {
+    if (!ctx) {
+        return;
+    }
+    // 1.0 = no penalty (Pytorch default). Below 1.0 *encourages* repeats.
+    if (r < 0.5f) {
+        r = 0.5f;
+    }
+    if (r > 2.0f) {
+        r = 2.0f;
+    }
+    ctx->params.repetition_penalty = r;
+}
+
+extern "C" void chatterbox_set_max_speech_tokens(struct chatterbox_context* ctx, int n) {
+    if (!ctx) {
+        return;
+    }
+    // Default is 1000; allow up to 4000 (= ~80 s of speech tokens at
+    // 50 Hz). Anything below 32 is unusable.
+    if (n < 32) {
+        n = 32;
+    }
+    if (n > 4000) {
+        n = 4000;
+    }
+    ctx->params.max_speech_tokens = n;
 }
 
 extern "C" void chatterbox_tokens_free(int32_t* tokens) {
