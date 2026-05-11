@@ -577,6 +577,11 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        // CrispASR patch (PR #07-metal-aa-snake-beta): fused BigVGAN v2
+        // anti-aliased SnakeBeta (upsample 2× + sin²(α·x)/β + downsample 2×).
+        // MUST RE-APPLY after every ggml bump.
+        GGML_OP_AA_SNAKE_BETA,
+
         GGML_OP_COUNT,
     };
 
@@ -2037,6 +2042,24 @@ extern "C" {
             int                   s0,  // stride
             int                   p0,  // padding
             int                   d0); // dilation
+
+    // CrispASR patch (PR #07-metal-aa-snake-beta): BigVGAN v2 anti-aliased
+    // SnakeBeta — fused upsample 2× + sin²(α·x)/β + downsample 2×.
+    // All inputs F32; output same shape as `x`.
+    //   x        : [T, C]      — time-fastest, channel-major
+    //   log_alpha: [C]         — per-channel α frequency, log-scale
+    //   log_beta : [C]         — per-channel β amplitude, log-scale
+    //   us_filter: [K, 1, 1]   — Kaiser-windowed sinc, sum=1
+    //   ds_filter: [K, 1, 1]   — Kaiser-windowed sinc, sum=1
+    // K must be 12 (asserted in the CPU forward).
+    // MUST RE-APPLY after every ggml bump.
+    GGML_API struct ggml_tensor * ggml_aa_snake_beta(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * log_alpha,
+            struct ggml_tensor  * log_beta,
+            struct ggml_tensor  * us_filter,
+            struct ggml_tensor  * ds_filter);
 
     GGML_API struct ggml_tensor * ggml_conv_2d(
             struct ggml_context * ctx,

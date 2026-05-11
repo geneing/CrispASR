@@ -1078,9 +1078,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+
+    // CrispASR patch (PR #07-metal-aa-snake-beta) — MUST RE-APPLY after ggml bump.
+    "AA_SNAKE_BETA",
 };
 
-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
+static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1188,9 +1191,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+
+    // CrispASR patch (PR #07-metal-aa-snake-beta) — MUST RE-APPLY after ggml bump.
+    "aa_snake_beta(x, log_a, log_b, usf, dsf)",
 };
 
-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
+static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -4580,6 +4586,41 @@ GGML_API struct ggml_tensor * ggml_conv_transpose_1d(
     result->src[0] = a;
     result->src[1] = b;
 
+    return result;
+}
+
+// ggml_aa_snake_beta
+//
+// CrispASR patch (PR #07-metal-aa-snake-beta): fused BigVGAN v2 anti-aliased
+// SnakeBeta (upsample 2× + sin²(α·x)/β + downsample 2×). All inputs F32.
+// Output has the same shape as `x` ([T, C]). The CPU forward and Metal kernel
+// assume K=12 — kept generic in the builder but asserted in the forward.
+// MUST RE-APPLY after every ggml bump.
+GGML_API struct ggml_tensor * ggml_aa_snake_beta(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * log_alpha,
+        struct ggml_tensor  * log_beta,
+        struct ggml_tensor  * us_filter,
+        struct ggml_tensor  * ds_filter) {
+    GGML_ASSERT(ggml_is_matrix(x));                  // [T, C]
+    GGML_ASSERT(log_alpha->ne[0] == x->ne[1]);       // C matches
+    GGML_ASSERT(log_beta->ne[0]  == x->ne[1]);
+    GGML_ASSERT(us_filter->ne[0] == 12);             // K fixed at 12 for now
+    GGML_ASSERT(ds_filter->ne[0] == 12);
+    GGML_ASSERT(x->type         == GGML_TYPE_F32);
+    GGML_ASSERT(log_alpha->type == GGML_TYPE_F32);
+    GGML_ASSERT(log_beta->type  == GGML_TYPE_F32);
+    GGML_ASSERT(us_filter->type == GGML_TYPE_F32);
+    GGML_ASSERT(ds_filter->type == GGML_TYPE_F32);
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, x);
+    result->op     = GGML_OP_AA_SNAKE_BETA;
+    result->src[0] = x;
+    result->src[1] = log_alpha;
+    result->src[2] = log_beta;
+    result->src[3] = us_filter;
+    result->src[4] = ds_filter;
     return result;
 }
 

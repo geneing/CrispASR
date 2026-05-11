@@ -517,10 +517,17 @@ static ggml_tensor* aa_snake_beta_native(ggml_context* ctx, ggml_tensor* x, ggml
 }
 
 // Dispatch by env: INDEXTTS_AA_BACKEND=native picks the ggml-native path;
-// anything else (or unset) stays on the proven CPU custom-op path.
+// INDEXTTS_AA_BACKEND=op (or =metal) picks the new fused `ggml_aa_snake_beta`
+// op (Step C-2); anything else (or unset) stays on the proven CPU custom-op
+// path.
 static bool aa_use_native() {
     const char* v = getenv("INDEXTTS_AA_BACKEND");
     return v && (v[0] == 'n' || v[0] == 'N');
+}
+static bool aa_use_opvariant() {
+    const char* v = getenv("INDEXTTS_AA_BACKEND");
+    // Match "op", "Op", "metal", "Metal".
+    return v && (v[0] == 'o' || v[0] == 'O' || v[0] == 'm' || v[0] == 'M');
 }
 
 // ── ECAPA-TDNN speaker encoder ──────────────────────────────────
@@ -1069,6 +1076,8 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
                     ggml_tensor* dsf1 = T(ts, key);
                     if (aa_use_native()) {
                         x = aa_snake_beta_native(ctx0, x, alpha1, beta1, usf1, dsf1);
+                    } else if (aa_use_opvariant()) {
+                        x = ggml_aa_snake_beta(ctx0, x, alpha1, beta1, usf1, dsf1);
                     } else {
                         x = aa_snake_beta(ctx0, x, alpha1, beta1, usf1, dsf1, c->aa_params);
                     }
@@ -1101,6 +1110,8 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
                     ggml_tensor* dsf2 = T(ts, key);
                     if (aa_use_native()) {
                         x = aa_snake_beta_native(ctx0, x, alpha2, beta2, usf2, dsf2);
+                    } else if (aa_use_opvariant()) {
+                        x = ggml_aa_snake_beta(ctx0, x, alpha2, beta2, usf2, dsf2);
                     } else {
                         x = aa_snake_beta(ctx0, x, alpha2, beta2, usf2, dsf2, c->aa_params);
                     }
@@ -1148,6 +1159,8 @@ static ggml_cgraph* build_bigvgan_graph(indextts_voc_context* c, int T_in) {
             ggml_tensor* dsf_post = T(ts, "activation_post.ds.filter");
             if (aa_use_native()) {
                 x = aa_snake_beta_native(ctx0, x, alpha_post, beta_post, usf_post, dsf_post);
+            } else if (aa_use_opvariant()) {
+                x = ggml_aa_snake_beta(ctx0, x, alpha_post, beta_post, usf_post, dsf_post);
             } else {
                 x = aa_snake_beta(ctx0, x, alpha_post, beta_post, usf_post, dsf_post, c->aa_params);
             }
@@ -1297,9 +1310,10 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
         return nullptr;
     }
     const bool force_gpu_with_aa = getenv("INDEXTTS_VOC_FORCE_GPU") && getenv("INDEXTTS_VOC_FORCE_GPU")[0] == '1';
-    // Native-ops AA (Step B) runs on whichever backend owns the graph — no Metal↔CPU
-    // sync at each AA site. So the auto-CPU fallback only applies to the custom-op path.
-    const bool aa_blocks_gpu = c->use_aa && !aa_use_native() && !force_gpu_with_aa;
+    // Native-ops AA (Step B) and the new ggml_aa_snake_beta op (Step C-2) both
+    // run on whichever backend owns the graph — no Metal↔CPU sync at each AA
+    // site. The auto-CPU fallback only applies to the legacy map_custom1 path.
+    const bool aa_blocks_gpu = c->use_aa && !aa_use_native() && !aa_use_opvariant() && !force_gpu_with_aa;
     const bool effective_use_gpu = use_gpu && !aa_blocks_gpu;
     c->backend = effective_use_gpu ? ggml_backend_init_best() : c->backend_cpu;
     if (!c->backend) {
