@@ -121,6 +121,18 @@ whole utterance the way `t0`/`t1` advertise.
 at the price of imperfect text reconstruction on long utterances.
 Useful when the encoder is large and the per-chunk budget is tight.
 
+**Short-utterance fallback.** Backends that use convolutional
+encoders (moonshine, parakeet, voxtral, …) abort with `OW > 0` from
+`ggml_im2col` when handed audio shorter than the encoder's first conv
+kernel — about 2 s at 16 kHz. When `redecode` would hit that limit
+(the VAD-trimmed `[t0..t1]` is under 2 s) CrispASR skips the extra
+backend pass and falls back to the **`prefix`-mode stitcher** for
+that one finalize. `final.text` is then the LCP-accumulated prefix
+plus the last partial — the same content the wrapper has already
+seen in `partial` events, never an empty string blanking a
+previously-emitted partial. The fallback is internal; no flag, no
+event change.
+
 ## Microphone (`--mic`)
 
 ```bash
