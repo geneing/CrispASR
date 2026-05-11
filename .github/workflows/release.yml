@@ -46,6 +46,39 @@ jobs:
           name: crispasr-linux-x86_64
           path: release/crispasr-linux-x86_64.tar.gz
 
+  # ── Linux ARM64 CLI binaries ─────────────────────────────────────────────────
+  # Mirror of build-linux on GitHub's ubuntu-24.04-arm runner. NEON is the
+  # native SIMD path on aarch64, so OpenBLAS adds little — keep it on (same
+  # as x86_64) for consistent CPU code paths and easy A/B comparison;
+  # `libopenblas-dev` has aarch64 binaries in Ubuntu's apt repo.
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libopenblas-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_OPENBLAS=ON
+          cmake --build build --target crispasr-cli crispasr-quantize -j $(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p release/crispasr-linux-arm64
+          cp build/bin/crispasr release/crispasr-linux-arm64/
+          cp build/bin/crispasr-quantize release/crispasr-linux-arm64/
+          cd release && tar czf crispasr-linux-arm64.tar.gz crispasr-linux-arm64/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-linux-arm64
+          path: release/crispasr-linux-arm64.tar.gz
+
   build-python-linux:
     runs-on: ubuntu-latest
     steps:
@@ -110,6 +143,69 @@ jobs:
         with:
           name: crispasr-python-linux-x86_64
           path: release/crispasr-python-linux-x86_64.tar.gz
+
+  # ── Python binding (Linux ARM64) ─────────────────────────────────────────────
+  # Mirror of build-python-linux on aarch64 — bundles libwhisper.so +
+  # ggml backend libs + libcrispasr_helpers.so + $ORIGIN RPATH so the
+  # tarball is self-contained.
+  build-python-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ patchelf
+
+      - name: Build shared libraries
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PLATFORM_NO_VERSIONED_SONAME=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=OFF
+          cmake --build build -j$(nproc)
+
+      - name: Build Python ctypes helpers library
+        run: |
+          gcc -shared -fPIC -o build/libcrispasr_helpers.so \
+            python/crispasr/_helpers.c \
+            -Iinclude \
+            -Iggml/include \
+            -Lbuild/src \
+            -lwhisper \
+            -Wl,-rpath,'$ORIGIN'
+
+      - name: Package Python binding
+        run: |
+          PKG=release/crispasr-python-linux-arm64/crispasr
+          mkdir -p "$PKG"
+
+          # Python sources
+          cp python/crispasr/__init__.py "$PKG/"
+          cp python/crispasr/_binding.py "$PKG/"
+
+          # Shared libraries (same set as x86_64 — see build-python-linux).
+          find build/src -maxdepth 1 -name '*.so' -exec cp {} "$PKG/" \;
+          ln -sf libwhisper.so              "$PKG/libcrispasr.so"
+          cp build/ggml/src/libggml.so      "$PKG/" 2>/dev/null || true
+          cp build/ggml/src/libggml-base.so "$PKG/" 2>/dev/null || true
+          cp build/ggml/src/libggml-cpu.so  "$PKG/" 2>/dev/null || true
+          cp build/libcrispasr_helpers.so   "$PKG/"
+
+          # RPATH = $ORIGIN so siblings resolve without LD_LIBRARY_PATH
+          for f in "$PKG"/*.so; do
+            patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true
+          done
+
+          cd release && tar czf crispasr-python-linux-arm64.tar.gz crispasr-python-linux-arm64/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-python-linux-arm64
+          path: release/crispasr-python-linux-arm64.tar.gz
 
   build-macos:
     runs-on: macos-latest
@@ -258,6 +354,66 @@ jobs:
         with:
           name: libcrispasr-linux-x86_64
           path: release/libcrispasr-linux-x86_64.tar.gz
+
+  # ── Linux ARM64 shared libs + headers (CPU baseline) ─────────────────────────
+  # Mirror of build-libs-linux-x86_64 on the ubuntu-24.04-arm runner.
+  # GPU variants for arm64 (CUDA-Jetson, Vulkan-mobile) are out of scope
+  # for this round — add separate jobs when there's user demand.
+  build-libs-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libopenblas-dev patchelf
+
+      - name: Build (shared libs, CPU + OpenBLAS)
+        run: |
+          cmake -S . -B build-libs \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_OPENBLAS=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=OFF \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build-libs --config Release -j $(nproc) --target crispasr
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          OUT=release/libcrispasr-linux-arm64
+          mkdir -p "$OUT/src" "$OUT/ggml/src" "$OUT/include" "$OUT/ggml/include"
+          # Core libs — preserve symlinks so SOVERSION-1 alias works.
+          cp -P build-libs/src/libcrispasr*.so* "$OUT/src/"
+          [ -e build-libs/src/libwhisper.so ] && cp -P build-libs/src/libwhisper.so* "$OUT/src/"
+          # Per-backend shared libs (parakeet, canary, voxtral, qwen3_asr, …).
+          find build-libs/src -maxdepth 1 -name 'lib*.so*' \( -type f -o -type l \) \
+            ! -name 'libcrispasr*' ! -name 'libwhisper*' \
+            -exec cp -P {} "$OUT/src/" \;
+          # Backend libs — flat collection from every ggml subdir.
+          find build-libs/ggml/src -name 'libggml*.so*' \( -type f -o -type l \) \
+            -exec cp -P {} "$OUT/ggml/src/" \;
+          # Patch RPATH to $ORIGIN so libs resolve siblings without
+          # LD_LIBRARY_PATH (matches build-libs-linux-x86_64 convention).
+          for f in "$OUT"/src/*.so* "$OUT"/ggml/src/*.so*; do
+            [ -L "$f" ] && continue
+            patchelf --set-rpath '$ORIGIN:$ORIGIN/../../ggml/src' "$f" 2>/dev/null || true
+          done
+          # Headers so binding authors can extend the FFI without
+          # vendoring the whole CrispASR repo.
+          cp include/crispasr.h "$OUT/include/"
+          cp ggml/include/*.h   "$OUT/ggml/include/" 2>/dev/null || true
+          cp LICENSE "$OUT/"
+          cd release && tar czf libcrispasr-linux-arm64.tar.gz libcrispasr-linux-arm64/
+          ls -lh libcrispasr-linux-arm64.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libcrispasr-linux-arm64
+          path: release/libcrispasr-linux-arm64.tar.gz
 
   # ── Windows x86_64 shared libs + headers (CPU baseline) ──────────────────────
   # Windows tarball includes BOTH the runtime DLLs (under bin/) and the MSVC
@@ -795,7 +951,7 @@ jobs:
   # 3 CUDA jobs (slow, not failing); meanwhile the 11 fast builds had
   # produced their artifacts and were sitting unused in run storage.
   publish:
-    needs: [build-linux, build-python-linux, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan]
+    needs: [build-linux, build-linux-arm64, build-python-linux, build-python-linux-arm64, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-arm64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
