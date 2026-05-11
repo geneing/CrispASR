@@ -2126,8 +2126,9 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
     // both on GPU, expected to be broken). CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU=1
     // tries the selective split (kept for future regression once the kernel
     // lands).
+    // cppcheck-suppress duplicateAssignExpression
     bool t3_use_gpu = params.use_gpu;
-    bool s3gen_use_gpu = params.use_gpu;
+    bool s3gen_use_gpu = params.use_gpu; // NOLINT — intentionally same init, diverges below
     if (params.use_gpu) {
         const char* force_gpu_env = std::getenv("CRISPASR_CHATTERBOX_FORCE_GPU");
         const bool force_gpu = force_gpu_env && *force_gpu_env && std::strcmp(force_gpu_env, "0") != 0;
@@ -3253,6 +3254,31 @@ extern "C" void chatterbox_free(struct chatterbox_context* ctx) {
 extern "C" void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_threads) {
     if (ctx)
         ctx->n_threads = n_threads > 0 ? n_threads : 4;
+}
+
+extern "C" void chatterbox_set_temperature(struct chatterbox_context* ctx, float temperature) {
+    if (ctx)
+        ctx->params.temperature = temperature;
+}
+
+extern "C" void chatterbox_set_top_p(struct chatterbox_context* ctx, float top_p) {
+    if (ctx)
+        ctx->params.top_p = top_p;
+}
+
+extern "C" void chatterbox_set_min_p(struct chatterbox_context* ctx, float min_p) {
+    if (ctx)
+        ctx->params.min_p = min_p;
+}
+
+extern "C" void chatterbox_set_repetition_penalty(struct chatterbox_context* ctx, float r) {
+    if (ctx)
+        ctx->params.repetition_penalty = r;
+}
+
+extern "C" void chatterbox_set_max_speech_tokens(struct chatterbox_context* ctx, int n) {
+    if (ctx)
+        ctx->params.max_speech_tokens = n > 0 ? n : 1000;
 }
 
 // Diff/debug: VE pipeline stages — see chatterbox_ve.h for the spec.
