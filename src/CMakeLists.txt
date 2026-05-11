@@ -1002,7 +1002,27 @@ if (TARGET orpheus)
     target_link_libraries(crispasr PUBLIC orpheus)
 endif()
 if (TARGET chatterbox)
-    target_link_libraries(crispasr PUBLIC chatterbox)
+    # libcrispasr.so calls chatterbox_set_temperature / set_top_p /
+    # set_min_p / set_repetition_penalty / set_max_speech_tokens from
+    # crispasr_c_api.cpp. With BUILD_SHARED_LIBS=ON on Linux (the
+    # default the Docker Smoke build hits), ld leaves those refs
+    # unresolved in libcrispasr.so because the chatterbox.cpp.o that
+    # defines them wasn't being pulled in from libchatterbox.a at
+    # SO-link time. Static archive members after a shared library on
+    # the executable link line can't satisfy the shared library's
+    # externals, so the exec link then errored:
+    #   "libcrispasr.so.0.6.2: undefined reference to chatterbox_set_temperature"
+    # (Docker Smoke failure on ff7bcc50.) Wrap the chatterbox dep in
+    # --whole-archive on GNU-ld (Linux non-MINGW) so ALL chatterbox.a
+    # object files end up in libcrispasr.so unconditionally — fixes
+    # the cascade without restructuring the per-backend split. Apple
+    # ld64 and MSVC don't need this (their default already pulls in
+    # the required object files); MinGW already uses static crispasr.
+    if (UNIX AND NOT APPLE AND BUILD_SHARED_LIBS)
+        target_link_libraries(crispasr PUBLIC -Wl,--whole-archive chatterbox -Wl,--no-whole-archive)
+    else()
+        target_link_libraries(crispasr PUBLIC chatterbox)
+    endif()
 endif()
 if (TARGET indextts)
     target_link_libraries(crispasr PUBLIC indextts)
