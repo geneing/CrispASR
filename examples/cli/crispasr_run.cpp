@@ -1056,10 +1056,34 @@ int crispasr_run_backend(const whisper_params& params_in) {
         // `last_speech_end_sample` is the stream-timeline sample where
         // VAD last saw speech; `--stream-final-on-silence-ms` is checked
         // against `now - last_speech_end_sample`, not "all-empty steps".
+        //
+        // Round 3 (CKwasd retest after round 2) addresses four remaining
+        // semantic issues in the JSON stream:
+        //   1. After finalize, the rolling `pcm_window` still contains
+        //      the finished utterance's speech for up to `--stream-length`,
+        //      and VAD re-discovers it every step. `finalized_until_sample`
+        //      bookmarks the upper bound of the finalized region so
+        //      re-discovered slices can't seed a new utterance with the
+        //      previous text.
+        //   2. The trailing-silence check used to be gated on
+        //      `step_slice_text.empty()`, which a re-discovered old slice
+        //      can keep non-empty for a full window length. Finalization
+        //      now fires purely on `now - last_speech_end_sample`.
+        //   3. Multiple VAD slices in one step each called
+        //      `on_partial_text`, producing competing partials for the
+        //      same `utterance_id`. Round 3 coalesces all slice texts
+        //      that belong to the open utterance into a single partial
+        //      per utterance per step.
+        //   4. `utterance_pcm` accumulated every step's new samples
+        //      (including post-`last_speech_end` silence). Finalize now
+        //      trims it to `[utterance_start_sample, last_speech_end_sample]`
+        //      so the redecode input matches the [t0..t1] interval the
+        //      final event advertises.
         int64_t utterance_id = 0;
         bool have_open_utterance = false;
         int64_t utterance_start_sample = 0;
         int64_t last_speech_end_sample = 0;
+        int64_t finalized_until_sample = 0;
         std::vector<float> utterance_pcm;
         std::string prefix_committed;
         std::string last_partial_text; // dedupe key + prefix-mode tail
@@ -1127,6 +1151,14 @@ int crispasr_run_backend(const whisper_params& params_in) {
             if (!stream_vad_path.empty()) {
                 const auto slices = crispasr_compute_vad_slices(pcm_window.data(), (int)pcm_window.size(), SR,
                                                                 stream_vad_path.c_str(), stream_vad_opts);
+                // Snapshot for the straddling-slice subrange decode below.
+                // `cumulative_samples` has already been advanced by
+                // `n_new` for this step, so the rolling window currently
+                // covers [window_start_sample_now, cumulative_samples).
+                // finalized_until_sample is updated inside the JSON state
+                // machine *after* this loop runs, so it reflects the
+                // upper bound of all utterances finalized before this step.
+                const int64_t window_start_sample_now = cumulative_samples - (int64_t)pcm_window.size();
                 for (const auto& sl : slices) {
                     auto slice_segs =
                         backend->transcribe(pcm_window.data() + sl.start, sl.end - sl.start, sl.t0_cs, params);
@@ -1136,7 +1168,54 @@ int crispasr_run_backend(const whisper_params& params_in) {
                         // utterance state machine. The aggregate gets the
                         // same treatment after the loop, so plain-text
                         // mode behavior is unchanged.
-                        std::vector<crispasr_segment> sl_for_text = slice_segs;
+                        std::vector<crispasr_segment> sl_for_text;
+
+                        // Round 3 (CKwasd #1 corner): if the VAD slice
+                        // straddles a previously-finalized boundary
+                        // (s_start < finalized_until_sample < s_end), the
+                        // full-slice decode covers audio that belongs to
+                        // the prior utterance — emitting it as a partial
+                        // for the new utterance_id leaks prior text into
+                        // the live stream. Re-decode just the post-
+                        // finalized subrange so partial.text describes
+                        // only the new utterance's interval. This costs
+                        // one extra encoder pass per straddling slice
+                        // (bounded to ~window_length / stream_step steps
+                        // after a finalize, until the rolling window
+                        // evicts the old audio).
+                        const int64_t s_start_abs = window_start_sample_now + (int64_t)sl.start;
+                        // Some backends (moonshine's stacked conv1d
+                        // encoder, for example) abort on inputs shorter
+                        // than a few hundred ms — `OW > 0` from
+                        // `ggml_im2col`. Gate the subrange decode on a
+                        // generous min so we don't crash; fall back to
+                        // suppressing the partial in that case so we
+                        // don't leak the prior utterance's text either.
+                        // 32000 samples = 2 s @ 16 kHz, comfortably
+                        // above every supported backend's encoder
+                        // minimum.
+                        constexpr int kStraddleMinSamples = 32000;
+                        if (s_start_abs < finalized_until_sample) {
+                            const int sub_start = (int)(finalized_until_sample - window_start_sample_now);
+                            const int sub_end = (int)sl.end;
+                            const int sub_len = sub_end - sub_start;
+                            if (sub_start >= 0 && sub_len >= kStraddleMinSamples && sub_end <= (int)pcm_window.size()) {
+                                whisper_params decode_params = params;
+                                decode_params.vad = false;
+                                decode_params.vad_model.clear();
+                                sl_for_text =
+                                    backend->transcribe(pcm_window.data() + sub_start, sub_len, 0, decode_params);
+                            }
+                            // else: sl_for_text stays empty → empty
+                            // partial text for this slice, which
+                            // `flush_pending_partial` will skip. The
+                            // straddling slice's prior-utterance audio
+                            // never reaches the wrapper; the genuine
+                            // new audio will be picked up on a later
+                            // step once the subrange exceeds the min.
+                        } else {
+                            sl_for_text = slice_segs;
+                        }
                         apply_punc_model(punc_ctx.get(), sl_for_text);
                         if (!params.punctuation) {
                             for (auto& seg : sl_for_text)
@@ -1191,13 +1270,39 @@ int crispasr_run_backend(const whisper_params& params_in) {
             if (params.stream_json) {
                 const int64_t now_sample = cumulative_samples;
                 const int64_t window_start_sample = cumulative_samples - (int64_t)pcm_window.size();
+                // Track whether this step produced a `partial` or `final`
+                // event so the silence heartbeat at the bottom only fires
+                // when nothing else did. With the round-3 issue-1 skip,
+                // `step_slice_text.empty()` is no longer a reliable proxy
+                // (slices can be present but all filtered as old).
+                bool emitted_event_this_step = false;
 
                 auto finalize_utterance = [&]() {
                     if (!have_open_utterance)
                         return;
+                    // Round 3 (CKwasd #4): trim utterance_pcm to the
+                    // VAD-determined speech region [t0..t1] before the
+                    // redecode pass. The buffer unconditionally appends
+                    // every step's new samples (including post-speech
+                    // silence) so finalize sees a buffer that can extend
+                    // past last_speech_end_sample. Resizing to the actual
+                    // speech-region length makes the redecode input
+                    // match the final event's advertised interval.
+                    if (last_speech_end_sample > utterance_start_sample) {
+                        const int64_t want = last_speech_end_sample - utterance_start_sample;
+                        if ((int64_t)utterance_pcm.size() > want)
+                            utterance_pcm.resize((size_t)want);
+                    }
                     std::string final_text;
                     if (params.stream_final_mode == "redecode") {
-                        if (!utterance_pcm.empty()) {
+                        // Same encoder-min guard as the straddling-slice
+                        // subrange decode in the slice loop above —
+                        // moonshine/parakeet/etc. abort with `OW > 0`
+                        // when handed input shorter than the encoder's
+                        // first conv kernel. Fall back to the prefix
+                        // stitcher in that case.
+                        constexpr int kRedecodeMinSamples = 32000;
+                        if ((int)utterance_pcm.size() >= kRedecodeMinSamples) {
                             // Disable nested VAD: utterance_pcm is already
                             // the speech region we identified, no need to
                             // re-segment it (and the nested VAD path would
@@ -1234,6 +1339,13 @@ int crispasr_run_backend(const whisper_params& params_in) {
                             "{\"type\":\"final\",\"utterance_id\":%lld,\"text\":\"%s\",\"t0\":%.3f,\"t1\":%.3f}\n",
                             (long long)utterance_id, crispasr_json_escape(final_text).c_str(), t0, t1);
                     fflush(stdout);
+                    emitted_event_this_step = true;
+                    // Round 3 (CKwasd #1): bookmark the finalized
+                    // boundary so the slice loop can skip slices the
+                    // rolling window still holds from this utterance.
+                    // Monotonic: finalized_until_sample only grows.
+                    if (last_speech_end_sample > finalized_until_sample)
+                        finalized_until_sample = last_speech_end_sample;
                     have_open_utterance = false;
                     utterance_pcm.clear();
                     prefix_committed.clear();
@@ -1288,6 +1400,22 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 const bool was_open_at_step_start = have_open_utterance;
                 bool utterance_just_opened = false;
 
+                // Round 3 (CKwasd #3): coalesce slice texts into a single
+                // partial per utterance per step. Multiple slices in one
+                // step belonging to the same open utterance previously
+                // emitted one partial each (competing hypotheses to the
+                // wrapper); now they're concatenated into one partial.
+                // A mid-step finalize flushes the pending partial first
+                // so the prior utterance's partial isn't dropped.
+                std::string step_open_partial;
+                auto flush_pending_partial = [&]() {
+                    if (have_open_utterance && !step_open_partial.empty()) {
+                        on_partial_text(step_open_partial);
+                        emitted_event_this_step = true;
+                    }
+                    step_open_partial.clear();
+                };
+
                 // Drive the utterance state machine over the per-slice
                 // results we collected above. For VAD-on, each slice is
                 // a real VAD speech region; for VAD-off, there's at
@@ -1296,30 +1424,68 @@ int crispasr_run_backend(const whisper_params& params_in) {
                     const int64_t s_start = window_start_sample + (int64_t)sl.start;
                     const int64_t s_end = window_start_sample + (int64_t)sl.end;
 
+                    // Round 3 (CKwasd #1): skip slices fully inside the
+                    // already-finalized region. Without this guard the
+                    // rolling pcm_window's lingering tail of a finalized
+                    // utterance re-opens a fresh utterance_id seeded with
+                    // the previous text.
+                    if (s_end <= finalized_until_sample)
+                        continue;
+                    // Straddling slice (s_start < finalized < s_end) with
+                    // a post-finalized tail shorter than the encoder min
+                    // (kStraddleMinSamples in the slice-building loop)
+                    // can't be re-decoded standalone, so its sl_text was
+                    // suppressed above. Skip it here too: opening a new
+                    // utterance from a straddling slice while its new
+                    // content is below the encoder min would create a
+                    // spurious utterance with empty final.text. Wait
+                    // for a later step where enough new audio has
+                    // accumulated to clear the gate.
+                    if (s_start < finalized_until_sample && (s_end - finalized_until_sample) < 32000)
+                        continue;
+
                     // Silence-driven finalize: if the gap between the
                     // last speech end and this slice's start is wider
                     // than the threshold, close the open utterance
-                    // before opening a new one for this slice.
+                    // before opening a new one for this slice. Flush
+                    // the pending partial first so its text reaches
+                    // the wrapper before the final lands.
                     if (have_open_utterance && params.stream_final_silence_ms > 0 &&
                         (s_start - last_speech_end_sample) * 1000 / SR >= params.stream_final_silence_ms) {
+                        flush_pending_partial();
                         finalize_utterance();
                     }
 
                     if (!have_open_utterance) {
                         // Open utterance starting from this slice's
-                        // window-relative start. (For the no-VAD
-                        // synthetic slice this is offset 0 = start of
-                        // the rolling buffer, which is the best we can
-                        // do without VAD timing.)
-                        open_utterance_at((int)sl.start, s_start);
+                        // window-relative start, clamped to the
+                        // finalized boundary so a straddling slice
+                        // (VAD min-silence wider than ours, so VAD did
+                        // not break across the just-finalized utterance)
+                        // doesn't pull the prior speech into the new
+                        // utterance's redecode buffer. (For the no-VAD
+                        // synthetic slice this still degrades cleanly:
+                        // open_start = max(window_start, finalized).)
+                        const int64_t open_start = std::max(s_start, finalized_until_sample);
+                        int window_offset = (int)(open_start - window_start_sample);
+                        if (window_offset < (int)sl.start)
+                            window_offset = (int)sl.start;
+                        open_utterance_at(window_offset, open_start);
                         utterance_just_opened = true;
                     }
 
                     if (s_end > last_speech_end_sample)
                         last_speech_end_sample = s_end;
 
-                    on_partial_text(sl_text);
+                    // Round 3 (CKwasd #3): accumulate into the per-step
+                    // partial buffer instead of emitting per slice.
+                    if (!sl_text.empty()) {
+                        if (!step_open_partial.empty())
+                            step_open_partial += ' ';
+                        step_open_partial += sl_text;
+                    }
                 }
+                flush_pending_partial();
 
                 // Append this step's NEW samples to utterance_pcm (only
                 // when the utterance was already open at step start —
@@ -1337,24 +1503,42 @@ int crispasr_run_backend(const whisper_params& params_in) {
                     finalize_utterance();
                 }
 
-                // End-of-step trailing-silence check: handles the case
-                // where this step had no speech at all (step_slice_text
-                // empty) but an utterance is open and trailing silence
-                // has accumulated beyond the threshold.
-                if (have_open_utterance && step_slice_text.empty() && params.stream_final_silence_ms > 0 &&
+                // End-of-step trailing-silence check.
+                // Round 3 (CKwasd #2): no longer gated on
+                // `step_slice_text.empty()`. The rolling pcm_window
+                // keeps the last utterance's speech for up to
+                // `--stream-length` ms after the speaker stops; VAD
+                // keeps re-discovering that lingering slice every
+                // step, which made `step_slice_text` non-empty and
+                // blocked finalization for the full window length
+                // (~18 s for `--stream-length 18000`). With the
+                // round-3 issue-1 skip, those lingering slices are
+                // already filtered out of the loop above, so by the
+                // time we get here `last_speech_end_sample` is the
+                // genuine end of the open utterance and the gap to
+                // `now_sample` is the actual trailing silence. Fire
+                // finalize whenever that gap crosses the threshold,
+                // independent of whether anything was decoded this
+                // step.
+                if (have_open_utterance && params.stream_final_silence_ms > 0 && last_speech_end_sample > 0 &&
                     (now_sample - last_speech_end_sample) * 1000 / SR >= params.stream_final_silence_ms) {
                     finalize_utterance();
                 }
 
                 // Heartbeat silence event for consumers that need
-                // timing even during pauses.
-                if (step_slice_text.empty()) {
+                // timing even during pauses. Round 3: gate on
+                // "no partial/final this step" rather than
+                // "step_slice_text empty" so the wrapper still gets
+                // a heartbeat when VAD found a slice but it was
+                // filtered (fully-old) or its straddling subrange was
+                // too short for the encoder.
+                if (!emitted_event_this_step) {
                     fprintf(stdout, "{\"type\":\"silence\",\"t\":%.3f}\n", (double)now_sample / (double)SR);
                     fflush(stdout);
                 }
 
                 if (params.stream_monitor) {
-                    fprintf(stderr, step_slice_text.empty() ? "" : "\xE2\x9C\x93");
+                    fprintf(stderr, emitted_event_this_step ? "\xE2\x9C\x93" : "");
                     fflush(stderr);
                 }
                 continue;
@@ -1403,6 +1587,18 @@ int crispasr_run_backend(const whisper_params& params_in) {
         // finalize. `t1` falls back to `cumulative_samples / SR` when
         // we never saw a "speech ended" event before the pipe closed.
         if (params.stream_json && have_open_utterance) {
+            // Round 3 (CKwasd #4): same trim as the in-loop finalize
+            // so the EOF-flushed final's text covers exactly its
+            // advertised [t0..t1] interval. If we never saw a VAD
+            // speech-end before EOF (last_speech_end_sample == 0),
+            // skip the trim and let the full buffer drive the
+            // redecode — t1 also falls back to `cumulative_samples`
+            // below in that case.
+            if (last_speech_end_sample > utterance_start_sample) {
+                const int64_t want = last_speech_end_sample - utterance_start_sample;
+                if ((int64_t)utterance_pcm.size() > want)
+                    utterance_pcm.resize((size_t)want);
+            }
             std::string final_text;
             if (params.stream_final_mode == "redecode") {
                 if (!utterance_pcm.empty()) {

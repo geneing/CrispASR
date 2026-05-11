@@ -47,9 +47,15 @@ Event types:
 
 | `type` | When | Fields |
 |---|---|---|
-| `partial` | A streaming step produced new text. The same `utterance_id` repeats with updated `text` until the utterance is finalized. | `utterance_id`, `text`, `t0`, `t1` |
-| `final` | Trailing silence ≥ `--stream-final-on-silence-ms` (default `800`) closed the open utterance. Echoes the last `text`. | `utterance_id`, `text`, `t0`, `t1` |
-| `silence` | A streaming step produced no text and no utterance is open (or the silence threshold has not yet been reached). | `t` |
+| `partial` | A streaming step produced new text for the open utterance. At most one `partial` per `utterance_id` per step — multiple VAD slices belonging to the same utterance within a step are concatenated. | `utterance_id`, `text`, `t0`, `t1` |
+| `final` | Trailing silence ≥ `--stream-final-on-silence-ms` (default `800`) after the last detected speech closed the open utterance. In the default `--stream-final-mode redecode` `text` is produced by re-running the backend on the buffered utterance PCM (covers `[t0..t1]`); in `prefix` mode `text` is a prefix accumulator stitched with the last partial. | `utterance_id`, `text`, `t0`, `t1` |
+| `silence` | A streaming step produced no speech slices. Emitted regardless of whether an utterance is still open, so wrappers always see a timeline heartbeat. | `t` |
+
+Stream-contract guarantees:
+
+- Once an `utterance_id` finalizes, its audio is bookmarked and never re-opens a later `utterance_id`. Earlier text will not reappear in later utterances' partials.
+- Finalization fires as soon as `now - last_speech_end_sample ≥ --stream-final-on-silence-ms`, independent of the rolling-window length. A 260 ms silence threshold with `--stream-length 18000` finalizes ~260 ms after the speaker stops, not ~18 s later.
+- `final.t1 = last_speech_end_sample / 16 kHz` and the redecode buffer is trimmed to `[utterance_start_sample, last_speech_end_sample]`, so `final.text` describes exactly the `[t0..t1]` interval (trailing silence past `t1` is not part of the decoded region).
 
 Sample stream:
 
