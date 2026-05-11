@@ -3,13 +3,14 @@
 Pending roadmap items. Each is self-contained with files, approach, and
 effort estimate. Completed items have been moved to `HISTORY.md`.
 
-**Current state (May 2026, v0.5.5):** 20 ASR + 3 TTS backends (+ Chatterbox T3 in progress), unified CLI,
+**Current state (May 2026, v0.6.2):** 20 ASR + 3 TTS + 1 speaker-verification backends (+ Chatterbox T3 in progress), unified CLI,
 OpenAI-compatible server + WebSocket streaming, shared `src/core/` library, FireRedPunc
-post-processor, C-ABI + Go/Java/Ruby/JS/Python bindings, CI on 6 platforms.
+post-processor, C-ABI + Go/Java/Ruby/JS/Python/Dart bindings, CI on 6 platforms.
 All backends support `-m auto --auto-download`. Three new ggml ops
 (`conv_1d_cf`, `conv_1d_dw_cf`, `conv_1d_group`). ggml bumped to 0.10.0.
-Feature matrix expanded to 21 backends (README). test-all-backends.py
-passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
+Feature matrix expanded to 21 backends (README). Speaker identification via
+TitaNet embeddings + profile DB, integrated into diarize pipeline.
+test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 
 > **‼️ Tooling pin: `clang-format` MUST be v18.** CI pins it
 > (`.github/workflows/lint.yml`). Homebrew's default `clang-format` and
@@ -48,6 +49,7 @@ passes 18/18 transcribe + 51/54 feature tests (3 stream skips, no failures).
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
 | **DONE** | #88 Kokoro length-scale + vibevoice diffusion steps | 1 day combined | Both backend-internal refactors shipped → [HISTORY §85](HISTORY.md). `kokoro_set_length_scale` + `vibevoice_set_tts_steps` runtime setters on the per-backend API; `crispasr_session_set_length_scale` + `_set_tts_steps` on the unified API. CrisperWeaver's TTS speed slider drives both. |
 | **DONE** | #89 Flash-attn field migration | ~2 hours | Mechanical plumbing across 12 backends shipped → [HISTORY §84](HISTORY.md). Prereq for #86 closed. |
+| **DONE** | #90 TitaNet speaker verification + speaker ID | 1 day | TitaNet-Large GGUF converter + pure-CPU runtime + speaker profile DB + CLI + C-ABI + wrappers. cos=0.9999 vs NeMo. → [HISTORY §89](HISTORY.md) |
 
 **Recently completed** (full write-ups in HISTORY.md): **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 

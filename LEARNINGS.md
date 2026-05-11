@@ -4691,3 +4691,51 @@ quant noise), ASR roundtrip identical.
 Lesson: vDSP gives modest wins on already-cache-friendly inner loops.
 The big lever for IndexTTS GPU perf is still a Metal kernel — see
 `tools/upstream-prs/07-metal-aa-snake-beta.md`.
+
+## Speaker verification — TitaNet
+
+### NeMo mel preprocessing is not what the config says
+
+The NeMo model config YAML for TitaNet says `window: "hann"` but the
+actual `FilterbankFeatures.forward()` applies three additional steps
+before the STFT that are NOT listed in the model config:
+
+1. **Pre-emphasis** (`x[t] = x[t] - 0.97 * x[t-1]`) — this is the
+   default from NeMo's `AudioToMelSpectrogramPreprocessor`, NOT specified
+   in the per-model config. Missing this causes a ~12 dB mel offset and
+   cos drops from 0.999 to 0.917.
+2. **Zero-padding** for center=True (`pad_mode="constant"`) — NOT
+   reflect. The NeMo source explicitly passes `pad_mode="constant"` to
+   `torch.stft`. Our initial reflect padding was wrong.
+3. **Centered window placement** — when `win_length < n_fft`, PyTorch's
+   `torch.stft` pads the window symmetrically:
+   `left = (n_fft - win_length) // 2`. This is NOT documented in the
+   PyTorch STFT docs but is in the source.
+
+Lesson: never trust the model config alone. Trace the actual Python
+forward with intermediate dumps. The "standard" STFT has at least 3
+knobs (pre-emphasis, pad mode, window centering) that differ between
+NeMo, torchaudio, and librosa.
+
+### NeMo BatchNorm eps is 0.001, not 1e-5
+
+All encoder BN layers in TitaNet-Large use `eps=0.001`. The PyTorch
+default is `1e-5`. This single mismatch caused the encoder norms to
+explode: block 1 norm was 451 (should be 17). The effect compounds
+multiplicatively through 3 mega-blocks × 3 sub-blocks = 9 stages.
+
+Lesson: always check `module.eps` for every BatchNorm in the model.
+NeMo's `ConvASREncoder` passes `batchnorm_kwargs` from the config,
+and the default for NeMo's `MaskedBatchNorm1d` is 0.001 — NOT the
+PyTorch `nn.BatchNorm1d` default.
+
+### JasperBlock has a hidden post-activation (mout)
+
+NeMo's `JasperBlock` applies an activation (ReLU + Dropout) AFTER
+the SE + residual addition, stored in `self.mout`. This is NOT visible
+in the `mconv` module list. The mconv layers provide inter-sub-block
+activation for repeat > 1, but the FINAL activation comes from mout.
+Without this, the encoder output has negative values where it shouldn't.
+
+Lesson: always print `block.mout` / `block.mout` for any NeMo encoder
+block. The `mconv` list alone is incomplete.

@@ -3575,3 +3575,52 @@ people who need it and for the eventual fused-kernel work
 
 Step A's auto-fall-to-CPU is suppressed when `aa_use_native()` returns
 true — the whole vocoder graph stays on Metal end-to-end in that case.
+
+### §89 — TitaNet-Large speaker verification + speaker profile DB (2026-05-11)
+
+Added NVIDIA TitaNet-Large (23M params, CC-BY-4.0) as a standalone
+speaker verification / embedding extractor backend. Produces 192-d
+L2-normalized speaker embeddings with 0.66% EER on VoxCeleb1-O cleaned.
+
+**Architecture:** 5 Jasper-style blocks with depthwise separable Conv1d +
+Squeeze-and-Excite + residual connections. Decoder: Attentive Statistical
+Pooling (ASP) → BN → Linear(6144→192) → L2-normalize.
+
+**Implementation:**
+- `models/convert-titanet-to-gguf.py` — .nemo → GGUF converter (~45 MB)
+- `src/titanet.{h,cpp}` — pure-CPU runtime (init/embed/free/cosine_sim)
+- `src/speaker_db.{h,cpp}` — file-per-speaker profile database (.spkr format)
+- `tools/reference_backends/titanet.py` — NeMo diff-testing backend
+- `tests/test-titanet.cpp` — standalone smoke test binary
+
+**CLI integration:**
+- `--enroll-speaker <name>` — extract embedding, save to speaker DB, exit
+- `--speaker-db <path>` — match transcription speakers against profile DB
+- `--titanet-model <path>` — model path or "auto" for auto-download
+- `--speaker-threshold <float>` — cosine sim threshold (default 0.7)
+- Speaker ID runs as a post-step after diarize, relabeling anonymous
+  `(speaker N)` with matched names like `(alice)`
+
+**C-ABI:** `crispasr_titanet_init/embed/free` + `crispasr_speaker_db_load/
+match/enroll/count/free`. Wrapper bindings added for Python, Dart/Flutter,
+and Rust.
+
+**Model registry:** `titanet-large.gguf` at `cstr/titanet-large-GGUF`.
+Auto-download via `--titanet-model auto`.
+
+**Parity validation — 6 bugs found and fixed during diff-testing:**
+
+| Bug | Symptom | Fix |
+|---|---|---|
+| BN epsilon | NeMo uses ε=0.001 for encoder (not 1e-5) | Store in GGUF metadata, use per-stage |
+| Missing mout ReLU | JasperBlock applies ReLU AFTER SE+residual | Add `apply_relu` after residual add |
+| ReLU on last sub-block | Last sub-block has no activation before SE | Skip ReLU for sub R-1 |
+| STFT window centering | PyTorch centers window at (n_fft−win)/2 | Center window in frame |
+| Missing pre-emphasis | NeMo applies x[t] -= 0.97·x[t-1] before STFT | Add pre-emphasis filter |
+| Wrong STFT padding | NeMo uses pad_mode="constant" (zero-pad) | Changed from reflect to zero |
+
+Final parity: **cos = 0.9999** on both test samples (an255: 0.999978,
+cen7: 0.999917). Encoder+decoder isolated: cos = 0.999997 with mel
+injection.
+
+Commits: `dc5f01b`, `3d12359`, `b54b92e`.
