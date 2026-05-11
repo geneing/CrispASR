@@ -3342,30 +3342,14 @@ extern "C" void chatterbox_set_n_threads(struct chatterbox_context* ctx, int n_t
         ctx->n_threads = n_threads > 0 ? n_threads : 4;
 }
 
-extern "C" void chatterbox_set_temperature(struct chatterbox_context* ctx, float temperature) {
-    if (ctx)
-        ctx->params.temperature = temperature;
-}
-
-extern "C" void chatterbox_set_top_p(struct chatterbox_context* ctx, float top_p) {
-    if (ctx)
-        ctx->params.top_p = top_p;
-}
-
-extern "C" void chatterbox_set_min_p(struct chatterbox_context* ctx, float min_p) {
-    if (ctx)
-        ctx->params.min_p = min_p;
-}
-
-extern "C" void chatterbox_set_repetition_penalty(struct chatterbox_context* ctx, float r) {
-    if (ctx)
-        ctx->params.repetition_penalty = r;
-}
-
-extern "C" void chatterbox_set_max_speech_tokens(struct chatterbox_context* ctx, int n) {
-    if (ctx)
-        ctx->params.max_speech_tokens = n > 0 ? n : 1000;
-}
+// (chatterbox_set_temperature / set_top_p / set_min_p /
+//  set_repetition_penalty / set_max_speech_tokens are defined above
+//  at lines ~3258-3313 with proper bound-checking — `r < 0.5f` clamp
+//  on repetition_penalty, `n > 0 ? n : 1000` fallback on
+//  max_speech_tokens, etc. The simpler one-liner copies that lived
+//  here briefly in 934313cc were duplicate definitions causing GCC
+//  redefinition errors on every Linux/macOS/Windows/iOS/Android CI
+//  job — removed.)
 
 // Diff/debug: VE pipeline stages — see chatterbox_ve.h for the spec.
 //
