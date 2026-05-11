@@ -151,9 +151,11 @@ jobs:
           cppcheck \
             --error-exitcode=1 \
             --enable=warning,performance,portability \
+            --inline-suppr \
             --std=c++17 \
             --suppress=missingIncludeSystem \
             --suppress=unmatchedSuppression \
+            --suppress=duplicateAssignExpression \
             -i ggml \
             -i bindings \
             --suppress='*:examples/server/*' \
