@@ -27,6 +27,7 @@
 #include "whisper_params.h"
 
 #include "common-crispasr.h" // read_audio_data
+#include "crispasr_chat.h"   // /v1/chat/completions
 #include "crispasr_tts_chunking.h"
 #include "crispasr_wav_writer.h"
 #include "../server/httplib.h"
@@ -884,6 +885,258 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     });
 
     // -----------------------------------------------------------------------
+    // POST /v1/chat/completions — OpenAI-compatible chat endpoint
+    //
+    // Body: application/json
+    //   {
+    //     "model":            "<model id>",                (optional, ignored)
+    //     "messages":         [{role, content}, ...],      (required)
+    //     "temperature":      0.0 .. 2.0,                  (optional, default 0.8)
+    //     "top_p":            0.0 .. 1.0,                  (optional, default 0.95)
+    //     "top_k":            int,                          (optional, crispasr ext.)
+    //     "max_tokens":       int,                          (optional, default 256)
+    //     "seed":             int,                          (optional)
+    //     "stop":             ["..."] | "...",              (optional)
+    //     "stream":           bool                          (optional, default false)
+    //   }
+    //
+    // stream=false  → 200 application/json, OpenAI ChatCompletion shape
+    // stream=true   → 200 text/event-stream, SSE deltas + "data: [DONE]"
+    //
+    // Backed by the shared crispasr_chat_* C ABI (one process-wide session
+    // for params.chat_model). The session's internal mutex serialises
+    // overlapping requests; concurrent requests will queue, not crash.
+    // -----------------------------------------------------------------------
+    std::shared_ptr<crispasr_chat_session> chat_sess(nullptr, &crispasr_chat_close);
+    std::mutex chat_init_mutex;
+    auto ensure_chat_session = [&]() -> crispasr_chat_session_t {
+        std::lock_guard<std::mutex> g(chat_init_mutex);
+        if (chat_sess) {
+            return chat_sess.get();
+        }
+        if (params.chat_model.empty()) {
+            return nullptr;
+        }
+        crispasr_chat_open_params op;
+        crispasr_chat_open_params_default(&op);
+        op.n_ctx = params.chat_n_ctx;
+        op.n_gpu_layers = params.chat_n_gpu_layers;
+        crispasr_chat_error err{};
+        crispasr_chat_session_t s = crispasr_chat_open(params.chat_model.c_str(), &op, &err);
+        if (!s) {
+            fprintf(stderr, "crispasr-server: chat session open failed: %s\n", err.message);
+            return nullptr;
+        }
+        fprintf(stderr, "crispasr-server: /v1/chat/completions ready — model '%s', template '%s', ctx %d\n",
+                params.chat_model.c_str(), crispasr_chat_template_name(s), crispasr_chat_n_ctx(s));
+        chat_sess.reset(s, &crispasr_chat_close);
+        return s;
+    };
+
+    // Build the GenerateParams from an OpenAI-compatible JSON body.
+    // The `stop` field accepts either a string or an array of strings;
+    // we normalise into the (vector<string>) `stops` out-param so the
+    // const char* const* the ABI takes can point at stable storage.
+    auto parse_generate_params = [](const nlohmann::json& body, crispasr_chat_generate_params& gp,
+                                    std::vector<std::string>& stops, std::vector<const char*>& stops_cstr) {
+        crispasr_chat_generate_params_default(&gp);
+        if (body.contains("temperature") && body["temperature"].is_number()) {
+            gp.temperature = body["temperature"].get<float>();
+        }
+        if (body.contains("top_p") && body["top_p"].is_number()) {
+            gp.top_p = body["top_p"].get<float>();
+        }
+        if (body.contains("top_k") && body["top_k"].is_number_integer()) {
+            gp.top_k = body["top_k"].get<int32_t>();
+        }
+        if (body.contains("max_tokens") && body["max_tokens"].is_number_integer()) {
+            gp.max_tokens = body["max_tokens"].get<int32_t>();
+        }
+        if (body.contains("seed") && body["seed"].is_number_integer()) {
+            gp.seed = body["seed"].get<uint32_t>();
+        }
+        if (body.contains("stop")) {
+            if (body["stop"].is_string()) {
+                stops.push_back(body["stop"].get<std::string>());
+            } else if (body["stop"].is_array()) {
+                for (const auto& s : body["stop"]) {
+                    if (s.is_string()) {
+                        stops.push_back(s.get<std::string>());
+                    }
+                }
+            }
+        }
+        stops_cstr.reserve(stops.size());
+        for (const auto& s : stops) {
+            stops_cstr.push_back(s.c_str());
+        }
+        gp.stop = stops_cstr.empty() ? nullptr : stops_cstr.data();
+        gp.n_stop = stops_cstr.size();
+    };
+
+    svr.Post("/v1/chat/completions", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
+        if (params.chat_model.empty()) {
+            json_error(res, 503, "chat is not enabled on this server (start with --chat-model PATH)", "chat_disabled");
+            return;
+        }
+        crispasr_chat_session_t s = ensure_chat_session();
+        if (!s) {
+            json_error(res, 500, "failed to initialise chat session", "chat_init_failed");
+            return;
+        }
+
+        nlohmann::json body;
+        try {
+            body = nlohmann::json::parse(req.body);
+        } catch (...) {
+            json_error(res, 400, "invalid JSON body", "invalid_json");
+            return;
+        }
+        if (!body.contains("messages") || !body["messages"].is_array() || body["messages"].empty()) {
+            json_error(res, 400, "missing or empty 'messages' array", "missing_required_field", "messages");
+            return;
+        }
+
+        // Marshal messages into ABI-shaped POD. Backing strings stay
+        // alive for the duration of this lambda (until generate returns).
+        std::vector<std::string> roles_buf, contents_buf;
+        roles_buf.reserve(body["messages"].size());
+        contents_buf.reserve(body["messages"].size());
+        for (const auto& m : body["messages"]) {
+            if (!m.contains("role") || !m.contains("content") || !m["role"].is_string()) {
+                json_error(res, 400, "each message needs string 'role' and 'content'", "invalid_message");
+                return;
+            }
+            roles_buf.push_back(m["role"].get<std::string>());
+            // OpenAI accepts string OR array of content parts; we
+            // collapse multimodal arrays to their text-only joined form.
+            if (m["content"].is_string()) {
+                contents_buf.push_back(m["content"].get<std::string>());
+            } else if (m["content"].is_array()) {
+                std::string joined;
+                for (const auto& part : m["content"]) {
+                    if (part.is_object() && part.contains("text") && part["text"].is_string()) {
+                        if (!joined.empty())
+                            joined += "\n";
+                        joined += part["text"].get<std::string>();
+                    }
+                }
+                contents_buf.push_back(joined);
+            } else {
+                contents_buf.push_back("");
+            }
+        }
+        std::vector<crispasr_chat_message> msgs;
+        msgs.reserve(roles_buf.size());
+        for (size_t i = 0; i < roles_buf.size(); ++i) {
+            msgs.push_back({roles_buf[i].c_str(), contents_buf[i].c_str()});
+        }
+
+        crispasr_chat_generate_params gp;
+        std::vector<std::string> stops;
+        std::vector<const char*> stops_cstr;
+        parse_generate_params(body, gp, stops, stops_cstr);
+
+        const bool stream = body.value("stream", false);
+        const std::string model_id = params.chat_model; // for "model" field in response
+        // Each session is multi-turn safe via reset; each /v1/chat/completions
+        // call is treated as a stateless conversation, so flush KV cache.
+        crispasr_chat_error rerr{};
+        if (crispasr_chat_reset(s, &rerr) != 0) {
+            json_error(res, 500, std::string("chat reset failed: ") + rerr.message, "chat_reset_failed");
+            return;
+        }
+
+        const auto now_unix = []() -> int64_t {
+            return (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        };
+        const std::string created_str = std::to_string(now_unix());
+        // chat-cmpl-<random>; httplib doesn't ship UUIDs so an ms-resolution
+        // timestamp + thread id is enough to disambiguate concurrent calls.
+        const std::string completion_id =
+            "chatcmpl-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count());
+
+        if (!stream) {
+            crispasr_chat_error gerr{};
+            char* out = crispasr_chat_generate(s, msgs.data(), msgs.size(), &gp, &gerr);
+            if (!out) {
+                json_error(res, 500, std::string("chat generate failed: ") + gerr.message, "chat_generate_failed");
+                return;
+            }
+            const std::string reply = out;
+            crispasr_chat_string_free(out);
+            std::ostringstream js;
+            js << "{\"id\": \"" << completion_id << "\", "
+               << "\"object\": \"chat.completion\", "
+               << "\"created\": " << created_str << ", "
+               << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
+               << "\"choices\": [{"
+               << "\"index\": 0, "
+               << "\"message\": {\"role\": \"assistant\", \"content\": \"" << crispasr_json_escape(reply) << "\"}, "
+               << "\"finish_reason\": \"stop\""
+               << "}]}";
+            res.set_content(js.str(), "application/json");
+            return;
+        }
+
+        // ---------- streaming (SSE) ----------
+        // We can't stream from the chat ABI's on_token callback directly
+        // into httplib's chunked sink because httplib's content provider
+        // calls our lambda *after* the response is committed, asking us
+        // to fill its sink. So: run generate synchronously into a queue
+        // before the chunked provider drains it. For a one-call-per-
+        // request server with a session-internal mutex, this is fine
+        // and avoids needing a second thread + condvar dance.
+        struct sse_state {
+            std::vector<std::string> deltas;
+            std::string error;
+        };
+        sse_state state;
+        crispasr_chat_error gerr{};
+        auto on_tok = +[](const char* utf8, void* user) { static_cast<sse_state*>(user)->deltas.emplace_back(utf8); };
+        if (crispasr_chat_generate_stream(s, msgs.data(), msgs.size(), &gp, on_tok, &state, &gerr) != 0) {
+            json_error(res, 500, std::string("chat stream failed: ") + gerr.message, "chat_stream_failed");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-cache");
+        // Build the full SSE body and ship it as one chunked response —
+        // simpler than a content-provider closure since we already have
+        // every delta in hand. Clients see proper SSE framing and can
+        // parse incrementally.
+        std::ostringstream sse;
+        for (const auto& delta : state.deltas) {
+            std::ostringstream js;
+            js << "{\"id\": \"" << completion_id << "\", "
+               << "\"object\": \"chat.completion.chunk\", "
+               << "\"created\": " << created_str << ", "
+               << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
+               << "\"choices\": [{\"index\": 0, "
+               << "\"delta\": {\"content\": \"" << crispasr_json_escape(delta) << "\"}, "
+               << "\"finish_reason\": null}]}";
+            sse << "data: " << js.str() << "\n\n";
+        }
+        // Final stop chunk + DONE marker.
+        {
+            std::ostringstream js;
+            js << "{\"id\": \"" << completion_id << "\", "
+               << "\"object\": \"chat.completion.chunk\", "
+               << "\"created\": " << created_str << ", "
+               << "\"model\": \"" << crispasr_json_escape(model_id) << "\", "
+               << "\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}";
+            sse << "data: " << js.str() << "\n\n";
+        }
+        sse << "data: [DONE]\n\n";
+        res.set_content(sse.str(), "text/event-stream");
+    });
+
+    // -----------------------------------------------------------------------
     // Catch unmatched routes. cpp-httplib invokes the error handler for any
     // 4xx/5xx response, including ones our own route handlers produced via
     // json_error() — so guard on `res.body.empty()` to avoid clobbering the
@@ -918,6 +1171,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             fprintf(stderr, "crispasr-server: warning: --voice-dir not set; /v1/voices will return empty "
                             "and /v1/audio/speech will reject requests with a 'voice' field\n");
         }
+    }
+    if (!params.chat_model.empty()) {
+        fprintf(stderr, "  POST /v1/chat/completions        — text-LLM chat (model '%s')\n", params.chat_model.c_str());
     }
     fprintf(stderr, "\n");
     if (!api_keys.empty())

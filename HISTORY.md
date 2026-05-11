@@ -3624,3 +3624,78 @@ cen7: 0.999917). Encoder+decoder isolated: cos = 0.999997 with mel
 injection.
 
 Commits: `dc5f01b`, `3d12359`, `b54b92e`.
+
+### §90 — Chat C ABI: text-LLM surface on libcrispasr (2026-05-11)
+
+Spec: `docs/prompts/chat-abi.md`. Phases 0–6 landed in one pass.
+
+**Phase 0 — `crispasr-llama-core` static lib.** Lifted the 50+
+llama.cpp source files under `examples/talk-llama/` (`llama.cpp`,
+`llama-{adapter,arch,batch,chat,context,…}.cpp`, `unicode*.cpp`,
+`models/*.cpp`) out of the SDL2-gated `crispasr-talk-llama` example
+and into a STATIC lib defined in `src/CMakeLists.txt`. Built
+unconditionally with hidden visibility (`CXX_VISIBILITY_PRESET hidden
++ VISIBILITY_INLINES_HIDDEN ON`) so `llama_*` / unicode helpers don't
+leak from `libcrispasr.dylib`'s export table. `examples/talk-llama/
+CMakeLists.txt` simplified to a single `add_executable(crispasr-talk-
+llama talk-llama.cpp)` that links against the new lib — one source
+set, two consumers.
+
+**Phase 1+2+3 — `crispasr_chat_*` ABI.** Public header at
+`include/crispasr_chat.h` (POD structs + opaque handle only, no
+`llama.h` types). Implementation `src/chat.cpp` linked PRIVATE into
+`libcrispasr` so external consumers see only the `crispasr_chat_*`
+surface. Covers open / close / reset / generate (one-shot) /
+generate_stream (on_token callback) / memory_estimate / template_name
+/ n_ctx / string_free. Sampler chain composed via
+`llama_sampler_chain_init + temp / top_k / top_p / min_p /
+repeat_penalty / dist` from upstream `examples/main` — full sampling
+config landed in one pass rather than churning ABI between Phase 1
+and Phase 2. Multi-turn KV cache reuse via a per-session token
+history; divergent prompts trigger `llama_memory_clear` + re-prefill,
+matching prefixes skip re-decode.
+
+**Phase 4 — `crispasr-chat` CLI.** `examples/cli/crispasr_chat_main.cpp`
+— minimal stdin → stdout binary. Auto-detects TTY vs piped stdin: TTY
+gives an interactive REPL with streaming deltas, pipe gives a one-shot
+"read all of stdin → print reply" mode. No SDL2 dep. Links against
+`crispasr` only.
+
+**Phase 5 — `POST /v1/chat/completions` in the server.** Added to
+`examples/cli/crispasr_server.cpp` (the active server with the
+existing `/v1/audio/*` OpenAI surface). New `--chat-model PATH` /
+`--chat-ctx N` / `--chat-gpu-layers N` flags; the session lazy-opens
+on first request and re-uses across calls (one process-wide handle,
+session-internal mutex serialises overlapping requests). Supports
+both `stream: false` (plain `chat.completion` JSON) and `stream: true`
+(SSE deltas + `data: [DONE]`). OpenAI-shape `{role, content}` arrays
+accepted; multimodal content arrays are collapsed to their text-only
+joined form for now.
+
+**Phase 6 — Dart binding.** `flutter/crispasr/lib/src/chat.dart`. New
+`CrispasrChatSession` class mirrors `CrispasrSession`'s shape:
+`Finalizer` for free-on-GC, explicit `close()` for deterministic
+cleanup, `generate()` returns `Future<String>`, `reset()` flushes KV.
+`generateStream` intentionally NOT exposed — the C ABI's `on_token`
+callback passes a `const char*` only valid for the duration of the
+synchronous call, which is incompatible with Dart's
+`NativeCallable.listener` (async delivery → dangling pointer by the
+time the Dart closure runs). The recommended Dart streaming path is
+the HTTP `/v1/chat/completions` SSE endpoint from Phase 5. SDK
+constraint bumped to `>=3.1.0` for `Array<Int8>` inline struct fields.
+
+**Tests.** `tests/test-chat-ggml.cpp` Catch2 smoke verifies open →
+n_ctx → template_name → generate (one-shot) → reset → generate_stream
+→ close. Streamed output equals one-shot under greedy + fixed seed.
+Gated on `CRISPASR_CHAT_TEST_MODEL` env var pointing at a tiny GGUF
+chat model — skipped when unset so plain builds stay green. Verified
+locally against `HuggingFaceTB/SmolLM2-360M-Instruct-Q8_0.gguf`
+(386 MB) on M1 Metal; 13 assertions pass, Metal pipeline cache picks
+up the chat code path automatically.
+
+**Won't-fix this session.** Phase 7 (CrisperWeaver integration) is in
+a different repo and stays out of scope. The Dart `generateStream`
+absence is documented in the binding's source comment; closing it
+properly needs an ABI tweak so `on_token` pointers stay valid past
+the C callback's return (e.g. malloc-per-chunk + Dart-side
+`crispasr_chat_string_free`).

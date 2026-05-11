@@ -267,3 +267,22 @@ if (CRISPASR_CURL)
 endif()
 
 install(TARGETS ${TARGET} RUNTIME BUNDLE DESTINATION bin)
+
+# ---------------------------------------------------------------------------
+# crispasr-chat — minimal reference CLI for the crispasr_chat_* C ABI.
+#
+# Pure stdin → stdout chat loop. Streaming by default (one-shot when
+# stdin is a pipe). Demonstrates the smallest downstream-binding shape
+# and doubles as a smoke test for the chat surface against any GGUF
+# chat model on disk. No SDL2 dep — text-only.
+# ---------------------------------------------------------------------------
+add_executable(crispasr-chat
+    crispasr_chat_main.cpp
+)
+target_include_directories(crispasr-chat PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(crispasr-chat PRIVATE
+    crispasr
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+include(DefaultTargetOptions)
+install(TARGETS crispasr-chat RUNTIME BUNDLE DESTINATION bin)

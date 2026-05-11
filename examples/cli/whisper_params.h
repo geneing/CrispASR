@@ -261,4 +261,13 @@ struct whisper_params {
     int translate_max_tokens = 256;
     std::string translate_source_lang; // overrides source_lang for the translator stage
     std::string translate_target_lang; // overrides target_lang for the translator stage
+
+    // Text-LLM chat (server-mode /v1/chat/completions). Independent from
+    // the audio backend's `model` path so a server can serve ASR + chat
+    // off two different GGUFs. When empty, /v1/chat/completions returns
+    // 503 with `chat_disabled` rather than 404. See docs/prompts/chat-abi.md
+    // for the underlying ABI.
+    std::string chat_model; // path to a GGUF chat model
+    int32_t chat_n_ctx = 4096;
+    int32_t chat_n_gpu_layers = -1;
 };

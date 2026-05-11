@@ -474,6 +474,15 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
         params.tts_max_input_chars = std::stoi(ARGV_NEXT);
     } else if (arg == "--cors-origin") {
         params.server_cors_origin = ARGV_NEXT;
+    } else if (arg == "--chat-model") {
+        // Optional GGUF chat model — enables POST /v1/chat/completions
+        // on the server. Independent of the primary --model so a
+        // server can host ASR + chat off two different GGUFs.
+        params.chat_model = ARGV_NEXT;
+    } else if (arg == "--chat-ctx") {
+        params.chat_n_ctx = std::stoi(ARGV_NEXT);
+    } else if (arg == "--chat-gpu-layers") {
+        params.chat_n_gpu_layers = std::stoi(ARGV_NEXT);
     } else if (arg == "--tts-trim-silence") {
         params.tts_trim_silence = true;
     } else if (arg == "--text") {
@@ -873,6 +882,15 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             params.tts_max_input_chars);
     fprintf(stderr, "             --cors-origin ORIGIN     server: opt-in CORS for browser clients "
                     "('*' for any, or scheme://host[:port])\n");
+    fprintf(stderr, "             --chat-model PATH        server: enable POST /v1/chat/completions backed by "
+                    "this GGUF chat model (independent of --model)\n");
+    fprintf(stderr,
+            "             --chat-ctx N             [%-7d] server: context window in tokens for the chat model\n",
+            params.chat_n_ctx);
+    fprintf(stderr,
+            "             --chat-gpu-layers N      [%-7d] server: GPU layers for the chat model "
+            "(-1 = all, 0 = CPU only)\n",
+            params.chat_n_gpu_layers);
     fprintf(stderr, "             --tts-steps N            [%-7d] DPM-Solver++ steps (10-20, vibevoice only)\n",
             params.tts_steps);
     fprintf(stderr, "             --tts-trim-silence       [%-7s] trim leading silence from TTS output\n",

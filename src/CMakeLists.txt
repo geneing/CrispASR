@@ -144,6 +144,12 @@ add_library(crispasr
             # CLI keeps the TTY prompting shim; the library does the
             # non-interactive resolve.
             crispasr_model_registry.cpp
+            # Text-LLM chat C ABI (docs/prompts/chat-abi.md). Calls into
+            # the private crispasr-llama-core static lib; the public
+            # surface lives in include/crispasr_chat.h and exposes only
+            # POD structs + opaque handles — no llama.h types leak out.
+            chat.cpp
+            ../include/crispasr_chat.h
             )
 add_library(whisper ALIAS crispasr)
 
@@ -333,6 +339,88 @@ if(NOT MSVC)
     target_compile_options(crispasr-core PRIVATE -O3)
 endif()
 set_target_properties(crispasr-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ---------------------------------------------------------------------------
+# crispasr-llama-core — vendored llama.cpp built as a private STATIC lib
+# so the chat / text-LLM C-ABI (src/chat.cpp, include/crispasr_chat.h) can
+# call into it without exposing `llama.h` types in the public surface and
+# without pulling a second copy of ggml.
+#
+# Sources live under `examples/talk-llama/` (they originally landed there
+# only to power the SDL2-gated `crispasr-talk-llama` example). The example
+# now consumes this lib too — one source set, two targets — see
+# examples/talk-llama/CMakeLists.txt.
+#
+# Audio-LLM backends (voxtral / qwen3_asr / granite_speech / …) ship their
+# own hand-rolled ggml graph builders and intentionally do NOT link this
+# target; they stay free of the per-architecture llama-model code.
+# ---------------------------------------------------------------------------
+set(LLAMA_CORE_DIR ${CMAKE_SOURCE_DIR}/examples/talk-llama)
+file(GLOB LLAMA_CORE_MODELS CONFIGURE_DEPENDS ${LLAMA_CORE_DIR}/models/*.cpp)
+add_library(crispasr-llama-core STATIC
+            ${LLAMA_CORE_DIR}/llama.cpp
+            ${LLAMA_CORE_DIR}/llama-adapter.cpp
+            ${LLAMA_CORE_DIR}/llama-arch.cpp
+            ${LLAMA_CORE_DIR}/llama-batch.cpp
+            ${LLAMA_CORE_DIR}/llama-chat.cpp
+            ${LLAMA_CORE_DIR}/llama-context.cpp
+            ${LLAMA_CORE_DIR}/llama-cparams.cpp
+            ${LLAMA_CORE_DIR}/llama-grammar.cpp
+            ${LLAMA_CORE_DIR}/llama-graph.cpp
+            ${LLAMA_CORE_DIR}/llama-hparams.cpp
+            ${LLAMA_CORE_DIR}/llama-impl.cpp
+            ${LLAMA_CORE_DIR}/llama-io.cpp
+            ${LLAMA_CORE_DIR}/llama-kv-cache.cpp
+            ${LLAMA_CORE_DIR}/llama-kv-cache-iswa.cpp
+            ${LLAMA_CORE_DIR}/llama-memory.cpp
+            ${LLAMA_CORE_DIR}/llama-memory-recurrent.cpp
+            ${LLAMA_CORE_DIR}/llama-memory-hybrid.cpp
+            ${LLAMA_CORE_DIR}/llama-memory-hybrid-iswa.cpp
+            ${LLAMA_CORE_DIR}/llama-mmap.cpp
+            ${LLAMA_CORE_DIR}/llama-model-loader.cpp
+            ${LLAMA_CORE_DIR}/llama-model-saver.cpp
+            ${LLAMA_CORE_DIR}/llama-model.cpp
+            ${LLAMA_CORE_DIR}/llama-quant.cpp
+            ${LLAMA_CORE_DIR}/llama-sampler.cpp
+            ${LLAMA_CORE_DIR}/llama-vocab.cpp
+            ${LLAMA_CORE_DIR}/unicode.cpp
+            ${LLAMA_CORE_DIR}/unicode-data.cpp
+            ${LLAMA_CORE_MODELS})
+# Headers live next to the .cpp files. PUBLIC so src/chat.cpp (built into
+# libcrispasr) sees llama.h, but the header is NOT installed — only the
+# `crispasr_chat_*` ABI in include/crispasr_chat.h is.
+target_include_directories(crispasr-llama-core PUBLIC ${LLAMA_CORE_DIR})
+target_compile_features   (crispasr-llama-core PUBLIC cxx_std_17)
+target_link_libraries     (crispasr-llama-core PUBLIC ggml ggml-base Threads::Threads)
+set_target_properties(crispasr-llama-core PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    # Hide llama.cpp's C ABI from libcrispasr's export table — chat.cpp
+    # calls into it INTERNALLY via the static-archive link, but external
+    # consumers of libcrispasr.dylib only see the crispasr_chat_* surface.
+    # Without this, hundreds of llama_* / ggml_* symbols leak and could
+    # collide with another llama.cpp linked into the same process.
+    CXX_VISIBILITY_PRESET hidden
+    C_VISIBILITY_PRESET   hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+if(NOT MSVC)
+    target_compile_options(crispasr-llama-core PRIVATE -O3)
+    # Vendored upstream code — silence the strict warnings we apply to
+    # our own sources so a ggml/llama.cpp bump doesn't break CI lint.
+    target_compile_options(crispasr-llama-core PRIVATE
+        -Wno-cast-qual
+        -Wno-unused-function
+        -Wno-unused-parameter
+        -Wno-unused-variable
+        -Wno-shadow
+        -Wno-missing-declarations
+        -Wno-missing-noreturn
+        -Wno-pedantic
+        -Wno-deprecated-declarations)
+endif()
+if(WIN32)
+    # llama-mmap.cpp uses PrefetchVirtualMemory which needs Win 8.1+.
+    target_compile_definitions(crispasr-llama-core PRIVATE _WIN32_WINNT=0x0602)
+endif()
 
 # ---------------------------------------------------------------------------
 # Parakeet TDT — nvidia/parakeet-tdt-0.6b-v3 (FastConformer encoder + TDT decoder)
@@ -1082,7 +1170,17 @@ if (TARGET text-lid-dispatch)
     target_link_libraries(crispasr PUBLIC text-lid-dispatch)
 endif()
 
+# Text-LLM chat backend — PRIVATE link: llama.h identifiers are
+# absorbed into libcrispasr and don't bleed into the public surface.
+# Symbols downstream consumers see are only the `crispasr_chat_*` ABI
+# from include/crispasr_chat.h. See docs/prompts/chat-abi.md.
+if (TARGET crispasr-llama-core)
+    target_link_libraries(crispasr PRIVATE crispasr-llama-core)
+endif()
+
 install(TARGETS crispasr LIBRARY)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/crispasr_chat.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # Convenience alias: produce `libwhisper.{dylib,so,dll}` as a symlink (or
 # copy on Windows) next to `libcrispasr`, pointing at the same file. Lets

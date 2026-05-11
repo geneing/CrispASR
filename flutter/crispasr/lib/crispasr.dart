@@ -2,3 +2,4 @@
 library crispasr;
 
 export 'src/crispasr.dart';
+export 'src/chat.dart';
