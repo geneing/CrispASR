@@ -3,7 +3,7 @@
   "title": "CrispASR — auto rebake refs",
   "code_file": "crispasr-rebake.py",
   "language": "python",
-  "kernel_type": "script",
+  "kernel_type": "notebook",
   "is_private": "true",
   "enable_gpu": "false",
   "enable_internet": "true",

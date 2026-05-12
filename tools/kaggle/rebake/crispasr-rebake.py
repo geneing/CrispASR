@@ -1,4 +1,4 @@
-# ─────────────────────────── cell 0 (markdown) ───────────────────────────
+# %% [markdown]
 # # CrispASR — automatic reference re-bake (Kaggle)
 #
 # Sibling kernel to `chr1str/crispasr-regression-suite`. Same code,
@@ -7,48 +7,56 @@
 # NeMo / transformers / torch source models and pushes them to
 # `cstr/crispasr-regression-fixtures`.
 #
-# Requires the Kaggle secret `HF_TOKEN` with **write** scope to the
-# fixtures repo. Without it, the preflight fails at cell 2 with a
-# clear "rebake+UPLOAD=1 requires HF_TOKEN" message — never wastes
-# the 5–10 min ML stack install on an unauthenticated push attempt.
-#
-# After a successful re-bake, the script prints the new fixtures
-# commit SHA. **The manifest pin in
-# `tests/regression/manifest.json` is NOT auto-bumped** — that
-# stays a reviewable human commit, otherwise drift sneaks into
-# nightly without anyone noticing. The maintainer compares the
-# old vs new cos numbers, decides whether to accept the drift,
-# and bumps the SHA explicitly.
-#
-# This file is a thin bootstrap shim:
-#   - Sets `CRISPASR_REGRESSION_MODE=rebake` + `UPLOAD=1` as
-#     defaults (still overridable via Kaggle "Variables").
-#   - Clones the latest `main` of CrispASR.
-#   - Exec's the canonical `tools/kaggle/crispasr-regression.py`
-#     from the clone, so every Kaggle run picks up the freshest
-#     bootstrap logic without re-pushing the kernel.
+# Notebook-type kernel with **real Jupytext cell separators**
+# (`# %% [code]`). UserSecretsClient must be called from a dedicated
+# top-of-notebook cell; running the secret read in a monolithic
+# script kernel (as we did initially) causes a flaky ConnectionError
+# even when the JWT is properly injected — that's why this file
+# diverges from the `kernel_type: "script"` validate kernel.
 
+# %% [code]
+# ── Cell 1: read the HF_TOKEN Kaggle Secret as the FIRST thing the
+#    kernel does. Matches Kaggle's documented pattern (secrets in
+#    their own cell, at the top, before any heavy imports / pip
+#    work).
+from kaggle_secrets import UserSecretsClient
+user_secrets = UserSecretsClient()
+hf_token_secret = user_secrets.get_secret("HF_TOKEN")
+print("[cell 1] HF_TOKEN secret read OK from Kaggle Secrets")
+
+# %% [code]
+# ── Cell 2: export the secret as an env var so the canonical
+#    regression script's auth chain (which prefers env vars) picks
+#    it up without going through UserSecretsClient a second time.
 import os
+os.environ["HF_TOKEN"] = hf_token_secret
+os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token_secret
+
+# Re-bake defaults — overridable via Kaggle's "Add-ons → Variables"
+# pane if you want one-off validate-mode runs from this kernel.
+os.environ.setdefault("CRISPASR_REGRESSION_MODE", "rebake")
+os.environ.setdefault("CRISPASR_REGRESSION_UPLOAD", "1")
+print(f"[cell 2] env primed: MODE={os.environ['CRISPASR_REGRESSION_MODE']} "
+      f"UPLOAD={os.environ['CRISPASR_REGRESSION_UPLOAD']}")
+
+# %% [code]
+# ── Cell 3: shallow-clone CrispASR's main and hand control to the
+#    canonical `tools/kaggle/crispasr-regression.py`. Doing the
+#    clone in its own cell keeps the secret-handling cells small
+#    and self-contained.
 import subprocess
 import sys
 from pathlib import Path
 
 WORK = Path("/kaggle/working")
 REPO = WORK / "CrispASR-bootstrap"
-
-os.environ.setdefault("CRISPASR_REGRESSION_MODE", "rebake")
-os.environ.setdefault("CRISPASR_REGRESSION_UPLOAD", "1")
-
-# Minimal clone — we only need tools/kaggle + tests/regression + the
-# source needed to build crispasr-cli / crispasr-diff. Full clone is
-# easier than a sparse-checkout pattern and only ~50 MB anyway.
 if not REPO.exists():
     subprocess.check_call([
         "git", "clone", "--recursive", "--depth", "20",
         "https://github.com/CrispStrobe/CrispASR.git", str(REPO),
     ])
+print(f"[cell 3] clone OK: {REPO}")
 
-# Hand control to the canonical script.
 script = REPO / "tools" / "kaggle" / "crispasr-regression.py"
 sys.argv[0] = str(script)
 exec(compile(script.read_text(), str(script), "exec"))
