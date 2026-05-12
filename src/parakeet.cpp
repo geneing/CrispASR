@@ -1088,9 +1088,30 @@ static std::vector<parakeet_emitted_token> parakeet_tdt_decode(parakeet_context*
             int dur_skip = (int)hp.tdt_durations[dur_id]; // 0..4
 
             if (tok == blank_id) {
-                // Blank → never emit, always advance t by at least 1 frame.
-                t += std::max(1, dur_skip);
-                break;
+                // Blank → never emit. Two cases, matching the NeMo TDT
+                // reference (`GreedyTDTInfer._greedy_decode` in
+                // `rnnt_greedy_decoding.py`):
+                //
+                //   dur > 0: advance encoder frame by dur, exit inner loop.
+                //   dur = 0: stay on this frame, count toward the shared
+                //            `max_per_step` budget so we don't spin forever
+                //            (reference: `symbols_added += 1; need_loop =
+                //            (skip == 0)`).
+                //
+                // The old "force `t += 1` on blank+dur=0" path matched the
+                // empirical result of NeMo's spin (10 deterministic blank
+                // retries → force-advance by 1 via `if symbols_added ==
+                // max_symbols: time_idx += 1`) for greedy argmax, but
+                // diverged from the reference for any path where the
+                // predictor / joint state can change between retries (e.g.
+                // temperature sampling, or future paths that touch the
+                // shared `n_inner` budget). Issue #88.
+                if (dur_skip > 0) {
+                    t += dur_skip;
+                    break;
+                }
+                n_inner++;
+                continue;
             }
 
             // Softmax probability of the picked token, scoped to the

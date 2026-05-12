@@ -4739,3 +4739,68 @@ Without this, the encoder output has negative values where it shouldn't.
 
 Lesson: always print `block.mout` / `block.mout` for any NeMo encoder
 block. The `mconv` list alone is incomplete.
+
+## Parakeet-TDT greedy decode — blank + duration=0 (May 2026)
+
+### `max(1, dur_skip)` on blank exits the inner loop "too early" vs. NeMo
+
+`parakeet_tdt_decode()` originally treated `blank + dur=0` as a
+force-advance: `t += std::max(1, dur_skip); break;`. NeMo's
+`GreedyTDTInfer._greedy_decode` instead does
+`time_idx += skip; need_loop = (skip == 0)` — i.e. blank+dur=0 stays
+on the same encoder frame and re-runs the joint head, counting toward
+the shared `max_symbols` budget (default 10). Only when the budget is
+exhausted does `time_idx += 1` fire.
+
+For pure greedy argmax the two are observationally equivalent: blank
+predictions don't change predictor state, so retries are deterministic
+and produce the same blank+dur=0 every time, eventually force-advancing
+exactly one frame either way. The fix is still worth applying because:
+
+1. **Reference parity**: the inner-loop budget now counts both
+   non-blank+dur=0 emits AND blank+dur=0 spins, matching NeMo's
+   `symbols_added`. The non-blank path was already correct
+   (`n_inner++` + post-loop `if (n_inner >= max_per_step) t++`).
+2. **Sampling correctness**: with `decode_temperature > 0`, the joint
+   output IS stochastic and retries can resolve to a non-blank token.
+   The old code skipped those retries entirely. Issue #88 reporter's
+   "model emits blank+dur=0 as a 'not yet decided' signal" mental
+   model only matches reality in the sampling path.
+3. **Forward-compatibility**: any future change that mutates predictor
+   state on blank (e.g. a non-NeMo experimental decoder) would silently
+   change behavior with the old force-advance; the retry path
+   preserves the contract.
+
+### Don't double-increment `t` in the fix
+
+The natural-looking fix is
+
+```cpp
+if (tok == blank_id) {
+    if (dur_skip > 0) { t += dur_skip; break; }
+    n_inner++;
+    if (n_inner >= max_per_step) { t++; break; }   // ← bug
+    continue;
+}
+```
+
+This double-advances when blank+dur=0 exhausts the budget: the `t++`
+inside the if-branch fires, then the existing post-loop
+`if (n_inner >= max_per_step) t++` fires again, jumping the encoder
+ahead by 2 frames instead of 1.
+
+The clean version drops the in-handler force-advance and lets the
+existing post-loop check do its job:
+
+```cpp
+if (tok == blank_id) {
+    if (dur_skip > 0) { t += dur_skip; break; }
+    n_inner++;
+    continue;     // while-condition + post-loop handle exhaustion
+}
+```
+
+Lesson: when adding a fast-exit inside a loop with an existing
+post-loop "fix up" step, audit the post-loop for redundancy with the
+fast-exit. The most defensive-looking version is the most likely to
+double-count.
