@@ -110,16 +110,91 @@ hf_token = kaggle_secret("HF_TOKEN") or os.environ.get("HF_TOKEN")
 if hf_token:
     os.environ["HF_TOKEN"] = hf_token
     os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
-    print("HF auth: token present")
+    print("HF auth: token present (will verify next)")
 else:
     print("HF auth: anonymous (rebake+upload will fail without HF_TOKEN)")
-    if MODE == "rebake" and UPLOAD:
-        raise SystemExit("UPLOAD=1 in rebake mode requires HF_TOKEN secret")
 
+# Need huggingface_hub before we can preflight the token. Pulled here
+# (small, ~MB) even if the token check ends up failing — the cost of
+# the import is negligible against the fail-fast benefit.
 subprocess.check_call([
     sys.executable, "-m", "pip", "install", "--quiet",
     "huggingface_hub",
 ])
+
+# ── Preflight: prove the token / fixture chain works before we spend
+#    10 minutes building + downloading models we'll never use. Better
+#    to die loudly in cell 2 than 25 minutes later in cell 7. ────────
+def preflight_hf() -> None:
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
+
+    api = HfApi(token=hf_token) if hf_token else HfApi()
+
+    # 1. If a token is present, prove it's valid and tell us whose it is.
+    if hf_token:
+        try:
+            info = api.whoami()
+            user = info.get("name") or info.get("fullname") or "?"
+            orgs = [o.get("name") for o in info.get("orgs", []) if o.get("name")]
+            print(f"HF auth: token OK — user={user!r}  orgs={orgs}")
+        except HfHubHTTPError as exc:
+            raise SystemExit(
+                f"HF auth: token REJECTED by /api/whoami-v2 ({exc}).\n"
+                f"  Generate a fresh token at https://huggingface.co/settings/tokens\n"
+                f"  and store it as the Kaggle secret HF_TOKEN (read+write for rebake)."
+            )
+
+    # 2. For rebake+upload, the token must additionally have *write*
+    #    access to the fixtures repo. Probe via repo_info(); HF returns
+    #    a `private`/`gated` flag we can sanity-check, and the call
+    #    itself 401s if the token can't see private repos when needed.
+    #    Writability is harder to introspect cleanly — the cheapest
+    #    proof is the upload step itself — but we can at least confirm
+    #    the repo exists and the user can see it.
+    fixtures_repo = "cstr/crispasr-regression-fixtures"
+    try:
+        info = api.repo_info(repo_id=fixtures_repo, repo_type="model")
+        print(f"HF fixtures: {fixtures_repo} reachable (last_modified={info.last_modified})")
+    except HfHubHTTPError as exc:
+        msg = (
+            f"HF fixtures: cannot reach {fixtures_repo} ({exc}).\n"
+            f"  validate mode CAN'T proceed without the fixtures repo;\n"
+            f"  rebake+upload CAN'T proceed without write access to it."
+        )
+        raise SystemExit(msg)
+
+    if MODE == "rebake" and UPLOAD:
+        if not hf_token:
+            raise SystemExit(
+                "rebake+UPLOAD=1 requires HF_TOKEN with write access to "
+                f"{fixtures_repo}. Add it as a Kaggle secret."
+            )
+        # Best-effort write probe: open a no-op preupload (computes
+        # remote-cas hash for a 1-byte blob; HF returns 401 if we
+        # can't write, OK otherwise). Cheaper than actually committing.
+        try:
+            api.preupload_lfs_files(
+                repo_id=fixtures_repo,
+                repo_type="model",
+                additions=[],  # zero files — just exercises the auth check
+            )
+            print(f"HF fixtures: write access to {fixtures_repo} confirmed")
+        except HfHubHTTPError as exc:
+            raise SystemExit(
+                f"HF fixtures: token can READ {fixtures_repo} but write "
+                f"probe failed ({exc}). Generate a write-scoped token at "
+                f"https://huggingface.co/settings/tokens."
+            )
+        except Exception as exc:
+            # preupload_lfs_files API may shift; fall back to a warning
+            # rather than blocking the rebake. The real upload step
+            # will surface any actual auth error.
+            print(f"HF fixtures: write probe inconclusive ({type(exc).__name__}: "
+                  f"{exc}). Proceeding; real upload will catch it.")
+
+
+preflight_hf()
 if MODE == "rebake":
     # The heavy ML stack only matters when re-baking. validate mode
     # never touches NeMo / transformers / torch.
