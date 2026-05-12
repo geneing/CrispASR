@@ -29,11 +29,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Phase 1: just parakeet-tdt-0.6b-ja as a smoke test that the
-  # plumbing works end-to-end. The matrix is intentionally small;
-  # expand as backends get their fixtures uploaded to HF (see
-  # `tests/regression/README.md` "Adding a new backend").
+  # Tier 0: schema + parser smoke test. Runs in <2 seconds with no
+  # binary, no model, no network — so the per-backend matrix below
+  # never even spawns if the manifest is malformed.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run driver smoke test
+        run: python tests/regression/test_driver_smoke.py
+
+  # Tier 1: per-backend regression. Each entry of the matrix downloads
+  # its pinned-revision GGUF + pinned-revision reference dump from HF,
+  # runs crispasr + crispasr-diff against the manifest's expected
+  # transcript and per-stage cos_min thresholds. `fail-fast: false`
+  # so one bad backend doesn't mask the rest.
+  #
+  # The matrix is intentionally small; expand as backends get their
+  # fixtures uploaded to HF (see `tests/regression/README.md`
+  # "Adding a new backend"). Heavy backends (vibevoice 7 GB,
+  # voxtral4b 4 GB) that don't fit reliably on the GitHub free-tier
+  # 14 GB ubuntu-latest scratch should go through the weekly Kaggle
+  # full-sweep job (`tools/kaggle-regression.py`) instead.
   regression:
+    needs: smoke
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

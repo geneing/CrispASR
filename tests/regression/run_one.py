@@ -116,6 +116,47 @@ _DIFF_LINE = re.compile(
 )
 
 
+def parse_diff_stdout(stdout: str) -> dict[str, float]:
+    """Parse a crispasr-diff stdout blob into {stage_name: cos_min}.
+
+    Module-level so the smoke test (and the Kaggle multi-backend
+    driver) can re-use it without spawning subprocesses.
+    """
+    result: dict[str, float] = {}
+    for ln in stdout.splitlines():
+        m = _DIFF_LINE.match(ln.strip())
+        if not m:
+            continue
+        result[m.group(2)] = float(m.group(3))
+    return result
+
+
+def evaluate_stage_thresholds(
+    stages: dict[str, float], thresholds: dict[str, float],
+) -> tuple[list[tuple[str, float, float]], list[tuple[str, float, float]], list[str], list[tuple[str, float]]]:
+    """Apply manifest thresholds to parsed cos_min map.
+
+    Returns (passes, fails, missing, extras):
+      passes  — [(stage, cos_min, threshold)] above threshold
+      fails   — [(stage, cos_min, threshold)] below threshold
+      missing — [stage] in thresholds but not in stages
+      extras  — [(stage, cos_min)] in stages but not in thresholds
+    """
+    passes: list[tuple[str, float, float]] = []
+    fails: list[tuple[str, float, float]] = []
+    missing: list[str] = []
+    for stage, threshold in thresholds.items():
+        if stage not in stages:
+            missing.append(stage)
+            continue
+        v = stages[stage]
+        (passes if v >= threshold else fails).append((stage, v, threshold))
+    extras = sorted(
+        (s, stages[s]) for s in set(stages) - set(thresholds)
+    )
+    return passes, fails, missing, extras
+
+
 def run_diff(diff_bin: Path, backend_id: str, gguf: Path, ref: Path, sample: Path) -> dict:
     """Run crispasr-diff and return {stage_name: cos_min}.
 
@@ -140,12 +181,7 @@ def run_diff(diff_bin: Path, backend_id: str, gguf: Path, ref: Path, sample: Pat
     # crispasr-diff prints summary lines on stdout. Parse the [PASS]/[FAIL]
     # lines; ignore the diff harness's own pass/fail verdict — we apply our
     # own per-stage thresholds from the manifest.
-    result: dict[str, float] = {}
-    for ln in proc.stdout.splitlines():
-        m = _DIFF_LINE.match(ln.strip())
-        if not m:
-            continue
-        result[m.group(2)] = float(m.group(3))
+    result = parse_diff_stdout(proc.stdout)
     if not result:
         die(
             f"crispasr-diff produced no parseable stage lines.\n"

@@ -9,6 +9,8 @@
     {
       "name": "parakeet-tdt-0.6b-ja",
       "backend_id": "parakeet",
+      "source_model": "nvidia/parakeet-tdt_ctc-0.6b-ja",
+      "source_model_note": "HF id passed to NeMo's ASRModel.from_pretrained() by tools/reference_backends/parakeet.py. Only needed for re-bake (Kaggle); the nightly validate path doesn't touch source weights.",
       "gguf": {
         "repo": "cstr/parakeet-tdt-0.6b-ja-GGUF",
         "revision": "fd1963a153f09c883662624a8ac2fbf57c97a98d",
