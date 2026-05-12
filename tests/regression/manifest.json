@@ -1,0 +1,30 @@
+{
+  "_comment": "Per-backend regression pins. Each entry pins (a) the GGUF under test to a specific HF revision SHA so an upstream re-quantise doesn't silently regress us, and (b) the reference-dump archive in cstr/crispasr-regression-fixtures (also pinned). See tests/regression/README.md.",
+  "version": 1,
+  "fixtures": {
+    "repo": "cstr/crispasr-regression-fixtures",
+    "revision": "fccac11aa5157cf70cc5de8c756877cdcd5a7611"
+  },
+  "backends": [
+    {
+      "name": "parakeet-tdt-0.6b-ja",
+      "backend_id": "parakeet",
+      "gguf": {
+        "repo": "cstr/parakeet-tdt-0.6b-ja-GGUF",
+        "revision": "fd1963a153f09c883662624a8ac2fbf57c97a98d",
+        "file": "parakeet-tdt-0.6b-ja.gguf",
+        "approx_size_mb": 530
+      },
+      "sample": "samples/ja/reazon_baseball_14s.wav",
+      "expected_transcript": "ピッチャーの岡本は1回戦の鳥取城北戦は8回、6対33点リードの場面で3人目でマウンドに上がりました。",
+      "expected_transcript_source": "captured on commit 3a9b294c (post-issue-#88 fix) with HF revision fd1963a, M1 Metal CPU+BLAS, decode_temperature=0. NOT the human ground-truth from samples/ja/reazon_baseball_14s.srt (which reads 山本 / Yamamoto rather than the model's ピッチャーの岡本 / Okamoto). Lock-in is for regression, not correctness.",
+      "fixture_path": "parakeet-tdt-0.6b-ja/reazon_baseball_14s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999,
+        "encoder_output_ref_mel": 0.999,
+        "mel_spectrogram": 0.95
+      },
+      "diff_thresholds_note": "mel_spectrogram is allowed below 0.999 because CrispASR's mel front-end has a known small divergence vs NeMo's preprocessor. encoder_output should always be ≥ 0.999."
+    }
+  ]
+}

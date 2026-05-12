@@ -2545,3 +2545,62 @@ None of these are blocking; they're listed so the next
 parity-pass audit doesn't have to re-discover them.
 
 ---
+
+
+
+
+## 92. All-backend regression suite (nightly CI)
+
+**Status:** seed shipped (`parakeet-tdt-0.6b-ja` end-to-end);
+expand by adding manifest entries + uploading reference dumps.
+
+**Why:** the ggml-assertion-hardening regression in 0.6.x cycle
+demonstrated that we silently inherit upstream behaviour changes —
+both in ggml and in HF-hosted weights — without any test catching
+them. A nightly regression that pins every artifact to a specific
+revision SHA closes that gap.
+
+**Architecture (shipped, see `tests/regression/`):**
+
+```
+manifest.json    per-backend pins: GGUF revision + reference path
+                 + expected transcript + cosine thresholds
+run_one.py       driver: HF download (pinned) → crispasr (assert
+                 transcript) → crispasr-diff (assert cos_min)
+regression.yml   nightly cron at 04:00 UTC, matrix per backend
+```
+
+Reference dumps live in
+[`cstr/crispasr-regression-fixtures`](https://huggingface.co/cstr/crispasr-regression-fixtures);
+the `fixtures.revision` SHA in `manifest.json` pins the whole
+fixture set together so a re-dump can't silently shift CI's
+expectations.
+
+**Next steps (each ~1 hour per backend):**
+
+1. **Add parakeet-tdt-0.6b-v3** (English). Need to cache the
+   `.nemo` source locally first; `nvidia/parakeet-tdt-0.6b-v3`
+   isn't downloaded on the dev box right now.
+2. **Add canary** + **cohere** + **kyutai-stt** + **moonshine**.
+   All have reference modules in `tools/reference_backends/`.
+3. **Add the TTS family** (kokoro, indextts, qwen3-tts, chatterbox,
+   vibevoice). These need WAV-output checksums or an
+   ASR-roundtrip rather than transcript equality.
+4. **Promote to release gating.** Once stable, hook into
+   `release.yml`'s pre-publish job so a regression aborts the
+   tag.
+
+**Time budget per nightly run:** ~5-15 min per backend (download
++ build cache hit + run). With matrix fan-out, wall time stays
+under 30 min for the full suite.
+
+**Storage:** fixtures repo grows by ~1-50 MB per backend. After
+20+ backends still well under 1 GB. The GGUF cache lives in
+`$RUNNER_TEMP` and is discarded with the runner — no GitHub
+Actions cache eviction concerns.
+
+**Cost on free tier:** public-repo Actions minutes are unlimited,
+so the only constraint is wall-clock fairness on the shared
+runner pool. Nightly cadence is the sweet spot — catches
+regressions within 24 h without burning capacity that would
+delay PR feedback.

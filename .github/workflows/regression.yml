@@ -1,0 +1,81 @@
+# Per-backend regression suite. See tests/regression/README.md for the
+# full design rationale. Highlights:
+#
+#   - Nightly cron (04:00 UTC) + workflow_dispatch.
+#   - Matrix per backend with fail-fast: false so one regression
+#     surfaces all the others on the same run.
+#   - Downloads pinned-revision GGUFs + pinned-revision reference dumps
+#     from HuggingFace; never relies on `main` HEAD. This protects us
+#     from upstream re-quantise / re-dump drift (the ggml-assertion-
+#     hardening lesson).
+#   - Per-job disk: 14 GB on ubuntu-latest, plenty for one ASR backend
+#     at a time. Cleanup at the end is a belt-and-braces — the runner
+#     is discarded anyway.
+#   - HF cache lives under $RUNNER_TEMP so it's automatically gone at
+#     the end of the job; no GitHub cache eviction concerns.
+
+name: Regression (nightly)
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Phase 1: just parakeet-tdt-0.6b-ja as a smoke test that the
+  # plumbing works end-to-end. The matrix is intentionally small;
+  # expand as backends get their fixtures uploaded to HF (see
+  # `tests/regression/README.md` "Adding a new backend").
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - parakeet-tdt-0.6b-ja
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build + runtime deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ ninja-build libopenblas-dev jq
+          # huggingface_hub for hf_hub_download; no transformers / nemo
+          # needed on the CI side because reference dumps are pre-baked
+          # and stored in HF, not regenerated.
+          python -m pip install --upgrade pip
+          pip install huggingface_hub
+
+      - name: Configure + build crispasr + crispasr-diff
+        run: |
+          cmake -S . -B build-regression -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCRISPASR_BUILD_TESTS=OFF \
+              -DCRISPASR_BUILD_EXAMPLES=ON \
+              -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build-regression --target crispasr crispasr-diff -j$(nproc)
+
+      - name: Run regression for ${{ matrix.backend }}
+        env:
+          BUILD_DIR: build-regression
+          WORK_DIR: ${{ runner.temp }}/regression-${{ matrix.backend }}
+        run: |
+          mkdir -p "$WORK_DIR"
+          tests/regression/run_one.py "${{ matrix.backend }}"
+
+      - name: Free disk
+        if: always()
+        run: |
+          # Belt-and-braces; the runner gets nuked anyway, but keep the
+          # cleanup explicit so a `KEEP_WORK=1` local invocation doesn't
+          # accidentally leak after porting.
+          rm -rf "${{ runner.temp }}/regression-${{ matrix.backend }}" 2>/dev/null || true
+          df -h /
