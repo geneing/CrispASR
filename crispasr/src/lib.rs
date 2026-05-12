@@ -1437,6 +1437,94 @@ pub fn detect_language_pcm(
 }
 
 // =========================================================================
+// Text-LID — P13.5 Phase 7 (C-ABI 0.5.2+)
+// =========================================================================
+
+/// Result of [`text_detect_language`].  Label format depends on the
+/// loaded GGUF: CLD3 returns ISO 639-1 (`"en"`, `"de"`, `"zh-Latn"`)
+/// across 109 labels; GlotLID-V3 / LID-176 fastText return ISO 639-3
+/// with a script tag (`"eng_Latn"`, `"sco_Latn"`) across 2102 or 176
+/// labels respectively.  Callers needing ISO 639-1 normalisation
+/// must do it on their side — the dispatcher preserves the model's
+/// native space because the script tag carries real information
+/// (e.g. `zh-Latn` ≠ `zh-Hans`).
+#[derive(Clone, Debug)]
+pub struct TextLidResult {
+    /// Predicted language label.  Empty on failure.  See type docs
+    /// for the format details.
+    pub label: String,
+    /// Posterior probability on the argmax label.  `-1.0` on
+    /// dispatcher failures, otherwise `[0.0, 1.0]`.
+    pub confidence: f32,
+}
+
+/// Detect the language of a UTF-8 text string via the internal
+/// `text_lid_dispatch` (peek the GGUF's `general.architecture` →
+/// route to CLD3 or fastText).
+///
+/// `model_path` must be a concrete on-disk path; auto-resolution
+/// from the registry is the caller's job (use
+/// `registry_lookup("lid-cld3" / "lid-glotlid" / "lid-fasttext176")`
+/// + `cache_ensure_file` for the same shape the ASR side already
+/// uses).
+///
+/// Errors when:
+/// - any input string contains an interior NUL,
+/// - the GGUF can't be opened or has an unsupported architecture,
+/// - the predict path errors out,
+/// - the output buffer (256 bytes here — fits CLD3's longest
+///   `zh-Latn` and fastText's longest `<3-letter>_<4-letter>`
+///   labels with room to spare) overflows.
+pub fn text_detect_language(
+    text: &str,
+    model_path: &str,
+    n_threads: i32,
+) -> Result<TextLidResult, String> {
+    let ctext = CString::new(text).map_err(|e| format!("text contains NUL: {e}"))?;
+    let cmodel =
+        CString::new(model_path).map_err(|e| format!("model_path contains NUL: {e}"))?;
+
+    // 256-byte buffer comfortably fits every label format the
+    // dispatcher emits — CLD3's longest is ~10 bytes (`zh-Latn`),
+    // fastText's longest is ~12 bytes (`<3letter>_<4letter>`).
+    let mut buf = [0u8; 256];
+    let mut conf: c_float = -1.0;
+    let rc = unsafe {
+        crispasr_sys::crispasr_text_detect_language(
+            ctext.as_ptr(),
+            cmodel.as_ptr(),
+            n_threads,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as i32,
+            &mut conf,
+        )
+    };
+    match rc {
+        0 => {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            let label = std::str::from_utf8(&buf[..end])
+                .map_err(|e| format!("text-LID returned non-UTF8 bytes: {e}"))?
+                .to_string();
+            Ok(TextLidResult {
+                label,
+                confidence: conf as f32,
+            })
+        }
+        -1 => Err("text-LID: invalid args (null pointer or bad buffer size)".to_string()),
+        1 => Err(format!(
+            "text-LID dispatcher init/predict failed for model {model_path} \
+             (check the GGUF's architecture key — must be `lid-cld3` or `lid-fasttext`)"
+        )),
+        2 => Err(
+            "text-LID label exceeded 256-byte output buffer — file an issue, this shouldn't happen \
+             with the dispatcher's current label spaces"
+                .to_string(),
+        ),
+        other => Err(format!("text-LID returned unexpected status code {other}")),
+    }
+}
+
+// =========================================================================
 // Diarization (shared C-ABI, 0.4.5+)
 // =========================================================================
 

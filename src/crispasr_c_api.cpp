@@ -23,6 +23,7 @@
 #include "crispasr_vad.h"            // VAD slicing + stitching (shared with CLI)
 #include "crispasr_diarize.h"        // Speaker diarization (shared with CLI)
 #include "crispasr_lid.h"            // Language identification (shared with CLI)
+#include "text_lid_dispatch.h"       // Text-LID backend-agnostic façade (CLD3 + fastText)
 #include "crispasr_aligner.h"        // CTC / forced-aligner word timings (shared with CLI)
 #include "crispasr_cache.h"          // HF download + filesystem cache (shared with CLI)
 #include "crispasr_model_registry.h" // Known-model lookup (shared with CLI)
@@ -3281,6 +3282,72 @@ CA_EXPORT int crispasr_detect_language_pcm(const float* samples, int32_t n_sampl
 }
 
 // ---------------------------------------------------------------------------
+// Text-LID (P13.5 Phase 7 — downstream consumers' text-LID needs).
+//
+// Wraps the existing internal `text_lid_dispatch.h` façade (CLD3 +
+// GlotLID/LID-176 fastText) as a stable C-ABI export so the Rust /
+// Dart / Python bindings can drop the CLI-shell-out fallback they
+// were using for text language detection.  Mirrors the audio-side
+// `crispasr_detect_language_pcm` shape: caller supplies a model
+// path + output buffer, function returns an int status code and
+// writes the label + confidence via out-params.
+//
+// Label format depends on the loaded GGUF:
+//   * CLD3 backend (lid-cld3 arch) — ISO 639-1 two-letter codes
+//     ('en', 'de', 'zh-Latn') across 109 labels.
+//   * fastText backend (lid-fasttext arch) — ISO 639-3 + script
+//     ('eng_Latn', 'sco_Latn') across 2102 (GlotLID-V3) or 176
+//     (LID-176) labels.
+// Callers that need ISO 639-1 normalisation must do it on their side;
+// the dispatcher intentionally returns the model's native label space
+// to preserve information (CLD3's `zh-Latn` and GlotLID's `eng_Latn`
+// both carry script tags that a naive 2-letter normalisation would
+// drop).
+//
+// Returns:
+//   *  0 — success; out_label_buf + out_confidence populated.
+//   * -1 — invalid args (null pointer, n_threads <= 0, out_cap < 1).
+//   *  1 — dispatcher init failure (bad GGUF, unsupported architecture).
+//   *  2 — output buffer too small for the predicted label.
+CA_EXPORT int crispasr_text_detect_language(
+    const char* text,
+    const char* model_path,
+    int32_t n_threads,
+    char* out_label_buf,
+    int32_t out_label_cap,
+    float* out_confidence) {
+    if (!text || !model_path || !out_label_buf || out_label_cap <= 0)
+        return -1;
+    if (n_threads <= 0)
+        n_threads = 1;
+
+    text_lid_context* ctx = text_lid_init_from_file(model_path, n_threads);
+    if (!ctx)
+        return 1;
+
+    float conf = 0.0f;
+    const char* label = text_lid_predict(ctx, text, &conf);
+    if (!label) {
+        text_lid_free(ctx);
+        return 1;
+    }
+
+    const size_t label_len = std::strlen(label);
+    if (static_cast<int32_t>(label_len) + 1 > out_label_cap) {
+        text_lid_free(ctx);
+        return 2;
+    }
+
+    std::memcpy(out_label_buf, label, label_len);
+    out_label_buf[label_len] = '\0';
+    if (out_confidence)
+        *out_confidence = conf;
+
+    text_lid_free(ctx);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // CTC / forced-aligner word timings (shared across all 4 consumers).
 //
 // Runs a CTC aligner (canary-ctc by default, qwen3-forced-aligner when
@@ -3978,11 +4045,13 @@ CA_EXPORT void crispasr_punc_free(void*) {}
 // =========================================================================
 
 CA_EXPORT const char* crispasr_c_api_version(void) {
-    // 0.5.1 — Adds `crispasr_session_translate_text_free` so safe-Rust
-    // wrappers can release the malloc'd buffer that
-    // `crispasr_session_translate_text` returns without pulling in libc.
+    // 0.5.2 — Adds `crispasr_text_detect_language` (text-LID via the
+    // internal `text_lid_dispatch` façade — CLD3 + GlotLID-V3 +
+    // LID-176 routed by GGUF architecture).  Mirrors the audio-side
+    // `crispasr_detect_language_pcm` return-code contract.
+    // 0.5.1 — Adds `crispasr_session_translate_text_free`.
     // Pure addition; no symbol renames or signature changes.
-    return "0.5.1";
+    return "0.5.2";
 }
 
 // Backwards-compatibility alias. The Dart smoke test and any 0.4.x-era

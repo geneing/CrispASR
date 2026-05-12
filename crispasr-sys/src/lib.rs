@@ -500,6 +500,29 @@ extern "C" {
         out_prob: *mut c_float,
     ) -> c_int;
 
+    // --- Text-LID (P13.5 Phase 7) ---
+    //
+    // Detect the language of a UTF-8 text string via the internal
+    // `text_lid_dispatch` façade — routes to CLD3 (ISO 639-1, 109
+    // labels) or GlotLID-V3 / LID-176 fastText (ISO 639-3 + script,
+    // 2102 or 176 labels) based on the GGUF's architecture key.
+    // Label format follows whichever backend the GGUF loads as —
+    // see the C-API doc-comment for normalisation guidance.
+    //
+    // Returns:
+    //   *  0 — success; `out_label_buf` + `out_confidence` populated.
+    //   * -1 — invalid args (null pointer or out_label_cap <= 0).
+    //   *  1 — dispatcher init / predict failure.
+    //   *  2 — output buffer too small for the predicted label.
+    pub fn crispasr_text_detect_language(
+        text: *const c_char,
+        model_path: *const c_char,
+        n_threads: c_int,
+        out_label_buf: *mut c_char,
+        out_label_cap: c_int,
+        out_confidence: *mut c_float,
+    ) -> c_int;
+
     pub fn crispasr_detect_backend_from_gguf(
         path: *const c_char,
         out_name: *mut c_char,
