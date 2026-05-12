@@ -2661,3 +2661,66 @@ Drop-in once green on every workflow.
 **Don't do this in a patch release.** Even with the alias the
 churn is visible to anyone bisecting a build issue. Schedule for
 the next minor (0.7.0).
+
+
+
+
+## 94. Auto-generate Go bindings `#cgo LDFLAGS` from CMake graphviz
+
+**Status:** open, ~half-day. Recommended before the v0.7.0 cycle.
+
+**Why:** the hand-maintained `#cgo LDFLAGS` in `bindings/go/whisper.go`
+has now bitten three releases in a row — v0.6.3 (`-ltitanet`
+missing → commit `acda0622`), v0.6.4 implicitly (would have failed
+if the Rust translate path tested), and v0.6.4 actually
+(`-ltext-lid-dispatch -llid-fasttext -llid-cld3 -lindextts
+-lt5_translate` missing → Bindings Tests (Go) #82). The fail mode
+is repetitive and the fix is mechanical, which is exactly the
+shape that should be automated.
+
+The Ruby binding already solved this — `bindings/ruby/ext/dependencies.rb`
+asks CMake for a `--graphviz` dependency dot, walks the graph
+reachable from the `crispasr` target, and emits the right
+`-l<name>.a` list. Result: every new `target_link_libraries(crispasr
+PUBLIC <X>)` in `src/CMakeLists.txt` propagates to Ruby consumers
+with zero edits on the binding side.
+
+**Plan:**
+
+1. Move the graphviz-walk logic out of `bindings/ruby/ext/`
+   into a shared `tools/cmake_graphviz_targets.py` (~80 LOC).
+   Takes a target name + dot path; returns the topologically-
+   sorted list of static-lib targets reachable from it.
+2. New step in the Go binding's build pipeline: before
+   `go build`, run
+   `cmake --graphviz=/tmp/crispasr.dot -S . -B build_go ...`
+   and `python tools/cmake_graphviz_targets.py crispasr
+   /tmp/crispasr.dot > bindings/go/cgo_libs.txt`. The .txt
+   becomes a generated artifact; `whisper.go` reads it via
+   `//go:embed cgo_libs.txt` and a small init() that splits
+   it into the `#cgo LDFLAGS` slice at build time.
+3. Drawback: `//go:embed` doesn't compose with `#cgo
+   LDFLAGS:` directives — those are evaluated at the cgo
+   preprocessing stage, before any Go code runs. So we'd
+   actually need to **generate `whisper.go`'s `#cgo` block
+   from the .txt at build time**, or use a separate
+   `bindings/go/cgo_ldflags.go` with `#cgo LDFLAGS: ${ldflags}`
+   and have a `go generate` step that writes it. Either is
+   ~30 LOC + a Makefile/CMake target.
+4. Mirror the same generated list in `bindings/go/whisper.go`'s
+   darwin `#cgo` line.
+5. CI: add a check that detects drift — if the hand-edited
+   `whisper.go` `#cgo LDFLAGS` doesn't match
+   `cmake_graphviz_targets.py crispasr` output, fail the lint
+   job with a clear message. Best of both worlds: humans can
+   still edit if needed but drift is loud.
+
+**Why not just always run codegen instead of letting humans edit:**
+Go's tooling makes generated source files awkward (e.g., `go
+fmt` may not run on them, IDE jump-to-symbol may miss them).
+Keeping a hand-maintained file with a drift-check is the
+least-intrusive path for Go consumers who pull via `go get`.
+
+**Tracking:** every commit message that fixes the next round
+of "missing -lX" should reference this section and cross-check
+whether the auto-gen is finally in place.
