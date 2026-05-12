@@ -20,14 +20,27 @@ tools/kaggle/
 
 ## One-time setup
 
-Required: Kaggle CLI (`pip install kaggle`), Kaggle API token at
-`~/.kaggle/kaggle.json` (download from
-[your Kaggle Account page](https://www.kaggle.com/settings/account)
-→ "Create New Token"). Set permissions:
+Required: Kaggle CLI (`pip install kaggle`, ≥ 1.8.0).
+
+**Authentication** — two paths, the CLI auto-detects:
+
+- *Modern (recommended)*: paste the API token from
+  [your Kaggle Account page](https://www.kaggle.com/settings/account)
+  → "Create New Token" → "API token" into `~/.kaggle/access_token`
+  (raw token, ~38 bytes, no JSON wrapper). `kaggle config view`
+  reports `auth_method: ACCESS_TOKEN` when this is active.
+- *Legacy (still works)*: same page offers the older "API
+  credentials" download, which gives a `kaggle.json` file with
+  `{"username": ..., "key": ...}`. Drop it at `~/.kaggle/kaggle.json`.
+
+Either way, lock down the file:
 
 ```bash
-chmod 600 ~/.kaggle/kaggle.json
+chmod 600 ~/.kaggle/access_token       # modern
+chmod 600 ~/.kaggle/kaggle.json        # legacy
 ```
+
+The CLI prefers the modern access token when both files exist.
 
 1. **Push the kernel** (uploads + triggers a first run):
 
@@ -38,8 +51,8 @@ chmod 600 ~/.kaggle/kaggle.json
    First push creates the kernel at
    `https://www.kaggle.com/code/<your-kaggle-username>/crispasr-regression-suite`.
    The slug `<username>` comes from the `id` field in
-   `kernel-metadata.json` — edit that to your username before the first
-   push if you're not `w1nt3rmut3`.
+   `kernel-metadata.json` — edit that to your username before the
+   first push if you're not `chr1str`.
 
 2. **Wait for the first run to complete cleanly** (poll the URL or
    `kaggle kernels status <id>`). The first run downloads ~1 GB
