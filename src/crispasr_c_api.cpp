@@ -3755,6 +3755,14 @@ CA_EXPORT char* crispasr_session_translate_text(crispasr_session* s, const char*
     return nullptr;
 }
 
+// Free a string returned by `crispasr_session_translate_text`.  Mirrors
+// the punc-side `crispasr_punc_free_text` symmetric-ownership pattern —
+// without this, safe-Rust callers would need to drag in libc::free just
+// to release a single malloc'd buffer.  No-op when `text` is nullptr.
+CA_EXPORT void crispasr_session_translate_text_free(char* text) {
+    free(text);
+}
+
 // =========================================================================
 // Streaming session API (PLAN #62b — generalize stream_open from
 // whisper_context* to crispasr_session*).
@@ -3970,7 +3978,11 @@ CA_EXPORT void crispasr_punc_free(void*) {}
 // =========================================================================
 
 CA_EXPORT const char* crispasr_c_api_version(void) {
-    return "0.5.0";
+    // 0.5.1 — Adds `crispasr_session_translate_text_free` so safe-Rust
+    // wrappers can release the malloc'd buffer that
+    // `crispasr_session_translate_text` returns without pulling in libc.
+    // Pure addition; no symbol renames or signature changes.
+    return "0.5.1";
 }
 
 // Backwards-compatibility alias. The Dart smoke test and any 0.4.x-era

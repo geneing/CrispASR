@@ -684,6 +684,69 @@ impl Session {
         Ok(())
     }
 
+    /// Translate `text` from `src_lang` to `tgt_lang` via whichever
+    /// MT-capable backend this session loaded (m2m100, m2m100-wmt21,
+    /// madlad, gemma4-e2b).  Distinct from [`Self::set_translate`] —
+    /// that one is the whisper *audio-side* EN-only translate flag,
+    /// applied to PCM input; this one is text→text with arbitrary
+    /// language pairs.
+    ///
+    /// `max_tokens` caps the decoder output length.  Pass `<= 0` to
+    /// fall back to the C++ default (200 tokens for m2m100, etc.).
+    ///
+    /// Backend selection guidance (from the README feature matrix):
+    /// - **m2m100** — 100 languages, any-to-any (default for the long
+    ///   tail like Bosnian, Swahili, …).
+    /// - **m2m100-wmt21** — English-paired only (EN ↔ {zh, de, fr,
+    ///   ja, ru, is, ha}), direction-specific checkpoints.  Higher
+    ///   quality on those pairs.
+    /// - **madlad** — 419 languages via target-language prefix tag
+    ///   (handled internally; caller still passes `tgt_lang`).
+    /// - **gemma4-e2b** — Dual ASR+MT (140+ langs).
+    ///
+    /// Errors when:
+    /// - `text`, `src_lang`, or `tgt_lang` contain interior NULs;
+    /// - the session has no MT-capable backend loaded (returns
+    ///   `nullptr` from the C-ABI, surfaced as a clear error);
+    /// - the backend's internal translate routine errored out.
+    pub fn translate_text(
+        &self,
+        text: &str,
+        src_lang: &str,
+        tgt_lang: &str,
+        max_tokens: i32,
+    ) -> Result<String, String> {
+        let ctext = CString::new(text).map_err(|e| format!("text contains NUL: {e}"))?;
+        let csrc = CString::new(src_lang).map_err(|e| format!("src_lang contains NUL: {e}"))?;
+        let ctgt = CString::new(tgt_lang).map_err(|e| format!("tgt_lang contains NUL: {e}"))?;
+        let ptr = unsafe {
+            crispasr_sys::crispasr_session_translate_text(
+                self.handle,
+                ctext.as_ptr(),
+                csrc.as_ptr(),
+                ctgt.as_ptr(),
+                max_tokens,
+            )
+        };
+        if ptr.is_null() {
+            return Err(format!(
+                "translate_text returned no output (backend {:?} may not be MT-capable, \
+                 or the pair {}→{} is unsupported)",
+                self.backend(),
+                src_lang,
+                tgt_lang
+            ));
+        }
+        // Same CStr → owned String pattern as `PuncModel::process` — the
+        // C side malloc'd this buffer and we own it until we hand it
+        // back through `crispasr_session_translate_text_free`.
+        let out = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { crispasr_sys::crispasr_session_translate_text_free(ptr) };
+        Ok(out)
+    }
+
     /// Open a rolling-window streaming decoder for this session
     /// (PLAN #62). Currently whisper-only at the C-ABI level; other
     /// backends return an error. `step_ms` is how often to commit a

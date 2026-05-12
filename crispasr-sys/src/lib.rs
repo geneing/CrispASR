@@ -456,6 +456,34 @@ extern "C" {
     pub fn crispasr_session_set_target_language(s: *mut CrispasrSession, lang: *const c_char) -> c_int;
     pub fn crispasr_session_set_punctuation(s: *mut CrispasrSession, enable: c_int) -> c_int;
     pub fn crispasr_session_set_translate(s: *mut CrispasrSession, enable: c_int) -> c_int;
+    // --- Text-to-text translation (m2m100 / m2m100-wmt21 / madlad / gemma4-e2b) ---
+    //
+    // Distinct from `crispasr_session_set_translate` above, which is the
+    // *audio-side* Whisper sticky flag (PCM input → English text out).
+    // This one translates an already-extracted Rust string between
+    // arbitrary language pairs via whichever MT-capable backend the
+    // session loaded.  Returns a malloc'd UTF-8 buffer that the caller
+    // MUST release via `crispasr_session_translate_text_free` (mirrors
+    // the punc-side ownership pattern).  Returns nullptr on:
+    //   * any input pointer being null,
+    //   * the session not having a CAP_TRANSLATE backend loaded,
+    //   * the backend's internal translate routine erroring out.
+    //
+    // `max_tokens` caps the decoder output length.  Pass `<= 0` to
+    // fall back to the C++ default (200 for m2m100).
+    pub fn crispasr_session_translate_text(
+        s: *mut CrispasrSession,
+        text: *const c_char,
+        src_lang: *const c_char,
+        tgt_lang: *const c_char,
+        max_tokens: c_int,
+    ) -> *mut c_char;
+    // Free a buffer previously returned by `crispasr_session_translate_text`.
+    // No-op when `text` is null.  Calling `libc::free` directly also works
+    // (the C++ side just delegates to `free()`), but routing through this
+    // symbol keeps ownership symmetric and protects callers if the C++
+    // side ever switches allocators.
+    pub fn crispasr_session_translate_text_free(text: *mut c_char);
     pub fn crispasr_session_set_temperature(
         s: *mut CrispasrSession,
         temperature: c_float,
