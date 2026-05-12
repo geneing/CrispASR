@@ -98,11 +98,29 @@ print(f"  UPLOAD           = {UPLOAD}")
 # ─────────────────────────── cell 2 (code) ───────────────────────────
 # ── Wire HF auth, install Python deps ─────────────────────────────────────
 def kaggle_secret(name: str) -> str | None:
-    """Pull a Kaggle secret if available; return None silently otherwise."""
+    """Pull a Kaggle secret if available, with verbose diagnostics if
+    not. The previous silent fall-back to anonymous made a missing
+    secret look identical to a missing-attach-toggle, which burned us
+    on chr1str/crispasr-auto-rebake-refs run 1.
+    """
     try:
         from kaggle_secrets import UserSecretsClient
+    except ImportError as exc:
+        print(f"kaggle_secret({name!r}): kaggle_secrets module unimportable "
+              f"({type(exc).__name__}: {exc}). Are we actually inside a "
+              f"Kaggle kernel?", flush=True)
+        return None
+    try:
         return UserSecretsClient().get_secret(name)
-    except Exception:
+    except Exception as exc:
+        # Most common: secret created on the user's account but not
+        # "attached" to this notebook. The fix is in the kernel's
+        # Add-ons → Secrets pane (each secret has an Attach toggle).
+        print(f"kaggle_secret({name!r}): cannot read secret "
+              f"({type(exc).__name__}: {exc}). Most likely cause: the "
+              f"secret exists on your account but isn't ATTACHED to this "
+              f"kernel. Open the kernel's 'Add-ons → Secrets' pane and "
+              f"toggle Attach on for {name!r}.", flush=True)
         return None
 
 
