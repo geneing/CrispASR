@@ -286,12 +286,54 @@ if not REPO.exists():
 sh(f"git fetch origin && git checkout {CRISPASR_REF}", cwd=REPO)
 sh("git submodule update --init --recursive", cwd=REPO)
 
+# ── Fast-build toolchain — match the perf-A/B kernel's pattern.
+#    ccache cuts re-build cost from ~5 min to ~30 s on cache-hot runs
+#    (cache survives across notebook re-runs because /kaggle/working/
+#    persists). mold halves link time vs ld. ninja is the build
+#    driver itself. The CCACHE_DIR + CCACHE_MAXSIZE lines are the
+#    exact recipe from tools/kaggle-issue81-cuda-ab.py — both kernels
+#    share that working dir if the user opens them in the same
+#    Kaggle session. ────────────────────────────────────────────
+import shutil as _shutil
+
+print("Installing build toolchain (ninja, ccache, mold)…", flush=True)
+sh("apt-get update -qq && apt-get install -y --no-install-recommends "
+   "cmake ninja-build g++ libopenblas-dev jq ccache mold || true")
+
+HAS_CCACHE = _shutil.which("ccache") is not None
+HAS_MOLD = _shutil.which("mold") is not None
+HAS_NINJA = _shutil.which("ninja") is not None
+
+# Persist ccache across runs in /kaggle/working/.ccache. Kaggle wipes
+# /tmp + /root between runs but keeps /kaggle/working, so this is the
+# only sane location for a cache.
+CCACHE_DIR = WORK / ".ccache"
+CCACHE_DIR.mkdir(exist_ok=True)
+os.environ["CCACHE_DIR"] = str(CCACHE_DIR)
+os.environ["CCACHE_MAXSIZE"] = "5G"
+if HAS_CCACHE:
+    subprocess.run("ccache -M 5G && ccache -z",
+                   shell=True, capture_output=True)
+
+print(f"  ninja={HAS_NINJA}  ccache={HAS_CCACHE}  mold={HAS_MOLD}  "
+      f"CCACHE_DIR={CCACHE_DIR}", flush=True)
+
 build_flags = []
 if BUILD_FLAVOUR == "cuda":
     build_flags.append("-DGGML_CUDA=ON")
+if HAS_CCACHE:
+    build_flags += [
+        "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+        "-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache",
+    ]
+if HAS_MOLD:
+    # `-fuse-ld=mold` on the linker line cuts ~30s off our 320-object
+    # link. CMake's flag plumbing is split between EXE / SHARED / MODULE
+    # link types; set all three so the static archive driver too.
+    for kind in ("EXE", "SHARED", "MODULE"):
+        build_flags.append(f"-DCMAKE_{kind}_LINKER_FLAGS=-fuse-ld=mold")
 
-sh("apt-get update -qq && apt-get install -y --no-install-recommends "
-   "cmake ninja-build g++ libopenblas-dev jq")
 sh(
     f"cmake -S {REPO} -B {BUILD} -G Ninja "
     f"-DCMAKE_BUILD_TYPE=Release "
@@ -306,6 +348,11 @@ sh(
 # absent — exactly what burned the GH regression workflow on its first
 # run (commit 08d1872f) and what just burned this Kaggle one.
 sh(f"cmake --build {BUILD} --target crispasr-cli crispasr-diff -j$(nproc)")
+
+if HAS_CCACHE:
+    print("ccache stats after build:", flush=True)
+    subprocess.run("ccache -s | grep -E 'cache hit|cache miss|files in cache|cache size'",
+                   shell=True)
 
 # ─────────────────────────── cell 4 (code) ───────────────────────────
 # ── Load manifest + backend filter ────────────────────────────────────────
