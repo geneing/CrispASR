@@ -1,7 +1,7 @@
 {
   "id": "chr1str/crispasr-auto-rebake-refs",
   "title": "CrispASR — auto rebake refs",
-  "code_file": "crispasr-rebake.py",
+  "code_file": "crispasr-rebake.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": "true",

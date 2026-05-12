@@ -9,6 +9,14 @@
 
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Notebook-type kernels require the .ipynb form. The .py is the
+# source of truth (easier to diff, edit, lint); regenerate the
+# .ipynb on every push so they don't drift.
+echo "jupytext .py → .ipynb"
+jupytext --to ipynb "$DIR/crispasr-rebake.py" \
+  --output "$DIR/crispasr-rebake.ipynb"
+
 echo "kaggle kernels push -p $DIR"
 kaggle kernels push -p "$DIR"
 
