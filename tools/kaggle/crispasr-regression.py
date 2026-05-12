@@ -139,13 +139,38 @@ def kaggle_secret(name: str) -> str | None:
         return None
 
 
-hf_token = kaggle_secret("HF_TOKEN") or os.environ.get("HF_TOKEN")
+# Dump Kaggle-injected env keys (no values) so we can see what auth /
+# secret machinery the runtime actually has. Helps distinguish a
+# missing Attach toggle from a Kaggle-side service flake.
+_kaggle_env_keys = sorted(k for k in os.environ if k.startswith("KAGGLE"))
+print(f"Kaggle env keys present: {_kaggle_env_keys}", flush=True)
+
+# Source 1: a Kaggle "Variable" (Add-ons → Variables) sets an env var
+# directly. Always available in script kernels, no service call needed.
+env_hf = os.environ.get("HF_TOKEN")
+if env_hf:
+    print("HF auth: HF_TOKEN read from env var (Kaggle Variable, env, "
+          "or shell). Skipping UserSecretsClient.", flush=True)
+    hf_token = env_hf
+else:
+    # Source 2: a Kaggle "Secret" (Add-ons → Secrets), read via
+    # UserSecretsClient. Requires JWT injection (any attached secret),
+    # and the service endpoint must be reachable from this runtime.
+    # Script-kernel + batch-run combinations sometimes flake on the
+    # service call even when the JWT is present — if you see that,
+    # add HF_TOKEN as a Variable instead and re-push.
+    hf_token = kaggle_secret("HF_TOKEN")
 if hf_token:
     os.environ["HF_TOKEN"] = hf_token
     os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
-    print("HF auth: token present (will verify next)")
+    print("HF auth: token present (will verify next)", flush=True)
 else:
-    print("HF auth: anonymous (rebake+upload will fail without HF_TOKEN)")
+    print("HF auth: anonymous (rebake+upload will fail without HF_TOKEN). "
+          "If you've added HF_TOKEN as a Kaggle Secret and the Attach "
+          "toggle is on but it still doesn't read, try adding it as a "
+          "Kaggle Variable instead (Add-ons → Variables): script-type "
+          "kernels in batch mode sometimes can't reach the secrets API "
+          "service.", flush=True)
 
 # Need huggingface_hub before we can preflight the token. Pulled here
 # (small, ~MB) even if the token check ends up failing — the cost of
