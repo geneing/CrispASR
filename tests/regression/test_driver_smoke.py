@@ -87,8 +87,8 @@ class ManifestSchemaTests(unittest.TestCase):
     def test_backend_entries_have_required_keys(self):
         required = {
             "name", "backend_id", "gguf",
-            "sample", "expected_transcript",
-            "fixture_path", "diff_thresholds",
+            "expected_transcript",
+            "fixture_ref_path", "diff_thresholds",
         }
         gguf_required = {"repo", "revision", "file"}
         names_seen: set[str] = set()
@@ -120,14 +120,27 @@ class ManifestSchemaTests(unittest.TestCase):
                     f"{entry['name']}.{stage} threshold {threshold} out of [0,1]",
                 )
 
-    def test_sample_paths_exist(self):
-        """Every backend's sample WAV must be present in the repo."""
+    def test_sample_source_declared(self):
+        """Every backend must declare its sample source: either a
+        repo-relative `sample` (in-tree, must exist) or a
+        `fixture_sample_path` pulled from the fixtures HF repo at
+        the pinned revision (the recommended path for new entries).
+        """
         for entry in self.manifest["backends"]:
-            sample = HERE.parent.parent / entry["sample"]
+            has_in_repo = "sample" in entry
+            has_hf = "fixture_sample_path" in entry
             self.assertTrue(
-                sample.exists(),
-                f"{entry['name']}: sample {sample} not in repo",
+                has_in_repo or has_hf,
+                f"{entry['name']}: neither `sample` (in-repo) nor "
+                f"`fixture_sample_path` (HF) declared",
             )
+            if has_in_repo:
+                sample = HERE.parent.parent / entry["sample"]
+                self.assertTrue(
+                    sample.exists(),
+                    f"{entry['name']}: in-repo sample {sample} not "
+                    f"present; either drop the field or check the WAV in",
+                )
 
 
 class DiffParserTests(unittest.TestCase):

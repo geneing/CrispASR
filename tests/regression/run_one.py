@@ -198,10 +198,6 @@ def regression_for(name: str, manifest: dict, work_dir: Path,
     if entry is None:
         die(f"backend '{name}' not in manifest")
 
-    sample = REPO_ROOT / entry["sample"]
-    if not sample.exists():
-        die(f"sample WAV missing: {sample}")
-
     gguf_local = hf_download(
         entry["gguf"]["repo"],
         entry["gguf"]["file"],
@@ -210,10 +206,25 @@ def regression_for(name: str, manifest: dict, work_dir: Path,
     )
     ref_local = hf_download(
         manifest["fixtures"]["repo"],
-        entry["fixture_path"],
+        entry["fixture_ref_path"],
         manifest["fixtures"]["revision"],
         work_dir,
     )
+    # Sample WAVs live alongside the ref dumps in the fixtures HF repo
+    # (samples/.gitignore in CrispASR excludes them from the source
+    # tree to keep clones small). An in-tree fallback `sample` field
+    # remains supported for legacy entries that lived in the repo.
+    if "fixture_sample_path" in entry:
+        sample = hf_download(
+            manifest["fixtures"]["repo"],
+            entry["fixture_sample_path"],
+            manifest["fixtures"]["revision"],
+            work_dir,
+        )
+    else:
+        sample = REPO_ROOT / entry["sample"]
+        if not sample.exists():
+            die(f"sample WAV missing: {sample}")
 
     failures = 0
 

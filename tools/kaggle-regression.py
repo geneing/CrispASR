@@ -200,10 +200,17 @@ def run_validate() -> list[dict]:
             ))
             ref_local = Path(hf_hub_download(
                 repo_id=MANIFEST["fixtures"]["repo"],
-                filename=entry["fixture_path"],
+                filename=entry["fixture_ref_path"],
                 revision=MANIFEST["fixtures"]["revision"],
             ))
-            sample = REPO / entry["sample"]
+            if "fixture_sample_path" in entry:
+                sample = Path(hf_hub_download(
+                    repo_id=MANIFEST["fixtures"]["repo"],
+                    filename=entry["fixture_sample_path"],
+                    revision=MANIFEST["fixtures"]["revision"],
+                ))
+            else:
+                sample = REPO / entry["sample"]
 
             crispasr_bin = BUILD / "bin" / "crispasr"
             diff_bin = BUILD / "bin" / "crispasr-diff"
@@ -275,7 +282,18 @@ def run_rebake() -> list[dict]:
             })
             print(f"  -> SKIP (no source_model)")
             continue
-        sample = REPO / entry["sample"]
+        # For re-bake, the sample WAV must be on disk so the Python
+        # reference can read it. Pull from the fixtures HF repo if the
+        # manifest points there; otherwise expect it in-tree.
+        if "fixture_sample_path" in entry:
+            from huggingface_hub import hf_hub_download
+            sample = Path(hf_hub_download(
+                repo_id=MANIFEST["fixtures"]["repo"],
+                filename=entry["fixture_sample_path"],
+                revision=MANIFEST["fixtures"]["revision"],
+            ))
+        else:
+            sample = REPO / entry["sample"]
 
         cmd = [
             sys.executable, "-u", str(REPO / "tools" / "dump_reference.py"),
