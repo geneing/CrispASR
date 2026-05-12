@@ -101,7 +101,14 @@ def kaggle_secret(name: str) -> str | None:
     """Pull a Kaggle secret if available, with verbose diagnostics if
     not. The previous silent fall-back to anonymous made a missing
     secret look identical to a missing-attach-toggle, which burned us
-    on chr1str/crispasr-auto-rebake-refs run 1.
+    on chr1str/crispasr-auto-rebake-refs.
+
+    Kaggle injects `KAGGLE_USER_SECRETS_TOKEN` (a JWT) into the runtime
+    ONLY when at least one secret is attached to the kernel. So if
+    that env var is absent, no secret can possibly be read regardless
+    of what the account dashboard says — the kernel-side "Add-ons →
+    Secrets" Attach toggle is the gate that controls injection.
+    Surfacing this distinction up front saves a debugging round.
     """
     try:
         from kaggle_secrets import UserSecretsClient
@@ -110,17 +117,25 @@ def kaggle_secret(name: str) -> str | None:
               f"({type(exc).__name__}: {exc}). Are we actually inside a "
               f"Kaggle kernel?", flush=True)
         return None
+    has_jwt = bool(os.environ.get("KAGGLE_USER_SECRETS_TOKEN"))
+    if not has_jwt:
+        print(f"kaggle_secret({name!r}): KAGGLE_USER_SECRETS_TOKEN env var is "
+              f"MISSING. Kaggle only injects it when at least one secret is "
+              f"ATTACHED to the kernel (Add-ons → Secrets → Attach toggle). "
+              f"You probably added the secret on your account settings page "
+              f"but didn't open the kernel's per-notebook Secrets pane and "
+              f"toggle Attach for {name!r}.", flush=True)
+        return None
     try:
         return UserSecretsClient().get_secret(name)
     except Exception as exc:
-        # Most common: secret created on the user's account but not
-        # "attached" to this notebook. The fix is in the kernel's
-        # Add-ons → Secrets pane (each secret has an Attach toggle).
-        print(f"kaggle_secret({name!r}): cannot read secret "
-              f"({type(exc).__name__}: {exc}). Most likely cause: the "
-              f"secret exists on your account but isn't ATTACHED to this "
-              f"kernel. Open the kernel's 'Add-ons → Secrets' pane and "
-              f"toggle Attach on for {name!r}.", flush=True)
+        # JWT is present but the specific secret named is still missing
+        # or unreadable. Could be a label typo, propagation lag, or a
+        # different-secret attached.
+        print(f"kaggle_secret({name!r}): JWT present but secret read failed "
+              f"({type(exc).__name__}: {exc}). Possible causes: label typo "
+              f"(case-sensitive), or a different secret is attached.",
+              flush=True)
         return None
 
 
