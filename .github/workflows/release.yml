@@ -46,6 +46,48 @@ jobs:
           name: crispasr-linux-x86_64
           path: release/crispasr-linux-x86_64.tar.gz
 
+  # ── Linux x86_64 CLI — AVX-512 + VNNI variant ────────────────────────────────
+  # Default build-linux ships AVX-2 only. On CPUs with AVX-512 + VPDPBUSD
+  # (Tiger Lake / Ice Lake / Sapphire Rapids client / Zen 4+) ggml's
+  # tinyBLAS Q8_0×Q8_0 matmul drops into `_mm256_dpbusd_epi32` and the
+  # Q8_0 dispatch closes a sizable chunk of the ONNX-Runtime-int8 gap
+  # users have reported (issue #81 — @Tamnac, Tiger Lake i7-1165G7,
+  # 4× RT crispasr q8_0 vs 18× RT onnx int8). Ships as a separate
+  # tarball so the default download stays compatible with every Haswell+
+  # CPU; users on Skylake-X / Ice Lake / Tiger Lake / Sapphire Rapids
+  # / Zen 4 can opt into the faster build.
+  build-linux-x86_64-avx512:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libopenblas-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+              -DGGML_OPENBLAS=ON \
+              -DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON \
+              -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON
+          cmake --build build --target crispasr-cli crispasr-quantize -j $(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p release/crispasr-linux-x86_64-avx512
+          cp build/bin/crispasr release/crispasr-linux-x86_64-avx512/
+          cp build/bin/crispasr-quantize release/crispasr-linux-x86_64-avx512/
+          cd release && tar czf crispasr-linux-x86_64-avx512.tar.gz \
+              crispasr-linux-x86_64-avx512/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-linux-x86_64-avx512
+          path: release/crispasr-linux-x86_64-avx512.tar.gz
+
   # ── Linux ARM64 CLI binaries ─────────────────────────────────────────────────
   # Mirror of build-linux on GitHub's ubuntu-24.04-arm runner. NEON is the
   # native SIMD path on aarch64, so OpenBLAS adds little — keep it on (same
@@ -360,6 +402,62 @@ jobs:
         with:
           name: libcrispasr-linux-x86_64
           path: release/libcrispasr-linux-x86_64.tar.gz
+
+  # ── Linux x86_64 shared libs — AVX-512 + VNNI variant ────────────────────────
+  # Companion to build-linux-x86_64-avx512 but for the shared-lib tarball
+  # downstream consumers (crispasr-sys / Dart / wrapper bindings) pull
+  # from. See that job's comment for the per-CPU rationale.
+  build-libs-linux-x86_64-avx512:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libopenblas-dev patchelf
+
+      - name: Build (shared libs, CPU + OpenBLAS + AVX-512 VNNI)
+        run: |
+          cmake -S . -B build-libs \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_OPENBLAS=ON \
+            -DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON \
+            -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=OFF \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build-libs --config Release -j $(nproc) --target crispasr
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          OUT=release/libcrispasr-linux-x86_64-avx512
+          mkdir -p "$OUT/src" "$OUT/ggml/src" "$OUT/include" "$OUT/ggml/include"
+          cp -P build-libs/src/libcrispasr*.so* "$OUT/src/"
+          [ -e build-libs/src/libwhisper.so ] && cp -P build-libs/src/libwhisper.so* "$OUT/src/"
+          find build-libs/src -maxdepth 1 -name 'lib*.so*' \( -type f -o -type l \) \
+            ! -name 'libcrispasr*' ! -name 'libwhisper*' \
+            -exec cp -P {} "$OUT/src/" \;
+          find build-libs/ggml/src -name 'libggml*.so*' \( -type f -o -type l \) \
+            -exec cp -P {} "$OUT/ggml/src/" \;
+          for f in "$OUT"/src/*.so* "$OUT"/ggml/src/*.so*; do
+            [ -L "$f" ] && continue
+            patchelf --set-rpath '$ORIGIN:$ORIGIN/../../ggml/src' "$f" 2>/dev/null || true
+          done
+          cp include/crispasr.h "$OUT/include/"
+          cp ggml/include/*.h   "$OUT/ggml/include/" 2>/dev/null || true
+          cp LICENSE "$OUT/"
+          cd release && tar czf libcrispasr-linux-x86_64-avx512.tar.gz \
+              libcrispasr-linux-x86_64-avx512/
+          ls -lh libcrispasr-linux-x86_64-avx512.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libcrispasr-linux-x86_64-avx512
+          path: release/libcrispasr-linux-x86_64-avx512.tar.gz
 
   # ── Linux ARM64 shared libs + headers (CPU baseline) ─────────────────────────
   # Mirror of build-libs-linux-x86_64 on the ubuntu-24.04-arm runner.
@@ -1020,7 +1118,7 @@ jobs:
           path: release/crispasr-android-arm64-v8a.tar.gz
 
   publish:
-    needs: [build-linux, build-linux-arm64, build-python-linux, build-python-linux-arm64, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-arm64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan, build-android-arm64]
+    needs: [build-linux, build-linux-x86_64-avx512, build-linux-arm64, build-python-linux, build-python-linux-arm64, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-x86_64-avx512, build-libs-linux-arm64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan, build-android-arm64]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
