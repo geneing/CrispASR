@@ -74,14 +74,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install huggingface_hub
 
-      - name: Configure + build crispasr + crispasr-diff
+      - name: Configure + build crispasr-cli + crispasr-diff
         run: |
           cmake -S . -B build-regression -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCRISPASR_BUILD_TESTS=OFF \
               -DCRISPASR_BUILD_EXAMPLES=ON \
               -DCRISPASR_BUILD_SERVER=OFF
-          cmake --build build-regression --target crispasr crispasr-diff -j$(nproc)
+          # CMake target `crispasr-cli` produces the `bin/crispasr`
+          # binary (target name vs output name diverge — see
+          # examples/cli/CMakeLists.txt). Asking for target `crispasr`
+          # would build just the library, leaving bin/crispasr absent.
+          cmake --build build-regression --target crispasr-cli crispasr-diff -j$(nproc)
 
       - name: Run regression for ${{ matrix.backend }}
         env:
