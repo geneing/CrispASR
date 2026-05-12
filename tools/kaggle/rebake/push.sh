@@ -17,6 +17,25 @@ echo "jupytext .py → .ipynb"
 jupytext --to ipynb "$DIR/crispasr-rebake.py" \
   --output "$DIR/crispasr-rebake.ipynb"
 
+# Inject the kernelspec metadata papermill (Kaggle's notebook
+# runner) requires. jupytext doesn't add this by default, and
+# without it papermill bails with
+#   ValueError: No kernel name found in notebook and no override
+#   provided.
+python - <<'PY' "$DIR/crispasr-rebake.ipynb"
+import json, sys
+p = sys.argv[1]
+nb = json.load(open(p))
+nb["metadata"]["kernelspec"] = {
+    "display_name": "Python 3",
+    "language": "python",
+    "name": "python3",
+}
+nb["metadata"]["language_info"] = {"name": "python", "version": "3.10"}
+json.dump(nb, open(p, "w"), indent=1)
+print(f"kernelspec injected into {p}")
+PY
+
 echo "kaggle kernels push -p $DIR"
 kaggle kernels push -p "$DIR"
 
