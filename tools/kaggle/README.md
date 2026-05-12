@@ -11,12 +11,26 @@ maintenance is bumping pinned revisions in `tests/regression/manifest.json`.
 
 ```
 tools/kaggle/
-├── kernel-metadata.json      Kaggle's manifest (id, code_file, internet, …)
-├── crispasr-regression-suite.py    The notebook itself — clones repo, builds,
-│                             runs the regression suite, publishes results.
-├── push.sh                   `kaggle kernels push` wrapper.
-└── README.md                 This file.
+├── README.md                   This file.
+├── kernel-metadata.json        Kaggle manifest for the VALIDATE kernel
+│                               (id = chr1str/crispasr-regression-suite,
+│                                code_file = crispasr-regression.py).
+├── crispasr-regression.py      THE notebook script. Clones the repo,
+│                               builds CrispASR, runs the regression
+│                               suite. Same file powers both kernels.
+├── push.sh                     `kaggle kernels push` for the validate kernel.
+└── rebake/                     Sibling kernel for AUTO re-bake.
+    ├── kernel-metadata.json    id = chr1str/crispasr-auto-rebake-refs,
+    │                           code_file = crispasr-rebake.py.
+    ├── crispasr-rebake.py      Thin bootstrap: sets MODE=rebake +
+    │                           UPLOAD=1, clones `main`, exec's the
+    │                           canonical regression script from there.
+    └── push.sh                 Push wrapper for the rebake kernel.
 ```
+
+Two Kaggle kernels, one canonical script — the rebake kernel pulls the
+latest `crispasr-regression.py` from `main` on every run, so changes to
+the regression logic propagate without re-pushing the bootstrap.
 
 ## One-time setup
 
@@ -67,17 +81,23 @@ The CLI prefers the modern access token when both files exist.
    - Validate mode works anonymously against public HF repos; you
      don't need this for the default weekly schedule.
 
-4. **Enable the schedule** (this is the manual step the CLI can't
-   do — Kaggle hasn't exposed scheduling via API):
-   - Open the kernel page → "Settings"
-   - Find "Schedule a notebook run"
-   - Cadence: Weekly, day: Sunday, time: 04:00 UTC
-     (different day/time fine; pick a low-traffic window).
-   - Save.
+4. **Enable the schedule** (the manual step the CLI can't do —
+   Kaggle hasn't exposed scheduling via API):
+   - Validate kernel
+     ([chr1str/crispasr-regression-suite](https://www.kaggle.com/code/chr1str/crispasr-regression-suite)):
+     Settings → "Schedule a notebook run" → Weekly · Sun · 04:00 UTC.
+   - Rebake kernel
+     ([chr1str/crispasr-auto-rebake-refs](https://www.kaggle.com/code/chr1str/crispasr-auto-rebake-refs)):
+     Settings → "Schedule a notebook run" → Monthly · 1st · 04:00 UTC.
+     Less often than validate because re-baking is intentional drift
+     adoption, not routine checking. The fixtures HF repo gets new
+     `ref.gguf` files; the manifest pin in
+     `tests/regression/manifest.json` is **NOT** auto-bumped — that
+     stays a reviewable commit by a maintainer.
 
 ## How a scheduled run works
 
-Each weekly tick, Kaggle re-runs whatever `crispasr-regression-suite.py`
+Each weekly tick, Kaggle re-runs whatever `crispasr-regression.py`
 version was last pushed. The script itself does:
 
 1. `git clone --recursive https://github.com/CrispStrobe/CrispASR.git`
@@ -96,7 +116,7 @@ this kernel when the bootstrap script's own behaviour changes
 ## Modes
 
 Driven by env vars on the script, settable in the kernel UI under
-"Add-ons → Variables" or by editing `tools/kaggle/crispasr-regression-suite.py`
+"Add-ons → Variables" or by editing `tools/kaggle/crispasr-regression.py`
 before a push:
 
 | Env var | Default | Effect |
@@ -126,6 +146,6 @@ CI's expectations. When something legitimate changes upstream:
 ## When to re-push this kernel
 
 `./tools/kaggle/push.sh` only when the **bootstrap script itself
-needs to change** — i.e. you're editing `crispasr-regression-suite.py`.
+needs to change** — i.e. you're editing `crispasr-regression.py`.
 For everything else (new backends in the manifest, new C++ commits,
 new GGUFs in HF), the running notebook pulls them at runtime.

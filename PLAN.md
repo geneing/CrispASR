@@ -2604,3 +2604,60 @@ so the only constraint is wall-clock fairness on the shared
 runner pool. Nightly cadence is the sweet spot — catches
 regressions within 24 h without burning capacity that would
 delay PR feedback.
+
+
+
+
+## 93. CMake target rename: `crispasr` → `crispasr-lib`
+
+**Status:** open, low-risk mechanical rename. Recommended after
+the next release cycle so external consumers can absorb it.
+
+**Why:** the CMake target `crispasr` produces the **library**
+(`libcrispasr.so`), while the CLI **binary** is produced by target
+`crispasr-cli` (which outputs `bin/crispasr`). The target name vs.
+output binary name divergence is a long-standing trap that has now
+caused two CI regressions this session:
+
+  - GH regression workflow run 25735206584 — built only the library,
+    found `bin/crispasr` absent (fixed in commit `08d1872f`).
+  - Kaggle `crispasr-regression-suite` run on 2026-05-12 14:34 —
+    same root cause (fixed in this commit, applied to
+    `tools/kaggle/crispasr-regression.py`).
+
+Both fixes are one-line and obvious **after** you know — but the
+trap reliably re-bites anyone writing a new CI workflow because
+the natural mental model is "target `crispasr` builds the
+`crispasr` binary." Renaming the library target makes the
+distinction explicit.
+
+**Plan:**
+
+1. `src/CMakeLists.txt`: rename `add_library(crispasr ...)` →
+   `add_library(crispasr-lib ...)`. Update every
+   `target_link_libraries(... crispasr ...)` and any
+   `target_*(crispasr ...)` call elsewhere in the tree.
+2. Preserve the **output binary name** `libcrispasr.{so,dylib,a}`
+   via `set_target_properties(crispasr-lib PROPERTIES OUTPUT_NAME
+   crispasr)` — no .so/.dylib filename change, no ABI break.
+3. Update consumers that use the CMake target name:
+   - `bindings/go/whisper.go` cgo LDFLAGS (currently `-lcrispasr`,
+     unchanged since OUTPUT_NAME stays `crispasr`).
+   - `bindings/ruby/ext/dependencies.rb` graphviz walk (queries by
+     target name `crispasr` — needs a 1-line update).
+   - `.github/workflows/{ci,release,regression}.yml` `--target`
+     args (mostly already use `crispasr-cli` for the CLI binary,
+     but any `--target crispasr` referring to the library needs
+     the rename).
+   - `tools/kaggle/crispasr-regression.py` similarly.
+4. Add a CMake alias for one release cycle:
+   `add_library(crispasr ALIAS crispasr-lib)` so external repos
+   that depend on `target_link_libraries(... crispasr)` keep
+   working while they migrate.
+
+**Effort:** ~2 hours including consumer audit + CI re-runs.
+Drop-in once green on every workflow.
+
+**Don't do this in a patch release.** Even with the alias the
+churn is visible to anyone bisecting a build issue. Schedule for
+the next minor (0.7.0).

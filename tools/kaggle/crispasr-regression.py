@@ -230,7 +230,12 @@ sh(
     f"-DCRISPASR_BUILD_SERVER=OFF "
     + " ".join(build_flags)
 )
-sh(f"cmake --build {BUILD} --target crispasr crispasr-diff -j$(nproc)")
+# CMake target `crispasr-cli` produces bin/crispasr (target/output names
+# intentionally diverge per examples/cli/CMakeLists.txt:12). Asking for
+# target `crispasr` here builds only the library, leaving bin/crispasr
+# absent — exactly what burned the GH regression workflow on its first
+# run (commit 08d1872f) and what just burned this Kaggle one.
+sh(f"cmake --build {BUILD} --target crispasr-cli crispasr-diff -j$(nproc)")
 
 # ─────────────────────────── cell 4 (code) ───────────────────────────
 # ── Load manifest + backend filter ────────────────────────────────────────
