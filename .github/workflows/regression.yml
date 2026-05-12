@@ -20,6 +20,14 @@ on:
   schedule:
     - cron: '0 4 * * *'  # 04:00 UTC daily
   workflow_dispatch:
+  # PR-time: only run the cheap smoke + dry-run checks. The full
+  # per-backend matrix is gated on `event_name != 'pull_request'`
+  # below so PRs don't burn 30 min of runner time. Paths are
+  # whitelisted so unrelated PRs don't trigger this at all.
+  pull_request:
+    paths:
+      - 'tests/regression/**'
+      - '.github/workflows/regression.yml'
 
 permissions:
   contents: read
@@ -40,11 +48,29 @@ jobs:
       - name: Run driver smoke test
         run: python tests/regression/test_driver_smoke.py
 
+  # Dry-run preflight: confirm every pinned HF artifact in the
+  # manifest actually exists (GGUF + fixture ref.gguf + fixture
+  # audio.wav). Catches the "added a backend, forgot to upload"
+  # case in PR CI without the 1+ GB pull. ~1 s for the seed
+  # manifest; O(N+1) HF API calls for N backends.
+  preflight:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install huggingface_hub
+      - run: python tests/regression/run_one.py --dry-run
+
   # Tier 1: per-backend regression. Each entry of the matrix downloads
   # its pinned-revision GGUF + pinned-revision reference dump from HF,
   # runs crispasr + crispasr-diff against the manifest's expected
   # transcript and per-stage cos_min thresholds. `fail-fast: false`
   # so one bad backend doesn't mask the rest.
+  #
+  # Skipped on `pull_request` — PRs only get smoke + preflight,
+  # which run in <2 minutes total. Full matrix runs nightly +
+  # on manual workflow_dispatch.
   #
   # The matrix is intentionally small; expand as backends get their
   # fixtures uploaded to HF (see `tests/regression/README.md`
@@ -53,7 +79,8 @@ jobs:
   # 14 GB ubuntu-latest scratch should go through the weekly Kaggle
   # full-sweep job (`tools/kaggle-regression.py`) instead.
   regression:
-    needs: smoke
+    if: github.event_name != 'pull_request'
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

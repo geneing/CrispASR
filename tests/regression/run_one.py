@@ -25,6 +25,12 @@ Usage:
   CRISPASR_BIN=/path/crispasr DIFF_BIN=/path/crispasr-diff \\
     tests/regression/run_one.py parakeet-tdt-0.6b-ja
 
+  # Dry-run: HEAD-check every pinned HF object referenced by the
+  # manifest (or just the named backend). No downloads, no binary
+  # needed. ~1 s for the seed manifest. Use as a fast PR-time gate.
+  tests/regression/run_one.py --dry-run
+  tests/regression/run_one.py --dry-run parakeet-tdt-0.6b-ja
+
 Env:
 
   BUILD_DIR       Build directory containing bin/crispasr + bin/crispasr-diff
@@ -265,11 +271,111 @@ def regression_for(name: str, manifest: dict, work_dir: Path,
     return failures
 
 
+def dry_run(manifest: dict, backend_filter: str | None = None) -> int:
+    """HEAD-check every pinned HF object referenced by the manifest
+    (or just one backend's entries). No downloads, no binary needed.
+
+    Catches the "added a backend, forgot to upload its fixtures" case
+    in PR CI in ~1 second, well before the 25-minute Tier 1 run would
+    discover it. Three checks per backend:
+
+      1. The GGUF file exists at the pinned revision SHA.
+      2. The fixture ref.gguf exists at fixtures.revision.
+      3. The fixture audio.wav exists at fixtures.revision (if the
+         entry uses `fixture_sample_path` rather than the legacy
+         in-tree `sample`).
+
+    Returns the count of failures (0 on full success). Output is
+    one line per missing artifact, suitable for a CI log.
+    """
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
+
+    api = HfApi()
+    fx_repo = manifest["fixtures"]["repo"]
+    fx_rev = manifest["fixtures"]["revision"]
+
+    # One list_repo_files call covers every backend's fixture paths
+    # (they all live in the same repo at the same revision). Far
+    # cheaper than per-path file_exists() calls — and gives us a
+    # nicer "did you mean ..." hint when a path is wrong.
+    try:
+        fx_files = set(api.list_repo_files(
+            repo_id=fx_repo, repo_type="model", revision=fx_rev))
+    except HfHubHTTPError as exc:
+        die(f"fixtures repo {fx_repo}@{fx_rev[:8]} not reachable: {exc}")
+
+    failures = 0
+    backends = manifest["backends"]
+    if backend_filter:
+        backends = [b for b in backends if b["name"] == backend_filter]
+        if not backends:
+            die(f"backend '{backend_filter}' not in manifest")
+
+    print(f"dry-run: fixtures {fx_repo}@{fx_rev[:8]} has {len(fx_files)} files")
+    print(f"dry-run: checking {len(backends)} backend(s)")
+
+    for entry in backends:
+        name = entry["name"]
+        gguf_repo = entry["gguf"]["repo"]
+        gguf_rev = entry["gguf"]["revision"]
+        gguf_file = entry["gguf"]["file"]
+        # GGUF — different repo per backend, so one call each.
+        try:
+            ok = api.file_exists(
+                repo_id=gguf_repo, repo_type="model",
+                revision=gguf_rev, filename=gguf_file)
+        except HfHubHTTPError as exc:
+            print(f"  \033[31mFAIL\033[0m {name}: gguf repo {gguf_repo}@"
+                  f"{gguf_rev[:8]} not reachable: {exc}")
+            failures += 1
+            continue
+        if not ok:
+            print(f"  \033[31mFAIL\033[0m {name}: gguf {gguf_repo}@"
+                  f"{gguf_rev[:8]}::{gguf_file} not found")
+            failures += 1
+            continue
+
+        # Fixture ref.gguf — membership check against the listing.
+        ref_path = entry["fixture_ref_path"]
+        if ref_path not in fx_files:
+            print(f"  \033[31mFAIL\033[0m {name}: fixture ref {ref_path!r} "
+                  f"not in {fx_repo}@{fx_rev[:8]}")
+            failures += 1
+            continue
+
+        # Fixture audio.wav (new-style) — same membership check.
+        if "fixture_sample_path" in entry:
+            sp = entry["fixture_sample_path"]
+            if sp not in fx_files:
+                print(f"  \033[31mFAIL\033[0m {name}: fixture sample {sp!r} "
+                      f"not in {fx_repo}@{fx_rev[:8]}")
+                failures += 1
+                continue
+
+        print(f"  \033[32mPASS\033[0m {name}")
+
+    if failures == 0:
+        print(f"\n\033[32mOK\033[0m  dry-run: all {len(backends)} backend(s) "
+              f"have their pinned artifacts on HF")
+    else:
+        print(f"\n\033[31mFAIL\033[0m  dry-run: {failures} missing artifact(s)")
+    return failures
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
+    # Tiny ad-hoc arg parser — argparse felt heavy for two real options
+    # and the existing tests/regression/run_one.py wrapper invocations
+    # are all "one positional + env vars".
+    args = sys.argv[1:]
+    do_dry_run = False
+    if args and args[0] == "--dry-run":
+        do_dry_run = True
+        args = args[1:]
+    backend_filter = args[0] if args else None
+    if len(args) > 1:
         print(__doc__, file=sys.stderr)
         return 2
-    backend_name = sys.argv[1]
 
     manifest_path = Path(os.environ.get(
         "REGRESSION_MANIFEST",
@@ -277,6 +383,14 @@ def main() -> int:
     ))
     with manifest_path.open() as f:
         manifest = json.load(f)
+
+    if do_dry_run:
+        return dry_run(manifest, backend_filter)
+
+    if not backend_filter:
+        print(__doc__, file=sys.stderr)
+        return 2
+    backend_name = backend_filter
 
     build_dir = Path(os.environ.get("BUILD_DIR", "build-regression"))
     crispasr_bin = Path(os.environ.get(
