@@ -1310,17 +1310,19 @@ extern "C" bool voxtral4b_kv_init(voxtral4b_context* ctx, int max_ctx) {
     const auto kv_pair = core_attn::kv_dtype_pair_from_env("voxtral4b");
     ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.k, hd, max_ctx, n_kv, nl);
     ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.v, hd, max_ctx, n_kv, nl);
-    // Size the backend buffer from the actual ggml_nbytes after creation
-    // (was hardcoded F16 byte count, which over-allocated for quant types).
+    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
+    // Use ggml_backend_alloc_ctx_tensors to handle alignment automatically
+    // (ggml_backend_buffer_get_alloc_size may exceed ggml_nbytes due to
+    // backend-specific alignment — issue #87 crash on voxtral4b after the
+    // ggml 0.10.2 bump which tightened the alloc assertion).
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "voxtral4b");
+    ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, kv_backend);
+    if (!ctx->kv_buf) {
+        fprintf(stderr, "voxtral4b: kv cache allocation failed (max_ctx=%d)\n", max_ctx);
+        return false;
+    }
     const size_t k_size = ggml_nbytes(ctx->kv_k);
     const size_t v_size = ggml_nbytes(ctx->kv_v);
-
-    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
-    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "voxtral4b");
-    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, k_size + v_size);
-    char* base = (char*)ggml_backend_buffer_get_base(ctx->kv_buf);
-    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base);
-    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_v, base + ggml_nbytes(ctx->kv_k));
 
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "voxtral4b: kv cache %.0f MiB k=%s v=%s (on %s, head_dim=%d max_ctx=%d n_kv=%d n_layers=%d)\n",
