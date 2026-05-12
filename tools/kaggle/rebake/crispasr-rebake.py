@@ -39,7 +39,12 @@ REPO = WORK / "CrispASR-bootstrap"
 # Add-ons → Variables UI if you ever want one-off behaviour without
 # editing this notebook.
 os.environ.setdefault("CRISPASR_REGRESSION_MODE", "rebake")
-os.environ.setdefault("CRISPASR_REGRESSION_UPLOAD", "0")    # !!! key flip
+# UPLOAD=1 → attempt auto-upload via api.upload_folder() at end.
+# Works when HF_TOKEN reads cleanly (UI-triggered runs do this).
+# Falls back gracefully to staging-only if token is unreadable
+# (Kaggle Secrets batch-mode flake) — see preflight_hf() warning;
+# pick up with ./tools/kaggle/rebake/fetch-and-upload.sh.
+os.environ.setdefault("CRISPASR_REGRESSION_UPLOAD", "1")
 
 # %% [code]
 if not REPO.exists():

@@ -222,12 +222,24 @@ def preflight_hf() -> None:
         )
         raise SystemExit(msg)
 
-    if MODE == "rebake" and UPLOAD:
-        if not hf_token:
-            raise SystemExit(
-                "rebake+UPLOAD=1 requires HF_TOKEN with write access to "
-                f"{fixtures_repo}. Add it as a Kaggle secret."
-            )
+    # The UPLOAD setting is mutated in-place below if needed so the
+    # subsequent rebake path skips api.upload_folder() gracefully.
+    global UPLOAD
+    if MODE == "rebake" and UPLOAD and not hf_token:
+        # Don't die — let the rebake stage refs anyway so they can be
+        # fetched + uploaded from local (Kaggle Secrets API has been
+        # flaky in batch-trigger runs; we don't want a transient
+        # secrets-API issue to lose the whole compute cycle). The
+        # fetch-and-upload.sh script picks up from /kaggle/working/
+        # rebake-stage/ and publishes from the maintainer's box.
+        print(
+            "WARN: rebake+UPLOAD=1 requested but HF_TOKEN unreadable. "
+            "Downgrading to UPLOAD=0; refs will stage to "
+            "/kaggle/working/rebake-stage/. Pick them up locally with:\n"
+            "  ./tools/kaggle/rebake/fetch-and-upload.sh\n",
+            flush=True,
+        )
+        UPLOAD = False
         # Best-effort write probe: open a no-op preupload (computes
         # remote-cas hash for a 1-byte blob; HF returns 401 if we
         # can't write, OK otherwise). Cheaper than actually committing.
